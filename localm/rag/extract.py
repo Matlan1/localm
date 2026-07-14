@@ -295,7 +295,13 @@ def classify_format(text: str, filename: str = "", *,
         try:
             from localm.config import load_config
             enabled = bool(load_config().get("rag_classify_unknown_files", True))
-        except Exception:
+        except Exception as e:
+            # Config unreadable: fall back to the DEFAULT (feature on), matching a
+            # fresh install where the key is simply absent. Benign default, but surface
+            # it so a genuinely corrupt config is discoverable, not silent. Rule 5.
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("rag classify_format: could not load config, assuming "
+                       "rag_classify_unknown_files=on: %s", e)
             enabled = True
         if enabled:
             label = _normalise_label(classify_fn(text[:1000]) or "") or "text"

@@ -301,7 +301,17 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     job.push({"type": "line", "text": "Reloading the chat model..."})
     try:
         from localm.selfclient import self_request
-        self_request("POST", "/models/load", timeout=300, base_url=self_url)
+        resp = self_request("POST", "/models/load", timeout=300, base_url=self_url)
+        if not resp.ok:
+            # A non-2xx (503 "No model specified", 401, or a 500 when the engine
+            # load fails because the media backend still holds VRAM - the exact
+            # hazard this module manages) means the reload did NOT happen. Report
+            # that honestly instead of the false "Chat model ready." - lazy reload
+            # on the next message still recovers, so this is a message fix, not an
+            # escalation. Mirrors unload_chat_for_media's resp.ok check above.
+            job.push({"type": "line", "text":
+                      f"Reload deferred to the next message (HTTP {resp.status_code})."})
+            return
         job.push({"type": "line", "text": "Chat model ready."})
     except Exception as e:
         job.push({"type": "line", "text": f"Reload deferred to the next message ({e})."})

@@ -573,3 +573,61 @@ def test_real_tree_has_no_raw_accessor_violations():
     ch = _load_check_hygiene()
     tracked = ch._tracked_files()
     assert ch._raw_accessor_violations(tracked) == []
+
+
+# ---- HONESTY FIX #5: an unparseable .py must be REPORTED, not silently skipped ----
+# The raw-accessor guard used to `continue` past any .py it could not read or parse
+# (OSError / SyntaxError / UnicodeDecodeError), so a file it never actually scanned
+# read as "clean" (AGENTS.md rule 5). It now appends a problem instead.
+
+def test_unparseable_py_is_flagged_not_silently_skipped(tmp_path, monkeypatch):
+    """NEGATIVE: a .py with a syntax error the guard cannot ast.parse must be reported
+    as unchecked, not skipped - a guard that 'passes' a file it never scanned is the
+    exact silent pass rule 5 forbids."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "broken.py"
+    p.write_text("def broken(:\n    pass\n", encoding="utf-8")   # deliberate syntax error
+    problems = ch._raw_accessor_violations([p])
+    assert problems, "an unparseable .py must produce a problem, not an empty (clean) result"
+    assert any("could not read/parse" in x for x in problems), problems
+    assert any("broken.py" in x for x in problems), problems
+
+
+def test_valid_py_with_no_raw_call_still_clean(tmp_path, monkeypatch):
+    """Positive control for FIX #5: a parseable .py with no raw-accessor call stays
+    clean - the new report path fires ONLY on a genuinely unparseable file."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "fine.py"
+    p.write_text("def f():\n    return 1 + 2\n", encoding="utf-8")
+    assert ch._raw_accessor_violations([p]) == []
+
+
+# ---- HONESTY FIX #3: the top-level gate must FAIL when it scanned nothing ----
+# When `git ls-files` fails (not a checkout, git missing), _tracked_files() returns []
+# so the dash/disclosure/abs-path scan and changelog gate run over ZERO files and
+# main() used to print "Hygiene check passed". A disclosure/privacy gate reporting
+# clean without scanning anything is exactly the silent pass rule 5 forbids.
+
+def test_hygiene_main_fails_when_nothing_scanned(monkeypatch):
+    """NEGATIVE: with no tracked files enumerable (simulated git failure), main() must
+    return non-zero and NOT report success."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "_tracked_files", lambda: [])
+    assert ch.main([]) == 1
+
+
+def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
+    """Positive control for FIX #3: with a real (clean) file to scan and the other
+    sub-gates stubbed clean, main() returns 0 - the new guard fires ONLY on the
+    scanned-nothing case, it does not break the happy path."""
+    ch = _load_check_hygiene()
+    clean = tmp_path / "ok.py"
+    clean.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    monkeypatch.setattr(ch, "_tracked_files", lambda: [clean])
+    monkeypatch.setattr(ch, "_changelog_append_only", lambda: [])
+    monkeypatch.setattr(ch, "_raw_accessor_violations", lambda t: [])
+    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    assert ch.main([]) == 0

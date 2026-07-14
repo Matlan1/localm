@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 from typing import NamedTuple
@@ -22,8 +23,9 @@ from .gguf import _gguf_first_parts
 from .gguf import _has_gguf_magic
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
+from .gguf import gguf_embedding_signal
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -40,9 +42,13 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     as chat, though it stays runnable when named explicitly (``localm run NAME``, an
     API request naming it) and its type can be corrected with ``localm set-type``. A
     legacy entry with no ``model_type`` key is treated as 'llm' (eligible), preserving
-    pre-Branch-A behaviour.
+    pre-Branch-A behaviour. type='embedding' is also excluded: it is loaded via a
+    dedicated embeddings-mode context (see ``inference/embedder.py``), not the causal
+    chat path, so it must never be auto-picked as the default chat model - a real risk
+    now that ``setup-embeddings`` can register one into the main registry, making an
+    embedding-only registry (a plausible first-run state) a genuine scenario.
     """
-    return isinstance(entry, dict) and entry.get("model_type", "llm") != "unknown"
+    return isinstance(entry, dict) and entry.get("model_type", "llm") not in ("unknown", "embedding")
 
 
 def is_llm(entry: dict) -> bool:
@@ -104,16 +110,19 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> str:
     """Deterministically classify a LOCAL model's type from HARD metadata only.
 
-    A .gguf file or Ollama blob is a llama.cpp text model (the format itself is the
-    hard signal) -> 'llm'. An HF directory is classified from config.json: a
-    LoRA/adapter dir -> 'lora'; an ``architectures`` class ending in ForCausalLM /
-    LMHeadModel / ForConditionalGeneration -> 'llm'; anything we cannot resolve ->
-    'unknown' (never a silent 'llm'). Embedding models are provisioned via
-    ``setup-embeddings``, not the chat registry, so there is no separate 'embedding'
-    registry type here.
+    A .gguf file or Ollama blob (the same GGUF byte format under a renamed file)
+    is first checked for an embedding/pooling signal in its OWN GGUF metadata
+    (``gguf_embedding_signal`` - architecture or a ``*.pooling_type`` key; see
+    gguf.py) -> 'embedding'; otherwise it is a llama.cpp text model -> 'llm'. An
+    HF directory is classified from config.json: a LoRA/adapter dir -> 'lora'; an
+    ``architectures`` class ending in ForCausalLM / LMHeadModel /
+    ForConditionalGeneration -> 'llm'; anything we cannot resolve -> 'unknown'
+    (never a silent 'llm').
     """
     try:
         if is_gguf or is_blob:
+            if gguf_embedding_signal(path):
+                return "embedding"
             return "llm"
         if is_hf:
             if (path / "adapter_config.json").exists():
@@ -164,6 +173,51 @@ _SHORTCUT_SIZES: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class ComfySource:
+    """A known-good HuggingFace download source for one exact ComfyUI workflow
+    model filename."""
+    spec: str            # "owner/repo:filename" - fed straight to pull_model()
+    model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
+    comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
+    size_bytes: int
+
+
+# filename (exact, as ComfyUI's /object_info reports it) -> curated download source
+# for a ComfyUI WORKFLOW model slot. This is a DIFFERENT keyspace from
+# MODEL_SHORTCUTS above: MODEL_SHORTCUTS is keyed by a short alias a user TYPES
+# for `localm pull <alias>`; this dict is keyed by an exact installed filename and
+# is looked up automatically when ComfyUI preflight detects that filename missing
+# from a workflow - never typed by a user directly. Each entry's HuggingFace
+# source was verified by fetching the repo's live file tree, not assumed. Curated
+# only (exact-filename lookup, no fuzzy/heuristic matching) - see
+# resolve_comfy_model_source().
+#
+# ae.safetensors is sourced from the ungated Apache-2.0 FLUX.1-schnell repo rather
+# than the gated (license-click-through) FLUX.1-dev repo: the file is
+# byte-identical in both (confirmed by matching size), and sourcing it from the
+# ungated repo avoids a HuggingFace license-gate failure for users who haven't
+# accepted the FLUX.1-dev non-commercial license.
+COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
+    "flux1-dev-Q8_0.gguf": ComfySource(
+        "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf",
+        "diffusion-unet", "unet", 12_708_281_504),
+    "clip_l.safetensors": ComfySource(
+        "comfyanonymous/flux_text_encoders:clip_l.safetensors",
+        "text-encoder", "clip", 246_144_152),
+    "t5xxl_fp8_e4m3fn.safetensors": ComfySource(
+        "comfyanonymous/flux_text_encoders:t5xxl_fp8_e4m3fn.safetensors",
+        "text-encoder", "clip", 4_893_934_904),
+    "ae.safetensors": ComfySource(
+        "black-forest-labs/FLUX.1-schnell:ae.safetensors",
+        "vae", "vae", 335_304_388),
+}
+
+
+def resolve_comfy_model_source(filename: str) -> Optional[ComfySource]:
+    """The curated download source for *filename*, or None when it isn't one of
+    the known-good exact-filename matches above."""
+    return COMFY_MODEL_SOURCES.get(filename)
 
 
 def resolve_spec(spec: str) -> str:
@@ -809,7 +863,9 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     resolved = str(child.resolve())
                     if resolved in known:
                         continue
-                    _mm._register(_unique_registry_name(reg, child.name), child)
+                    mtype = _detect_local_model_type(child, is_gguf=False, is_hf=True)
+                    _mm._register(_unique_registry_name(reg, child.name), child,
+                                  model_type=mtype)
                     reg = _mm.load_registry()
                     known.add(resolved)
                     added += 1
@@ -835,7 +891,9 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     logger.debug("skipping %s: not a GGUF (bad/missing magic)",
                                  child.name)
                     continue
-                _mm._register(_unique_registry_name(reg, child.stem), child)
+                mtype = _detect_local_model_type(child, is_gguf=True, is_hf=False)
+                _mm._register(_unique_registry_name(reg, child.stem), child,
+                              model_type=mtype)
                 reg = _mm.load_registry()
                 known.add(resolved)
                 added += 1

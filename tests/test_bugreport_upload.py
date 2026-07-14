@@ -82,6 +82,25 @@ def test_upload_report_posts_and_returns_issue_url():
     assert not any("github" in k.lower() for k in seen["headers"])
 
 
+def test_upload_report_scrubs_home_path_in_title():
+    """HON-03/HON-15: the title becomes a PUBLIC GitHub issue title. Scrubbing at
+    the upload choke point means a home path (username) in ANY caller's title is
+    redacted in what is actually SENT on the wire, no matter which caller passed it
+    (report_failure passes the raw summary, the GUI route the raw first line)."""
+    seen = {}
+
+    def opener(url, data, headers, timeout):
+        import json
+        seen["payload"] = json.loads(data.decode("utf-8"))
+        return 201, '{"url": "https://github.com/x/localm/issues/1"}'
+
+    bugreport.upload_report(
+        r"froze at C:\Users\bob\localm\gui", "## body\nno secrets here",
+        url="https://proxy.example/file", token="tok", opener=opener)
+    assert "bob" not in seen["payload"]["title"]
+    assert "<redacted>" in seen["payload"]["title"]
+
+
 def test_upload_report_no_endpoint_raises(monkeypatch):
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     with pytest.raises(bugreport.LocalmError):
@@ -278,6 +297,55 @@ def test_endpoint_uploads_on_request(monkeypatch):
     assert data["uploaded"] is True
     assert data["issue_url"].endswith("/issues/12")
     assert Path(data["path"]).is_file()   # still saved to disk
+
+
+def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
+    """HON-15 (GUI upload path): drive the REAL /api/bug-report upload route end to
+    end - description -> save_user_report -> build_report -> upload_report -> the
+    network POST - and assert the actual bytes on the wire carry NO username in the
+    title OR the body. Only the socket is faked (real upload_report runs), so nothing
+    between the user's field and the wire is mocked away (tests real behaviour)."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr(bugreport, "upload_config",
+                        lambda: ("https://proxy.example/file", "tok"))
+
+    import json
+    import urllib.request
+    sent = {}
+
+    class _Resp:
+        status = 201
+
+        def read(self):
+            return b'{"url": "https://github.com/x/localm/issues/7"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        sent["data"] = req.data
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    # The home path is on the FIRST line so it also flows into the derived title.
+    desc = (r"Upload broke when I ran C:\Users\bob\localm\gui\index.html"
+            "\nClicked send five times, nothing happened.")
+    r = _post(create_app(_engine()), {"description": desc, "upload": True})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["uploaded"] is True
+    payload = json.loads(sent["data"].decode("utf-8"))
+    # The GUI route builds the title from the raw first line; the upload choke point
+    # scrubs it, so the username never reaches the public issue title OR the body.
+    assert "bob" not in payload["title"]
+    assert "bob" not in payload["body"]
+    assert "<redacted>" in payload["title"]
 
 
 def test_endpoint_upload_failure_is_surfaced_not_hidden(monkeypatch):

@@ -352,3 +352,111 @@ def test_swap_with_backup_surfaces_double_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(au, "rollback", raise_os)      # AND rollback fails
     with pytest.raises(RuntimeError, match="rollback also failed"):
         au.swap_with_backup(staged, inst, bdir)
+
+
+# --------- _prune surfaces a file it cannot remove (do not hide) ---------
+# _prune used to `except OSError: pass`, collapsing a benign already-empty-dir rmdir
+# with a REAL file-unlink failure (e.g. a Windows AV lock on a freshly written file).
+# A stale file then survived while apply()/rollback() reported success. _prune now
+# RETURNS the file-removal failures so the caller surfaces them.
+
+from pathlib import Path   # noqa: E402  (used by the _prune-failure tests below)
+
+
+def test_prune_returns_error_for_unremovable_file(tmp_path, monkeypatch):
+    """A FILE _prune cannot unlink is REPORTED (not silently left behind); files it can
+    remove are still removed for real, and the return is [] when everything succeeds."""
+    good = tmp_path / "good"
+    (good / "a").mkdir(parents=True)
+    (good / "a" / "f.py").write_text("stale", encoding="utf-8")
+    assert au._prune(good, "good") == []                     # happy path: removed, no errors
+    assert not (good / "a" / "f.py").exists()
+
+    dst = tmp_path / "runtime"
+    (dst / "sub").mkdir(parents=True)
+    (dst / "sub" / "locked.py").write_text("stale", encoding="utf-8")
+    (dst / "sub" / "ok.py").write_text("stale", encoding="utf-8")
+
+    real_unlink = au.Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self.name == "locked.py":
+            raise OSError("locked by AV")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(au.Path, "unlink", flaky_unlink)
+    errs = au._prune(dst, "runtime")                         # rollback-style: remove all
+    assert any("locked.py" in e for e in errs)
+    assert not (dst / "sub" / "ok.py").exists()              # removable file WAS removed
+    assert (dst / "sub" / "locked.py").exists()              # locked one stays behind (stale)
+
+
+def test_rollback_surfaces_prune_unlink_failure(tmp_path, monkeypatch):
+    """A scaffold file _prune cannot strip while unwinding a PRESERVE_WITHIN name during
+    rollback must reach rollback()'s errors and RAISE - never a stale file left under a
+    silent rolled_back:True (do-not-hide-problems)."""
+    inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
+    inst.mkdir(); staged.mkdir()
+    _install_with_runtime(inst)
+    _staged_with_runtime(staged)
+    names = au.swap_with_backup(staged, inst, bdir)          # inst/runtime now scaffold V2
+
+    real_unlink = au.Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self.name == "__init__.py" and "localm_llama_runtime" in self.as_posix():
+            raise OSError("locked by AV")            # the scaffold file rollback must strip
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(au.Path, "unlink", flaky_unlink)
+    with pytest.raises(RuntimeError, match="rollback incomplete"):
+        au.rollback(bdir, inst, names)
+
+
+def test_apply_files_logs_prune_failure_without_raising(tmp_path, monkeypatch, caplog):
+    """On the FORWARD apply path a stale file that cannot be pruned is LOGGED, not raised:
+    a leftover file must not brick an otherwise-good update, but must stay visible."""
+    import logging
+    inst, staged = tmp_path / "i", tmp_path / "s"
+    inst.mkdir(); staged.mkdir()
+    _install_with_runtime(inst)
+    _staged_with_runtime(staged)
+    # A file the new build DROPPED (present in the install runtime, absent in staged) so
+    # apply_files' _prune(keep_src=...) actually tries to remove it.
+    dropped = inst / "runtime" / "localm_llama_runtime" / "old_helper.py"
+    dropped.write_text("dropped by the new build", encoding="utf-8")
+    names = au.swap_entries(staged)
+
+    real_unlink = au.Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self.name == "old_helper.py":
+            raise OSError("locked by AV")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(au.Path, "unlink", flaky_unlink)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        au.apply_files(staged, inst, names)                  # must NOT raise
+    assert "could not remove" in caplog.text
+    assert dropped.exists()                                  # the un-prunable file stayed
+
+
+def test_prune_swallows_empty_dir_rmdir_failure(tmp_path, monkeypatch):
+    """The BENIGN half of the fix: an already-empty dir whose rmdir fails (lock/perms) is
+    SWALLOWED, never surfaced - a leftover empty dir strands nothing. Only FILE-removal
+    failures reach the returned errors (guards against a regression that would spuriously
+    fail rollback() on a harmless leftover dir)."""
+    dst = tmp_path / "runtime"
+    (dst / "emptydir").mkdir(parents=True)   # an empty subdir _prune will try to rmdir
+
+    real_rmdir = au.Path.rmdir
+
+    def flaky_rmdir(self, *a, **k):
+        if self.name == "emptydir":
+            raise OSError("dir locked")
+        return real_rmdir(self, *a, **k)
+
+    monkeypatch.setattr(au.Path, "rmdir", flaky_rmdir)
+    errs = au._prune(dst, "runtime")                          # rollback-style: remove all
+    assert errs == []                                        # empty-dir rmdir failure swallowed
+    assert (dst / "emptydir").exists()                       # ... dir harmlessly left behind

@@ -295,6 +295,15 @@
             <div class="dl-label" id="pull-pct"></div>
           </div>
           <pre id="pull-log" class="job-log" style="display:none"></pre>
+          <div class="row" style="margin-top:8px">
+            <button class="btn-secondary" id="models-import-comfy-btn">Import from ComfyUI…</button>
+            <span class="sub">Already have models in a ComfyUI install? Preview and import them in bulk.</span>
+          </div>
+          <div class="row" id="models-scan-row" style="margin-top:8px">
+            <span class="ic cat-ic cat-violet" data-icon="refresh"></span>
+            <button class="btn-secondary" id="models-scan-btn">Re-scan ComfyUI folder</button>
+            <span class="sub">Picks up new models from the ComfyUI folder already set in Settings - one click, no folder picker.</span>
+          </div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="models"></span>
@@ -302,14 +311,12 @@
           <div class="tab-nav" id="models-tab-nav">
             <button class="tab-btn active" data-type="all">All</button>
             <button class="tab-btn" data-type="llm">LLMs</button>
+            <button class="tab-btn" data-type="embedding">Embedding</button>
             <button class="tab-btn" data-type="diffusion-unet">Diffusion</button>
             <button class="tab-btn" data-type="text-encoder">Encoders</button>
             <button class="tab-btn" data-type="vae">VAEs</button>
             <button class="tab-btn" data-type="lora">LoRAs</button>
             <button class="tab-btn" data-type="unknown">Other</button>
-          </div>
-          <div class="scan-row" id="models-scan-row" style="display: none">
-            <button class="btn-secondary" id="models-scan-btn">Scan ComfyUI Models</button>
           </div>
           <div class="scan-row">
             <button class="btn-secondary" id="models-unload-all-btn" title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>

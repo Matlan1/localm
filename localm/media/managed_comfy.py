@@ -10,10 +10,11 @@ anything: copying the user's stack is S2, the fresh hardware-matched install is
 S3. Everything here is inert until a managed instance exists on disk.
 
 The single source of truth for "which ComfyUI does localm talk to" is
-``resolve_comfy_target()``. The rule (locked decision 6):
+``resolve_comfy_target()``. The rule (decision 6, simplified from an earlier
+two-flag design - see git history for the retired ``managed_comfy_enabled``
+toggle, which never had a reachable state distinct from ``comfy_target``):
 
-    target the MANAGED instance  IFF  managed_comfy_enabled
-                                  AND  comfy_target == "own"
+    target the MANAGED instance  IFF  comfy_target == "own"
                                   AND  a managed instance is actually installed
     otherwise                         the user's ComfyUI, exactly as today.
 
@@ -111,16 +112,31 @@ def rmtree_robust(path: Path) -> None:
 
 
 def is_managed_comfy_installed() -> bool:
-    """True when a usable managed ComfyUI is actually present on disk.
+    """True when a usable managed ComfyUI is actually present on disk AND the
+    provisioning pipeline (S2/S3) actually finished.
 
-    S1 requires BOTH the ComfyUI entry point (``main.py``) AND the managed venv
-    interpreter - i.e. code present AND runnable - so a half-copied or aborted
-    install (S2/S3) does NOT read as installed and reroute media to a broken
-    instance. A future stage may tighten this further (e.g. a marker file
-    recording the pinned commit), but the layout check is the honest floor."""
+    Requires the completion marker (S2/S3's ``MARKER_FILENAME``, written as the
+    SECOND-TO-LAST step of provision_fresh()/provision_by_copy(), right before
+    their own final self-check) IN ADDITION TO the ComfyUI entry point
+    (``main.py``) and the managed venv interpreter existing.
+
+    Checking only main.py + venv_python (the original S1 design - see git
+    history) reads "installed" true as soon as step 2 of an 7-8 step pipeline
+    finishes (the git clone, then `python -m venv`) - reproduced live: for the
+    ENTIRE remaining duration of a real install (torch, ComfyUI's own
+    requirements, custom nodes, localm's patches - which can take minutes),
+    this function, `localm comfy status`, the Settings page pill, AND the
+    actual Generate-button routing (managed_comfy_active() calls this) would
+    all have reported the instance ready, and a Generate click during that
+    window would launch a ComfyUI with no torch installed. The marker is
+    written only once every earlier step has succeeded, so it is the honest
+    completion signal; main.py/venv_python alone are not."""
     paths = managed_comfy_paths()
     try:
-        return paths.main_py.is_file() and paths.venv_python.is_file()
+        if not (paths.main_py.is_file() and paths.venv_python.is_file()):
+            return False
+        from localm.media.managed_comfy_provision import MARKER_FILENAME
+        return (paths.root / MARKER_FILENAME).is_file()
     except OSError:
         return False
 
@@ -171,16 +187,46 @@ def managed_comfy_workdir() -> str:
     return str(managed_comfy_paths().root)
 
 
+def managed_comfy_launch_cmd() -> str:
+    """The command that starts the managed instance: its OWN venv interpreter
+    running its OWN ``main.py``, on the managed port - never the user's
+    ``comfy_launch_cmd``/auto-discovered launcher script, which only make sense
+    for a user-provided ComfyUI (their own launcher, possibly ZLUDA-wrapped). A
+    fresh/copied managed install is a raw checkout with no bundled .bat/.sh
+    launcher of its own, so discovery would always find nothing here. Quoted the
+    same way a user's own launch command is expected to be (see ensure_comfy's
+    shlex/cmd handling). No-op-safe: a pure string, creates nothing."""
+    paths = managed_comfy_paths()
+    return f'"{paths.venv_python}" "{paths.main_py}" --listen 127.0.0.1 --port {MANAGED_COMFY_PORT}'
+
+
 def managed_comfy_active(cfg: Optional[dict] = None) -> bool:
     """True when media calls should target the MANAGED instance (decision 6):
-    the toggle is on, the target is "own", AND an instance is installed. Any of
-    those false -> the user's ComfyUI, exactly as today."""
+    the target is "own" AND an instance is installed. Either false -> the
+    user's ComfyUI, exactly as today."""
     cfg = cfg if cfg is not None else load_config()
-    if not cfg.get("managed_comfy_enabled"):
-        return False
     if cfg.get("comfy_target", "own") != "own":
         return False
     return is_managed_comfy_installed()
+
+
+def legacy_comfy_value(key: str, full_config: dict) -> str:
+    """A LEGACY GLOBAL comfy_* config value (``comfy_workdir``, ``comfy_launch_cmd``),
+    suppressed to "" whenever the managed instance is active.
+
+    Every media backend.py (image/music/video) falls back to these global keys
+    to seed defaults for setups that pre-date per-plugin config - but
+    ``comfy_client.ensure_comfy()``'s "an explicit caller workdir/launch_cmd
+    always wins over managed routing" precedence cannot tell a deliberate
+    override from a years-old global default. Honouring the legacy value here
+    would silently pass it through as if it WERE a deliberate override,
+    defeating managed-instance auto-routing for anyone who ever set
+    comfy_workdir/comfy_launch_cmd - including users who set it long before a
+    managed instance existed. A genuine PER-PLUGIN override (the caller's own
+    ``comfy_blk.get(...)``) is untouched by this and still wins, as intended."""
+    if managed_comfy_active(full_config):
+        return ""
+    return full_config.get(key, "") or ""
 
 
 def managed_comfy_api_url_if_active(cfg: Optional[dict] = None) -> Optional[str]:
@@ -194,31 +240,55 @@ def managed_comfy_api_url_if_active(cfg: Optional[dict] = None) -> Optional[str]
 
 @dataclass(frozen=True)
 class ComfyTarget:
-    """Which ComfyUI localm targets: its URL, working dir, and whether it is the
-    managed instance (True) or the user's own (False)."""
+    """Which ComfyUI localm targets: its URL, working dir, launch command (None
+    when the caller should fall back to its own discovery, e.g. the user's own
+    install), and whether it is the managed instance (True) or the user's own
+    (False)."""
     api_url: str
     workdir: Optional[str]
+    launch_cmd: Optional[str]
     managed: bool
 
 
 def resolve_comfy_target(cfg: Optional[dict] = None) -> ComfyTarget:
     """THE single coexistence resolver (decision 6). Returns the managed
-    instance's (api_url, workdir) when managed routing is active, else the user's
-    ComfyUI exactly as today: the same api_url ``default_api_url()`` yields and
-    the ``comfy_workdir`` config value.
+    instance's (api_url, workdir, launch_cmd) when managed routing is active,
+    else the user's ComfyUI exactly as today: the same api_url
+    ``default_api_url()`` yields, the ``comfy_workdir`` config value, and no
+    launch_cmd (the caller resolves/discovers its own, as before).
 
-    Media modules can call this to get BOTH the URL and the workdir at once; the
-    URL alone also flows automatically through ``default_api_url()`` (which
-    consults ``managed_comfy_api_url_if_active``)."""
+    Media modules can call this to get the URL, workdir, AND launch command at
+    once; the URL alone also flows automatically through ``default_api_url()``
+    (which consults ``managed_comfy_api_url_if_active``)."""
     cfg = cfg if cfg is not None else load_config()
     if managed_comfy_active(cfg):
         return ComfyTarget(api_url=managed_comfy_api_url(),
-                           workdir=managed_comfy_workdir(), managed=True)
+                           workdir=managed_comfy_workdir(),
+                           launch_cmd=managed_comfy_launch_cmd(), managed=True)
     # User's ComfyUI, untouched. Import here (not at module load) to avoid a
     # circular import: comfy_client imports this module lazily too.
     from localm.media.comfy_client import default_api_url
     return ComfyTarget(api_url=default_api_url(),
-                       workdir=cfg.get("comfy_workdir"), managed=False)
+                       workdir=cfg.get("comfy_workdir"), launch_cmd=None,
+                       managed=False)
+
+
+def comfy_models_dest_dir(subfolder: str, cfg: Optional[dict] = None) -> Optional[Path]:
+    """Absolute ``models/<subfolder>`` directory for whichever ComfyUI
+    ``resolve_comfy_target()`` says is currently active - the destination a
+    downloaded model file needs to land in for THAT ComfyUI to see it.
+
+    Managed -> ``<LOCALM_HOME>/comfyui-models/<subfolder>``. External with a
+    configured ``comfy_workdir`` -> ``<comfy_workdir>/models/<subfolder>``.
+    External with no ``comfy_workdir`` configured -> None: there is no
+    known-safe filesystem location to write into, and the caller must say so
+    plainly rather than guessing."""
+    target = resolve_comfy_target(cfg)
+    if target.managed:
+        return managed_comfy_paths().models_dir / subfolder
+    if target.workdir:
+        return Path(target.workdir) / "models" / subfolder
+    return None
 
 
 # --------------------------------------------------------------------------- #

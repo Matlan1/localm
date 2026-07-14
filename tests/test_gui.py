@@ -2610,6 +2610,70 @@ class TestImageGeneration:
         assert seen.get("url") == "http://127.0.0.1:9999"
 
 
+class TestImageComfyModelPicker:
+    """/api/imagine/comfy-models + /api/imagine/comfy-launch - the Workflow
+    panel's "Launch ComfyUI" button and per-slot model dropdowns."""
+
+    def test_comfy_models_reports_unreachable_honestly(self, img_app):
+        """No ComfyUI is running in this test app - the route must say so
+        (rule 5: never a silently-empty picker that looks like "no slots")."""
+        app, _ = img_app
+        with TestClient(app) as client:
+            r = client.get("/api/imagine/comfy-models")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reachable"] is False
+        assert data["slots"] == []
+        assert "message" in data and data["message"]
+
+    def test_comfy_models_returns_slots_when_reachable(self, img_app, monkeypatch):
+        # backend.py is loaded via the plugin engine's own unique module spec
+        # (see PluginManager.install), so it is NOT the same module object as
+        # `import localm.plugins.builtin.image.backend` from here - patching
+        # that would silently miss the live instance plug.py actually holds.
+        # _comfy_model_slots/ensure_available forward to the shared, normally-
+        # imported localm.image_gen.comfy module instead, which IS a single
+        # canonical instance - patch there, matching test_imagine_job_* above.
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        fake_slots = [{"node_id": "1", "class_type": "UnetLoaderGGUFAdvanced",
+                       "input_name": "unet_name", "current": "a.gguf",
+                       "options": ["a.gguf", "b.gguf"]}]
+        monkeypatch.setattr(comfy, "workflow_model_slots",
+                            lambda workflow, api_url: fake_slots)
+        with TestClient(app) as client:
+            r = client.get("/api/imagine/comfy-models")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reachable"] is True
+        assert data["slots"] == fake_slots
+
+    def test_comfy_launch_starts_comfy(self, img_app, monkeypatch):
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        seen = {}
+        monkeypatch.setattr(comfy, "ensure_comfy",
+                            lambda *a, **k: (seen.update(called=True), (True, "up"))[1])
+        with TestClient(app) as client:
+            r = client.post("/api/imagine/comfy-launch")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert seen.get("called") is True
+
+    def test_comfy_launch_reports_failure(self, img_app, monkeypatch):
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        monkeypatch.setattr(comfy, "ensure_comfy",
+                            lambda *a, **k: (False, "ComfyUI failed to start."))
+        with TestClient(app) as client:
+            r = client.post("/api/imagine/comfy-launch")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is False
+        assert "failed" in data["message"].lower()
+
+
 # ------------------------------------------------------------------ #
 #  Music plugin (/api/music*)                                          #
 # ------------------------------------------------------------------ #

@@ -48,12 +48,15 @@ def home(tmp_path, monkeypatch):
 def _install_managed() -> mc.ManagedComfyPaths:
     """Minimal on-disk layout that makes is_managed_comfy_installed() true, using the
     module's OWN path accessors so the test is platform-agnostic (the venv
-    interpreter path differs on Windows vs POSIX)."""
+    interpreter path differs on Windows vs POSIX). Includes the completion
+    marker (#621 follow-up - main.py + venv alone means "still installing")."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
     paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
     assert mc.is_managed_comfy_installed()
     return paths
 
@@ -138,9 +141,9 @@ def test_status_not_installed_offers_setup(home, app):
     body = r.json()
     assert body["installed"] is False
     assert body.get("path") in (None, "")
-    # Off by default: not routing to a managed instance.
+    # Off by default: not routing to a managed instance (comfy_target defaults
+    # to "own" but is inert until an instance is actually installed).
     assert body["managed_active"] is False
-    assert body["enabled"] is False
     assert body["target"] == "own"
 
 

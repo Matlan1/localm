@@ -375,6 +375,118 @@ def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, m
     assert (install / "brand_new").exists()   # fallback cannot remove an unrecorded new entry
 
 
+def test_apply_removes_stale_manifest_when_write_fails(tmp_path, monkeypatch, sig_env, caplog):
+    """A failed applied_names.json write must NOT leave the PREVIOUS update's manifest in
+    place: the updates dir persists across updates, and a stale manifest would make a later
+    rollback remove/restore the WRONG top-level set (silent install data loss reported as
+    rolled_back:True). apply() unlinks it before the swap and WARNS on the failed write."""
+    import logging
+    from pathlib import Path
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    inst = _fake_install(tmp_path, deps=("click",))
+
+    # Update #1 records a manifest for real (drives the actual swap, no mocks).
+    op1, sig1 = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig1, download_opener=op1)
+    manifest = home / "updates" / "applied_names.json"
+    assert manifest.is_file()
+
+    # Update #2: only the manifest write fails (the swap itself still runs for real).
+    real_write = Path.write_text
+
+    def flaky_write(self, *a, **k):
+        if self.name == "applied_names.json":
+            raise OSError("disk full")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write)
+    op2, sig2 = _signed_build("0.3.0", ["click"])
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        res = updater.apply(5, installed=inst, signature=sig2, download_opener=op2)
+
+    assert res["applied"] is True and res["version"] == "0.3.0"
+    assert not manifest.exists()   # stale #1 manifest NOT left behind (unlinked before swap)
+    assert "could not record the update manifest" in caplog.text
+
+
+def test_rollback_last_warns_on_corrupt_manifest_and_falls_back(tmp_path, monkeypatch, caplog):
+    """A corrupt applied_names.json is not silently collapsed to 'absent': rollback_last
+    WARNS that brand-new entries will not be removed, then falls back to the backup dir
+    (still restoring the pre-existing names)."""
+    import logging
+    install = _stage_rollback(tmp_path, monkeypatch, manifest=None)
+    updir = (tmp_path / "home") / "updates"
+    (updir / "applied_names.json").write_text("{ this is not valid json", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        updater.rollback_last(installed=install)
+
+    assert "unreadable" in caplog.text
+    assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"  # restored
+    assert (install / "brand_new").exists()   # fallback cannot remove an unrecorded new entry
+
+
+def test_apply_early_abort_preserves_prior_manifest(tmp_path, monkeypatch, sig_env):
+    """The manifest unlink is placed AFTER download/verify/extract precisely so an EARLY
+    abort (bad signature, downgrade, corrupt zip) leaves the PREVIOUS update's still-valid
+    applied_names.json intact. Regression guard: hoisting the unlink above the verify block
+    would silently reintroduce the data loss (a later rollback on a stale name set)."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    inst = _fake_install(tmp_path, deps=("click",))
+
+    # A prior successful update recorded a manifest.
+    op1, sig1 = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig1, download_opener=op1)
+    manifest = home / "updates" / "applied_names.json"
+    before = manifest.read_text(encoding="utf-8")
+    assert before   # non-empty
+
+    # A later update aborts EARLY at the signature gate (before extract/swap/unlink).
+    from localm.bugreport import LocalmError
+    op2, _sig2 = _signed_build("0.3.0", ["click"])
+    with pytest.raises(LocalmError):
+        updater.apply(5, installed=inst, signature=None, download_opener=op2)  # unsigned -> refused
+
+    # The prior manifest is untouched: the unlink never ran (it is downstream of the gate).
+    assert manifest.read_text(encoding="utf-8") == before
+
+
+def test_apply_warns_when_prior_manifest_unlink_fails(tmp_path, monkeypatch, sig_env, caplog):
+    """If the previous applied_names.json cannot be unlinked with a non-FileNotFound OSError
+    (e.g. a lock), apply() WARNS (never crashes); the subsequent write still overwrites it.
+    Regression guard for the unlink-failure branch of the stale-manifest fix."""
+    import logging
+    from pathlib import Path
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    inst = _fake_install(tmp_path, deps=("click",))
+    op1, sig1 = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig1, download_opener=op1)
+    manifest = home / "updates" / "applied_names.json"
+    assert manifest.is_file()
+
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if self.name == "applied_names.json":
+            raise OSError("locked by AV")   # a non-FileNotFound OSError
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    op2, sig2 = _signed_build("0.3.0", ["click"])
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        res = updater.apply(5, installed=inst, signature=sig2, download_opener=op2)
+
+    assert res["applied"] is True and res["version"] == "0.3.0"
+    assert "could not remove the previous update manifest" in caplog.text
+    assert manifest.exists()   # the write below the failed unlink still overwrote it
+
+
 # ------------------------ spawn_health_watchdog (LM-DA-011) ----------------
 #
 # spawn_health_watchdog() never actually runs scripts/update_watchdog.py in these

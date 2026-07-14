@@ -8,9 +8,10 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, authHeaders, cancelJob, confirmDanger, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { showView } from "../app/tabs.js";
+import { modelOverrides } from "./workflow.js";
 
 /* ================================================================ */
 /*  Images page                                                      */
@@ -413,12 +414,16 @@ $("img-generate").onclick = async () => {
     denoise: num("img-denoise"),
     input_image: $("img-input").value.trim() || null,
   };
+  if (modelOverrides.image && Object.keys(modelOverrides.image).length) {
+    body.model_overrides = modelOverrides.image;
+  }
   $("img-generate").disabled = true;
   const log = $("img-log");
   log.style.display = "block";
   log.textContent = "";
   $("img-result").replaceChildren();
   try {
+    await checkModelsBeforeGenerate("image", log, { model_overrides: modelOverrides.image });
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

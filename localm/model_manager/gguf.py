@@ -7,6 +7,7 @@ import localm.model_manager as _mm  # read package-patchable names at call time
 import hashlib
 import os
 import re
+import struct
 import threading
 from pathlib import Path
 from typing import Callable
@@ -111,15 +112,21 @@ def _sha256_file_bytes(data: bytes) -> str:
 
 
 
-def _safe_models_filename(filename: str) -> Optional[str]:
-    """Return a single-component filename confined to ``MODELS_DIR``.
+def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Optional[str]:
+    """Return a single-component filename confined to *base_dir* (``MODELS_DIR``
+    by default).
 
-    A model download must never write outside the models folder. ``filename`` is
-    derived from untrusted input (a URL path or an ``owner/repo:file`` spec), so
-    a value like ``../../evil.gguf`` or ``sub/dir/evil.gguf`` must be rejected
-    rather than used as a destination. Returns the bare filename when it is a
-    single, non-traversing path component, else ``None`` (GAP-CLI-2).
+    A model download must never write outside its destination folder.
+    ``filename`` is derived from untrusted input (a URL path or an
+    ``owner/repo:file`` spec), so a value like ``../../evil.gguf`` or
+    ``sub/dir/evil.gguf`` must be rejected rather than used as a destination.
+    Returns the bare filename when it is a single, non-traversing path
+    component, else ``None`` (GAP-CLI-2). *base_dir* lets a caller routing a
+    download to a non-default destination (e.g. a ComfyUI models subfolder)
+    validate against the REAL destination instead of always against
+    ``MODELS_DIR``.
     """
+    base_dir = base_dir if base_dir is not None else _mm.MODELS_DIR
     if not filename:
         return None
     # An embedded NUL is not a legal filename on any OS and makes Path.resolve() /
@@ -136,8 +143,8 @@ def _safe_models_filename(filename: str) -> Optional[str]:
     if "/" in filename or "\\" in filename or os.sep in filename:
         return None
     try:
-        dest = (_mm.MODELS_DIR / name).resolve()
-        if dest.parent != _mm.MODELS_DIR.resolve():
+        dest = (base_dir / name).resolve()
+        if dest.parent != base_dir.resolve():
             return None
     except (OSError, ValueError):
         # ValueError also covers a null/odd path that slipped past the check above
@@ -276,4 +283,154 @@ def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
             continue   # non-first split part -> registered via its first part
         out.append(f)
     return out
+
+
+
+
+# ------------------------------------------------------------------ #
+#  GGUF embedding-model detection (hard metadata, not a filename guess) #
+# ------------------------------------------------------------------ #
+
+# llama.cpp's own LLM_ARCH_NAMES entries for encoder/embedding-only
+# architectures (verified against src/llama-arch.cpp) - a GGUF whose
+# general.architecture is one of these is unambiguously an embedding/encoder
+# model, never a causal-chat LLM.
+_GGUF_EMBEDDING_ARCHITECTURES = frozenset({
+    "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert",
+    "jina-bert-v2", "jina-bert-v3", "eurobert", "gemma-embedding",
+    "t5encoder", "pangu-embedded",
+})
+
+# GGUF metadata value types (ggml gguf.h `enum gguf_type`). STRING(8) and
+# ARRAY(9) are variable-length and handled specially; every other type here
+# maps to its fixed byte width.
+_GGUF_FIXED_TYPE_SIZES = {
+    0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
+}
+_GGUF_TYPE_STRING = 8
+_GGUF_TYPE_ARRAY = 9
+
+# Bounded read for the metadata probe: real GGUF writers put general.* and
+# <arch>.pooling_type keys before the (often large) tokenizer vocab arrays and
+# all tensor data, so a few MB is always enough; this guarantees the probe
+# never reads a multi-GB model file just to classify it.
+_GGUF_META_PROBE_BYTES = 4 * 1024 * 1024
+
+
+def _gguf_read_string(buf: bytes, off: int):
+    """Read a GGUF length-prefixed string at *off*; returns (value, new_offset).
+    Raises struct.error/UnicodeDecodeError/IndexError on malformed input -
+    callers catch and treat that as 'no signal', never crash."""
+    (n,) = struct.unpack_from("<Q", buf, off)
+    off += 8
+    if n > len(buf) - off or n > 1_000_000:
+        # No real GGUF key or architecture NAME is anywhere near 1 MB; a huge
+        # length here means we're mis-parsing (or past our bounded read), not
+        # that this is a legitimately giant string - bail out cleanly.
+        raise struct.error("gguf string length implausible or out of bounds")
+    return buf[off:off + n].decode("utf-8"), off + n
+
+
+def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
+    """Advance past one GGUF metadata VALUE of type *vtype* at *off*, returning
+    the new offset. Raises on an unsupported/malformed type (caught by the
+    caller) rather than silently mis-parsing the rest of the file."""
+    if vtype == _GGUF_TYPE_STRING:
+        _, off = _gguf_read_string(buf, off)
+        return off
+    if vtype == _GGUF_TYPE_ARRAY:
+        (elem_type,) = struct.unpack_from("<I", buf, off)
+        off += 4
+        (count,) = struct.unpack_from("<Q", buf, off)
+        off += 8
+        if elem_type == _GGUF_TYPE_STRING:
+            for _ in range(count):
+                _, off = _gguf_read_string(buf, off)
+            return off
+        size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
+        if size is None:
+            raise struct.error(f"unsupported gguf array element type {elem_type}")
+        return off + size * count
+    size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
+    if size is None:
+        raise struct.error(f"unsupported gguf value type {vtype}")
+    return off + size
+
+
+def _gguf_metadata_probe(path: Path) -> dict:
+    """Best-effort read of the GGUF header metadata needed for embedding-model
+    detection: ``general.architecture`` and whether any ``*.pooling_type`` key
+    is present. Reads only a bounded prefix of the file (see
+    ``_GGUF_META_PROBE_BYTES`` - real metadata always precedes the large
+    tokenizer vocab arrays and tensor data), never the whole model. Returns
+    ``{}`` on any parse failure or truncation within that bound - this must
+    NEVER raise or crash a caller; an unreadable/unexpected header just means
+    'no signal', exactly like ``_has_gguf_magic``'s existing defensive style,
+    and the caller falls back to its pre-existing classification. A truncation
+    or malformed key AFTER a definitive signal was already resolved (e.g. a
+    huge multilingual tokenizer vocab array following an early
+    general.architecture="bert" key) returns that already-resolved signal
+    rather than discarding it - the early-exit below stops as soon as either
+    signal is definitively known, so this is the normal case, not just a
+    fallback."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return {}
+    architecture = None
+    has_pooling_type = False
+    try:
+        if buf[:4] != b"GGUF":
+            return {}
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            # v1 used 32-bit tensor/kv counts and predates every architecture
+            # this detector cares about; no signal rather than mis-parsing it
+            # with the v2+ 64-bit layout.
+            return {}
+        tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+            else:
+                if key.endswith(".pooling_type"):
+                    has_pooling_type = True
+                off = _gguf_skip_value(buf, off, vtype)
+            # Stop as soon as the final answer is already decided: a definitive
+            # embedding architecture, or any pooling_type key at all, makes the
+            # rest of the KV block irrelevant to classification. Requiring only
+            # ONE of the two (not both) means a truncation past this point can
+            # never discard an already-confirmed signal.
+            if has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES:
+                break
+    except (struct.error, IndexError, UnicodeDecodeError):
+        # Truncated within our bounded read, or a malformed/unexpected layout -
+        # fall through and report whatever was already resolved before the
+        # failure, rather than discarding a signal found earlier in the walk.
+        pass
+    return {"architecture": architecture, "has_pooling_type": has_pooling_type}
+
+
+def gguf_embedding_signal(path: Path) -> bool:
+    """True when *path*'s own GGUF metadata marks it as an embedding/pooling
+    model rather than a causal-chat LLM: either its ``general.architecture`` is
+    one of llama.cpp's dedicated encoder/embedding architectures
+    (``_GGUF_EMBEDDING_ARCHITECTURES``), or it carries a
+    ``"<architecture>.pooling_type"`` key at all - llama.cpp's converter only
+    writes that key for a pooling-configured export (e.g. Qwen3-Embedding,
+    gte-Qwen2, e5-mistral all reuse a decoder architecture whose
+    general.architecture is unchanged from the chat variant, so the pooling-type
+    key is the only signal that catches them). Both are hard metadata baked
+    into the file itself - never a filename guess. Used by
+    ``_detect_local_model_type`` (local add + folder auto-sync) and by
+    ``pull.py`` (a freshly-downloaded remote GGUF)."""
+    meta = _gguf_metadata_probe(path)
+    if meta.get("architecture") in _GGUF_EMBEDDING_ARCHITECTURES:
+        return True
+    return bool(meta.get("has_pooling_type"))
 

@@ -44,6 +44,9 @@ class MusicRequest(BaseModel):
     steps: int | None = None
     cfg: float | None = None
     lyrics_strength: float | None = None
+    # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
+    # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
+    model_overrides: dict[str, dict[str, str]] | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -115,6 +118,8 @@ async def music(req: MusicRequest, request: Request):
             kwargs["cfg"] = req.cfg
         if req.lyrics_strength is not None:
             kwargs["lyrics_strength"] = req.lyrics_strength
+        if req.model_overrides:
+            kwargs["model_overrides"] = req.model_overrides
         ok, message = _backend.generate(
             s, req.tags, out_path,
             self_url=self_url,
@@ -216,6 +221,32 @@ async def music_history(request: Request):
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "music", [it["name"] for it in items]))
     return {"tracks": [it for it in items if it["name"] in allowed]}
+
+
+@_router.get("/api/music/comfy-models")
+async def music_comfy_models():
+    """Model-file slots the active music workflow exposes (for the Workflow
+    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
+    about unreachability (rule 5) - never a silently-empty picker."""
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    slots = _backend._comfy_model_slots(s)
+    if slots is None:
+        return {"reachable": False, "api_url": s["api_url"], "slots": [],
+                "message": "ComfyUI is not running - launch it to see available models."}
+    return {"reachable": True, "api_url": s["api_url"], "slots": slots}
+
+
+@_router.post("/api/music/comfy-launch")
+async def music_comfy_launch():
+    """Start (or confirm) ComfyUI is up for the music plugin, without running a
+    generation - backs the Workflow panel's "Launch ComfyUI" button."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 
 def register(host) -> None:

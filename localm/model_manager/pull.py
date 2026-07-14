@@ -168,6 +168,8 @@ def pull_model(
     mmproj_spec: Optional[str] = None,
     model_type: str = "auto",
     store: Optional[str] = None,
+    dest_dir: Optional[Path] = None,
+    register: bool = True,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -177,8 +179,16 @@ def pull_model(
 
     *store* ("copy" / "move" / None) only applies to the local-path branch
     below - a remote HF/URL download already lands in MODELS_DIR on its own.
+
+    *dest_dir*, when given, routes the download to that directory instead of
+    MODELS_DIR (e.g. a ComfyUI models subfolder) and skips localm's own
+    registry when *register* is False. Only supported for a single-file HF
+    spec (``owner/repo:file`` or ``owner/repo/file.gguf``) - a bare-repo
+    snapshot or a direct URL pull with *dest_dir* set is refused rather than
+    silently downloading to MODELS_DIR anyway.
     """
     spec = _mm.resolve_spec(model_spec)
+    type_is_auto = (model_type == "auto")
 
     # A local filesystem path is not a remote spec: register it in place rather
     # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
@@ -265,6 +275,20 @@ def pull_model(
     else:
         detected_type = model_type
 
+    is_url_spec = spec.startswith("http://") or spec.startswith("https://")
+    is_single_file_spec = not is_url_spec and "/" in spec and (
+        ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"))
+    if dest_dir is not None and not is_single_file_spec:
+        # dest_dir routing is only wired through _pull_gguf_file - refuse rather
+        # than silently downloading to MODELS_DIR while the caller believed it
+        # went to dest_dir (AGENTS.md rule 5: no silent wrong-destination writes).
+        console.print(
+            "[red]dest_dir is only supported for a single-file spec[/red] "
+            "(owner/repo:file or owner/repo/file.gguf) - "
+            f"{model_spec!r} would pull a full snapshot or direct URL instead."
+        )
+        return False
+
     if spec.startswith("http://") or spec.startswith("https://"):
         res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
                          expected_sha256=expected_sha256, redownload=redownload,
@@ -273,7 +297,9 @@ def pull_model(
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
             res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256,
-                                   redownload=redownload, model_type=detected_type)
+                                   redownload=redownload, model_type=detected_type,
+                                   dest_dir=dest_dir, register=register,
+                                   type_is_auto=type_is_auto)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
@@ -363,19 +389,32 @@ def _pull_gguf_file(
     redownload: bool = False,
     register: bool = True,
     model_type: str = "llm",
+    dest_dir: Optional[Path] = None,
+    type_is_auto: bool = False,
 ) -> bool:
-    """Download a single .gguf file from a HuggingFace repo.
+    """Download a single file from a HuggingFace repo (despite the name, not
+    restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
+    here, see ``pull_model``'s docstring).
 
     ``expected_sha256`` is the user-supplied ``--sha256`` digest. It is NOT a
     facade here (FAC-5): when given it is reconciled with HuggingFace's own LFS
     metadata up front, and the downloaded first part is verified against it
     before the model is registered.
+
+    ``dest_dir``, when given, routes the download to that directory instead of
+    ``MODELS_DIR`` (e.g. a ComfyUI models subfolder) and is created via
+    ``_mkdir_or_explain`` instead of ``ensure_dirs()``. ``register`` still
+    controls whether the download is added to localm's own model registry -
+    a file routed elsewhere (e.g. for ComfyUI, not for localm's own chat-model
+    catalog) should normally pass ``register=False``.
     """
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
     except ImportError:
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
         return False
+
+    base_dir = dest_dir if dest_dir is not None else _mm.MODELS_DIR
 
     if ":" in spec:
         repo_id, filename = spec.rsplit(":", 1)
@@ -384,24 +423,25 @@ def _pull_gguf_file(
         repo_id, filename = parts[0], parts[1]
 
     # Split GGUF: normalise to the full ordered part list. llama.cpp loads
-    # the model from the first part, so that's what gets registered.
+    # the model from the first part, so that's what gets registered. A
+    # non-split, non-gguf file (e.g. a .safetensors) is just a one-element list.
     all_parts = split_gguf_parts(filename) or [filename]
     filename  = all_parts[0]
 
     # Traversal guard (GAP-CLI-2): the filename comes from an untrusted spec
-    # (owner/repo:../../evil.gguf), so confine every part to MODELS_DIR before
+    # (owner/repo:../../evil.gguf), so confine every part to base_dir before
     # it is used as a destination. Reject the whole pull on any unsafe part.
     for part in all_parts:
-        if _safe_models_filename(part) is None:
+        if _safe_models_filename(part, base_dir) is None:
             console.print(
                 f"[red]Unsafe model filename:[/red] {part}\n"
-                "A GGUF filename must be a single name inside the models folder "
+                "A model filename must be a single name inside the models folder "
                 "(no '/', '\\', or '..')."
             )
             return False
 
     model_name = _sanitize_name(name or filename.removesuffix(".gguf"))
-    dest = _mm.MODELS_DIR / filename
+    dest = base_dir / filename
 
     # Expected digest from HF metadata - free, no download needed.
     # (Only identifies the first part of a split GGUF, which is enough.)
@@ -422,7 +462,7 @@ def _pull_gguf_file(
     # user-supplied value.
     verify_digest = expected or want
 
-    missing = [p for p in all_parts if not (_mm.MODELS_DIR / p).exists()]
+    missing = [p for p in all_parts if not (base_dir / p).exists()]
     if not missing:
         console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
         # If the user asserted a hash, verify the file actually on disk before
@@ -436,8 +476,12 @@ def _pull_gguf_file(
                 )
                 return False
         if register:
+            reg_type = model_type
+            if type_is_auto and reg_type == "llm" and _mm.gguf_embedding_signal(dest):
+                console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+                reg_type = "embedding"
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 digest=verify_digest, model_type=model_type)
+                                 digest=verify_digest, model_type=reg_type)
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
@@ -452,7 +496,11 @@ def _pull_gguf_file(
                 return True
             # "download" falls through
 
-    _mm.ensure_dirs()
+    if dest_dir is not None:
+        from ..config import _mkdir_or_explain
+        _mkdir_or_explain(base_dir, is_home=False)
+    else:
+        _mm.ensure_dirs()
 
     # Disk space pre-flight - HEAD each missing part's CDN URL for Content-Length
     try:
@@ -465,7 +513,7 @@ def _pull_gguf_file(
     except Exception:
         total_size = 0
 
-    if not _mm._check_disk_space(_mm.MODELS_DIR, total_size):
+    if not _mm._check_disk_space(base_dir, total_size):
         return False
 
     if len(all_parts) > 1:
@@ -477,15 +525,15 @@ def _pull_gguf_file(
     else:
         console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
 
-    with _download_progress([_mm.MODELS_DIR / p for p in missing], total_size):
+    with _download_progress([base_dir / p for p in missing], total_size):
         for part in missing:
             try:
                 local = hf_hub_download(
                     repo_id=repo_id,
                     filename=part,
-                    local_dir=str(_mm.MODELS_DIR),
+                    local_dir=str(base_dir),
                 )
-                final = _mm.MODELS_DIR / part
+                final = base_dir / part
                 if Path(local) != final:
                     shutil.move(local, final)
             except Exception as e:
@@ -503,15 +551,19 @@ def _pull_gguf_file(
                 f"{actual[:16]}… - deleting downloaded file(s)"
             )
             for part in all_parts:
-                p = _mm.MODELS_DIR / part
+                p = base_dir / part
                 if p.exists():
                     p.unlink()
             return False
         console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
 
     if register:
-        _mm._register(model_name, _mm.MODELS_DIR / filename, f"hf:{repo_id}",
-                  sha256=verify_digest, model_type=model_type)
+        reg_type = model_type
+        if type_is_auto and reg_type == "llm" and _mm.gguf_embedding_signal(base_dir / filename):
+            console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+            reg_type = "embedding"
+        _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
+                  sha256=verify_digest, model_type=reg_type)
         console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
     else:
         console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
@@ -928,9 +980,7 @@ def _hf_pipeline_tag_to_type(repo_id: str) -> str:
     'clip' (e.g. 'exploration' contains 'lora') must NOT be misclassified (MED-15).
     Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
     resolves (including an offline/failed query), so an ambiguous pull is registered
-    honestly and is not auto-loaded as the chat model. Embedding models are
-    provisioned via `setup-embeddings`, not pulled into the chat registry, so there
-    is no 'embedding' type here.
+    honestly and is not auto-loaded as the chat model.
     """
     from localm.discover import _get, HF_API
     try:
@@ -953,6 +1003,8 @@ def _hf_pipeline_tag_to_type(repo_id: str) -> str:
                 return "lora"
             if {"text-encoder", "clip"} & tags:
                 return "text-encoder"
+            if tag in ("feature-extraction", "sentence-similarity"):
+                return "embedding"
             # Text generation / chat model.
             if tag in ("text-generation", "text2text-generation", "conversational"):
                 return "llm"

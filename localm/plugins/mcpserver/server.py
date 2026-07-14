@@ -186,7 +186,14 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
         try:
             backend = getattr(engines.get(None), "_backend", None)
             return getattr(backend, "can_embed", True) is not False
-        except Exception:
+        except Exception as e:
+            # Probe failed: assume embeddable (do not hide the embed tool on a
+            # transient error), but log so a real capability bug is traceable
+            # (AGENTS.md rule 5). Logger writes to the debug file/stderr, never
+            # stdout, so the JSON-RPC frame stream stays clean.
+            from localm.debuglog import logger
+            logger.debug("mcp: embed-capability probe (custom factory) failed, "
+                         "assuming embeddable: %s", e)
             return True
 
     if engines._engine is not None:
@@ -201,8 +208,12 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
             path, _hint = info
             if str(path).lower().endswith(".gguf"):
                 return False
-    except Exception:
-        pass
+    except Exception as e:
+        # Registry probe failed: assume embeddable rather than hide the tool, but
+        # log the cause (AGENTS.md rule 5). Debug logger stays off stdout.
+        from localm.debuglog import logger
+        logger.debug("mcp: embed-capability probe (registry) failed, assuming "
+                     "embeddable: %s", e)
     return True
 
 
@@ -214,7 +225,14 @@ def _coder_available() -> bool:
     try:
         from localm.plugins.engine import PluginManager
         return PluginManager(None).is_active("coder")
-    except Exception:
+    except Exception as e:
+        # Fails CLOSED (hide the coder tool) so a call that could not work is not
+        # advertised - but that means an installed+enabled coder VANISHES from the
+        # tool list if this probe raises (e.g. unreadable plugin config). Log the
+        # cause so that is diagnosable, not a silent disappearance (AGENTS.md rule
+        # 5). Debug logger writes to file/stderr, never the JSON-RPC stdout.
+        from localm.debuglog import logger
+        logger.debug("mcp: coder-availability probe failed, hiding coder tool: %s", e)
         return False
 
 

@@ -48,6 +48,10 @@ download matches it on the first run (roughly 20 to 25 GB in total):
 | Text encoders | `clip_l.safetensors` + `t5xxl_fp8_e4m3fn.safetensors` | `models/clip/` |
 | VAE | `ae.safetensors` | `models/vae/` |
 
+You do not have to fetch these by hand: if any of them are missing when you
+generate an image, localm's GUI offers to download it for you (showing the
+exact source and size first) and places it in the right folder automatically.
+
 ### 4. Start ComfyUI
 
 Launch ComfyUI on its default port 8188:

@@ -276,7 +276,7 @@ def test_get_embedder_invokes_swap_check_before_native_load(monkeypatch, tmp_pat
         def close(self):
             pass
 
-    monkeypatch.setattr(emb, "GGUFEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _FakeEmbedder)
 
     e = emb.get_embedder()
 
@@ -341,7 +341,7 @@ def test_get_embedder_swap_check_does_not_deadlock_cross_thread_lock_use(monkeyp
         def close(self):
             pass
 
-    monkeypatch.setattr(emb, "GGUFEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _FakeEmbedder)
 
     e = emb.get_embedder()
 

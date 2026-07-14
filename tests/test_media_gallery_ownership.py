@@ -139,6 +139,127 @@ class TestImageGalleryOwnership:
                       c.get("/api/imagine/history", headers=_h(a)).json()["images"])
 
 
+class TestCorruptIndexFailsClosed:
+    """An owner index that EXISTS but is unreadable/corrupt must FAIL CLOSED -
+    deny a non-owner - not collapse to an empty index that reports every artifact
+    as unowned (job_owner_ok treats owner=None as unrestricted). That collapse
+    was the HON-01 fail-open: a corrupt/locked/truncated gallery_index/<kind>.json
+    granted require_owner + history to EVERY caller. A genuinely-ABSENT index
+    stays open/untracked (the benign case), so the two must not be conflated."""
+
+    def _corrupt_index(self, kind: str) -> Path:
+        from localm.media import gallery
+        p = gallery._index_path(kind)
+        assert p.is_file()          # generation stamped an owner -> index exists
+        p.write_text("{ this is not valid json", encoding="utf-8")
+        return p
+
+    def test_corrupt_index_denies_scoped_keys_but_admin_sees_all(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        a, b = _mk_keys(["image"], ["image"])
+        with TestClient(app) as c:
+            name = TestImageGalleryOwnership._generate(c, monkeypatch, a)
+            self._corrupt_index("image")
+
+            # A DIFFERENT scoped key must be DENIED (fail closed), not handed
+            # every artifact as if unowned. Pre-fix this returned 200 / full
+            # history - the fail-open this test exists to catch.
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 404
+            assert c.get("/api/imagine/history", headers=_h(b)).json()["images"] == []
+            # Even the real owner's SCOPED key is denied until the index is
+            # repaired: ownership is indeterminate, so we fail closed for every
+            # non-admin principal, deliberately, not just the foreign one.
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 404
+            assert c.get("/api/imagine/history", headers=_h(a)).json()["images"] == []
+
+            # The owner/admin key still reaches everything (no cross-owner
+            # boundary to protect for them), so the gallery stays usable and the
+            # index remains repairable.
+            monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+            assert c.get(f"/api/imagine/file/{name}",
+                         headers=_h("ownersecret")).status_code == 200
+            assert any(it["name"] == name for it in
+                       c.get("/api/imagine/history",
+                            headers=_h("ownersecret")).json()["images"])
+
+    def test_absent_index_stays_open(self, tmp_path, monkeypatch):
+        """The distinction the fix turns on: an ABSENT index (never created, or
+        deleted) is the benign open/untracked case, so any scoped key still
+        reaches the media - unlike the corrupt case above."""
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        a, b = _mk_keys(["image"], ["image"])
+        with TestClient(app) as c:
+            name = TestImageGalleryOwnership._generate(c, monkeypatch, a)
+            from localm.media import gallery
+            gallery._index_path("image").unlink()       # genuinely absent
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 200
+            assert any(it["name"] == name for it in
+                       c.get("/api/imagine/history", headers=_h(b)).json()["images"])
+
+
+class TestGalleryIndexReadContract:
+    """Unit-level contract for the read/write primitives: absent vs corrupt is a
+    hard distinction, and writes are atomic (no temp-file residue, round-trips)."""
+
+    def _home(self, tmp_path, monkeypatch):
+        # _index_path -> home_dir() -> _detect_home() reads LOCALM_HOME at call
+        # time, so set the env var (not just the HOME_DIR constant).
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path / ".localm"))
+
+    def test_absent_returns_empty(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        from localm.media import gallery
+        assert gallery._read_index("image") == {}
+        assert gallery.owner_of("image", "whatever.png") is None
+
+    def test_corrupt_raises_not_empty(self, tmp_path, monkeypatch):
+        import pytest
+        self._home(tmp_path, monkeypatch)
+        from localm.media import gallery
+        p = gallery._index_path("image")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{ not: valid, json", encoding="utf-8")
+        with pytest.raises(gallery.GalleryIndexUnreadable):
+            gallery._read_index("image")
+        with pytest.raises(gallery.GalleryIndexUnreadable):
+            gallery.owner_of("image", "x.png")
+
+    def test_non_dict_json_is_treated_as_empty(self, tmp_path, monkeypatch):
+        # Valid JSON that is not an object (e.g. a list) is not "corrupt" in the
+        # security sense - it parses - so it stays the empty/open case, matching
+        # the pre-fix `isinstance(data, dict)` guard.
+        self._home(tmp_path, monkeypatch)
+        from localm.media import gallery
+        p = gallery._index_path("image")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("[1, 2, 3]", encoding="utf-8")
+        assert gallery._read_index("image") == {}
+
+    def test_atomic_write_roundtrip_leaves_no_temp(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        from localm.media import gallery
+        gallery._write_index("image", {"a.png": "owner1"})
+        assert gallery._read_index("image") == {"a.png": "owner1"}
+        # os.replace leaves no half-written temp behind.
+        leftovers = list(gallery._index_path("image").parent.glob("*.tmp.*"))
+        assert leftovers == []
+
+    def test_writers_do_not_clobber_corrupt_index(self, tmp_path, monkeypatch):
+        # stamp/rename/forget must not overwrite a corrupt index with a fresh
+        # map - that would silently drop every prior owner record.
+        self._home(tmp_path, monkeypatch)
+        from localm.media import gallery
+        p = gallery._index_path("image")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        corrupt = "{ not valid json"
+        p.write_text(corrupt, encoding="utf-8")
+        gallery.stamp_owner("image", "new.png", "ownerX")
+        gallery.rename_owner("image", "a.png", "b.png")
+        gallery.forget_owner("image", "a.png")
+        assert p.read_text(encoding="utf-8") == corrupt     # untouched
+
+
 class TestMusicGalleryOwnership:
     @staticmethod
     def _generate(client, monkeypatch, key):

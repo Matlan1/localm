@@ -12,7 +12,19 @@
 // v49: pages/settings.js changed (the ComfyUI setup log no longer erases itself
 // on failure, #621) - a stale-cache miss on THIS exact bump is what made that
 // fix invisible to an already-installed PWA in the field.
-const CACHE = "localm-shell-v49";
+// v50: pages/settings.js changed again (the managed_comfy_enabled checkbox was
+// removed - a stale-cached client would keep showing it AND get "unknown config
+// key" on save, since the server no longer accepts that field).
+// v51: index.html and pages/models.js changed (the ComfyUI re-scan button moved
+// out of its hidden tab-gated row into the "Add a model" card) - a stale-cached
+// client would keep the button invisible on the All/LLMs tabs.
+// v52: app/helpers.js and pages/images.js/music.js/video.js changed (the
+// ComfyUI missing-model download offer) - a stale-cached client would keep
+// missing the pre-generate model check and the download confirm modal.
+// v53: index.html and pages/models.js changed (a new "Embedding" Model
+// Manager tab + type option) - a stale-cached client would keep lacking the
+// tab and the per-row type <select> would be missing the 'embedding' choice.
+const CACHE = "localm-shell-v53";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

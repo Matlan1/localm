@@ -3,6 +3,8 @@ import sys
 
 import click
 
+from localm.debuglog import logger
+
 from ._core import console, main
 
 
@@ -36,8 +38,13 @@ def _wire_plugin_cli_entries() -> None:
             mod = importlib.import_module(mod_name)
             main.add_command(getattr(mod, attr))
             wired.add(name)
-        except ImportError:
-            pass
+        except ImportError as e:
+            # Usually a plugin's optional pip extras are simply not installed
+            # (benign - the verb is just unavailable). But this ALSO catches a
+            # genuinely broken first-party plugin module, which would otherwise
+            # vanish from the CLI with no trace. Debug-log so the two are
+            # distinguishable without failing startup over an optional extra.
+            logger.debug("plugin CLI %r not wired (import failed): %s", name, e)
     if "coder" not in wired:
         @main.command("coder", context_settings={"ignore_unknown_options": True})
         def _coder_stub(**_):
@@ -82,7 +89,12 @@ def setup_embeddings(model):
     localm's chat models make poor embeddings, so semantic retrieval uses a small
     dedicated model (bge-small, ~25 MB). This downloads it into
     <home>/models/embeddings/ so memory and RAG retrieval become semantic instead
-    of lexical. Respects net_mode=off (a hard kill switch)."""
+    of lexical. Respects net_mode=off (a hard kill switch). A freshly downloaded
+    known model is also synced into the Model Manager registry (type "embedding")
+    so it shows up in `localm list` / the GUI Models page; this sync is best-effort
+    and never touches an already-registered or user-pointed model."""
+    from pathlib import Path
+
     from ..config import load_config, update_config
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                       KNOWN_EMBEDDING_MODELS,
@@ -98,8 +110,33 @@ def setup_embeddings(model):
             f"key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered model, or a GGUF "
             "path, and network must be enabled (net_mode is not 'off').")
         sys.exit(1)
+
+    synced_note = ""
+    try:
+        p = Path(path).resolve()
+        # Only register a KNOWN-key download (lives directly under the dedicated
+        # embeddings dir) - never a user-pointed external GGUF or an already
+        # registered model, which keep whatever registration/type they already
+        # have (never silently override an existing choice).
+        from ..inference.embedder import _embeddings_dir
+        if p.parent == _embeddings_dir().resolve():
+            from ..config import load_registry
+            from ..model_manager import find_aliases_by_path, _register, _sanitize_name
+            if not find_aliases_by_path(p, load_registry()):
+                reg_name = _sanitize_name(f"embedding-{name}")
+                _register(reg_name, p, source="setup-embeddings", model_type="embedding")
+                synced_note = (f"\nRegistered as [bold]{reg_name}[/bold] "
+                               "(type 'embedding') - visible in `localm list` / the GUI.")
+    except Exception as e:
+        # Best-effort visibility sync only - the embedding model itself is
+        # already installed and fully functional regardless of whether this
+        # optional Model-Manager registration succeeds; surfaced at debug
+        # level rather than silenced (AGENTS.md rule 5).
+        from ..debuglog import logger as _logger
+        _logger.debug("setup-embeddings: could not sync into the model registry (%s)", e)
+
     console.print(
-        f"[green]Embedding model ready:[/green] {path}\n"
+        f"[green]Embedding model ready:[/green] {path}{synced_note}\n"
         "Memory now retrieves semantically. Existing RAG collections stay lexical "
         "(BM25) until re-indexed with embeddings: re-add them in the GUI, or run "
         "`localm rag add <name> <path> --embed` and query with `--embed` against a "

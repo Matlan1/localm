@@ -63,6 +63,41 @@ test("outside-whitelist add: 409 -> confirm -> widen allowed roots -> retry inde
       "the add retried after consent");
   });
 
+test("a non-consent 409 shows the server's real detail, not 'body stream already read'",
+  async () => {
+    // kbRunAdd used to read the 409 body once to check needs_consent, then read it
+    // AGAIN on the fall-through path. On a real Response the second read throws
+    // "body stream already read", masking the server's actual detail. Emulate the
+    // single-read Response semantics: json() succeeds once, then throws.
+    let addBodyReads = 0;
+    const fetchImpl = async (url) => {
+      if (String(url).includes("/add")) {
+        return {
+          ok: false, status: 409, statusText: "Conflict", text: async () => "",
+          json: async () => {
+            addBodyReads += 1;
+            if (addBodyReads > 1) throw new TypeError("body stream already read");
+            return { detail: "collection is busy" };   // a 409 that is NOT needs_consent
+          },
+        };
+      }
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ collections: [], fs_access: "host" }) };
+    };
+    const window = setup(fetchImpl);
+    runScript(window, `
+      window.__log = document.createElement("div");
+      kbRunAdd("mycoll", ["/some/path"], true, window.__log);
+    `);
+    for (let i = 0; i < 8; i++) await tick();
+    const toast = window.document.getElementById("toast").textContent;
+    const log = window.__log.textContent;
+    assert.ok(/collection is busy/.test(toast),
+      "the server's real 409 detail reaches the user: " + toast);
+    assert.ok(!/already read/.test(toast + log),
+      "the double-read bug is gone (no 'body stream already read')");
+  });
+
 test("declining the confirm does NOT widen roots and does not retry", async () => {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {

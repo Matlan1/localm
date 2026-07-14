@@ -50,20 +50,39 @@ _TS_TIMEOUT = 4
 #  Config                                                            #
 # ------------------------------------------------------------------ #
 
+class _UnreadableConfig(dict):
+    """Sentinel returned by :func:`_config` ONLY when the config could not be read.
+    It is an empty mapping for callers that read a DEFAULTED value (``mdns_label``
+    still falls back to ``localm``), but :func:`mdns_enabled` identity-checks it to
+    fail CLOSED - so an unreadable config can never silently RE-ENABLE mDNS for a
+    user who set ``mdns_enabled: false`` as an opt-out."""
+
+
 def _config() -> dict:
     try:
         from localm.config import load_config
         return load_config()
     except Exception:
-        # Best-effort: if config cannot be read we fall back to the built-in
-        # defaults (mDNS on, name "localm"). A note beats crashing the bind.
+        # Best-effort: if config cannot be read, name-based callers fall back to
+        # the built-in default label ("localm"). mdns_enabled() treats this
+        # sentinel as OFF (below), so a transiently unreadable config errs toward
+        # NOT advertising, never toward more. A note beats crashing the bind.
         logger.debug("netname: config unreadable; using defaults", exc_info=True)
-        return {}
+        return _UnreadableConfig()
 
 
 def mdns_enabled() -> bool:
-    """Whether to advertise the ``.local`` name over mDNS on network binds."""
-    return bool(_config().get("mdns_enabled", True))
+    """Whether to advertise the ``.local`` name over mDNS on network binds.
+
+    Fail CLOSED on a config-read failure: an unreadable config resolves to False
+    (no advertising), never True. An opt-out (``mdns_enabled: false``) must not be
+    silently re-enabled by a transiently unreadable config - the same fail-safe
+    ``netpolicy.network_mode()`` applies to ``net_mode``. The valid-config path is
+    unchanged: an unset key still defaults to True (mDNS on by default)."""
+    cfg = _config()
+    if isinstance(cfg, _UnreadableConfig):
+        return False
+    return bool(cfg.get("mdns_enabled", True))
 
 
 def normalize_label(raw: str) -> str:

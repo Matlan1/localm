@@ -156,9 +156,11 @@ def test_cli_add_fast_passes_flag(cli_runner, tmp_path, monkeypatch):
     import localm.cli as cli
     captured = {}
 
-    def _fake_add_local(path, name=None, on_duplicate="ask", no_hash=False, fast=False, store=None):
+    def _fake_add_local(path, name=None, on_duplicate="ask", no_hash=False, fast=False,
+                        model_type=None, store=None):
         captured["fast"] = fast
         captured["no_hash"] = no_hash
+        captured["model_type"] = model_type
         captured["store"] = store
         return True
     monkeypatch.setattr(cli, "add_local", _fake_add_local)

@@ -42,14 +42,17 @@ def home(tmp_path, monkeypatch):
 
 def _install_managed():
     """Create the on-disk markers is_managed_comfy_installed() checks (main.py +
-    the managed venv interpreter), so the REAL detector reports installed - no
-    mock of the thing under test."""
+    the managed venv interpreter + the completion marker - #621 follow-up: the
+    first two alone mean "still installing"), so the REAL detector reports
+    installed - no mock of the thing under test."""
     from localm.media.managed_comfy import managed_comfy_paths
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     p = managed_comfy_paths()
     p.main_py.parent.mkdir(parents=True, exist_ok=True)
     p.main_py.write_text("# fake ComfyUI entry point\n", encoding="utf-8")
     p.venv_python.parent.mkdir(parents=True, exist_ok=True)
     p.venv_python.write_text("", encoding="utf-8")
+    (p.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
 
 
 # ------------------------------ pure helpers --------------------------------------

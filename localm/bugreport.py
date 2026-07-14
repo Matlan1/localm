@@ -402,7 +402,13 @@ def _format_error(error: Optional[BaseException]) -> str:
     if error is None:
         return ""
     tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    tb = _scrub_home(tb)
+    # Full scrub, not just home paths: an exception message can embed a
+    # user-configured credentialed URL (a comfy_api_url / net_search_url / remote
+    # server base with user:pass@) or a pasted token, and this traceback ships in the
+    # uploaded "Error detail" body. _scrub_secrets adds the url-creds + bearer/apikey
+    # strips the sibling log-tail already applies (HON-15; do not report a scrub the
+    # module docstring promises but did not perform).
+    tb = _scrub_secrets(tb)
     # Keep the tail - the last frames are the useful ones, and a shorter report
     # is more likely to be read and sent.
     lines = tb.strip().splitlines()
@@ -531,6 +537,14 @@ def build_report(summary: str, reason: str = "",
                  error: Optional[BaseException] = None,
                  context: Optional[dict] = None) -> str:
     """Render an editable markdown bug report. The user owns it before sending."""
+    # The user-typed summary/reason are the only report fields not otherwise
+    # scrubbed; a home path (username) or pasted credential in them would ship in
+    # the uploaded body - and, via the derived title, into a PUBLIC issue. Scrub at
+    # this choke point so every caller (report_failure, save_user_report) is covered
+    # (HON-03/HON-15; AGENTS.md rule 5: a privacy step must not report a scrub it
+    # did not do). _scrub_secrets is idempotent and no-ops on empty text.
+    summary = _scrub_secrets(summary)
+    reason = _scrub_secrets(reason)
     diag = collect_diagnostics(context)
     err = _format_error(error)
 
@@ -739,9 +753,12 @@ def save_user_report(description: str, *, summary: str = "",
     text = build_report(summary, context=context)
     if description:
         # Drop the user's own words into the otherwise-empty "What I was doing".
+        # Scrub here: this is inserted AFTER build_report's own scrub pass and is
+        # uploaded verbatim in the report body when the user picks upload, so it must
+        # be scrubbed at this injection point too (HON-15).
         text = text.replace(
             "<!-- Please describe what you ran and what you expected. -->",
-            description)
+            _scrub_secrets(description))
     return save_report(text)
 
 
@@ -872,6 +889,13 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     reported as success (we do not hide problems). *opener* is injectable for
     tests (defaults to urllib)."""
     import json as _json
+
+    # Scrub the title at the upload boundary: it becomes a PUBLIC GitHub issue
+    # title, and callers pass the user's raw summary / description first line
+    # (report_failure, inference/routes/admin.py). This is the single choke point
+    # every uploaded title flows through, so scrubbing here covers all callers - a
+    # future one cannot forget (HON-03/HON-15). Idempotent; no-ops on empty text.
+    title = _scrub_secrets(title)
 
     # Fill each of url/token from config independently when not explicitly passed,
     # so an explicit token does not suppress loading the url from config (and vice
