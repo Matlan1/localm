@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from localm import model_manager as mm
-from localm.model_manager.scan import scan_comfy_models
+from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
 
 
 @pytest.fixture()
@@ -45,6 +45,16 @@ def temp_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(mm, "load_registry", _load)
     monkeypatch.setattr(mm, "save_registry", _save)
     monkeypatch.setattr(mm, "update_registry", _update)
+    # scan.py did `from localm.config import load_registry` at ITS OWN import
+    # time, so it holds an independent name bound to the original function -
+    # patching localm.config.load_registry (above) does not reach it (classic
+    # "patch where it's looked up, not where it's defined"). Without this, a
+    # scan-then-rescan test would see scan.py's dedup check read the real,
+    # session-frozen registry (conftest.py's autouse LOCALM_HOME) instead of
+    # this fixture's store, so it would never see a file THIS test just
+    # registered via _register_with_dedup (which writes through mm.*, not
+    # scan.load_registry) as already-registered.
+    monkeypatch.setattr("localm.model_manager.scan.load_registry", _load)
     return store, models_dir, registry_file
 
 
@@ -191,3 +201,121 @@ def test_scan_without_object_info_leaves_generic_file_unknown(tmp_path, temp_reg
 
     reg = mm.load_registry()
     assert reg["some_model"]["model_type"] == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+#  Guided Import-from-ComfyUI: workdir override + dry-run preview             #
+# --------------------------------------------------------------------------- #
+
+def _make_comfy_tree(root):
+    """A folder tree covering every SUBFOLDER_MAPPING convention plus one
+    unmapped folder, one file each - the fixture the workdir-override and
+    preview tests scan."""
+    layout = {
+        "unet": "unet_model.safetensors",
+        "clip": "clip_model.safetensors",
+        "vae": "vae_model.safetensors",
+        "loras": "lora_model.safetensors",
+        "my_custom_nodes": "mystery_model.safetensors",
+    }
+    for sub, fname in layout.items():
+        d = root / "models" / sub
+        d.mkdir(parents=True)
+        (d / fname).write_bytes(b"DATA")
+    return layout
+
+
+def test_scan_workdir_override_never_touches_configured_comfy_workdir(tmp_path, temp_registry):
+    """A one-off scan with an explicit workdir must not even READ the configured
+    comfy_workdir - `workdir or get_comfy_workdir()` short-circuits, so patching
+    get_comfy_workdir to explode proves it is never consulted (a stronger
+    guarantee than snapshotting config values, which could pass by coincidence)."""
+    comfy_dir = tmp_path / "comfy"
+    _make_comfy_tree(comfy_dir)
+
+    def _boom():
+        raise AssertionError("get_comfy_workdir() must not be called with an explicit workdir override")
+
+    with patch("localm.model_manager.scan.get_comfy_workdir", side_effect=_boom):
+        with patch("requests.get", side_effect=Exception("offline")):
+            res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+
+    assert res.added == 5
+
+
+def test_scan_workdir_override_categorizes_every_convention(tmp_path, temp_registry):
+    """An arbitrary one-off folder scans and categorizes exactly like the
+    configured-workdir path - unet/clip/vae/loras map correctly, the unmapped
+    folder lands as 'unknown'."""
+    comfy_dir = tmp_path / "comfy"
+    _make_comfy_tree(comfy_dir)
+
+    with patch("requests.get", side_effect=Exception("offline")):
+        res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+
+    assert res.added == 5
+    assert res.skipped == 0
+    reg = mm.load_registry()
+    assert reg["unet_model"]["model_type"] == "diffusion-unet"
+    assert reg["clip_model"]["model_type"] == "text-encoder"
+    assert reg["vae_model"]["model_type"] == "vae"
+    assert reg["lora_model"]["model_type"] == "lora"
+    assert reg["mystery_model"]["model_type"] == "unknown"
+
+
+def test_preview_comfy_models_registers_nothing(tmp_path, temp_registry):
+    """The dry-run preview must never write to the registry, whatever it finds."""
+    comfy_dir = tmp_path / "comfy"
+    _make_comfy_tree(comfy_dir)
+
+    with patch("requests.get", side_effect=Exception("offline")):
+        preview = preview_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+
+    assert mm.load_registry() == {}, "a preview must not register anything"
+    assert preview.already_registered == 0
+    assert preview.counts == {
+        "diffusion-unet": 1, "text-encoder": 1, "vae": 1, "lora": 1, "unknown": 1,
+    }
+
+
+def test_preview_then_scan_totals_agree(tmp_path, temp_registry):
+    """The preview's total_new (sum of counts) must match what a REAL scan of the
+    same folder actually adds - a stale/mismatched preview would mislead the
+    guided-import confirm step."""
+    comfy_dir = tmp_path / "comfy"
+    _make_comfy_tree(comfy_dir)
+
+    with patch("requests.get", side_effect=Exception("offline")):
+        preview = preview_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+        total_new = sum(preview.counts.values())
+        res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+
+    assert total_new == res.added == 5
+
+
+def test_preview_excludes_already_registered_files(tmp_path, temp_registry):
+    """A file the registry already knows about must count toward
+    already_registered, not toward the per-type counts - re-previewing the same
+    folder after a real scan should show nothing new left to import."""
+    comfy_dir = tmp_path / "comfy"
+    _make_comfy_tree(comfy_dir)
+
+    with patch("requests.get", side_effect=Exception("offline")):
+        scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+        preview = preview_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+
+    assert preview.counts == {}
+    assert preview.already_registered == 5
+
+
+def test_preview_missing_models_folder_reports_reason(tmp_path, temp_registry):
+    """No models/ folder under the chosen workdir -> the same honest 'none (...)'
+    reason scan_comfy_models gives, not a silent empty result."""
+    empty_dir = tmp_path / "not-comfy"
+    empty_dir.mkdir()
+
+    preview = preview_comfy_models(workdir=str(empty_dir))
+
+    assert preview.counts == {}
+    assert preview.already_registered == 0
+    assert preview.method.startswith("none (models folder not found under")
