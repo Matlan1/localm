@@ -31,6 +31,7 @@ managed_comfy_fresh.py; the S5 doctor hint already shipped).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -111,16 +112,38 @@ def _tail(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
+def _isolated_env() -> dict:
+    """The environment for a subprocess that runs Python against the USER's venv or
+    the freshly-created managed venv - never localm's own ``PYTHONPATH``.
+
+    ``subprocess.run`` inherits the full parent environment by default, and
+    ``PYTHONPATH`` is a per-process search path that Python's ``venv`` isolation
+    does NOT filter out - so if the calling localm process happens to have
+    ``PYTHONPATH`` set (e.g. a dev/CI invocation, or any future wrapper), a fresh
+    "isolated" venv silently sees whatever localm's OWN ``site-packages`` holds on
+    top of its actual package set. Reproduced live: with a dev ``PYTHONPATH`` set,
+    ``pip freeze`` on a venv holding exactly one package reported 91, one of which
+    needed a source build localm never intended to trigger. That defeats this
+    module's entire point (an exact, uncontaminated replica of the user's package
+    set - see the module docstring) silently, which is exactly the AGENTS.md rule 5
+    failure mode: a real fault (a corrupted freeze) masquerading as an unrelated
+    downstream error (a missing offline build dependency)."""
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
 def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = None,
          timeout: Optional[int] = None) -> tuple[bool, str]:
     """Run *cmd*, stream its combined output to *on_progress*, return (ok, output).
     A missing executable or a timeout is a clean (False, reason), never a raise -
-    the caller turns it into an honest ProvisionResult."""
+    the caller turns it into an honest ProvisionResult. Runs with ``_isolated_env()``
+    since every caller of this helper drives the user's or the managed venv."""
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
         proc = subprocess.run(
             cmd, cwd=(str(cwd) if cwd else None), capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace")
+            timeout=timeout, encoding="utf-8", errors="replace", env=_isolated_env())
     except FileNotFoundError as e:
         return False, f"{cmd[0]} not found: {e}"
     except subprocess.TimeoutExpired:
@@ -243,7 +266,7 @@ def read_user_freeze(venv_python: Path) -> Optional[list]:
         proc = subprocess.run(
             [str(venv_python), "-m", "pip", "freeze", "--disable-pip-version-check"],
             capture_output=True, text=True, timeout=180,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace", env=_isolated_env())
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
