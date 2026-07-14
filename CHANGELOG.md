@@ -155,6 +155,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a cloned repo's internal file paths past Windows' legacy 260-character
   limit, failing with a cryptic "Filename too long" / "invalid index-pack
   output" git error.
+- A couple of status messages no longer claim success when the step was actually
+  refused or skipped. A chat-model reload after image, music, or video generation
+  now says the reload was deferred to your next message (instead of a false "Chat
+  model ready.") when the server declined it, and installing the global `localm`
+  command tells you to add its folder to your PATH by hand when it could not do so
+  itself, instead of claiming the folder "was already on PATH".
 
 ### Security
 - **Bug reports no longer leak your username in the fields you type or the issue
