@@ -70,9 +70,38 @@ def test_build_report_includes_error_traceback():
     assert "ValueError: boom" in text
 
 
+def test_build_report_scrubs_credentialed_url_in_error_traceback():
+    """HON-15: an exception message can embed a user-configured credentialed URL
+    (a comfy_api_url / net_search_url / remote-server base with user:pass@), and the
+    traceback ships in the uploaded 'Error detail' body. It must be credential-scrubbed
+    like the sibling log tail, not merely home-scrubbed."""
+    try:
+        raise RuntimeError("Could not reach the localm server at "
+                           "http://user:SECRETPASS@remote:8000/v1: timeout")
+    except RuntimeError as e:
+        text = bugreport.build_report("server unreachable", error=e)
+    assert "## Error detail" in text
+    assert "SECRETPASS" not in text
+    assert "<redacted>" in text
+
+
 def test_build_report_no_secret_when_none_given():
     text = bugreport.build_report("x")
     assert "## Error detail" not in text
+
+
+def test_build_report_scrubs_home_path_in_summary_and_reason():
+    """HON-15: the user-typed summary/reason are the only report fields not
+    otherwise scrubbed; a home path (username) in them would ship in the uploaded
+    body (and, via the derived title, a PUBLIC issue). They are scrubbed at the
+    build_report choke point, so every caller is covered."""
+    text = bugreport.build_report(
+        r"crash running C:\Users\bob\localm\app.py",
+        reason=r"see backup at C:\Users\bob\localm-backups\b1")
+    assert "bob" not in text
+    assert "<redacted>" in text
+    # The scrubbed summary still lands in the title header (nothing is dropped).
+    assert "# localm bug report:" in text
 
 
 # --------------------------- send URLs ------------------------------------ #
@@ -121,6 +150,20 @@ def test_save_user_report_blank_description_still_saves(tmp_path, monkeypatch):
     path = bugreport.save_user_report("")
     assert path is not None and path.exists()
     assert "user-reported issue" in path.read_text(encoding="utf-8")
+
+
+def test_save_user_report_scrubs_home_path_in_description(tmp_path, monkeypatch):
+    """HON-15: the GUI description is inserted AFTER build_report's own scrub pass
+    and is uploaded verbatim in the report body when the user picks upload, so it
+    must be scrubbed at its injection point too - both the derived summary and the
+    full description must be redacted."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report(
+        "It broke when I ran it from C:\\Users\\bob\\localm and clicked send.")
+    assert path is not None and path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "bob" not in text
+    assert "<redacted>" in text
 
 
 # --------------------------- the interactive offer ------------------------ #
