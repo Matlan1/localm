@@ -607,6 +607,7 @@ async def unload_all_models() -> dict:
     loop = asyncio.get_running_loop()
     from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
+    from localm.inference import embedder as _embedder_mod
 
     def _free():
         return vram_capacity().get("free")
@@ -645,6 +646,16 @@ async def unload_all_models() -> dict:
         finally:
             engine.unloading = False
 
+    # Release the shared embedder too - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring): it is loaded independently
+    # by RAG/memory/coder-episode callers via get_embedder(), never through
+    # switch_engine, so it was previously NEVER freed by "Unload all" even
+    # though the GUI reported everything released (only the chat engines'
+    # VRAM actually dropped - the embedder's stayed resident).
+    embedder_was_loaded = _embedder_mod.loaded_dim() is not None
+    if embedder_was_loaded:
+        await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+
     # Update compatibility pointers - but NOT if the active engine was a pinned one
     # we deliberately left loaded (clearing it would strand the in-flight request's
     # active model).
@@ -653,13 +664,14 @@ async def unload_all_models() -> dict:
         _engine = None
         _inference_sem = None
 
-    if before is not None and unloaded_models:
+    released_anything = bool(unloaded_models) or embedder_was_loaded
+    if before is not None and released_anything:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
     else:
         released, after = 0, before
 
-    if unloaded_models:
+    if released_anything:
         status = "unloaded"
     elif skipped_in_use:
         status = "in_use"          # nothing freed: every loaded model is pinned
@@ -668,7 +680,8 @@ async def unload_all_models() -> dict:
     result = {
         "status": status,
         "model": unloaded_models[0] if unloaded_models else "none",
-        "unloaded_models": unloaded_models
+        "unloaded_models": unloaded_models,
+        "embedder_unloaded": embedder_was_loaded,
     }
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
@@ -677,6 +690,60 @@ async def unload_all_models() -> dict:
                       vram_before_bytes=before, vram_after_bytes=after)
     # Cross-install GPU coordination: reflect the now-empty/changed state for a
     # sibling's next eviction decision. No-op when not registered.
+    _gpu_registry_sync()
+    return result
+
+
+async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
+    """If *name* is a registered model whose path matches the currently-loaded
+    shared embedder, release it and report the freed VRAM - the targeted-unload
+    counterpart to ``unload_all_models``'s embedder release above.
+
+    The embedder is a separate lifecycle from ``_engines`` (see
+    ``localm.inference.embedder``'s module docstring): ``unload_one_model``'s
+    own ``_engines.get(name)`` lookup can never find it, so without this a
+    resident embedding model registered under its own name (the common case:
+    a `localm pull`-ed GGUF selected as the embedding model) showed as
+    "loaded" on the Models page yet its per-row Unload button was a silent
+    no-op. Matched by resolved PATH, not by name/config, so it is correct
+    regardless of how ``embedding_model`` was originally resolved (an explicit
+    path, a registered name, or a known key) - what matters is which file is
+    actually resident. Returns None when *name* is not the embedder, so the
+    caller falls back to its normal "already_unloaded" outcome for a genuinely
+    untracked/never-loaded chat model."""
+    from localm.inference import embedder as _embedder_mod
+    emb_path = _embedder_mod.loaded_path()
+    if emb_path is None:
+        return None
+    from pathlib import Path
+    from localm.config import load_registry
+    from localm.model_manager import _entry_path
+    entry_path = _entry_path(load_registry().get(name))
+    if entry_path is None:
+        return None
+    try:
+        if Path(entry_path).resolve() != Path(emb_path).resolve():
+            return None
+    except OSError:
+        return None
+
+    from localm.discover import vram_capacity
+    from localm.vram import wait_for_vram_release
+
+    def _free():
+        return vram_capacity().get("free")
+
+    before = _free()
+    await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+    result = {"status": "unloaded", "model": name, "was_active": False}
+    if before is not None:
+        result.update(vram_freed=released,
+                      vram_before_bytes=before, vram_after_bytes=after)
     _gpu_registry_sync()
     return result
 
@@ -699,6 +766,9 @@ async def unload_one_model(name: str) -> dict:
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
+        embedder_result = await _unload_embedder_if_matches(name, loop)
+        if embedder_result is not None:
+            return embedder_result
         return {"status": "already_unloaded", "model": name}
     # Honor the in-flight-request pin (AUDIT-CRIT-1): an engine a request is
     # generating on must not be unloaded out from under it (it would reload it
@@ -1618,6 +1688,16 @@ def _do_shutdown() -> None:
             _engine.unload()
         except Exception:
             _dbg_swallow("engine unload during shutdown failed (non-fatal)")
+    # Also release the shared embedder - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring), so a full stop actually
+    # frees ALL resident VRAM, not just the chat engines. Same swallow-but-log
+    # pattern as the engine unload above: shutdown must complete regardless,
+    # but a failure stays discoverable (rule 5).
+    try:
+        from localm.inference import embedder as _embedder_mod
+        _embedder_mod.reset_embedder()
+    except Exception:
+        _dbg_swallow("embedder reset during shutdown failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
@@ -1684,6 +1764,16 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
             _engine.unload()
         except Exception:
             _dbg_swallow("engine unload during restart failed (non-fatal)")
+    # Also release the shared embedder - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring), so a restart actually
+    # frees ALL resident VRAM before re-exec, not just the chat engines. Same
+    # swallow-but-log pattern as the engine unload above: restart must proceed
+    # regardless, but a failure stays discoverable (rule 5).
+    try:
+        from localm.inference import embedder as _embedder_mod
+        _embedder_mod.reset_embedder()
+    except Exception:
+        _dbg_swallow("embedder reset during restart failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()

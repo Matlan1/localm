@@ -24,7 +24,11 @@
 // v53: index.html and pages/models.js changed (a new "Embedding" Model
 // Manager tab + type option) - a stale-cached client would keep lacking the
 // tab and the per-row type <select> would be missing the 'embedding' choice.
-const CACHE = "localm-shell-v53";
+// v54: pages/models.js changed again (the "Unload all" toast now also counts
+// the shared embedding model's release, and a row for a registered model that
+// IS the resident embedder now correctly shows loaded/Unload) - a stale-cached
+// client would keep under-reporting freed VRAM and miss the per-row control.
+const CACHE = "localm-shell-v54";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

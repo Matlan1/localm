@@ -15,6 +15,7 @@ from localm.vram import (
     resolve_swap_policy,
     wait_for_vram_release,
     decide_media_swap,
+    decide_embedder_swap,
     media_estimate_bytes,
 )
 
@@ -202,6 +203,36 @@ class TestDecideMediaSwap:
         # 8 GB combined free comfortably covers a 4 GB estimate (+1 GB
         # headroom) that the single 4 GB main GPU alone would not.
         assert decide_media_swap(self._settings(est_gb=4)) is False
+
+
+class TestDecideEmbedderSwap:
+    """The embedder's own pre-load decision (get_embedder(), via
+    embedder._maybe_swap_for_embedder): same should_swap_for_media core as
+    decide_media_swap, generalized for a caller with no media 'settings' dict -
+    just an estimated size and the resolved model_swap_policy."""
+
+    def test_auto_keeps_chat_when_embedder_fits(self):
+        assert decide_embedder_swap(1 * GB, policy="auto", read_free=lambda: 100 * GB) is False
+
+    def test_auto_swaps_when_tight(self):
+        # a large embedding model (e.g. Qwen3-Embedding-8B, ~7.5 GB) alongside
+        # an already-resident chat model leaves little free VRAM
+        assert decide_embedder_swap(8 * GB, policy="auto", read_free=lambda: 4 * GB) is True
+
+    def test_never_keeps_even_when_tight(self):
+        assert decide_embedder_swap(8 * GB, policy="never", read_free=lambda: 1 * GB) is False
+
+    def test_always_swaps_even_when_roomy(self):
+        assert decide_embedder_swap(1 * GB, policy="always", read_free=lambda: 100 * GB) is True
+
+    def test_unmeasurable_free_swaps(self):
+        assert decide_embedder_swap(1 * GB, policy="auto", read_free=lambda: None) is True
+
+    def test_default_read_free_reads_vram_capacity(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": 2 * GB})
+        assert decide_embedder_swap(8 * GB, policy="auto") is True
+        monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": 100 * GB})
+        assert decide_embedder_swap(8 * GB, policy="auto") is False
 
 
 class TestBackendSwapSettings:
