@@ -654,6 +654,14 @@ class MemoryStore:
             try:
                 qv = embed_fn([query])[0]
             except Exception:
+                # Not hidden: the SAME embed failure on the SAME embedder is surfaced
+                # as diagnostics["degrade_reason"]="query_embed_failed" by
+                # _vector_relevance, which recall() runs (via _relevance) on this same
+                # call before _eligible - so the "used N memories / semantic signal
+                # off" observability already reports it. Here it just drops the
+                # semantic eligibility signal; lexical eligibility still applies, so
+                # recall degrades to lexical rather than erroring. Rule 5: reported
+                # elsewhere, benign here.
                 qv = None
             stored_dim = len(next(iter(self._vectors.values())))
             if qv and len(qv) == stored_dim:
@@ -799,26 +807,39 @@ class MemoryStore:
         """Read the ``.forgotten.jsonl`` archive sidecar as raw dicts (record fields
         plus ``forgotten_at``, and an optional ``v`` stamp tolerated like every other
         sidecar - see FORMAT_VERSION). A corrupt/partial line is skipped and warned
-        about, like ``_load``/``_load_corrections``; an absent file is simply empty."""
+        about, like ``_load``/``_load_corrections`` (including a line that is not valid
+        UTF-8); an absent file is simply empty; a present-but-unreadable file warns and
+        reports empty (see below)."""
         ff = self._forgotten_file()
         if not ff.is_file():
             return []
         out: list[dict] = []
         skipped = 0
         try:
-            lines = ff.read_text(encoding="utf-8").splitlines()
-        except OSError:
+            raw = ff.read_bytes()
+        except OSError as e:
+            # Exists but unreadable (transient lock). Unlike the corrections sidecar
+            # this read is NON-destructive - forgotten()/restore_forgotten only READ
+            # the archive - so keep the empty return, but WARN rather than silently
+            # reporting "nothing to restore" when the archive merely could not be read
+            # (rule 5: an absent archive and an unreadable one are not the same thing).
+            # read_bytes (not read_text) so invalid-UTF-8 CONTENT is a per-line skip
+            # below, not an uncaught UnicodeDecodeError that would 500 the restore route.
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "memory forgotten archive %s: unreadable, reporting no recoverable "
+                "records for now: %s", ff, e)
             return []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+        for raw_line in raw.split(b"\n"):
             try:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
                 data = json.loads(line)
                 if not isinstance(data, dict):
                     raise ValueError("forgotten line is not a JSON object")
                 out.append(data)
-            except (json.JSONDecodeError, TypeError, ValueError):
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
                 skipped += 1
         if skipped:
             from localm.debuglog import logger as _dbg
@@ -965,27 +986,39 @@ class MemoryStore:
         return self._file.with_suffix(".corrections.jsonl")
 
     def _load_corrections(self) -> list[PendingCorrection]:
-        """Read the pending-corrections sidecar. A corrupt/partial line is skipped
-        (best-effort, like the record loader); an absent file is simply empty."""
+        """Read the pending-corrections sidecar. A corrupt/partial LINE is skipped
+        (best-effort, like the record loader) - including a line that is not valid
+        UTF-8, so a torn multibyte write corrupts only that line, not the whole file;
+        an ABSENT file is simply empty; a present-but-UNREADABLE file (I/O error)
+        RAISES (rule 5: missing != unreadable). Collapsing an unreadable file to []
+        would let propose_corrections rewrite the sidecar with only the freshly
+        proposed entries and permanently wipe every pending correction, while telling
+        the caller it succeeded. Mirrors sessions.py:_load (re-raise so the caller
+        fails closed) and _load_dismissed (read_bytes, so only a real I/O error counts
+        as unreadable); the save-bearing callers here (propose_corrections /
+        corrections / resolve_correction) catch the OSError, warn, and abort the save
+        rather than crash."""
         cf = self._corrections_file()
         if not cf.is_file():
             return []
         out: list[PendingCorrection] = []
         skipped = 0
-        try:
-            lines = cf.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+        # read_bytes so ONLY a real I/O failure (OSError) is "unreadable" and raises
+        # for the callers to abort on; decode + parse each LINE inside the try, so a
+        # bad-JSON OR invalid-UTF-8 line is skipped as corrupt content and never
+        # escapes as an uncaught UnicodeDecodeError (a ValueError, NOT OSError) that
+        # would 500 the memory routes. read_text() would instead decode the whole file
+        # up front and raise past the callers' OSError guard on a single bad byte.
+        for raw_line in cf.read_bytes().split(b"\n"):
             try:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
                 data = json.loads(line)
                 if not isinstance(data, dict):
                     raise ValueError("correction line is not a JSON object")
                 out.append(PendingCorrection.from_dict(data))
-            except (json.JSONDecodeError, TypeError, ValueError):
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
                 skipped += 1
         if skipped:
             from localm.debuglog import logger as _dbg
@@ -1035,8 +1068,19 @@ class MemoryStore:
         df = self._dismissed_file()
         if not df.is_file():
             return set()
+        # A present-but-UNREADABLE file (transient lock) RAISES via read_bytes (rule
+        # 5): collapsing it to an empty set would let resolve_correction's reject
+        # branch rewrite the file with only the new key and wipe every prior
+        # dismissal. That caller catches the OSError and skips the dismissed save.
+        # Corrupt CONTENT is a different case that self-heals on the next write, so it
+        # stays a warned empty set. Read the raw BYTES first (only an I/O failure,
+        # OSError, means "unreadable"), then decode + parse INSIDE the try so a
+        # bad-JSON OR invalid-UTF-8 body is treated as corrupt content. Decoding via
+        # read_text() instead would raise UnicodeDecodeError (a ValueError, NOT an
+        # OSError) straight past the callers' OSError guard and 500 the reject route.
+        raw_bytes = df.read_bytes()
         try:
-            data = json.loads(df.read_text(encoding="utf-8"))
+            data = json.loads(raw_bytes.decode("utf-8"))
             if isinstance(data, dict):
                 raw = data.get("keys", [])
             elif isinstance(data, list):
@@ -1044,9 +1088,12 @@ class MemoryStore:
             else:
                 return set()
             return {tuple(k) for k in raw if isinstance(k, (list, tuple))}
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            pass
-        return set()
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "memory corrections-dismissed %s: unparseable, treating as an empty "
+                "dismissed set (self-heals on the next dismissal)", df)
+            return set()
 
     def _save_dismissed(self, keys: set) -> None:
         df = self._dismissed_file()
@@ -1069,8 +1116,21 @@ class MemoryStore:
         if not proposals:
             return 0
         with _namespace_lock(self._ns_hash):
-            existing = self._load_corrections()
-            dismissed = self._load_dismissed()
+            try:
+                existing = self._load_corrections()
+                dismissed = self._load_dismissed()
+            except OSError as e:
+                # A sidecar exists but could not be read (transient lock). Do NOT
+                # proceed: _save_corrections below would rewrite the file with only
+                # the freshly proposed entries and wipe the pending ones. Skip this
+                # pass (nothing added, nothing lost) and let the consolidation caller
+                # keep going. Rule 5: surface the real failure, do not save over it.
+                from localm.debuglog import logger as _dbg
+                _dbg.warning(
+                    "memory corrections %s: sidecar unreadable, skipping this "
+                    "propose pass to avoid wiping pending corrections: %s",
+                    self._corrections_file(), e)
+                return 0
             seen = {c.dedup_key() for c in existing}
             added = 0
             for p in proposals:
@@ -1090,7 +1150,17 @@ class MemoryStore:
         the sidecar) so the modal never shows an un-actionable suggestion."""
         with _namespace_lock(self._ns_hash):
             self._load()
-            corrs = self._load_corrections()
+            try:
+                corrs = self._load_corrections()
+            except OSError as e:
+                # Unreadable sidecar: show nothing this call rather than crash, and do
+                # NOT run the stale-prune save below over a phantom-empty list (which
+                # would wipe the file). Rule 5: warn, do not silently claim "none".
+                from localm.debuglog import logger as _dbg
+                _dbg.warning(
+                    "memory corrections %s: unreadable, showing none for now: %s",
+                    self._corrections_file(), e)
+                return []
             ids = {r.id for r in self._records}
             live = [c for c in corrs if c.target_id in ids]
             if len(live) != len(corrs):
@@ -1112,7 +1182,18 @@ class MemoryStore:
         meanwhile, the entry is simply dropped (nothing to apply)."""
         with _namespace_lock(self._ns_hash):
             self._load()
-            corrs = self._load_corrections()
+            try:
+                corrs = self._load_corrections()
+            except OSError as e:
+                # Cannot read the sidecar (transient lock): abort rather than crash or
+                # act on a phantom-empty list. Non-destructive - the pending entry,
+                # the record, and the dismissals are all left intact, so the user can
+                # retry once the lock clears. Rule 5: warn, do not silently 404-or-wipe.
+                from localm.debuglog import logger as _dbg
+                _dbg.warning(
+                    "memory corrections %s: unreadable, cannot resolve %s now: %s",
+                    self._corrections_file(), correction_id, e)
+                return None
             corr = next((c for c in corrs if c.id == correction_id), None)
             if corr is None:
                 return None
@@ -1153,9 +1234,22 @@ class MemoryStore:
                 # `updated` alone did nothing: the propose path never reads it).
                 target.updated = now
                 self._save()
-                dismissed = self._load_dismissed()
-                dismissed.add(corr.dedup_key())
-                self._save_dismissed(dismissed)
+                try:
+                    dismissed = self._load_dismissed()
+                    dismissed.add(corr.dedup_key())
+                    self._save_dismissed(dismissed)
+                except OSError as e:
+                    # Dismissed file unreadable: do NOT rewrite it (that would wipe
+                    # every prior dismissal). The record is still confirmed and the
+                    # pending entry is still cleared below; the only cost is this one
+                    # dismissal is not recorded, so consolidation MAY re-propose it
+                    # later - a bounded re-nag, not data loss. Rule 5: warn, do not
+                    # save over an unreadable file.
+                    from localm.debuglog import logger as _dbg
+                    _dbg.warning(
+                        "memory corrections-dismissed %s: unreadable, not recording "
+                        "this dismissal to avoid wiping prior ones: %s",
+                        self._dismissed_file(), e)
                 outcome = "rejected"
             self._save_corrections([c for c in corrs if c.id != correction_id])
             return {"status": outcome, "id": correction_id,
