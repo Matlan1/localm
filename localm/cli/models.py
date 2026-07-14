@@ -122,7 +122,7 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
 @click.option("--mmproj", default=None, metavar="FILE",
               help="Download an associated mmproj file alongside the main model.")
 @click.option("--type", default="auto",
-              type=click.Choice(["auto", "llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"], case_sensitive=False),
+              type=click.Choice(["auto", *sorted(MODEL_TYPES)], case_sensitive=False),
               help="Model type/role.")
 @click.option("--store", default=None,
               type=click.Choice(["copy", "move"], case_sensitive=False),
@@ -241,7 +241,7 @@ def search_cmd(query, limit, list_files):
 
 @main.command("list")
 @click.option("--type", default=None,
-              type=click.Choice(["llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"], case_sensitive=False),
+              type=click.Choice(sorted(MODEL_TYPES), case_sensitive=False),
               help="Filter models by type.")
 def list_cmd(type):
     """List registered models (auto-detecting changes in the models folder)."""
@@ -355,12 +355,16 @@ def rm(model, yes):
 @click.option("--on-duplicate", default="ask",
               type=click.Choice(["ask", "alias", "copy", "move", "register", "skip"]),
               help="What to do when the model is already registered (default: ask).")
+@click.option("--type", default="auto",
+              type=click.Choice(["auto", *sorted(MODEL_TYPES)], case_sensitive=False),
+              help="Model type/role. Default 'auto' detects it from hard metadata "
+                   "(GGUF architecture/pooling signal, HF config.json architectures).")
 @click.option("--store", default=None,
               type=click.Choice(["copy", "move"], case_sensitive=False),
               help="Bring PATH into ~/.localm/models before registering it, "
                    "instead of registering it in place at its original location. "
                    "'copy' leaves the original untouched; 'move' relocates it.")
-def add(path, name, no_hash, fast, on_duplicate, store):
+def add(path, name, no_hash, fast, on_duplicate, type, store):
     """Register a local model file or HuggingFace directory.
 
     Duplicate detection is two-tier: the resolved path is checked first,
@@ -381,8 +385,9 @@ def add(path, name, no_hash, fast, on_duplicate, store):
     # localm.cli.add_local affect this call site.
     from localm import cli as _cli
     add_local = _cli.add_local
+    model_type = None if type == "auto" else type
     if not add_local(path, name, on_duplicate=on_duplicate,
-                     no_hash=no_hash, fast=fast, store=store):
+                     no_hash=no_hash, fast=fast, model_type=model_type, store=store):
         sys.exit(1)
 
 
