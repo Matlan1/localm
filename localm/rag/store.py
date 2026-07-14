@@ -232,7 +232,14 @@ def indexing_policy(cfg: Optional[dict] = None) -> dict:
         try:
             from localm.config import load_config
             cfg = load_config()
-        except Exception:
+        except Exception as e:
+            # A config we cannot load falls back to an EMPTY policy, which
+            # confine_index_path treats as whitelist-with-no-extra-roots: the safe,
+            # fail-CLOSED direction (it refuses more, never less). Benign default, but
+            # not hidden - a genuinely corrupt config should be discoverable. Rule 5.
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("rag indexing_policy: could not load config, using an empty "
+                       "fail-closed policy: %s", e)
             cfg = {}
     mode = cfg.get("rag_indexing_mode", "whitelist")
     if mode not in _INDEX_MODES:
@@ -243,7 +250,24 @@ def indexing_policy(cfg: Optional[dict] = None) -> dict:
         for r in cfg.get(key, []) or []:
             try:
                 out.append(Path(r).expanduser().resolve())
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                # A configured root we cannot resolve is DROPPED, but the two lists
+                # fail in OPPOSITE directions: dropping an ALLOWED root only fails
+                # CLOSED (a would-be-indexable path is then refused), while dropping a
+                # DENIED root fails OPEN - it silently removes a privacy control, so
+                # confine_index_path can no longer refuse a path inside a folder the
+                # user explicitly denied even though the UI still shows the deny. Rule
+                # 5: never silence this. Warn, naming the root, loudly for the denied
+                # list. (Cross-note: localm-privacy-review.)
+                from localm.debuglog import logger as _dbg
+                if key == "rag_denied_roots":
+                    _dbg.warning(
+                        "rag: denied root %r could not be resolved and is NOT being "
+                        "enforced - a path inside it may now be indexable: %s", r, e)
+                else:
+                    _dbg.warning(
+                        "rag: configured %s entry %r could not be resolved and is "
+                        "being ignored: %s", key, r, e)
                 continue
         return out
 
