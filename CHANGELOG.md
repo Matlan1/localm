@@ -34,6 +34,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   topics are recalled distinctly instead of collapsing into one vague note.
 
 ### Fixed
+- **A damaged media-ownership record no longer exposes everyone's generated media.**
+  On a multi-user server, the image, music, and video galleries record which key
+  generated each file so a scoped key only ever sees its own. If that on-disk
+  ownership record became unreadable (corrupt, truncated, or momentarily locked),
+  localm used to treat every file as unowned and let any key view, download, delete,
+  move, or rename all of them. It now fails closed: a scoped key is denied until the
+  record is repaired, while the owner/admin key (and single-user open mode) keeps full
+  access so the gallery stays usable. The record is also written atomically now, so an
+  interrupted save can no longer leave it half-written in the first place.
 - **Semantic knowledge search now works on password-protected servers.** When localm
   is started with an API key saved to disk (`localm key generate`, or the launcher),
   indexing a document used to silently fall back to keyword-only search: the server
