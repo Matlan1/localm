@@ -293,6 +293,13 @@ class IsolatedEmbedder(VramSizingMixin):
         self._pooling_type = pooling_type
         self.dim = 0
         self._runner = None
+        # In-flight embed() calls, mirroring Engine.active_requests - checked by
+        # http_server.py's unload/shutdown/restart paths (via active_requests()
+        # below) before releasing this embedder, exactly like a pinned chat
+        # Engine is skipped by unload_all_models/unload_one_model (AUDIT-CRIT-1).
+        # Plain int, incremented/decremented lock-free in embed() below: the
+        # same best-effort precision Engine's own _pin/_unpin already accept.
+        self.active_requests = 0
         self._reload()
 
     def _preflight_vram(self) -> None:
@@ -343,18 +350,26 @@ class IsolatedEmbedder(VramSizingMixin):
         process's life (mirrors Engine.chat_stream's auto-reload after a
         chat-backend crash). A crash DURING this call is still raised to the
         caller (rule 5: never silently swallowed) - only the NEXT call
-        recovers automatically."""
-        if self._runner is None or not self._runner.is_alive():
-            logger.warning("embedder worker is not running; reloading %s",
-                           self.model_path)
-            self._reload()
+        recovers automatically.
+
+        Pinned via ``active_requests`` for the whole call (including a
+        respawn), not just the RPC itself - a ``reset_embedder()`` arriving
+        mid-respawn would free the very runner this call is about to use."""
+        self.active_requests += 1
         try:
-            return self._runner.embed(list(texts))
-        except RuntimeError:
-            logger.exception(
-                "embedding worker fault; it will reload on the next call")
-            self._runner = None
-            raise
+            if self._runner is None or not self._runner.is_alive():
+                logger.warning("embedder worker is not running; reloading %s",
+                               self.model_path)
+                self._reload()
+            try:
+                return self._runner.embed(list(texts))
+            except RuntimeError:
+                logger.exception(
+                    "embedding worker fault; it will reload on the next call")
+                self._runner = None
+                raise
+        finally:
+            self.active_requests = max(0, self.active_requests - 1)
 
     def close(self) -> None:
         if self._runner is not None:
@@ -521,6 +536,18 @@ def loaded_path() -> Optional[str]:
     against the entry's own resolved path. Pairs with ``loaded_dim()``."""
     with _LOCK:
         return _EMBEDDER.model_path if _EMBEDDER is not None else None
+
+
+def active_requests() -> int:
+    """In-flight embed() calls on the currently-loaded embedder, or 0 if none is
+    loaded. Mirrors ``Engine.active_requests`` - checked by http_server.py's
+    unload-all/targeted-unload/shutdown/restart paths before releasing this
+    embedder, exactly like a pinned chat Engine is skipped by
+    unload_all_models/unload_one_model (AUDIT-CRIT-1): without this, any of
+    those paths could free the embedder - and the isolated worker process a
+    request is waiting on - out from under an in-flight embed() call."""
+    with _LOCK:
+        return _EMBEDDER.active_requests if _EMBEDDER is not None else 0
 
 
 def last_error() -> Optional[str]:
