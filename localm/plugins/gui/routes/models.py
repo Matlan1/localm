@@ -64,6 +64,17 @@ def register(app: FastAPI, ctx) -> None:
         from localm.model_manager import _entry_path
         registry = load_registry()
         current = active_model()
+        # Fetched ONCE, off the event loop, before the row loop below (not per
+        # row): get_embedder() can hold embedder._LOCK for the full duration of
+        # an IsolatedEmbedder native/subprocess load, and loaded_path() blocks
+        # on that same lock. A synchronous call here would freeze the WHOLE
+        # event loop - every request this server is serving, not just this one
+        # - for that window (same hazard as http_server.unload_all_models's
+        # loaded_dim() call). The embedder's path cannot change mid-request, so
+        # one fetch correctly serves every row's comparison below.
+        from localm.inference import embedder as _embedder_mod
+        loop = asyncio.get_running_loop()
+        emb_path = await loop.run_in_executor(get_plugin_executor(), _embedder_mod.loaded_path)
         models = []
         for name, entry in sorted(registry.items()):
             epath = _entry_path(entry)
@@ -93,14 +104,11 @@ def register(app: FastAPI, ctx) -> None:
             # shows up above. Recognise it by resolved PATH (not name/config)
             # so this row's "loaded" status - and its per-row Unload control,
             # gated on this flag - actually reflect a resident embedder.
-            if not loaded:
-                from localm.inference import embedder as _embedder_mod
-                emb_path = _embedder_mod.loaded_path()
-                if emb_path is not None:
-                    try:
-                        loaded = Path(emb_path).resolve() == path.resolve()
-                    except OSError:
-                        loaded = False
+            if not loaded and emb_path is not None:
+                try:
+                    loaded = Path(emb_path).resolve() == path.resolve()
+                except OSError:
+                    loaded = False
             models.append({
                 "name": name,
                 "source": str(entry.get("source", "")),

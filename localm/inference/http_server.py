@@ -652,7 +652,18 @@ async def unload_all_models() -> dict:
     # switch_engine, so it was previously NEVER freed by "Unload all" even
     # though the GUI reported everything released (only the chat engines'
     # VRAM actually dropped - the embedder's stayed resident).
-    embedder_was_loaded = _embedder_mod.loaded_dim() is not None
+    #
+    # loaded_dim() MUST run in the executor, not directly on this coroutine:
+    # get_embedder() can hold embedder._LOCK for the full duration of an
+    # IsolatedEmbedder native/subprocess load (up to its load timeout), and
+    # loaded_dim() blocks on that same lock. A synchronous call here would
+    # freeze the WHOLE event loop - every other request this server is
+    # serving - for that entire window, not just this coroutine (confirmed via
+    # live reproduction during review, 2026-07-14). Executor-offloading it, like
+    # every other blocking call in this function, keeps the wait local to this
+    # one coroutine instead.
+    embedder_was_loaded = await loop.run_in_executor(
+        None, lambda: _embedder_mod.loaded_dim() is not None)
     if embedder_was_loaded:
         await loop.run_in_executor(None, _embedder_mod.reset_embedder)
 
@@ -712,7 +723,12 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     caller falls back to its normal "already_unloaded" outcome for a genuinely
     untracked/never-loaded chat model."""
     from localm.inference import embedder as _embedder_mod
-    emb_path = _embedder_mod.loaded_path()
+    # Executor-offloaded, not a direct call: get_embedder() can hold
+    # embedder._LOCK for the full duration of an IsolatedEmbedder
+    # native/subprocess load, and loaded_path() blocks on that same lock. A
+    # synchronous call here would freeze the WHOLE event loop for that window
+    # (same hazard as unload_all_models's loaded_dim() call - see its comment).
+    emb_path = await loop.run_in_executor(None, _embedder_mod.loaded_path)
     if emb_path is None:
         return None
     from pathlib import Path
