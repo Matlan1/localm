@@ -18,6 +18,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   The chip's tooltip also says when recall fell back to keyword-only matching (for
   example, before an embedding model is installed), so semantic recall being off is
   no longer invisible.
+- **Launch ComfyUI and pick its models from the Images/Music/Video pages.** The
+  Workflow panel now has a "Launch ComfyUI" button (starts or confirms it, then
+  opens it in a new tab) and, once it's reachable, a dropdown for every model-file
+  slot (UNet/checkpoint, CLIP, VAE, ...) the active workflow exposes - no more
+  needing to hand-edit the workflow JSON to pick a different model. Picks are sent
+  along with the next generation and are remembered while you stay on that workflow.
 
 ### Changed
 - **Memory recall is now relevant-only.** Chat memory used to inject the same handful

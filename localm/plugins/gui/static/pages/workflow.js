@@ -14,6 +14,18 @@ import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 /*  Per-plugin workflow management (on the Image/Music/Video pages)   */
 /* ================================================================ */
 
+// The image plugin splits its routes across two prefixes (workflow management
+// under /api/image/..., generation + ComfyUI plumbing under /api/imagine/...) -
+// music/video use one prefix for both. comfy-models/comfy-launch live under
+// the generation prefix in all three plugins.
+const GENERATE_PREFIX = { image: "imagine", music: "music", video: "video" };
+
+// Per-media selected model overrides ({node_id: {input_name: value}}), set by
+// the dropdowns below and read by each page's Generate handler. Reset only when
+// the ACTIVE workflow changes (selectWorkflow/uploadWorkflow) - a plain panel
+// refresh (e.g. re-entering the tab) must not silently drop the user's picks.
+export const modelOverrides = { image: {}, music: {}, video: {} };
+
 /** Render the workflow panel for a media plugin: the built-in default plus each
  *  uploaded workflow, with select + delete, and an upload control. */
 export async function refreshWorkflowPanel(media) {
@@ -52,6 +64,89 @@ export async function refreshWorkflowPanel(media) {
   btn.onclick = () => uploadWorkflow(media, file);
   up.append(file, btn);
   box.appendChild(up);
+
+  box.appendChild(comfyLaunchRow(media));
+  box.appendChild(await comfyModelPicker(media));
+}
+
+/** "Launch ComfyUI" button: starts (or confirms) the configured ComfyUI for
+ *  this media plugin without running a generation, then opens it in a new
+ *  tab on success and re-probes the model picker (it may now be reachable). */
+function comfyLaunchRow(media) {
+  const row = el("div", "comfy-launch-row");
+  const launchBtn = el("button", "btn-secondary", "Launch ComfyUI");
+  launchBtn.type = "button";
+  launchBtn.onclick = async () => {
+    launchBtn.disabled = true;
+    launchBtn.textContent = "Launching…";
+    try {
+      const r = await fetch(`/api/${GENERATE_PREFIX[media]}/comfy-launch`,
+        { method: "POST", headers: authHeaders() });
+      const data = await r.json().catch(() => ({}));
+      if (data.ok) {
+        toast("ComfyUI is running");
+        if (data.api_url) window.open(data.api_url, "_blank", "noopener");
+        refreshWorkflowPanel(media);
+      } else {
+        toast(data.message || "Could not start ComfyUI", true);
+      }
+    } catch (e) {
+      toast("Launch failed: " + e.message, true);
+    } finally {
+      launchBtn.disabled = false;
+      launchBtn.textContent = "Launch ComfyUI";
+    }
+  };
+  row.appendChild(launchBtn);
+  return row;
+}
+
+/** One dropdown per model-file slot the active workflow exposes (resolved
+ *  against the live ComfyUI /object_info) - honest about unreachability
+ *  (rule 5) rather than a silently-empty picker. Selections are stored in
+ *  modelOverrides[media] for the page's Generate handler to send along. */
+async function comfyModelPicker(media) {
+  const wrap = el("div", "comfy-model-picker");
+  let data;
+  try {
+    const r = await fetch(`/api/${GENERATE_PREFIX[media]}/comfy-models`,
+      { headers: authHeaders() });
+    data = await r.json();
+  } catch (e) {
+    wrap.appendChild(el("div", "sub", "Could not check ComfyUI models: " + e.message));
+    return wrap;
+  }
+  if (!data.reachable) {
+    wrap.appendChild(el("div", "sub", data.message
+      || "ComfyUI is not running - launch it to pick models."));
+    return wrap;
+  }
+  if (!data.slots || !data.slots.length) {
+    wrap.appendChild(el("div", "sub", "This workflow has no selectable model files."));
+    return wrap;
+  }
+  wrap.appendChild(el("h5", "comfy-model-picker-head", "Models"));
+  const overrides = (modelOverrides[media] ??= {});
+  for (const slot of data.slots) {
+    const row = el("div", "comfy-model-row");
+    row.appendChild(el("label", "comfy-model-label", slot.input_name));
+    const sel = document.createElement("select");
+    sel.className = "comfy-model-select";
+    const chosen = overrides[slot.node_id]?.[slot.input_name] ?? slot.current;
+    for (const opt of slot.options) {
+      const o = document.createElement("option");
+      o.value = opt;
+      o.textContent = opt;
+      if (opt === chosen) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.onchange = () => {
+      (overrides[slot.node_id] ??= {})[slot.input_name] = sel.value;
+    };
+    row.appendChild(sel);
+    wrap.appendChild(row);
+  }
+  return wrap;
 }
 
 export function workflowRow(media, name, label, active, deletable) {
@@ -75,8 +170,13 @@ export async function selectWorkflow(media, name) {
   const r = await fetch(`/api/${media}/workflows/select`, {
     method: "POST", headers: authHeaders(), body: JSON.stringify({ name }),
   });
-  if (r.ok) { toast("Workflow selected"); refreshWorkflowPanel(media); }
-  else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+  if (r.ok) {
+    // A different workflow can use different node IDs entirely - stale
+    // overrides keyed by the old graph must not silently apply to the new one.
+    modelOverrides[media] = {};
+    toast("Workflow selected");
+    refreshWorkflowPanel(media);
+  } else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
 }
 
 export function deleteWorkflow(media, name) {
@@ -106,6 +206,7 @@ export async function uploadWorkflow(media, fileInput) {
   });
   const d = await r.json().catch(() => ({}));
   if (r.ok) {
+    modelOverrides[media] = {};   // new graph - see selectWorkflow
     toast("Uploaded and selected");
     fileInput.value = "";
     refreshWorkflowPanel(media);

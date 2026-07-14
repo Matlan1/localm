@@ -84,6 +84,18 @@ def _comfy_free_vram(s: dict) -> bool:
     return _comfy.free_comfy_vram(s["api_url"])
 
 
+def _comfy_model_slots(s: dict) -> Optional[list]:
+    """Every model-file slot in the ACTIVE image workflow, resolved against the
+    currently-reachable ComfyUI. None when ComfyUI is not reachable (the caller
+    shows a clear message instead of a silently-empty picker)."""
+    import json
+    try:
+        workflow = json.loads(_comfy.workflow_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return _comfy.workflow_model_slots(workflow, s["api_url"])
+
+
 def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     self_url: str, write_sidecar: bool,
                     guidance: Optional[float] = None,
@@ -91,6 +103,7 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     seed: Optional[int] = None,
                     input_image: Optional[Path] = None,
                     denoise: Optional[float] = None,
+                    model_overrides: Optional[dict] = None,
                     swap: bool = True,
                     delete_outputs: Optional[bool] = None,
                     cancel_check=None) -> tuple[bool, str]:
@@ -104,6 +117,7 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
         seed=seed,
         input_image=input_image,
         denoise=denoise,
+        model_overrides=model_overrides,
         localm_url=self_url,
         write_sidecar=write_sidecar,
         launch_cmd=s["launch_cmd"] or None,

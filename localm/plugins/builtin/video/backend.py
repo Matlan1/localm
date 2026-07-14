@@ -114,6 +114,18 @@ def _comfy_free_vram(s: dict) -> bool:
     return _comfy.free_comfy_vram(s["api_url"])
 
 
+def _comfy_model_slots(s: dict) -> Optional[list]:
+    """Every model-file slot in the ACTIVE video workflow, resolved against the
+    currently-reachable ComfyUI. None when ComfyUI is not reachable (the caller
+    shows a clear message instead of a silently-empty picker)."""
+    import json
+    try:
+        workflow = json.loads(_video_gen.comfy.workflow_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return _comfy.workflow_model_slots(workflow, s["api_url"])
+
+
 def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     self_url: str, write_sidecar: bool, on_progress=None,
                     input_image: Optional[Path] = None,

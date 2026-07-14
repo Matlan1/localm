@@ -252,6 +252,70 @@ def _format_missing(missing: list) -> str:
     return "\n".join(lines)
 
 
+def workflow_model_slots(workflow: dict, api_url: str) -> Optional[list]:
+    """Every model-file combo slot in *workflow*, resolved against ComfyUI's live
+    ``/object_info``: ``[{"node_id", "class_type", "input_name", "current",
+    "options"}, ...]``. This is the node/input walk ``preflight_models()`` uses to
+    validate a workflow's model choices, exposed here for a model-picker UI too -
+    one shared walk, not two independently-maintained ones.
+
+    None when ``/object_info`` cannot be fetched (ComfyUI unreachable) - distinct
+    from ``[]`` (reachable, but this workflow genuinely has no model-file inputs),
+    so a caller can tell "cannot determine" from "determined: none"."""
+    info = comfy_object_info(api_url)
+    if not info:
+        return None
+    slots = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        spec = info.get(node.get("class_type"))
+        inputs = node.get("inputs")
+        if not isinstance(spec, dict) or not isinstance(inputs, dict):
+            continue
+        for input_name, value in inputs.items():
+            if not isinstance(value, str):
+                continue
+            options = _combo_options(spec, input_name)
+            if options is None or not _looks_like_model_files(options):
+                continue
+            slots.append({
+                "node_id": str(node_id),
+                "class_type": node.get("class_type"),
+                "input_name": input_name,
+                "current": value,
+                "options": options,
+            })
+    return slots
+
+
+def apply_model_overrides(workflow: dict, overrides: dict) -> int:
+    """Apply per-node model-slot overrides to *workflow* in place.
+
+    *overrides* is ``{node_id: {input_name: value}}`` (the shape a client builds
+    from ``workflow_model_slots()``'s ``node_id``/``input_name``). Only writes a
+    field that ALREADY exists as a plain string input on that node - never creates
+    a new key, never touches a link/number input - so a malformed or stale
+    override can at worst no-op, never corrupt the graph. Returns how many fields
+    were actually changed."""
+    changed = 0
+    if not isinstance(overrides, dict):
+        return 0
+    for node_id, fields in overrides.items():
+        node = workflow.get(str(node_id))
+        if not isinstance(node, dict) or not isinstance(fields, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_name, value in fields.items():
+            if (input_name in inputs and isinstance(inputs[input_name], str)
+                    and isinstance(value, str) and inputs[input_name] != value):
+                inputs[input_name] = value
+                changed += 1
+    return changed
+
+
 def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple[bool, str]:
     """Validate every loader's model file against ComfyUI ``/object_info`` BEFORE the
     caller unloads the chat model.
@@ -261,32 +325,21 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     specific, Workflow-panel-pointing error when a required model is missing and no
     one variant fits; ``ok=True`` (empty message) otherwise. Best-effort: returns
     ``(True, "")`` when /object_info is unavailable (defer to submit-time validation)."""
-    info = comfy_object_info(api_url)
-    if not info:
+    slots = workflow_model_slots(workflow, api_url)
+    if slots is None:
         return True, ""        # cannot validate -> defer to submit-time validation
     missing: list = []
     subs: list = []
-    for node in workflow.values():
-        if not isinstance(node, dict):
-            continue
-        spec = info.get(node.get("class_type"))
-        inputs = node.get("inputs")
-        if not isinstance(spec, dict) or not isinstance(inputs, dict):
-            continue           # unknown class / no inputs here -> can't validate; skip
-        for input_name, value in list(inputs.items()):
-            if not isinstance(value, str):
-                continue       # links and numbers are not model-file names
-            options = _combo_options(spec, input_name)
-            if options is None or not _looks_like_model_files(options):
-                continue
-            if value in options:
-                continue       # the file is present - good
-            variant = _pick_variant(value, options)
-            if variant is not None:
-                inputs[input_name] = variant
-                subs.append((node.get("class_type"), input_name, value, variant))
-            else:
-                missing.append((node.get("class_type"), input_name, value, options))
+    for slot in slots:
+        value, options = slot["current"], slot["options"]
+        if value in options:
+            continue            # the file is present - good
+        variant = _pick_variant(value, options)
+        if variant is not None:
+            workflow[slot["node_id"]]["inputs"][slot["input_name"]] = variant
+            subs.append((slot["class_type"], slot["input_name"], value, variant))
+        else:
+            missing.append((slot["class_type"], slot["input_name"], value, options))
     if on_progress:
         for cls, field, old, new in subs:
             try:

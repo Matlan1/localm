@@ -44,6 +44,9 @@ class ImagineRequest(BaseModel):
     guidance: float | None = None
     input_image: str | None = None    # path on this machine (img2img)
     denoise: float | None = None
+    # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
+    # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
+    model_overrides: dict[str, dict[str, str]] | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -163,6 +166,7 @@ async def imagine(req: ImagineRequest, request: Request):
             seed=req.seed,
             input_image=input_image,
             denoise=req.denoise,
+            model_overrides=req.model_overrides,
             swap=gen_swap,
             delete_outputs=delete_outputs,
             cancel_check=lambda: job.cancel_requested,
@@ -273,6 +277,34 @@ async def imagine_history(request: Request):
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "image", [it["name"] for it in items]))
     return {"images": [it for it in items if it["name"] in allowed]}
+
+
+@_router.get("/api/imagine/comfy-models")
+async def imagine_comfy_models():
+    """Model-file slots the active image workflow exposes (for the Workflow
+    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
+    about unreachability (rule 5) - never a silently-empty picker."""
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    slots = _backend._comfy_model_slots(s)
+    if slots is None:
+        return {"reachable": False, "api_url": s["api_url"], "slots": [],
+                "message": "ComfyUI is not running - launch it to see available models."}
+    return {"reachable": True, "api_url": s["api_url"], "slots": slots}
+
+
+@_router.post("/api/imagine/comfy-launch")
+async def imagine_comfy_launch():
+    """Start (or confirm) ComfyUI is up for the image plugin, without running a
+    generation - backs the Workflow panel's "Launch ComfyUI" button. Runs the
+    same ensure_available() path a real generation uses, off the event loop
+    since a cold ComfyUI start can take minutes."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 
 def register(host) -> None:
