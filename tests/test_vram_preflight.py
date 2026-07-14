@@ -23,6 +23,31 @@ def _small_overhead(monkeypatch):
     monkeypatch.setattr(GgufBackend, "_VRAM_OVERHEAD_BYTES", 15_000_000)
 
 
+@pytest.fixture(autouse=True)
+def _reset_torch_broken_flag():
+    """_torch_rocm_init_broken is a deliberate process-lifetime cache (see its
+    docstring in _sizing.py) - correct for a real server process, but poison
+    for a test session where many unrelated tests share one process. Several
+    tests in this module (e.g. TestVramPreflight.test_load_failure_mentions_
+    vram_when_low) mock only _free_vram_bytes and leave GgufBackend's OTHER
+    real call, _total_vram_bytes(), unmocked; in an environment without torch
+    installed at all (no [gpu] extra - the common case for NVIDIA/Linux/macOS/
+    Vulkan/Metal, and for a quick dev venv on this AMD-ROCm-only project too),
+    that unmocked call hits a genuine `import torch` failure and latches the
+    flag True for the rest of the process - which then makes EVERY later test
+    that expects a real torch.cuda read (via patch.dict(sys.modules, ...)) see
+    None instead, regardless of its mock, since the flag check short-circuits
+    before `import torch` is even reached. Reset around every test in this
+    module so one test's incidental unmocked call can never leak into another
+    - this is a test-isolation fix only; the flag's process-wide production
+    behavior (_sizing.py) is untouched."""
+    from localm.inference.backends.llamacpp._sizing import VramSizingMixin
+    saved = VramSizingMixin._torch_rocm_init_broken
+    VramSizingMixin._torch_rocm_init_broken = False
+    yield
+    VramSizingMixin._torch_rocm_init_broken = saved
+
+
 class TestVramPreflight:
     def test_warns_when_model_exceeds_free_vram(self, tmp_path, capsys):
         b = _backend(tmp_path, size_bytes=80_000_000)
@@ -377,17 +402,6 @@ class TestFreeVramBytesUsesIsolatedNativeFallback:
         with patch.dict(sys.modules, {"torch": _BoomModule()}):
             free = GgufBackend._free_vram_bytes()
         assert free == 3_000
-
-    @pytest.fixture(autouse=True)
-    def _reset_torch_broken_flag(self):
-        """_torch_rocm_init_broken is a process-lifetime cache (deliberately -
-        see its docstring in _sizing.py) - reset it around every test in this
-        class so one test setting it can never leak into another."""
-        from localm.inference.backends.llamacpp._sizing import VramSizingMixin
-        saved = VramSizingMixin._torch_rocm_init_broken
-        VramSizingMixin._torch_rocm_init_broken = False
-        yield
-        VramSizingMixin._torch_rocm_init_broken = saved
 
     def test_torch_import_failure_is_cached_and_never_retried(self, monkeypatch):
         """The real bug this guards (found live, reproduced on demand - see
