@@ -104,6 +104,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   retrieval while the embedding model sat ready. Keyed servers now embed correctly -
   whether the key comes from the environment or the saved key file - so semantic
   (hybrid) search works again, including `localm rag add/query --embed`.
+- **A collection stuck on BM25 now says so where you can act on it.** The Knowledge
+  page's "Ready ... semantic search is on" banner used to read as a blanket
+  all-clear, even though it only covers indexing from that point forward - a
+  collection indexed before the embedding model was set up (or whose vector index
+  went stale) silently stayed lexical-only, with the only hint a small warning
+  buried in that collection's info modal. A BM25 row now gets a visible "reindex
+  needed" badge and a highlighted reindex button when the embedding model is ready,
+  and the banner itself now says existing collections may need reindexing.
 - **You can index documents on a headless `localm serve`.** A bare API server (no GUI)
   could not index into a knowledge collection at all - `POST /api/rag/collections/
   {name}/add` and `/upload` refused with a "run localm gui" error. They now index the

@@ -438,9 +438,12 @@ class TestCollection:
         assert "unreadable" in caplog.text
         assert c2.query("ROCm DLLs", k=1)             # BM25 fallback, no crash
 
-    def test_stale_vectors_length_mismatch_warns(self, tmp_path, docs_dir, caplog):
-        """A vectors list that no longer lines up with the chunks (stale/partial
-        index) is surfaced, not silently dropped."""
+    def test_extra_vectors_length_mismatch_warns_orphaned(self, tmp_path, docs_dir, caplog):
+        """MORE vectors than chunks means leftover/orphaned entries from a prior,
+        larger index (e.g. docs removed/re-chunked without pruning vectors.json to
+        match) - a distinct diagnosis from a genuinely partial embed, surfaced with
+        its own wording rather than a blanket 'stale or partial' (both are fixed the
+        same way, by a full reindex, but the cause differs)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -451,8 +454,26 @@ class TestCollection:
         with caplog.at_level("WARNING", logger="localm"):
             c2 = Collection("kb", base=base)
         assert (c2.vector_degrade_reason
-                and "stale or partial" in c2.vector_degrade_reason)
-        assert "stale or partial" in caplog.text
+                and "orphaned entries" in c2.vector_degrade_reason)
+        assert "orphaned entries" in caplog.text
+        assert c2.query("ROCm DLLs", k=1)
+
+    def test_fewer_vectors_length_mismatch_warns_partial(self, tmp_path, docs_dir, caplog):
+        """FEWER vectors than chunks is a genuinely partial embed (e.g. an
+        interrupted indexing run) - distinct wording from the 'extra vectors' case
+        above, though both degrade to BM25 and both are fixed by a full reindex."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+        p = base / "kb" / "vectors.json"
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data["vectors"].pop()                         # one fewer vector than chunks
+        p.write_text(json.dumps(data), encoding="utf-8")
+        with caplog.at_level("WARNING", logger="localm"):
+            c2 = Collection("kb", base=base)
+        assert (c2.vector_degrade_reason
+                and "a partial embed" in c2.vector_degrade_reason)
+        assert "a partial embed" in caplog.text
         assert c2.query("ROCm DLLs", k=1)
 
     def test_query_embedding_model_change_warns(self, tmp_path, docs_dir, caplog):
