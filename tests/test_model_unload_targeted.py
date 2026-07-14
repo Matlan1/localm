@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from localm.inference import embedder as emb
 from localm.inference import http_server as hs
 from localm.plugins.gui.web import attach_gui
 
@@ -248,6 +249,128 @@ def test_gui_models_list_exposes_loaded_independent_of_active(gui_app_with_engin
     assert by_name["model-a"]["loaded"] is True    # loaded-but-not-active, visible
     assert by_name["model-b"]["active"] is True
     assert by_name["model-b"]["loaded"] is True
+
+
+# --------------------------------------------------------------------------- #
+#  The shared embedder's separate lifecycle also gets released                #
+#                                                                               #
+#  The embedder (localm.inference.embedder) is loaded by get_embedder(), never #
+#  through switch_engine/_engines, so unload_all_models()/unload_one_model()   #
+#  previously had zero references to it - "Unload all" only freed the chat    #
+#  engines' VRAM while a resident embedder (e.g. a large custom GGUF like     #
+#  Qwen3-Embedding-8B) stayed fully resident and unaccounted for.             #
+# --------------------------------------------------------------------------- #
+
+def test_unload_all_releases_loaded_embedder(setup_multi_model, monkeypatch):
+    """Unload all must also release the shared embedder, not just report
+    'unloaded' while its VRAM stays resident (the reported symptom: 'Unload
+    all' only freed VRAM matching the embedding model's own footprint - the
+    chat model's VRAM WAS released, a separate resident allocation was not)."""
+    app = hs.create_app(None)
+    client = _authed_client(app)
+    _load(client, "model-a")
+
+    monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
+    calls = []
+    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    r = client.post("/v1/models/unload")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["embedder_unloaded"] is True
+    assert calls == [1]
+    assert hs._engines["model-a"].loaded is False
+
+
+def test_unload_all_status_unloaded_when_only_embedder_loaded(setup_multi_model, monkeypatch):
+    """No chat model is loaded at all, only the embedder - the previous bug:
+    unload_all_models() iterated only _engines (empty), saw nothing to unload,
+    and reported status 'already_unloaded' even though the embedder was never
+    touched and stayed fully resident. The honest status is 'unloaded'."""
+    app = hs.create_app(None)
+    client = _authed_client(app)
+
+    monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
+    calls = []
+    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    r = client.post("/v1/models/unload")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "unloaded"
+    assert data["embedder_unloaded"] is True
+    assert calls == [1]
+
+
+def test_unload_all_reports_already_unloaded_when_nothing_loaded(setup_multi_model, monkeypatch):
+    """Negative control: no chat model AND no embedder -> the original honest
+    no-op status is preserved (must not always claim 'unloaded')."""
+    app = hs.create_app(None)
+    client = _authed_client(app)
+    monkeypatch.setattr(emb, "loaded_dim", lambda: None)
+
+    r = client.post("/v1/models/unload")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "already_unloaded"
+    assert data["embedder_unloaded"] is False
+
+
+def test_unload_one_model_releases_matching_embedder(setup_multi_model, monkeypatch):
+    """The GUI's per-row Unload button, targeted at a registered model that IS
+    the resident embedder (get_embedder() loaded it - never through _engines,
+    so the plain _engines.get(name) lookup finds nothing). Matched by resolved
+    path, since embedding_model config may resolve via a different route than
+    the registry name the row displays."""
+    app = hs.create_app(None)
+    client = _authed_client(app)
+
+    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/model-a.gguf")
+    calls = []
+    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    r = client.post("/v1/models/unload", params={"model": "model-a"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "unloaded"
+    assert data["model"] == "model-a"
+    assert calls == [1]
+
+
+def test_unload_one_model_leaves_non_matching_registered_model_alone(setup_multi_model, monkeypatch):
+    """A registered-but-never-loaded model whose path does NOT match the
+    resident embedder stays the honest idempotent no-op - the embedder must
+    only be released when the NAME the caller targeted actually resolves to
+    it (negative control against the path-match logic false-positiving)."""
+    app = hs.create_app(None)
+    client = _authed_client(app)
+
+    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/some-other-embedder.gguf")
+    calls = []
+    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    r = client.post("/v1/models/unload", params={"model": "model-a"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "already_unloaded"
+    assert calls == []
+
+
+def test_gui_models_list_reports_embedder_loaded_via_path_match(gui_app_with_engines, monkeypatch):
+    """A registered model that is the resident embedder (never appears in
+    _engines) must show loaded:true on the Models page - and only that one,
+    not a differently-pathed registered model."""
+    app, _load_direct = gui_app_with_engines
+    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/model-a.gguf")
+    with patch("localm.config.load_registry", return_value={
+        "model-a": {"path": "C:/models/model-a.gguf"},
+        "model-b": {"path": "C:/models/model-b.gguf"},
+    }):
+        with TestClient(app) as client:
+            r = client.get("/api/models")
+    assert r.status_code == 200
+    by_name = {m["name"]: m for m in r.json()["models"]}
+    assert by_name["model-a"]["loaded"] is True     # resolved-path match to the embedder
+    assert by_name["model-b"]["loaded"] is False     # different path, not loaded anywhere
 
 
 # --------------------------------------------------------------------------- #
