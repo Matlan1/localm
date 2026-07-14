@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// scan-reason (audit finding E): the Models page "Scan ComfyUI folder" button
+// scan-reason (audit finding E): the Models page "Re-scan ComfyUI folder" button
 // must surface WHY an empty scan found nothing instead of a bare "Added 0".
 //
 // The scanner returns a ScanResult whose `method` carries the reason on an empty
@@ -36,7 +36,7 @@ function makeScanFetch(scanResult) {
 async function clickScan(scanResult) {
   const { window } = loadAppWithPages({ fetchImpl: makeScanFetch(scanResult) });
   const btn = window.document.getElementById("models-scan-btn");
-  assert.ok(btn, "the Scan ComfyUI folder button exists");
+  assert.ok(btn, "the Re-scan ComfyUI folder button exists");
   btn.click();
   await flush();
   return window.document.getElementById("toast").textContent;

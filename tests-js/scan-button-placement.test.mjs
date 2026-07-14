@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// scan-button-placement: the ComfyUI folder scanner used to live in a
+// scan-button-placement: the ComfyUI re-scan button used to live in a
 // tab-gated row (#models-scan-row, display:none by default) that only became
 // visible after switching the Registered-models tabs to Diffusion/Encoders/
 // VAEs/LoRAs/Other - it was invisible on page load (All tab) and on the LLMs
 // tab, with no label/icon/copy hinting that a tab switch would reveal a new
-// action. The button now lives inside the "Add a model" card as a labelled,
-// icon-carrying callout that is visible regardless of which Registered-models
-// tab is active, since the scan itself is type-agnostic server-side. This
-// drives the real DOM + tab-click handlers and asserts the button never
-// disappears, and that it still lives alongside the other add-a-model
-// affordances (pull-spec/pull-start), not inside the Registered-models card.
+// action. The button now lives inside the "Add a model" card, next to the
+// separate "Import from ComfyUI…" guided-import flow, and is visible
+// regardless of which Registered-models tab is active, since the scan itself
+// is type-agnostic server-side. This drives the real DOM + tab-click handlers
+// and asserts the button never disappears, that it still lives alongside the
+// other add-a-model affordances (pull-spec/pull-start) rather than inside the
+// Registered-models card, and that it stays clearly distinct from its sibling
+// Import button (the two cover different cases - see docs/managed-comfyui.md).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -77,15 +79,25 @@ test("scan-placement: the Scan button stays visible across every Registered-mode
   }
 });
 
-test("scan-placement: the button carries an icon and explanatory copy, not a bare secondary button", async () => {
+test("scan-placement: the button carries an icon and copy that differentiates it from its sibling Import button", async () => {
   const { window } = loadAppWithPages({ fetchImpl: okFetch });
   const btn = window.document.getElementById("models-scan-btn");
-  const row = btn.closest(".comfy-import");
-  assert.ok(row, "the scan button sits in its own labelled callout block");
+  const row = btn.closest("#models-scan-row");
+  assert.ok(row, "the scan button sits in its own row");
   assert.ok(row.querySelector("[data-icon], [data-icon-name]"),
-    "the callout carries an icon distinguishing it from Browse/Unload all");
-  assert.match(row.textContent, /ComfyUI/i,
-    "the callout names ComfyUI so the action is self-explanatory without a tab switch");
+    "the row carries an icon distinguishing it from a bare Browse/Unload-all button");
+
+  const importBtn = window.document.getElementById("models-import-comfy-btn");
+  assert.ok(importBtn, "the sibling guided-import button exists (this diff composes with it, not replaces it)");
+  assert.notEqual(btn.textContent.trim(), importBtn.textContent.trim(),
+    "the two ComfyUI-related buttons have distinct labels");
+
+  const scanRowText = row.textContent;
+  const importRowText = importBtn.closest(".row").textContent;
+  assert.notEqual(scanRowText, importRowText,
+    "the two rows' explanatory copy must not read as duplicates of each other");
+  assert.match(scanRowText, /Settings/i,
+    "the re-scan row's copy references the already-configured folder (its distinguishing behavior)");
 });
 
 test("scan-placement: clicking the (now always-visible) button still POSTs the scan and toasts the result", async () => {

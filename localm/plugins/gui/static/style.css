@@ -2125,33 +2125,6 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   margin-bottom: 12px;
 }
 
-/* ComfyUI folder-scan callout inside the "Add a model" card: a labelled,
-   always-visible alternative to the HuggingFace/URL/path fields above it, with
-   its own icon and explanatory line so it reads as a real option instead of a
-   bare secondary button that used to only appear on certain Registered-models
-   tabs (see models.js refreshModelsPage - visibility is no longer tab-gated). */
-.comfy-import {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-top: 14px;
-  padding: 12px 14px;
-  /* 8% pushed the .sub text (--text-dim on this tint, light theme) to a 4.35:1
-     contrast ratio - under the 4.5:1 WCAG AA minimum for normal-size text. 3%
-     keeps the callout visibly tinted while landing at ~4.65:1. The border
-     doesn't carry text and can stay stronger for definition. */
-  background: color-mix(in srgb, var(--cat-violet) 3%, transparent);
-  border: 1px solid color-mix(in srgb, var(--cat-violet) 25%, var(--border));
-  border-radius: 10px;
-}
-.comfy-import > .ic { flex: 0 0 auto; }
-.comfy-import > .ic svg { width: 20px; height: 20px; }
-.comfy-import-text { flex: 1 1 240px; min-width: 0; }
-.comfy-import-title { font-size: 13.5px; font-weight: 600; }
-.comfy-import-text .sub { margin: 2px 0 0; }
-.comfy-import > .btn-secondary { flex: 0 0 auto; }
-
 .picker-type-select {
   flex: 0 0 auto;
   background: var(--bg-input);
