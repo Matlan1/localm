@@ -188,6 +188,7 @@ def pull_model(
     silently downloading to MODELS_DIR anyway.
     """
     spec = _mm.resolve_spec(model_spec)
+    type_is_auto = (model_type == "auto")
 
     # A local filesystem path is not a remote spec: register it in place rather
     # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
@@ -297,7 +298,8 @@ def pull_model(
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
             res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256,
                                    redownload=redownload, model_type=detected_type,
-                                   dest_dir=dest_dir, register=register)
+                                   dest_dir=dest_dir, register=register,
+                                   type_is_auto=type_is_auto)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
@@ -388,6 +390,7 @@ def _pull_gguf_file(
     register: bool = True,
     model_type: str = "llm",
     dest_dir: Optional[Path] = None,
+    type_is_auto: bool = False,
 ) -> bool:
     """Download a single file from a HuggingFace repo (despite the name, not
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
@@ -473,8 +476,12 @@ def _pull_gguf_file(
                 )
                 return False
         if register:
+            reg_type = model_type
+            if type_is_auto and reg_type == "llm" and _mm.gguf_embedding_signal(dest):
+                console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+                reg_type = "embedding"
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 digest=verify_digest, model_type=model_type)
+                                 digest=verify_digest, model_type=reg_type)
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
@@ -551,8 +558,12 @@ def _pull_gguf_file(
         console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
 
     if register:
+        reg_type = model_type
+        if type_is_auto and reg_type == "llm" and _mm.gguf_embedding_signal(base_dir / filename):
+            console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+            reg_type = "embedding"
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
-                  sha256=verify_digest, model_type=model_type)
+                  sha256=verify_digest, model_type=reg_type)
         console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
     else:
         console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
@@ -969,9 +980,7 @@ def _hf_pipeline_tag_to_type(repo_id: str) -> str:
     'clip' (e.g. 'exploration' contains 'lora') must NOT be misclassified (MED-15).
     Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
     resolves (including an offline/failed query), so an ambiguous pull is registered
-    honestly and is not auto-loaded as the chat model. Embedding models are
-    provisioned via `setup-embeddings`, not pulled into the chat registry, so there
-    is no 'embedding' type here.
+    honestly and is not auto-loaded as the chat model.
     """
     from localm.discover import _get, HF_API
     try:
@@ -994,6 +1003,8 @@ def _hf_pipeline_tag_to_type(repo_id: str) -> str:
                 return "lora"
             if {"text-encoder", "clip"} & tags:
                 return "text-encoder"
+            if tag in ("feature-extraction", "sentence-similarity"):
+                return "embedding"
             # Text generation / chat model.
             if tag in ("text-generation", "text2text-generation", "conversational"):
                 return "llm"
