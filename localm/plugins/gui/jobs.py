@@ -346,6 +346,16 @@ class JobManager:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def has_running(self, kind: str) -> bool:
+        """Whether a job of *kind* is currently running - so a caller can tell
+        "still actively installing" apart from "abandoned mid-install" without
+        its own job-tracking state (e.g. the managed-ComfyUI status check,
+        which must not call a stalled/incomplete install "corrupt" while its
+        own setup job is genuinely still in flight)."""
+        with self._lock:
+            return any(j.kind == kind and j.status == "running"
+                      for j in self._jobs.values())
+
     def _gc(self) -> None:
         cutoff = time.time() - self._TTL_S
         stale = [
