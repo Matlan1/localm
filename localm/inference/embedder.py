@@ -21,16 +21,27 @@ downloaded on demand, gated by the network policy (never behind ``net_mode=off``
 auto only under ``net_mode=allow`` - otherwise the user runs ``localm setup-embeddings``).
 When no embedding model can be resolved, callers degrade to lexical-only retrieval
 (surfaced via a debug log, never a silent success).
+
+The native load (and every ``embed()`` call - it hits ``llama_decode``, the
+same abort-prone native call class) runs inside an ISOLATED CHILD PROCESS
+(``_embedder_runner.py``), not in this process - mirroring
+``backends/gguf.py``'s containment for the identical native-abort risk (PR
+#606: a native CUDA/HIP driver failure can hard-``abort()`` the whole process
+in C, uncatchable from Python). ``GGUFEmbedder`` below is the raw, unguarded
+native loader (constructed only inside that child); ``IsolatedEmbedder`` is
+the parent-side handle ``get_embedder()`` actually returns.
 """
 
 from __future__ import annotations
 
+import atexit
 import math
 import threading
 from pathlib import Path
 from typing import List, Optional
 
 from localm.debuglog import logger
+from localm.inference.backends.llamacpp._sizing import VramSizingMixin
 
 # Known small embedding models, keyed by a friendly name -> (hf_repo, filename).
 # Chosen for size + quality: bge-small is 24 MB Q4 and scores well; nomic is the
@@ -157,35 +168,15 @@ class GGUFEmbedder:
         # same as the chat backend (see discover.apply_main_gpu/apply_gpu_split
         # and llamacpp/llama.py). The returned buffer must stay alive through
         # llama_load_model_from_file below - it is read once at load time, not
-        # held as a live pointer.
-        from localm.discover import apply_gpu_split, apply_main_gpu, gpu_split_shortfall
+        # held as a live pointer. VRAM preflight (both the single-GPU
+        # VramSizingMixin._check_vram()-style check and the multi-GPU
+        # gpu_split_shortfall() check) now lives in the PARENT
+        # (IsolatedEmbedder, below) instead of here, mirroring how
+        # GgufWorker.load() carries no preflight of its own (only
+        # GgufBackend.load() does) - this class is the raw native loader from
+        # here on, isolated inside a child process by _embedder_runner.py.
+        from localm.discover import apply_gpu_split, apply_main_gpu
         apply_main_gpu(mp)
-        # Same per-device capacity gate as http_server.switch_engine's
-        # pre-load check (see gpu_split_shortfall's docstring for the full
-        # rationale: a configured split's STATIC ratio has no live per-device
-        # capacity awareness of its own, so an already-tight device can still
-        # get handed a share it cannot fit, reaching the native loader with
-        # too little room - this embedder is a second, independent GGUF/
-        # llama.cpp load path with no gate of its own until now). Embedding
-        # models are small (24-90 MB per this module's docstring), so this
-        # rarely fires in practice, but the check is cheap and the model file
-        # is already being opened next regardless. A RuntimeError here is
-        # already handled gracefully by get_embedder()'s caller - falls back
-        # to lexical-only retrieval with a logged warning, same as any other
-        # embedder load failure.
-        try:
-            file_size = Path(model_path).stat().st_size
-        except OSError:
-            file_size = 0
-        if file_size:
-            shortfall = gpu_split_shortfall(int(file_size * 1.2))
-            if shortfall:
-                detail = "; ".join(
-                    f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
-                    f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
-                raise RuntimeError(
-                    f"Not enough VRAM on the configured split device(s) to "
-                    f"load the embedding model ({detail}).")
         _tensor_split_keepalive = apply_gpu_split(mp)
         self._model = api.llama_load_model_from_file(model_path, mp)
         if not self._model:
@@ -281,12 +272,108 @@ class GGUFEmbedder:
             pass
 
 
+class IsolatedEmbedder(VramSizingMixin):
+    """Parent-side handle to a ``GGUFEmbedder`` running inside an isolated
+    child process (see ``_embedder_runner.py``) - the same native-abort
+    containment PR #606 gave the chat backend, applied to the embedder's
+    separate, previously-unisolated GGUF/llama.cpp load path (honesty-audit
+    follow-up, 2026-07-14).
+
+    Preflight VRAM sizing (inherited from VramSizingMixin, shared with
+    GgufBackend) runs HERE, before a child is even spawned - a load that can
+    never fit still fails fast without paying a process-spawn cost, exactly
+    mirroring GgufBackend/GgufWorker's split of responsibilities."""
+
+    def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
+                 n_ctx: int = _EMBED_CTX, pooling_type: int = _POOLING_MEAN) -> None:
+        self.model_path = model_path
+        self.n_gpu_layers = n_gpu_layers
+        self.effective_gpu_layers = None    # no auto-sizing for the embedder
+        self.n_ctx = n_ctx
+        self._pooling_type = pooling_type
+        self.dim = 0
+        self._runner = None
+        self._reload()
+
+    def _preflight_vram(self) -> None:
+        """Refuse a load that cannot fit BEFORE spawning a child. The
+        multi-GPU split case needs its own per-device check distinct from
+        VramSizingMixin._check_vram() (which only reasons about the single
+        main GPU device) - see gpu_split_shortfall's docstring (discover.py)
+        for the full rationale. The single-GPU case (the common one) used to
+        have NO real check at all; _check_vram() closes that gap."""
+        from localm.config import load_config
+        from localm.discover import gpu_split_shortfall, split_device_count
+        cfg = load_config()
+        if split_device_count(cfg) >= 2:
+            try:
+                file_size = Path(self.model_path).stat().st_size
+            except OSError:
+                file_size = 0
+            if file_size:
+                shortfall = gpu_split_shortfall(int(file_size * 1.2), cfg)
+                if shortfall:
+                    detail = "; ".join(
+                        f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
+                        f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
+                    raise RuntimeError(
+                        f"Not enough VRAM on the configured split device(s) "
+                        f"to load the embedding model ({detail}).")
+        else:
+            # The common single-GPU case: the same preflight GgufBackend.load()
+            # runs before every chat-model load.
+            self._check_vram()
+
+    def _reload(self) -> None:
+        """(Re)run preflight and spawn a fresh child that loads the model.
+        Used both by __init__ and by embed()'s auto-respawn after a crash -
+        VRAM may have changed since the last load, so preflight re-runs too."""
+        self._preflight_vram()
+        from ._embedder_runner import EmbedderRunner
+        params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
+                      n_ctx=self.n_ctx, pooling_type=self._pooling_type)
+        self._runner = EmbedderRunner()
+        meta = self._runner.spawn_and_load(params)
+        self.dim = meta["dim"]
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """Embed *texts* via the isolated worker, transparently respawning it
+        first if a PRIOR call's crash left it dead - so one transient native
+        fault does not permanently disable embeddings for the rest of the
+        process's life (mirrors Engine.chat_stream's auto-reload after a
+        chat-backend crash). A crash DURING this call is still raised to the
+        caller (rule 5: never silently swallowed) - only the NEXT call
+        recovers automatically."""
+        if self._runner is None or not self._runner.is_alive():
+            logger.warning("embedder worker is not running; reloading %s",
+                           self.model_path)
+            self._reload()
+        try:
+            return self._runner.embed(list(texts))
+        except RuntimeError:
+            logger.exception(
+                "embedding worker fault; it will reload on the next call")
+            self._runner = None
+            raise
+
+    def close(self) -> None:
+        if self._runner is not None:
+            self._runner.shutdown()
+            self._runner = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 # --------------------------------------------------------------------------- #
 #  Process-wide singleton                                                      #
 # --------------------------------------------------------------------------- #
 
 _LOCK = threading.RLock()
-_EMBEDDER: Optional[GGUFEmbedder] = None
+_EMBEDDER: Optional[IsolatedEmbedder] = None
 # A model that is present on disk but fails to LOAD (corrupt / OOM) is cached as
 # failed so the expensive load is not retried on every call. A *missing* model is
 # deliberately NOT cached: `localm setup-embeddings` can install one into a RUNNING
@@ -299,7 +386,7 @@ _TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode
 _LAST_ERROR: Optional[str] = None   # why the last load failed (for the GUI picker)
 
 
-def get_embedder() -> Optional[GGUFEmbedder]:
+def get_embedder() -> Optional[IsolatedEmbedder]:
     """The shared embedder, loading the configured model on first use. Returns None
     when no embedding model can be resolved - callers then fall back to lexical
     retrieval. A missing model is re-checked on every call (so a mid-session
@@ -328,7 +415,7 @@ def get_embedder() -> Optional[GGUFEmbedder]:
             from localm.inference.engine import _LOAD_LOCK
             ngl = int(load_config().get("n_gpu_layers", 99))
             with _LOAD_LOCK:
-                _EMBEDDER = GGUFEmbedder(path, n_gpu_layers=ngl)
+                _EMBEDDER = IsolatedEmbedder(path, n_gpu_layers=ngl)
             logger.info("embedding model ready: %s (dim=%d)", path, _EMBEDDER.dim)
             _LAST_ERROR = None
             return _EMBEDDER
@@ -372,3 +459,11 @@ def reset_embedder() -> None:
         _LOAD_FAILED = False
         _TRIED_DOWNLOAD = False
         _LAST_ERROR = None
+
+
+# A daemon worker already dies with the parent, but tear it down explicitly at
+# interpreter exit so its queue feeder threads never delay shutdown - mirrors
+# voice.py's atexit registration for the identical process-wide-singleton shape
+# (the embedder, unlike GgufBackend/ModelRunner, is not torn down by an owning
+# caller on every unload - it outlives any single request).
+atexit.register(reset_embedder)
