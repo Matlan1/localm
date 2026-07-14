@@ -59,6 +59,25 @@ def _chat_store(principal: str | None = None):
     return _mem.open_store(principal, "chat", "", root=_memory_root())
 
 
+def _ctx_principal(ctx) -> str | None:
+    """The memory-namespace principal for a chat-pipeline ctx, mirroring
+    memory_principal() on the request-based paths: an ADMIN-scoped (owner) caller
+    collapses to the shared "owner" namespace (None -> principal_of maps to
+    "owner"); a non-owner scoped key keeps its own key-hash namespace.
+
+    REG-464/AUDIT-MED-14: every WRITE path (memory_get/put/append/patch/delete +
+    memory_consolidate) and the auto-consolidate OUTLET already collapse
+    ADMIN->owner, so the recall INLET MUST resolve the SAME namespace here. Reading
+    the raw ctx.principal (the key hash) instead means, in protected mode, the
+    owner writes into "owner" but recall reads the per-key-hash namespace and
+    injects NONE of the owner's own saved memories. Tolerates a missing/None ctx
+    (a pipeline-less test call): getattr defaults keep it owner-scoped."""
+    from localm import scopes as _scopes
+    if _scopes.ADMIN in (getattr(ctx, "scopes", ()) or ()):
+        return None
+    return getattr(ctx, "principal", None)
+
+
 def _request_principal(request: Request | None) -> str | None:
     """MEMORY-1: the principal-resolution half of the request/store snippet
     every /api/memory* route repeated."""
@@ -654,11 +673,28 @@ def _read_episodic_watermark(store) -> float:
         return 0.0                               # absent/corrupt -> process from scratch
 
 
-def _write_episodic_watermark(store, mtime: float) -> None:
+def _read_episodic_stems(store) -> set:
+    """The session stems already summarised AT EXACTLY last_mtime. mtime alone is
+    not a unique cursor: a bulk LOCALM_HOME restore, or a coarse-granularity volume
+    (FAT/exFAT/SMB, 1-2s mtime resolution), gives many files one identical mtime, so
+    a strict `st_mtime > watermark` filter would permanently skip the tied files the
+    per-run cap left unprocessed. Pairing the watermark mtime with the stems already
+    done at that mtime makes the cursor tie-safe (REG-591): a tied file is re-picked
+    iff its stem is not yet recorded. Absent/old sidecar -> empty set."""
+    try:
+        data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
+        stems = data.get("stems", [])
+        return set(stems) if isinstance(stems, list) else set()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+
+def _write_episodic_watermark(store, mtime: float, stems=()) -> None:
     p = _episodic_watermark_path(store)
     try:
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps({"last_mtime": float(mtime)}), encoding="utf-8")
+        tmp.write_text(json.dumps({"last_mtime": float(mtime),
+                                   "stems": sorted(stems)}), encoding="utf-8")
         tmp.replace(p)
     except OSError as e:
         from localm.debuglog import logger
@@ -705,43 +741,104 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
 
 _UNSET = object()
 
+# REG-591 (HIGH): cap real model generations per episodic pass. On the FIRST pass
+# over a large pre-existing history the watermark is 0.0, so every session file is
+# "new"; without a cap that is one serial engine generation PER FILE (minutes to
+# hours), monopolising the single inference engine and starving chat. Bound each
+# run and let the backlog drain over several runs (the watermark advances only past
+# files actually processed). Pre-#591 the episodic pass made exactly one call total.
+EPISODIC_MAX_PER_RUN = 5
+# REG-591 (MEDIUM): only summarise a SETTLED session (untouched for at least this
+# long). An active/growing session's mtime keeps advancing past the watermark, so
+# it was re-summarised from partial content on every later run, accumulating
+# overlapping partial episodes. A session idle this long is effectively over; this
+# matches the auto-consolidate debounce cadence (MEMORY_AUTO_MIN_INTERVAL).
+EPISODIC_SETTLE_SECONDS = 900.0
 
-def _store_episodes(store, complete, embed_fn=_UNSET) -> int:
+
+def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary
     (memory-audit 2026-07-02 [14]). Each episode is tagged with its source session id
-    + mtime. The watermark advances to the newest session SEEN (even one that yields
-    no usable summary), so nothing is re-summarised or retried forever. Deduped
-    against existing episodics (0.85). Best-effort; the caller confirmed writes are
-    allowed (privacy). Returns the number of episodes stored.
+    + mtime. Deduped against existing episodics (0.85). Best-effort; the caller
+    confirmed writes are allowed (privacy). Returns the number of episodes stored.
+
+    BOUNDED + SETTLED (REG-591): at most EPISODIC_MAX_PER_RUN real summaries per run
+    (a large first-pass backlog drains over several runs, never one unbounded serial
+    burst), and only SETTLED sessions (idle >= EPISODIC_SETTLE_SECONDS) are
+    summarised. The watermark advances only past a file that was actually processed
+    (summarised, or seen-but-empty), NOT past an unsettled/still-growing file nor
+    past files deferred by the per-run cap, so nothing is re-summarised or retried
+    forever and an active session is summarised exactly once after it goes quiet.
 
     *embed_fn*: reuse an already-resolved embedder (synthesize_memory calls this
     right after run_consolidation, in the same round, so it passes its own
     embed_fn instead of this function re-resolving get_embedder() a second
-    time). Omit to resolve independently (existing test callers)."""
+    time). Omit to resolve independently (existing test callers).
+
+    *now*: injected wall-clock for the settle check (defaults to time.time());
+    tests pass an explicit value for determinism."""
     ef = _embed_fn() if embed_fn is _UNSET else embed_fn
     try:
+        import time as _time
         from difflib import SequenceMatcher
 
         from localm.memory import MemoryRecord, summarize_session
         sdir = _home() / "sessions"
         if not sdir.is_dir():
             return 0
+        now = _time.time() if now is None else now
         watermark = _read_episodic_watermark(store)
+        wm_stems = _read_episodic_stems(store)     # stems already done AT watermark (tie-safe)
+        # A file is unprocessed if it is strictly newer than the watermark, OR ties
+        # the watermark mtime but its stem was not yet summarised (REG-591 tie-
+        # safety, see _read_episodic_stems). Sort by (mtime, stem) for a total,
+        # stable oldest-first order even when mtimes tie.
         new_files = sorted(
-            (f for f in sdir.glob("*.jsonl") if f.stat().st_mtime > watermark),
-            key=lambda p: p.stat().st_mtime)       # oldest-first: watermark advances monotonically
+            (f for f in sdir.glob("*.jsonl")
+             if f.stat().st_mtime > watermark
+             or (f.stat().st_mtime == watermark and f.stem not in wm_stems)),
+            key=lambda p: (p.stat().st_mtime, p.stem))
         if not new_files:
             return 0
         stored = 0
+        gens = 0                                   # real model generations this run (bounded)
         newest = watermark
+        newest_stems = set(wm_stems)               # carry forward stems recorded at `watermark`
+
+        def _advance(mt: float, stem: str) -> None:
+            """Move the (mtime, stems-at-mtime) cursor past a processed file. A
+            file that ties `newest` ADDS its stem; a strictly-newer file resets the
+            stem set to just itself (nothing else at that new mtime is done yet)."""
+            nonlocal newest, newest_stems
+            if mt > newest:
+                newest, newest_stems = mt, {stem}
+            elif mt == newest:
+                newest_stems.add(stem)
+
         for f in new_files:
             mt = f.stat().st_mtime
-            newest = max(newest, mt)
+            # REG-591 (MEDIUM): a still-growing/active session keeps bumping its
+            # mtime past the watermark and would be re-summarised from partial
+            # content every run. Only summarise a SETTLED session, and do NOT
+            # advance the watermark past an unsettled one (so it is summarised
+            # exactly once, after it goes quiet). Files are oldest-first, so the
+            # first unsettled one means every later file is unsettled too -> stop.
+            if now - mt < EPISODIC_SETTLE_SECONDS:
+                break
             text = _session_text(f)
             if not text.strip():
+                _advance(mt, f.stem)               # no usable turns: seen, skip forever
                 continue
+            # REG-591 (HIGH): bound real generations per run. When the cap is hit,
+            # leave THIS file and the rest (and the cursor) for the next run, so a
+            # huge first-pass backlog drains over several runs instead of one
+            # unbounded serial burst.
+            if gens >= EPISODIC_MAX_PER_RUN:
+                break
             summ = summarize_session(complete, text)
+            gens += 1
+            _advance(mt, f.stem)                    # a real attempt was made -> advance past it
             if not summ:
                 continue
             lo = summ.lower()
@@ -754,7 +851,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET) -> int:
                                    meta={"session": f.stem, "session_mtime": mt}),
                       embed_fn=ef)
             stored += 1
-        _write_episodic_watermark(store, newest)
+        _write_episodic_watermark(store, newest, newest_stems)
         return stored
     except Exception as e:
         from localm.debuglog import logger
@@ -918,12 +1015,10 @@ def _memory_outlet(text, messages, ctx):
     contained so it can never affect the reply."""
     try:
         # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
-        # memory_principal on the request-based paths (AUDIT-MED-14).
-        from localm import scopes as _scopes
-        prin = getattr(ctx, "principal", None)
-        if _scopes.ADMIN in (getattr(ctx, "scopes", ()) or ()):
-            prin = None
-        _maybe_auto_consolidate(prin)
+        # memory_principal on the request-based paths and the recall inlet
+        # (AUDIT-MED-14 / REG-464). Shared with _memory_inlet via _ctx_principal
+        # so reads and writes can never drift onto different namespaces again.
+        _maybe_auto_consolidate(_ctx_principal(ctx))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
@@ -989,7 +1084,10 @@ def _memory_inlet(messages, ctx):
         query = _recall_query(messages)
         if not query.strip():
             return None
-        store = _chat_store(getattr(ctx, "principal", None))
+        # REG-464: resolve the SAME namespace the write path / outlet write to
+        # (ADMIN/owner -> "owner"), or an owner's saved memories are never recalled
+        # in protected mode.
+        store = _chat_store(_ctx_principal(ctx))
 
         if writes_ok:
             _migrate_legacy(store)                 # migration is a write
