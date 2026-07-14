@@ -177,6 +177,26 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
                      "model safely; loading the embedder alongside it (may be "
                      "tight on VRAM)")
         return "skipped"
+    # BUG #648: if this call is ALREADY running on the server loop's own thread
+    # (an async route resolved get_embedder() synchronously without offloading),
+    # the run_coroutine_threadsafe(...).result() below would DEADLOCK - the loop
+    # thread would block waiting for a coroutine only it can run, freezing the
+    # whole server for the full timeout, then swallowing the TimeoutError. Detect
+    # that and skip the guarded eviction: the embedder loads alongside the resident
+    # chat model (degraded, logged - never a freeze, and never silent per rule 5).
+    # Callers should offload to an executor so the eviction can actually run (the
+    # memory routes now do; this is the belt-and-braces guard for any other caller).
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        logger.warning("embedder: get_embedder() ran on the server event loop; "
+                       "skipping the guarded chat-model eviction to avoid "
+                       "deadlocking the loop (loading the embedder alongside the "
+                       "resident chat model - may be tight on VRAM). This call "
+                       "should be offloaded to an executor.")
+        return "skipped"
     try:
         fut = asyncio.run_coroutine_threadsafe(_hs.unload_all_models(), loop)
         res = fut.result(timeout=timeout_s)

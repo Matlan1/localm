@@ -68,6 +68,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Saving a memory no longer freezes the app.** On some setups, saving, editing,
+  or adding a remembered fact could make the whole app stop responding for several
+  minutes the first time an embedding model needed to load, because that load ran on
+  the request-handling path. Memory writes now load the embedder off that path, so
+  the app stays responsive.
 - **Clearer errors when indexing an image fails.** If the image-description step
   fails (a timeout, a connection error, or an error returned by the model), knowledge
   indexing now reports the real reason, instead of a misleading "returned an empty
