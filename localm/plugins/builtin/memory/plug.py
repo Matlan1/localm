@@ -161,14 +161,24 @@ def _legacy_memory_file() -> Path:
 
 
 def _read_memory() -> str:
-    """The legacy flat chat-memory.md text (migration source), or empty string."""
+    """The legacy flat chat-memory.md text (migration source).
+
+    Returns "" ONLY when the file is genuinely ABSENT. Raises OSError when it
+    EXISTS but cannot be read (locked / IO error): the caller MUST distinguish
+    the two. Collapsing an unreadable file into "" let ``_migrate_legacy`` write
+    its permanent ``.legacy-imported`` marker having imported nothing - a false
+    success that also dropped the legacy facts from recall (AGENTS.md rule 5)."""
     p = _legacy_memory_file()
-    if p.is_file():
-        try:
-            return p.read_text(encoding="utf-8")
-        except OSError:
-            return ""
-    return ""
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning(
+            "legacy chat-memory.md exists but could not be read (%s); NOT treating "
+            "it as empty - migration retries next start, recall falls back", e)
+        raise
 
 
 def _strip_bullet(line: str) -> str:
@@ -274,7 +284,13 @@ def _rendered_text(store) -> str:
     recs = store.all()
     if recs:
         return "\n".join(f"- {r.text}" for r in recs)
-    return _read_memory().strip()
+    try:
+        return _read_memory().strip()
+    except OSError:
+        # Unreadable legacy file (already WARN-logged in _read_memory): show an
+        # empty textarea rather than 500 the memory modal. A display fallback,
+        # not a silenced write - the migration path still refuses to mark done.
+        return ""
 
 
 # ------------------------------------------------------------------ #
@@ -487,7 +503,10 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
             break
         try:
             raw = f.read_text(encoding="utf-8")
-        except OSError:
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.debug("memory consolidation: skipping unreadable session %s: %s",
+                         f, e)
             continue
         file_pieces = []
         for line in reversed(raw.splitlines()):
@@ -618,7 +637,10 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
     ingests scratchpad. Empty when the file has no usable turns."""
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.debug("memory consolidation: unreadable session %s skipped "
+                     "(excluded from this summary): %s", path, e)
         return ""
     pieces: list[str] = []
     total = 0
@@ -785,7 +807,13 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
             return
         if not cfg.get("memory_enabled", True):
             return
-    except Exception:
+    except Exception as e:
+        # Config unreadable: stay disabled this turn (safe), but surface why so a
+        # persistently broken config is not an invisible "consolidation never runs"
+        # (AGENTS.md rule 5).
+        from localm.debuglog import logger
+        logger.debug("memory auto-consolidate: config read failed, skipping this "
+                     "turn: %s", e)
         return
     if not _persist_enabled():
         return                                # privacy: no new traces
@@ -968,7 +996,13 @@ def register(host) -> None:
     host.register_chat_hook("outlet", _memory_outlet)
     try:
         _ENGINE = host.engine()
-    except Exception:
+    except Exception as e:
+        # No live engine at register time (headless / api-mode): memory falls back
+        # to lexical recall and skips auto-consolidation. Benign, but log so it is
+        # traceable rather than a silent degrade (AGENTS.md rule 5).
+        from localm.debuglog import logger
+        logger.debug("memory: no inference engine at register (%s); semantic recall "
+                     "and auto-consolidation degrade until one is available", e)
         _ENGINE = None
 
 
