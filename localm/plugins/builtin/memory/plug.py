@@ -30,6 +30,7 @@ scope_key) isolation, exercised by the coder and the library tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading as _threading
@@ -154,6 +155,19 @@ def _embed_fn():
         from localm.debuglog import logger
         logger.debug("memory _embed_fn resolution failed: %s", e)
         return None
+
+
+async def _off_loop(fn):
+    """Run a blocking store operation OFF the server event loop.
+
+    BUG #648: a memory write resolves the shared embedder (via _embed_fn ->
+    get_embedder), which can trigger a VRAM swap (vram.evict_chat_for_embedder).
+    That swap must NOT run on the event-loop thread - it blocks on a coroutine the
+    loop itself has to execute, so doing it inline froze the whole server for up to
+    300s. Offloading to the default executor keeps the loop free (and lets the
+    eviction actually complete off-loop) while the store write / embedder load runs.
+    """
+    return await asyncio.get_running_loop().run_in_executor(None, fn)
 
 
 def _legacy_memory_file() -> Path:
@@ -302,7 +316,8 @@ async def memory_get(request: Request = None):
     store = _request_store(request)
     writable = _persist_enabled()
     if writable:
-        _migrate_legacy(store)
+        # Offloaded: _migrate_legacy resolves the embedder (BUG #648), never on-loop.
+        await _off_loop(lambda: _migrate_legacy(store))
     # Corrections are only surfaced when writes are allowed: they are useless
     # read-only (accept/reject need a write), and store.corrections() prunes stale
     # entries as a side effect, which must never run in privacy mode (no new
@@ -338,20 +353,29 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
             f"most {N_MAX}. Trim the list before saving.")
     store = _request_store(request)
 
-    _migrate_legacy(store)
-    with store.lock():
-        store._load()
-        existing = {r.text: r for r in store.all()}
-        seen: set = set()
-        records: list = []
-        for f in facts:
-            if f in seen:
-                continue                      # collapse duplicate lines
-            seen.add(f)
-            keep = existing.get(f)
-            records.append(keep if keep is not None else MemoryRecord(
-                text=f, kind="semantic", source="user", importance=0.8))
-        store.replace(records, embed_fn=_embed_fn())
+    # Offloaded whole snapshot-decide-write block (BUG #648): store.replace ->
+    # _embed_fn -> get_embedder must not resolve the embedder on the loop thread.
+    # Keeping the migrate + lock + diff + replace together in one executor call
+    # preserves the atomicity the lock provides (a concurrent append can't land
+    # mid-diff), just off the loop.
+    def _do_put():
+        _migrate_legacy(store)
+        with store.lock():
+            store._load()
+            existing = {r.text: r for r in store.all()}
+            seen: set = set()
+            records: list = []
+            for f in facts:
+                if f in seen:
+                    continue                  # collapse duplicate lines
+                seen.add(f)
+                keep = existing.get(f)
+                records.append(keep if keep is not None else MemoryRecord(
+                    text=f, kind="semantic", source="user", importance=0.8))
+            store.replace(records, embed_fn=_embed_fn())
+        return records
+
+    records = await _off_loop(_do_put)
     return {"status": "saved", "count": len(records)}
 
 
@@ -363,16 +387,22 @@ async def memory_append(req: MemoryAppend, request: Request = None):
         raise HTTPException(400, "Nothing to remember")
     store = _request_store(request)
 
-    _migrate_legacy(store)
     from localm.memory import N_MAX, MemoryRecord
-    # Refuse to append past the cap rather than accept a fact the next prune would
-    # silently evict (audit F4).
-    if len(store) >= N_MAX:
-        raise HTTPException(
-            413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
-                 "adding another.")
-    rec = store.add(MemoryRecord(text=fact, kind="semantic", source="user",
-                                 importance=0.8), embed_fn=_embed_fn())
+
+    # Offloaded (BUG #648): _migrate_legacy and store.add both resolve the embedder
+    # (_embed_fn -> get_embedder), which must not run on the event-loop thread.
+    def _do_append():
+        _migrate_legacy(store)
+        # Refuse to append past the cap rather than accept a fact the next prune
+        # would silently evict (audit F4).
+        if len(store) >= N_MAX:
+            raise HTTPException(
+                413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
+                     "adding another.")
+        return store.add(MemoryRecord(text=fact, kind="semantic", source="user",
+                                      importance=0.8), embed_fn=_embed_fn())
+
+    rec = await _off_loop(_do_append)
     return {"status": "appended", "id": rec.id}
 
 
@@ -386,7 +416,8 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
         fields["text"] = req.text
     if req.importance is not None:
         fields["importance"] = req.importance
-    rec = (store.update(mem_id, embed_fn=_embed_fn(), **fields)
+    # Offloaded (BUG #648): store.update -> _embed_fn -> get_embedder off the loop.
+    rec = (await _off_loop(lambda: store.update(mem_id, embed_fn=_embed_fn(), **fields))
            if fields else store.get(mem_id))
     if rec is None:
         raise HTTPException(404, "No such memory")
@@ -406,7 +437,8 @@ async def memory_correction_accept(cid: str, request: Request = None):
     """Apply a proposed supersession of a trusted fact: replace its text (or delete
     it), archiving the old value to the recoverable .forgotten sidecar. The user is
     the one deciding - a synth candidate never auto-overwrites a user fact ([9])."""
-    return _apply_correction(cid, True, request)
+    # Offloaded (BUG #648): resolve_correction -> _embed_fn -> get_embedder off-loop.
+    return await _off_loop(lambda: _apply_correction(cid, True, request))
 
 
 @_router.post("/api/memory/corrections/{cid}/reject")
@@ -414,7 +446,8 @@ async def memory_correction_reject(cid: str, request: Request = None):
     """Dismiss a proposed supersession: keep the fact as-is, reset its
     last-confirmed staleness, and remember the dismissal so consolidation does not
     re-propose the same change on the next pass."""
-    return _apply_correction(cid, False, request)
+    # Offloaded (BUG #648): resolve_correction -> _embed_fn -> get_embedder off-loop.
+    return await _off_loop(lambda: _apply_correction(cid, False, request))
 
 
 @_router.get("/api/memory/forgotten")
@@ -434,7 +467,8 @@ async def memory_forgotten_restore(mem_id: str, request: Request = None):
     """Recover one archived record back into the live store (LM-DA-024)."""
     _require_writable()
     store = _request_store(request)
-    rec = store.restore_forgotten(mem_id, embed_fn=_embed_fn())
+    # Offloaded (BUG #648): restore_forgotten -> _embed_fn -> get_embedder off-loop.
+    rec = await _off_loop(lambda: store.restore_forgotten(mem_id, embed_fn=_embed_fn()))
     if rec is None:
         raise HTTPException(
             404, "No such forgotten record (or it is already restored)")
