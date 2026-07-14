@@ -85,7 +85,7 @@ export async function refreshModelsPage() {
   // Selectable model types - mirrors localm.model_manager.registry.MODEL_TYPES
   // (keep in sync). Powers the per-row one-click set-type control.
   const MODEL_TYPE_OPTIONS =
-    ["llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
+    ["llm", "embedding", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
   for (const m of models) {
     const tr = el("tr");
     const nameTd = el("td", "name-cell");

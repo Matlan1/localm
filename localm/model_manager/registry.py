@@ -23,8 +23,9 @@ from .gguf import _gguf_first_parts
 from .gguf import _has_gguf_magic
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
+from .gguf import gguf_embedding_signal
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -41,9 +42,13 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     as chat, though it stays runnable when named explicitly (``localm run NAME``, an
     API request naming it) and its type can be corrected with ``localm set-type``. A
     legacy entry with no ``model_type`` key is treated as 'llm' (eligible), preserving
-    pre-Branch-A behaviour.
+    pre-Branch-A behaviour. type='embedding' is also excluded: it is loaded via a
+    dedicated embeddings-mode context (see ``inference/embedder.py``), not the causal
+    chat path, so it must never be auto-picked as the default chat model - a real risk
+    now that ``setup-embeddings`` can register one into the main registry, making an
+    embedding-only registry (a plausible first-run state) a genuine scenario.
     """
-    return isinstance(entry, dict) and entry.get("model_type", "llm") != "unknown"
+    return isinstance(entry, dict) and entry.get("model_type", "llm") not in ("unknown", "embedding")
 
 
 def is_llm(entry: dict) -> bool:
@@ -105,16 +110,19 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> str:
     """Deterministically classify a LOCAL model's type from HARD metadata only.
 
-    A .gguf file or Ollama blob is a llama.cpp text model (the format itself is the
-    hard signal) -> 'llm'. An HF directory is classified from config.json: a
-    LoRA/adapter dir -> 'lora'; an ``architectures`` class ending in ForCausalLM /
-    LMHeadModel / ForConditionalGeneration -> 'llm'; anything we cannot resolve ->
-    'unknown' (never a silent 'llm'). Embedding models are provisioned via
-    ``setup-embeddings``, not the chat registry, so there is no separate 'embedding'
-    registry type here.
+    A .gguf file or Ollama blob (the same GGUF byte format under a renamed file)
+    is first checked for an embedding/pooling signal in its OWN GGUF metadata
+    (``gguf_embedding_signal`` - architecture or a ``*.pooling_type`` key; see
+    gguf.py) -> 'embedding'; otherwise it is a llama.cpp text model -> 'llm'. An
+    HF directory is classified from config.json: a LoRA/adapter dir -> 'lora'; an
+    ``architectures`` class ending in ForCausalLM / LMHeadModel /
+    ForConditionalGeneration -> 'llm'; anything we cannot resolve -> 'unknown'
+    (never a silent 'llm').
     """
     try:
         if is_gguf or is_blob:
+            if gguf_embedding_signal(path):
+                return "embedding"
             return "llm"
         if is_hf:
             if (path / "adapter_config.json").exists():
@@ -855,7 +863,9 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     resolved = str(child.resolve())
                     if resolved in known:
                         continue
-                    _mm._register(_unique_registry_name(reg, child.name), child)
+                    mtype = _detect_local_model_type(child, is_gguf=False, is_hf=True)
+                    _mm._register(_unique_registry_name(reg, child.name), child,
+                                  model_type=mtype)
                     reg = _mm.load_registry()
                     known.add(resolved)
                     added += 1
@@ -881,7 +891,9 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     logger.debug("skipping %s: not a GGUF (bad/missing magic)",
                                  child.name)
                     continue
-                _mm._register(_unique_registry_name(reg, child.stem), child)
+                mtype = _detect_local_model_type(child, is_gguf=True, is_hf=False)
+                _mm._register(_unique_registry_name(reg, child.stem), child,
+                              model_type=mtype)
                 reg = _mm.load_registry()
                 known.add(resolved)
                 added += 1
