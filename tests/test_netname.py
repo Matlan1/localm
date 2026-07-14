@@ -85,6 +85,19 @@ def test_mdns_enabled_default_true(monkeypatch):
     assert netname.mdns_enabled() is False
 
 
+def test_mdns_enabled_fails_closed_when_config_unreadable(monkeypatch):
+    """An unreadable config must resolve mdns_enabled() to FALSE, never the
+    on-by-default True: a transiently unreadable config must not silently
+    re-enable mDNS for a user who set mdns_enabled:false as an opt-out (mirrors
+    netpolicy.network_mode's fail-safe). Label callers still get the default."""
+    def boom():
+        raise OSError("config unreadable")
+    monkeypatch.setattr("localm.config.load_config", boom)
+    assert netname.mdns_enabled() is False               # fail CLOSED, not True
+    # but a defaulted read still works (mdns_label falls back to the default):
+    assert netname.mdns_label() == "localm"
+
+
 def test_hostname_fqdn(monkeypatch):
     monkeypatch.setattr(socket, "gethostname", lambda: "Desk-Top.corp.example")
     assert netname.hostname_fqdn() == "desk-top.local"   # first label, lowercased

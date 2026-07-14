@@ -128,7 +128,7 @@ def test_install_posix_symlink(monkeypatch, tmp_path):
     bindir = tmp_path / "localbin"
     monkeypatch.setattr(gc, "bin_dir", lambda root: bindir)
     monkeypatch.setattr(gc, "shim_path", lambda root: bindir / "localm")
-    monkeypatch.setattr(gc, "_posix_ensure_on_path", lambda d: False)
+    monkeypatch.setattr(gc, "_posix_ensure_on_path", lambda d: (False, None))
     monkeypatch.setattr(gc.shutil, "which", lambda name: None)
     target = tmp_path / ".venv" / "bin" / "localm"
     target.parent.mkdir(parents=True)
@@ -156,3 +156,46 @@ def test_install_cli_exit_code_reflects_path_modified(monkeypatch):
         raise OSError("cannot write shim")
     monkeypatch.setattr(gc, "install", _boom)
     assert gc.main(["install", "--root", "."]) == 1
+
+
+# --------------- honesty: PATH-edit-failed is not a false success ---------- #
+
+def test_posix_ensure_on_path_reports_edit_failure(monkeypatch, tmp_path):
+    """When bindir is NOT on PATH and every shell-rc edit fails, the function must
+    return (False, <note>) - the 'could not add it' case - NOT the same (False,
+    None) as 'already on PATH'. Home points at a nonexistent dir (via the env vars
+    Path.home() reads) so every rc write AND the ~/.profile fallback raise
+    FileNotFoundError (an OSError)."""
+    missing_home = tmp_path / "no_such_home"           # never created
+    monkeypatch.setenv("HOME", str(missing_home))
+    monkeypatch.setenv("USERPROFILE", str(missing_home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+    assert Path.home() == missing_home                 # sanity: env override took
+    bindir = missing_home / ".local" / "bin"           # not on the real PATH
+    changed, note = gc._posix_ensure_on_path(bindir)
+    assert changed is False
+    assert note and "PATH" in note and "manually" in note
+
+
+def test_posix_ensure_on_path_already_on_path_has_no_note(monkeypatch, tmp_path):
+    """The already-on-PATH case stays (False, None) - no false warning."""
+    bindir = tmp_path / "localbin"
+    monkeypatch.setattr(gc, "_posix_on_path", lambda d: True)
+    assert gc._posix_ensure_on_path(bindir) == (False, None)
+
+
+def test_install_cli_surfaces_path_edit_failure(monkeypatch, capsys):
+    """main() must NOT claim 'already on PATH' when the shim was created but its
+    dir could not be added to PATH; it prints the manual-add note and still exits
+    20 (installed, PATH not modified by us). Negative-tests the false success."""
+    monkeypatch.setattr(gc, "install", lambda root: {
+        "path_dir": "/home/u/.local/bin", "shim": "s", "path_modified": False,
+        "conflict": None,
+        "path_note": "could not add /home/u/.local/bin to your PATH (could not "
+                     "edit your shell startup files); add it manually"})
+    rc = gc.main(["install", "--root", "."])
+    out = capsys.readouterr().out
+    assert rc == 20
+    assert "already on PATH" not in out          # the falsehood must be gone
+    assert "add it manually" in out
