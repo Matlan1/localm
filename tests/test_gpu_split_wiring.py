@@ -252,14 +252,38 @@ class TestGgufEmbedderGpuSplitWiring:
             for r in caplog.records
         )
 
+
+class TestIsolatedEmbedderGpuSplitPreflight:
+    """IsolatedEmbedder._preflight_vram (localm/inference/embedder.py) - the
+    parent-side gate that now runs BEFORE a child is ever spawned, moved out
+    of GGUFEmbedder.__init__ (which is the RAW native loader, constructed
+    only inside the isolated child process - see _embedder_runner.py and
+    PR #606's containment pattern this mirrors). Real gpu_split_shortfall()/
+    list_gpus() computation runs for real, same philosophy as the rest of
+    this file; only EmbedderRunner is stubbed so no real subprocess spawns."""
+
+    class _StubRunner:
+        spawned = False
+
+        def spawn_and_load(self, params, timeout=None):
+            type(self).spawned = True
+            return {"dim": 768}
+
+    def _build(self, monkeypatch, model_file):
+        type(self)._StubRunner.spawned = False
+        monkeypatch.setattr(
+            "localm.inference._embedder_runner.EmbedderRunner", self._StubRunner)
+        from localm.inference.embedder import IsolatedEmbedder
+        return IsolatedEmbedder(str(model_file))
+
     def test_split_configured_but_one_device_short_refuses(self, monkeypatch, tmp_path):
         """AUDIT-GPU-SPLIT-2: the embedder is a SECOND, independent GGUF/
         llama.cpp load path with no capacity gate of its own until this fix -
-        it must also refuse (not attempt a native load that could hard-abort)
-        when a configured split device's own proportional share is short,
-        even though embedding models are typically small (this module's own
-        docstring: 24-90 MB) - a tight-enough split device can still be
-        short of even a few MB."""
+        it must also refuse (never spawn a child that could hard-abort) when
+        a configured split device's own proportional share is short, even
+        though embedding models are typically small (this module's own
+        docstring: 24-90 MB) - a tight-enough split device can still be short
+        of even a few MB."""
         model_file = tmp_path / "embed.gguf"
         model_file.write_bytes(b"\0" * (2 * 1024 * 1024))   # 2 MB, realistic size
         monkeypatch.setattr(
@@ -270,18 +294,15 @@ class TestGgufEmbedderGpuSplitWiring:
             lambda: [{"index": 0, "name": "A", "total": 1024, "free": 512},
                      {"index": 1, "name": "B", "total": 16 * 1024 ** 3,
                       "free": 16 * 1024 ** 3}])
-        mock_api = _mock_embed_api()
-        with patch("localm.inference.backends.llamacpp._api", mock_api):
-            from localm.inference.embedder import GGUFEmbedder
-            with pytest.raises(RuntimeError, match="configured split"):
-                GGUFEmbedder(str(model_file))
-        # Refused BEFORE the native loader was ever reached.
-        mock_api.llama_load_model_from_file.assert_not_called()
+        with pytest.raises(RuntimeError, match="configured split"):
+            self._build(monkeypatch, model_file)
+        # Refused BEFORE a child process was ever spawned.
+        assert self._StubRunner.spawned is False
 
     def test_split_configured_with_enough_room_loads_normally(self, monkeypatch, tmp_path):
-        """Guard: the new gate must not over-correct into refusing every
+        """Guard: the gate must not over-correct into refusing every
         split-configured embedder load - a real (non-zero-size) file that
-        genuinely fits each device's free VRAM must still succeed."""
+        genuinely fits each device's free VRAM must still proceed to spawn."""
         model_file = tmp_path / "embed.gguf"
         model_file.write_bytes(b"\0" * (2 * 1024 * 1024))
         monkeypatch.setattr(
@@ -291,8 +312,6 @@ class TestGgufEmbedderGpuSplitWiring:
             "localm.discover.list_gpus",
             lambda: [{"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3},
                      {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3}])
-        mock_api = _mock_embed_api()
-        with patch("localm.inference.backends.llamacpp._api", mock_api):
-            from localm.inference.embedder import GGUFEmbedder
-            GGUFEmbedder(str(model_file))
-        mock_api.llama_load_model_from_file.assert_called_once()
+        e = self._build(monkeypatch, model_file)
+        assert self._StubRunner.spawned is True
+        assert e.dim == 768
