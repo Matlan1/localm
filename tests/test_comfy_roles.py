@@ -138,7 +138,7 @@ class TestEndToEndRenumberedGraph:
         wf_file = tmp_path / "wan_local.json"
         wf_file.write_text(json.dumps(RENUMBERED_WAN), encoding="utf-8")
         captured = {}
-        with patch.object(vcomfy, "_workflow_path", return_value=wf_file), \
+        with patch.object(vcomfy, "workflow_path", return_value=wf_file), \
              patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(vcomfy, "_localm_unload"), \
              patch.object(vcomfy.urllib.request, "urlopen", self._fake_comfy(captured)), \
@@ -198,7 +198,7 @@ class TestVideoRobustness:
         wf_file = tmp_path / "two_sampler.json"
         wf_file.write_text(json.dumps(graph), encoding="utf-8")
         captured = {}
-        with patch.object(vcomfy, "_workflow_path", return_value=wf_file), \
+        with patch.object(vcomfy, "workflow_path", return_value=wf_file), \
              patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(vcomfy, "_localm_unload"), \
              patch.object(vcomfy.urllib.request, "urlopen", _fake_video_urlopen(captured)), \
@@ -224,7 +224,7 @@ class TestVideoRobustness:
         wf_file = tmp_path / "bad.json"
         wf_file.write_text(json.dumps(bad), encoding="utf-8")
         unload = MagicMock()
-        with patch.object(vcomfy, "_workflow_path", return_value=wf_file), \
+        with patch.object(vcomfy, "workflow_path", return_value=wf_file), \
              patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(vcomfy, "_localm_unload", unload):
             ok, msg = vcomfy.generate_video("a fox", tmp_path / "out.mp4")

@@ -91,6 +91,23 @@ def test_version_falls_back_to_dist_info_when_live_raises(monkeypatch):
     assert instances._version() == "1.2.3-installed"
 
 
+def test_version_reports_unknown_not_a_fabricated_literal(monkeypatch):
+    """When BOTH the live VERSION file and dist-info are unreadable, _version()
+    must return the honest "unknown" sentinel, never a hardcoded version literal:
+    /whoami's version gates the post-update health watchdog by EQUALITY, so a
+    stale literal that ever equalled the expected version would false-PASS a build
+    whose version machinery is actually broken. "unknown" can never equal a real
+    target -> fails safe."""
+    def boom(*a, **k):
+        raise OSError("no version anywhere")
+    monkeypatch.setattr("localm._version.read_version", boom)
+    monkeypatch.setattr("importlib.metadata.version", boom)
+    v = instances._version()
+    assert v == "unknown"
+    # It must not resemble a real semver a watchdog could match by equality.
+    assert not v[:1].isdigit()
+
+
 def test_list_entries_and_unregister(tmp_path):
     iid = instances.new_instance_id()
     path = instances.register_instance(

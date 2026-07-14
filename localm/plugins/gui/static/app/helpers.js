@@ -618,11 +618,11 @@ function _offerModelDownload(missingModel, log) {
  *  preflight_models() gate, which fails with today's exact existing message.
  *  Best-effort: any failure to reach the pre-check itself also resolves true,
  *  so this can never block generation on its own account. */
-export async function checkModelsBeforeGenerate(kind, log) {
+export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
   let data;
   try {
     const r = await fetch(`/api/media/${kind}/preflight`, {
-      method: "POST", headers: authHeaders(), body: JSON.stringify({}),
+      method: "POST", headers: authHeaders(), body: JSON.stringify(overrides),
     });
     if (!r.ok) return true;
     data = await r.json();

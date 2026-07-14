@@ -28,8 +28,8 @@ own ComfyUI: the managed instance is a separate install it fully controls.
 ## Set it up
 
 ```bash
-localm comfy setup                 # provision localm's own ComfyUI
-localm config managed_comfy_enabled true   # then route media to it
+localm comfy setup                 # provision localm's own ComfyUI - media routes to
+                                    # it right away (comfy_target defaults to "own")
 ```
 
 `localm comfy setup` picks one of two paths automatically:
@@ -60,22 +60,20 @@ over.
 
 ## Turn it on (and off)
 
-Provisioning installs the managed instance but does not switch media over to it.
-Two settings decide which ComfyUI localm targets:
+One setting decides which ComfyUI localm targets:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `managed_comfy_enabled` | `false` | Master switch. Off = localm uses your own ComfyUI, exactly as before. |
-| `comfy_target` | `own` | `own` = use the managed instance; `user` = always use your own ComfyUI. |
+| `comfy_target` | `own` | `own` = use the managed instance once one is installed; `user` = always use your own ComfyUI. |
 
-localm targets the managed instance **only** when all three are true:
-`managed_comfy_enabled` is on, `comfy_target` is `own`, and a managed instance is
-actually installed. If any is false, localm uses your own ComfyUI, untouched. So
-after `localm comfy setup`, enable it with `localm config managed_comfy_enabled
-true` (the `comfy_target` default of `own` already points at it). To go back to
-your own ComfyUI without removing the managed one, set `comfy_target` to `user` or
-turn `managed_comfy_enabled` off. Both settings are also in the GUI under
-**Settings -> Media**, and take effect on the next server start.
+localm targets the managed instance **only** when `comfy_target` is `own` AND a
+managed instance is actually installed - so `comfy_target` defaults to `own` and
+is inert until you run `localm comfy setup`; nothing changes for you until then.
+To go back to your own ComfyUI without removing the managed one, set
+`comfy_target` to `user`. Either way, your own ComfyUI's settings (`comfy_workdir`
+and friends) and the managed instance are independent - switching between them
+never loses either one's configuration. Also in the GUI under **Settings ->
+Media**, and takes effect on the next server start.
 
 The managed instance runs on its own loopback port (`http://127.0.0.1:8189`), one
 above ComfyUI's default `8188`, so it and your own ComfyUI can run at the same
@@ -112,9 +110,9 @@ localm comfy remove --models       # also delete the managed models folder
 localm comfy remove -y             # skip the confirmation
 ```
 
-`localm comfy status` reports the `managed_comfy_enabled` and `comfy_target`
-settings, whether an instance is installed and where, and which ComfyUI media
-calls target right now. `localm comfy remove` deletes only
+`localm comfy status` reports the `comfy_target` setting, whether an instance is
+installed and where, and which ComfyUI media calls target right now. `localm
+comfy remove` deletes only
 `<data dir>/comfyui`; your own ComfyUI is never a target. Managed models are kept
 by default (they are expensive to re-download) unless you pass `--models`. The
 whole feature is self-contained under the data folder, so removing it leaves no

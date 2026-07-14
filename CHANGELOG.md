@@ -26,6 +26,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   The chip's tooltip also says when recall fell back to keyword-only matching (for
   example, before an embedding model is installed), so semantic recall being off is
   no longer invisible.
+- **Launch ComfyUI and pick its models from the Images/Music/Video pages.** The
+  Workflow panel now has a "Launch ComfyUI" button (starts or confirms it, then
+  opens it in a new tab) and, once it's reachable, a dropdown for every model-file
+  slot (UNet/checkpoint, CLIP, VAE, ...) the active workflow exposes - no more
+  needing to hand-edit the workflow JSON to pick a different model. Picks are sent
+  along with the next generation and are remembered while you stay on that workflow.
 
 ### Changed
 - **Memory recall is now relevant-only.** Chat memory used to inject the same handful
@@ -40,8 +46,47 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ones every time it ran). It now records one summary per conversation, tagged to that
   conversation, and never re-processes a session it has already summarised - so past
   topics are recalled distinctly instead of collapsing into one vague note.
+- **One control for which ComfyUI localm uses, not two.** Settings > Media used to
+  have both a "Use localm's own managed ComfyUI" checkbox and a separate "ComfyUI to
+  use: own/user" dropdown - two controls for one decision, and confusing when they
+  disagreed (checkbox on, dropdown set to "user"). There is now just the dropdown:
+  "own" routes to localm's managed ComfyUI once you set one up (`localm comfy
+  setup`), "user" always uses your own install. Your own ComfyUI's settings and
+  localm's managed instance both keep their state regardless of which one is
+  currently selected, so switching back and forth never loses either. One real
+  behavior change worth knowing: the old design needed a separate explicit "enable"
+  step after setup; that step is gone. If you ran `comfy setup` on an earlier
+  version but never flipped that switch, generation will now start using the
+  managed instance automatically next time - `localm comfy status` shows what is
+  currently targeted, and `localm config comfy_target user` (or the same dropdown
+  in Settings > Media) opts back out if you'd rather it stay off.
 
 ### Fixed
+- **The Models page shows the real error instead of "No models yet".** When the
+  Models page could not load your model list because the session had expired or the
+  API key lacked permission, it used to fall back to the empty "No models yet" state,
+  as if you had none. It now opens the key prompt on an expired session and otherwise
+  shows the actual status ("Could not load models (HTTP 403)"), so a sign-in or
+  permission problem is no longer mistaken for an empty model library.
+- **"Keep diagnostics" now warns when it cannot write its log.** If you turned on
+  keeping a diagnostic log for bug reports but the log file could not be created (for
+  example an unwritable or full data folder), localm used to start silently as though
+  it had, leaving your bug reports quietly without one. It now prints a warning at
+  startup that the diagnostic log could not be enabled, instead of appearing to
+  succeed; startup itself is unaffected.
+- **Adding documents to a knowledge collection reports the server's real error.**
+  When a document add was refused with a conflict, the GUI could show an internal
+  "body stream already read" message instead of the server's actual reason. It now
+  surfaces the real error detail.
+- **A damaged media-ownership record no longer exposes everyone's generated media.**
+  On a multi-user server, the image, music, and video galleries record which key
+  generated each file so a scoped key only ever sees its own. If that on-disk
+  ownership record became unreadable (corrupt, truncated, or momentarily locked),
+  localm used to treat every file as unowned and let any key view, download, delete,
+  move, or rename all of them. It now fails closed: a scoped key is denied until the
+  record is repaired, while the owner/admin key (and single-user open mode) keeps full
+  access so the gallery stays usable. The record is also written atomically now, so an
+  interrupted save can no longer leave it half-written in the first place.
 - **Semantic knowledge search now works on password-protected servers.** When localm
   is started with an API key saved to disk (`localm key generate`, or the launcher),
   indexing a document used to silently fall back to keyword-only search: the server
@@ -113,20 +158,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is itself a launcher that re-spawns the real one as a further child, one hop too
   many for Windows to hand the worker its synchronization handles correctly).
   Model loads and voice transcription now spawn correctly under LocaLM.exe.
-- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
-  longer fails when run from LocaLM.exe itself.** `localm make-launcher
-  --force` - used to refresh the branded launcher after upgrading Python -
-  failed outright ("could not locate the base interpreter to copy") when
-  invoked from the already-built LocaLM.exe, since Python could no longer
-  find itself under its own renamed identity. It now resolves correctly and
-  replaces the running launcher's file in place.
-- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
-  section used to be a blind cut of the last ~120 log lines, so a session that
-  kept running afterward (even routine polling) could push the real error out
-  before the report was filed. It now keeps every warning/error from the whole
-  run and collapses long runs of near-identical routine lines (e.g. repeated
-  status polling) into one line with a repeat count, so the actual failure is
-  never buried or pushed out - no matter how long the session ran after it.
 - **`localm doctor` now actually verifies model loads will work.** Its native
   runtime and GPU checks run their probes in a plain subprocess, a different
   mechanism from the isolated worker process every real GGUF model load and
@@ -134,12 +165,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   while every model load still failed (the exact LocaLM.exe launcher bug
   above). Doctor now spawns a worker the same way a real model load does and
   reports it as a failed check if that does not work.
-- **A failed automatic model preload is no longer silent in the log.** When
-  `localm gui` warms up the last-used model in the background at startup and
-  that load fails, the failure now reaches the debug log (with its full
-  traceback) in addition to the console notice - previously it was
-  console-only, so a report filed afterward showed no sign anything had gone
-  wrong.
+- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
+  longer fails when run from LocaLM.exe itself.** `localm make-launcher
+  --force` - used to refresh the branded launcher after upgrading Python -
+  failed outright ("could not locate the base interpreter to copy") when
+  invoked from the already-built LocaLM.exe, since Python could no longer
+  find itself under its own renamed identity. It now resolves correctly and
+  replaces the running launcher's file in place.
 - **A failed setup job (ComfyUI, a model pull, image generation) no longer
   hides its own error.** Two separate problems compounded: the job's live
   progress log in Settings disappeared the instant it failed - right as a
@@ -154,8 +186,77 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a cloned repo's internal file paths past Windows' legacy 260-character
   limit, failing with a cryptic "Filename too long" / "invalid index-pack
   output" git error.
+- **The managed-ComfyUI setup no longer fails creating its own venv under the
+  LocaLM.exe launcher (Windows).** After cloning ComfyUI, the "Creating a
+  fresh localm venv" step could fail with the same misleading "[WinError 2]
+  The system cannot find the file specified" as the model-loading bug above,
+  for a related but distinct reason: Python's own venv module matches file
+  names against the running interpreter's own name to decide what to copy
+  into the new venv, and a renamed launcher's name never exists in the base
+  install, so the new venv silently ended up with no interpreter of its own
+  and the mandatory pip bootstrap then failed. Setup now creates the venv
+  using the real base interpreter directly, so it succeeds under the branded
+  launcher too.
+- **`localm doctor` now also verifies venv creation will work.** Alongside
+  the worker-spawn check above, doctor now also creates (and immediately
+  discards) a throwaway venv the same way the managed-ComfyUI installer
+  does, so a machine that cannot create nested venvs is flagged up front
+  instead of failing silently mid-setup.
+- **Selecting localm's own managed ComfyUI now actually uses it for
+  generation.** Two separate bugs meant a correctly installed, correctly
+  selected managed instance could still go unused: (1) nothing knew how to
+  *start* it - image/music/video generation could only discover a launcher
+  script for a user-provided ComfyUI install, so it failed with "ComfyUI is
+  not reachable... point localm at your ComfyUI install" even though the
+  managed instance was right there; (2) if you had ever set a ComfyUI folder
+  for your own install - even long before setting up the managed one - that
+  old value silently kept overriding the managed instance forever, for the
+  same underlying reason. Generation now correctly launches and targets the
+  managed instance in both cases; a genuine per-plugin ComfyUI override
+  (Settings > Media's Image/Music/Video panels) still always wins, as before.
+- **The managed-ComfyUI status no longer reports "installed" while it is
+  still installing.** Whether a managed instance is considered ready (the
+  Settings pill, `localm comfy status`, and the actual routing that decides
+  where Generate sends a request) used to be based only on the ComfyUI
+  checkout and its venv existing - which happens within the first few
+  seconds of a fresh install, well before the much longer torch/requirements/
+  custom-nodes steps that follow. For the entire rest of that install
+  (several minutes on a normal connection), the status looked fully ready and
+  a Generate click would try to use a ComfyUI with no PyTorch installed yet.
+  Readiness now also requires the install's own completion marker, so the
+  status - and Generate - correctly wait for the whole setup to actually
+  finish.
+- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
+  section used to be a blind cut of the last ~120 log lines, so a session that
+  kept running afterward (even routine polling) could push the real error out
+  before the report was filed. It now keeps every warning/error from the whole
+  run and collapses long runs of near-identical routine lines (e.g. repeated
+  status polling) into one line with a repeat count, so the actual failure is
+  never buried or pushed out - no matter how long the session ran after it.
+- **A failed automatic model preload is no longer silent in the log.** When
+  `localm gui` warms up the last-used model in the background at startup and
+  that load fails, the failure now reaches the debug log (with its full
+  traceback) in addition to the console notice - previously it was
+  console-only, so a report filed afterward showed no sign anything had gone
+  wrong.
+- A couple of status messages no longer claim success when the step was actually
+  refused or skipped. A chat-model reload after image, music, or video generation
+  now says the reload was deferred to your next message (instead of a false "Chat
+  model ready.") when the server declined it, and installing the global `localm`
+  command tells you to add its folder to your PATH by hand when it could not do so
+  itself, instead of claiming the folder "was already on PATH".
 
 ### Security
+- **Bug reports no longer leak your username in the fields you type or the issue
+  title.** When you file a bug (through the app's "Report a bug", `localm bug-report`,
+  or the standalone reporter used when localm will not start), the automatically
+  collected diagnostics were already stripped of your home-folder path - which
+  contains your account name - and of any pasted credential. The one-line summary, the
+  description, and the extra "reason" you type were not, and neither was the public
+  issue title built from them, so a home path or a key pasted into those fields could
+  reach the public tracking issue even though the preview claims it shows exactly what
+  will be sent. Those fields are now scrubbed at the point of upload too, so what is
+  filed matches the redacted preview.
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
   "Allow private/loopback targets" setting (`net_allow_private`) turns off the
   guard that blocks model-initiated requests to localhost, your LAN, and

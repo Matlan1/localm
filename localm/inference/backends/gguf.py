@@ -29,6 +29,7 @@ from typing import Iterator, List, Optional
 from rich.console import Console
 
 from .base import BaseBackend, ModelLoadCancelled
+from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
 console = Console()
@@ -260,9 +261,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         constant could ever cover."""
         from localm.inference.backends.llamacpp._runner import LOAD_TIMEOUT_DEFAULT
         from localm.config import load_config
+        raw = load_config().get("gguf_load_timeout_s")
         try:
-            return float(load_config().get("gguf_load_timeout_s") or LOAD_TIMEOUT_DEFAULT)
+            return float(raw or LOAD_TIMEOUT_DEFAULT)
         except (TypeError, ValueError):
+            # A present-but-unparseable value (e.g. "abc", a list) is a real
+            # misconfiguration, distinct from the benign missing/empty case
+            # (None/0 -> the default above with no exception). Surface it under
+            # --debug rather than silently masking a typo'd config as if the
+            # user had simply not set it (rule 5).
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("gguf_load_timeout_s is set but not a valid number "
+                         "(%r); using the default %.0fs", raw, LOAD_TIMEOUT_DEFAULT)
             return LOAD_TIMEOUT_DEFAULT
 
     def unload(self) -> None:
@@ -295,7 +305,23 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         _grammar_unsupported and silently strip grammar from later requests. No-op
         when not loaded (no vocab to parse against) or when *grammar* is empty."""
         if grammar and self._loaded and self._runner is not None:
-            self._runner.check_grammar(grammar)
+            try:
+                self._runner.check_grammar(grammar)
+            except RunnerBusy:
+                # A generation is streaming on this model right now and holds the
+                # worker's response queue. validate_grammar is called
+                # synchronously on the server's async event loop (before the
+                # per-model inference semaphore), so blocking here would freeze
+                # the whole loop for the length of that generation (HON-02
+                # review finding). Defer the check: when generation builds the
+                # sampler it rejects a malformed grammar with the SAME clean
+                # InvalidGrammarError (llama.py raises it on the native NULL
+                # return, before any token) - so deferring only moves a bad
+                # grammar from an up-front 400 to a generation-time error, never
+                # a native fault or a latched degrade.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf validate_grammar: worker busy with a live "
+                           "stream; deferring grammar validation to generation time")
 
     # ------------------------------------------------------------------ #
     #  Tokenisation                                                        #
@@ -303,10 +329,24 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def count_tokens(self, text: str) -> int:
         """Return exact token count using the loaded model's vocabulary (an
-        RPC to the isolated worker)."""
+        RPC to the isolated worker), or the chars/4 heuristic when the worker
+        is busy streaming or the model is not loaded yet."""
         if self._loaded and self._runner is not None:
-            return self._runner.count_tokens(text)
-        # Not loaded yet - fall back to a chars/4 heuristic
+            try:
+                return self._runner.count_tokens(text)
+            except RunnerBusy:
+                # A generation is streaming on this model right now and holds
+                # the worker's response queue (HON-02). Rather than block this
+                # request's token accounting behind a whole generation - or risk
+                # its RPC reply racing the live stream's envelopes - fall back to
+                # the documented chars/4 estimate immediately and say so under
+                # --debug.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf count_tokens: worker busy with a live stream; "
+                           "using the chars/4 estimate")
+        # Not loaded yet, or the worker is mid-stream - chars/4 heuristic. A
+        # genuine RPC failure (worker crash/timeout) is NOT swallowed here: it
+        # propagates, preserving this method's existing contract.
         return max(1, len(text) // 4)
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
@@ -316,8 +356,21 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         if self._loaded and self._runner is not None:
             try:
                 return self._runner.count_messages_tokens(messages)
-            except Exception:
-                pass
+            except RunnerBusy:
+                # Worker busy with a live stream (HON-02) - use the heuristic
+                # rather than queue behind the generation. See count_tokens.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf count_messages_tokens: worker busy with a live "
+                           "stream; using the heuristic estimate")
+            except Exception as e:
+                # An unexpected RPC failure (worker crash/timeout, an encode
+                # error): the super() return below is then a heuristic ESTIMATE,
+                # not an exact count, and context-budgeting downstream is
+                # trusting an approximation - so surface it under --debug rather
+                # than swallowing it silently (rule 5).
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf count_messages_tokens RPC failed (%s); using "
+                           "the heuristic estimate", type(e).__name__)
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #

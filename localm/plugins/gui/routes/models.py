@@ -18,15 +18,17 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
 from localm.debuglog import logger
-from localm.inference.http_server import (principal_id, require_scope,
-                                          unload_all_models, unload_one_model)
+from localm.inference.http_server import (principal_id, require_fs_host,
+                                          require_scope, unload_all_models,
+                                          unload_one_model)
 import localm.inference.http_server as _hs
 from localm.plugins.executor import get_plugin_executor
 from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
                                     LoadModelRequest, MediaPreflightRequest,
                                     PullRequest, PullTokenRedeemRequest,
-                                    RemoveModelRequest, SetTypeRequest,
-                                    UnloadModelRequest, consume_pull_grant)
+                                    RemoveModelRequest, ScanRequest,
+                                    SetTypeRequest, UnloadModelRequest,
+                                    consume_pull_grant)
 
 
 def _require_registered(model: str, registry: dict | None = None) -> dict:
@@ -99,12 +101,40 @@ def register(app: FastAPI, ctx) -> None:
         return {"models": models, "active": current}
 
     @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def gui_scan_models():
-        from localm.model_manager.scan import scan_comfy_models
+    async def gui_scan_models(request: Request, req: ScanRequest | None = None):
+        """Scan for ComfyUI models. With no `workdir` (the old button's
+        bodyless POST, or an explicit `{}`), this is unchanged: it scans
+        whatever `comfy_workdir` is configured, MODELS_WRITE-only. An explicit
+        `workdir` is a one-off scan of an arbitrary folder for the guided
+        Import-from-ComfyUI flow - never written back to config - gated on
+        `require_fs_host` (called BEFORE the try/except below, so its 403
+        propagates as-is rather than getting reported as a generic 500): that
+        capability is equivalent to the host file/folder browser
+        (/api/fs/dirs), so a MODELS_WRITE-only key that lacks host filesystem
+        access cannot use this to enumerate or register arbitrary server
+        paths it could not otherwise browse. `dry_run` previews per-type
+        counts and registers nothing."""
+        from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
+        from functools import partial
+        workdir = req.workdir if req else None
+        dry_run = bool(req and req.dry_run)
+        if workdir:
+            require_fs_host(request)
         loop = asyncio.get_running_loop()
         try:
-            res = await loop.run_in_executor(get_plugin_executor(), scan_comfy_models)
+            if dry_run:
+                res = await loop.run_in_executor(
+                    get_plugin_executor(), partial(preview_comfy_models, workdir=workdir))
+                return {
+                    "dry_run": True,
+                    "method": res.method,
+                    "counts": res.counts,
+                    "already_registered": res.already_registered,
+                    "total_new": sum(res.counts.values()),
+                }
+            res = await loop.run_in_executor(
+                get_plugin_executor(), partial(scan_comfy_models, workdir=workdir))
             return {
                 "added": res.added,
                 "skipped": res.skipped,
@@ -267,16 +297,22 @@ def register(app: FastAPI, ctx) -> None:
     def _build_check_workflow(kind: str, overrides: MediaPreflightRequest):
         """Load *kind*'s currently-configured workflow template and shape it
         with the same model-relevant overrides the generate form has pending,
-        mirroring the load-template -> _build_*_workflow step generate_image /
-        generate_video / generate_music do - minus actually submitting a job.
-        input_image is always None: the image/video builders upload it to
-        ComfyUI as a real network call, which a read-only check must never do.
-        Returns the shaped workflow dict, or raises ValueError for an
-        unknown *kind*."""
+        mirroring the load-template -> apply_model_overrides -> _build_*_workflow
+        steps generate_image / generate_video / generate_music do - minus
+        actually submitting a job. ``model_overrides`` (the per-slot picks from
+        the Workflow panel's model dropdowns) is applied FIRST, exactly like the
+        real generate call, so a picked-but-not-installed model is caught here
+        too - otherwise this check would silently validate the template's
+        default filenames instead of what will actually run. input_image is
+        always None: the image/video builders upload it to ComfyUI as a real
+        network call, which a read-only check must never do. Returns the shaped
+        workflow dict, or raises ValueError for an unknown *kind*."""
         if kind == "image":
             from localm.image_gen.comfy import _build_image_workflow
-            from localm.image_gen.comfy import _workflow_path
-            workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+            from localm.image_gen.comfy import apply_model_overrides, workflow_path
+            workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
+            if overrides.model_overrides:
+                apply_model_overrides(workflow, overrides.model_overrides)
             _build_image_workflow(
                 workflow, prompt="", api_url="", guidance=None, negative_prompt=None,
                 cfg=None, seed=0, clip_name1=overrides.clip_name1,
@@ -286,8 +322,10 @@ def register(app: FastAPI, ctx) -> None:
             return workflow
         if kind == "video":
             from localm.video_gen.comfy import _build_video_workflow
-            from localm.video_gen.comfy import _workflow_path
-            workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+            from localm.video_gen.comfy import apply_model_overrides, workflow_path
+            workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
+            if overrides.model_overrides:
+                apply_model_overrides(workflow, overrides.model_overrides)
             _build_video_workflow(
                 workflow, prompt="", negative_prompt=None, frames=1, fps=8,
                 width=None, height=None, steps=1, cfg=None, seed=0,
@@ -295,8 +333,10 @@ def register(app: FastAPI, ctx) -> None:
             return workflow
         if kind == "music":
             from localm.music_gen.comfy import _build_music_workflow
-            from localm.music_gen.comfy import _workflow_path
-            workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+            from localm.music_gen.comfy import apply_model_overrides, workflow_path
+            workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
+            if overrides.model_overrides:
+                apply_model_overrides(workflow, overrides.model_overrides)
             _build_music_workflow(
                 workflow, tags="", lyrics_text="", duration_seconds=1.0, seed=0,
                 steps=1, cfg=1.0, lyrics_strength=1.0,

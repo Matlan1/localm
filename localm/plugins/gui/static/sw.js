@@ -12,7 +12,10 @@
 // v49: pages/settings.js changed (the ComfyUI setup log no longer erases itself
 // on failure, #621) - a stale-cache miss on THIS exact bump is what made that
 // fix invisible to an already-installed PWA in the field.
-const CACHE = "localm-shell-v49";
+// v50: pages/settings.js changed again (the managed_comfy_enabled checkbox was
+// removed - a stale-cached client would keep showing it AND get "unknown config
+// key" on save, since the server no longer accepts that field).
+const CACHE = "localm-shell-v50";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

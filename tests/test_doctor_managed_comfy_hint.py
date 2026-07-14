@@ -71,12 +71,15 @@ def _install_managed():
     """Create the S1 on-disk layout that makes is_managed_comfy_installed() true,
     under whatever LOCALM_HOME the cli_runner fixture pinned. Uses the module's
     own path accessors so it is platform-agnostic (venv interpreter path differs
-    on Windows vs POSIX)."""
+    on Windows vs POSIX). Includes the completion marker (#621 follow-up -
+    main.py + venv alone means "still installing")."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in ComfyUI main.py\n", encoding="utf-8")
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
     paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
     assert mc.is_managed_comfy_installed()
     return paths
 

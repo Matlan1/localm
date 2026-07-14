@@ -181,12 +181,21 @@ def _posix_on_path(bindir: Path) -> bool:
     return any(_same_dir(p, str(bindir)) for p in _split_path(os.environ.get("PATH", "")))
 
 
-def _posix_ensure_on_path(bindir: Path) -> bool:
+def _posix_ensure_on_path(bindir: Path):
     """If *bindir* is not already on PATH, append an export line to the user's
-    shell rc (pipx ``ensurepath`` style). Returns True if an rc was edited.
-    ``~/.local/bin`` is usually already on PATH, so this is usually a no-op."""
+    shell rc (pipx ``ensurepath`` style). ``~/.local/bin`` is usually already on
+    PATH, so this is usually a no-op.
+
+    Returns ``(changed, note)``:
+    - ``(False, None)`` - already on PATH (nothing to do).
+    - ``(True, None)``  - an rc was edited (or ~/.profile created) successfully.
+    - ``(False, <str>)`` - *bindir* is NOT on PATH but every shell-rc edit failed
+      (unwritable / root-owned / immutable dotfiles). This is the case the caller
+      MUST NOT report as "already on PATH": we could not persist the change, so
+      *note* names the manual step. A note, not a raise - startup must not abort
+      over a PATH nicety (module header: never a silent false success)."""
     if _posix_on_path(bindir):
-        return False
+        return False, None
     line = f'\n{_RC_MARK}\nexport PATH="$HOME/.local/bin:$PATH"\n'
     edited = False
     for name in (".bashrc", ".zshrc", ".profile"):
@@ -206,7 +215,13 @@ def _posix_ensure_on_path(bindir: Path) -> bool:
             edited = True
         except OSError:
             pass
-    return edited
+    if not edited:
+        # Reached only when bindir is NOT on PATH (we passed the early return) and
+        # every rc edit AND the ~/.profile fallback failed: we truly could not add
+        # it. Surface the truth so main() does not print "already on PATH".
+        return False, (f"could not add {bindir} to your PATH (could not edit your "
+                       "shell startup files); add it manually")
+    return True, None
 
 
 # --------------------------------------------------------------------------- #
@@ -217,12 +232,14 @@ def install(clone_root) -> dict:
     """Make ``localm`` available from any terminal. Non-destructive: creates our
     shim and appends our one bin dir to the user PATH; never overwrites another
     tool's command. Returns a dict the caller records in the install manifest:
-    ``{path_dir, shim, path_modified, conflict}`` (conflict = a pre-existing
-    ``localm`` on PATH, or None)."""
+    ``{path_dir, shim, path_modified, conflict, path_note}`` (conflict = a
+    pre-existing ``localm`` on PATH, or None; path_note = a human note when the
+    shim was created but its dir could NOT be put on PATH, else None)."""
     clone_root = Path(clone_root)
     d = bin_dir(clone_root)
     shim = shim_path(clone_root)
     conflict = existing_localm(shim)
+    path_note = None
 
     if sys.platform == "win32":
         _write_win_shim(shim)
@@ -236,12 +253,13 @@ def install(clone_root) -> dict:
         elif shim.exists():
             # Something that is not our symlink occupies the name - do not clobber.
             return {"path_dir": str(d), "shim": str(shim), "path_modified": False,
-                    "conflict": str(shim)}
+                    "conflict": str(shim), "path_note": None}
         shim.symlink_to(target)
-        changed = _posix_ensure_on_path(d)
+        changed, path_note = _posix_ensure_on_path(d)
 
     return {"path_dir": str(d), "shim": str(shim),
-            "path_modified": bool(changed), "conflict": conflict}
+            "path_modified": bool(changed), "conflict": conflict,
+            "path_note": path_note}
 
 
 def uninstall_command(path_dir: str, shim: str) -> dict:
@@ -322,7 +340,16 @@ def main(argv=None) -> int:
         if res.get("path_modified"):
             print("  Added 'localm' to your PATH. Open a NEW terminal to use it.")
             return 0
-        # Installed, but PATH was already set (a re-run, or the dir was present).
+        note = res.get("path_note")
+        if note:
+            # The shim was created but we could NOT put its dir on PATH. Do not
+            # claim it "was already on PATH" (false); tell the user the truth and
+            # the manual step. Still exit 20 (installed, PATH not modified by us) so
+            # the manifest records the shim without a --path-modified it did not do.
+            print(f"  [!] Global command created, but {note}.")
+            print("      Add that directory to your PATH, then open a new terminal.")
+            return 20
+        # Installed, and PATH was already set (a re-run, or the dir was present).
         # Exit 20 tells setup to record the command WITHOUT --path-modified, so the
         # manifest never claims to have changed a PATH it did not, and uninstall
         # will not take a dir off PATH that we did not put there.

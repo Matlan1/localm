@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import multiprocessing as mp
+import sys
 from typing import Optional
 
 from ._core import console, main
@@ -167,6 +168,53 @@ def _check_worker_spawn() -> None:
             f"  {_FAIL_SYM}  background worker spawn FAILED{detail} - GGUF "
             "model loads and voice transcription will fail even though the "
             "runtime above checks out")
+
+
+def _check_venv_creation() -> None:
+    """Verify localm can actually create a nested venv via ``-m venv`` using
+    ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
+    depends on (managed_comfy_fresh.py, #621). Creates and immediately discards a
+    throwaway venv under a temp dir; never touches LOCALM_HOME or any real install.
+
+    A DIFFERENT code path from the worker-spawn check above (that exercises
+    multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
+    matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
+    silently failing with "[WinError 2]") passed a doctor run showing everything
+    green precisely because nothing probed this. This check would have caught it."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from localm._mp_spawn import real_base_python
+
+    venv_python = real_base_python() or sys.executable
+    ok = False
+    detail = ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="localm-doctor-venv-") as tmp:
+            dest = Path(tmp) / "probe-venv"
+            r = subprocess.run(
+                [str(venv_python), "-m", "venv", str(dest)],
+                capture_output=True, text=True, timeout=60)
+            expected = dest / ("Scripts/python.exe" if sys.platform == "win32"
+                               else "bin/python3")
+            ok = r.returncode == 0 and expected.is_file()
+            if not ok:
+                tail = (r.stderr or r.stdout or "").strip().splitlines()
+                detail = tail[-1] if tail else ""
+    except Exception as e:
+        console.print(f"  {_FAIL_SYM}  venv-creation check errored: {e}")
+        return
+
+    if ok:
+        console.print(f"  {_OK_SYM}  venv creation: OK "
+                      "(the managed-ComfyUI installer uses this)")
+    else:
+        console.print(
+            f"  {_FAIL_SYM}  venv creation FAILED"
+            + (f" ({detail})" if detail else "")
+            + " - managed ComfyUI setup ('localm comfy setup') will fail even "
+              "though the runtime above checks out")
 
 
 def _check_gpu_driver() -> bool:
@@ -453,6 +501,8 @@ def doctor():
       - The isolated worker process (used by every GGUF model load and the
         voice/STT engine) can actually be spawned - a real subprocess.Popen
         probe passes even when this cannot (#617)
+      - A nested venv can actually be created via `-m venv` - the same
+        mechanism the managed-ComfyUI installer depends on (#621)
       - GPU inference capability, from the backend localm actually provisioned
         (Vulkan / Metal / bundled-ROCm / CUDA), not just nvidia-smi/rocm-smi/torch
       - Available VRAM
@@ -471,6 +521,7 @@ def doctor():
     if lib_healthy:
         _check_native_abi()
     _check_worker_spawn()
+    _check_venv_creation()
     # smi/torch are SUPPLEMENTARY detail lines, not the verdict: they miss
     # localm's default Vulkan/Metal/bundled-ROCm GPU paths entirely. The verdict
     # is derived from what localm will actually load (audit doctor-1).

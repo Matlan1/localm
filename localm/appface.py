@@ -21,6 +21,8 @@ import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.debuglog import logger
+
 
 def icon_path() -> Optional[str]:
     """The bundled LocaLM .ico, or None if missing."""
@@ -256,6 +258,10 @@ class _StatusWindow(AppFace):
             root.after(150, self._poll)
             root.mainloop()
         except Exception:
+            # The control window is a convenience layered on the server; a failure
+            # to build/run it must never stop the server, but do not discard it
+            # silently - log it (the _up.set() below still releases any waiter).
+            logger.debug("appface: control window failed to start", exc_info=True)
             self._up.set()
 
     def _on_x(self):
@@ -387,6 +393,10 @@ def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
             return None
         return _AppFaceHandle(window if win_ok else None, tray if tray_ok else None)
     except Exception:
+        # Best-effort: no control surface just means the server runs headless. Log
+        # the reason so a missing tray/window is diagnosable, not silent.
+        logger.debug("appface: control surface unavailable (start failed)",
+                     exc_info=True)
         return None
 
 
@@ -589,6 +599,10 @@ class _WinTray(AppFace):
         hwnd = user32.CreateWindowExW(0, "LocaLMTrayWindow", self.name, 0,
                                       0, 0, 0, 0, None, None, hinst, None)
         if not hwnd:
+            # CreateWindowExW returned NULL - no tray this run. Not fatal (the
+            # server runs fine without a tray icon), but log so it is not silent.
+            logger.debug("appface: tray window not created (CreateWindowExW "
+                         "returned NULL); no tray icon this run")
             self._ready.set()
             return
         self._hwnd = hwnd
@@ -609,6 +623,11 @@ class _WinTray(AppFace):
         nid.szTip = f"{self.name} - {self.url}"[:127]
         self._nid = nid
         self._ok = bool(shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)))
+        if not self._ok:
+            # The window exists but the shell rejected the notify-icon add; log so
+            # a missing tray icon is diagnosable rather than a silent no-op.
+            logger.debug("appface: Shell_NotifyIconW(NIM_ADD) failed; tray icon "
+                         "not shown this run")
         self._ready.set()
 
         # Message loop (owns this thread until WM_CLOSE / WM_DESTROY).
