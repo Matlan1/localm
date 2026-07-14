@@ -1148,11 +1148,89 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     return;
   }
 
-  pill.textContent = "not set up";
+  if (st.state === "corrupt") {
+    // An earlier setup attempt was abandoned (a crashed process, a closed
+    // browser tab mid-setup) before the completion marker was written - the
+    // checkout dir exists but is_managed_comfy_installed() correctly says no.
+    // Offer Repair instead of a dead end: Set up would just hit the route's
+    // own "already exists" 409, and there is no Remove button in THIS branch
+    // (that only appears once genuinely installed) - a user would otherwise
+    // have no way out short of the CLI.
+    pill.textContent = "incomplete - needs repair";
+    host.appendChild(el("div", "sub",
+      "A previous setup attempt did not finish (the folder exists at "
+      + (st.path || "the data folder") + " but the install is incomplete) - your "
+      + "downloaded models and settings are untouched either way."));
+    const actions = el("div", "actions");
+    const repair = el("button", "btn-primary comfy-managed-repair-btn", "Repair");
+    repair.type = "button";
+    actions.appendChild(repair);
+    host.appendChild(actions);
+    const log = el("pre", "comfy-managed-log");
+    log.style.display = "none";
+    host.appendChild(log);
+    repair.onclick = () => confirmDanger(
+      "Repair localm's ComfyUI?",
+      "This clears the incomplete install folder and sets it up again from "
+      + "scratch. Your downloaded models and localm settings live outside it "
+      + "and are not touched.",
+      "Repair",
+      async () => {
+        repair.disabled = true;
+        repair.textContent = "Repairing...";
+        log.style.display = "";
+        log.textContent = "";
+        let jobId;
+        try {
+          const r = await fetch("/api/comfy/repair",
+                                { method: "POST", headers: authHeaders() });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            toast(d.detail || "Repair failed", true);
+            repair.disabled = false;
+            repair.textContent = "Repair";
+            log.style.display = "none";
+            return;
+          }
+          jobId = d.job_id;
+        } catch (e) {
+          toast("Repair failed", true);
+          repair.disabled = false;
+          repair.textContent = "Repair";
+          return;
+        }
+        const end = await streamJob(jobId, (line) => {
+          log.textContent += line + "\n";
+          log.scrollTop = log.scrollHeight;
+        });
+        const ok = !!(end && end.status === "done");
+        toast(ok ? "localm's ComfyUI is ready" : "Repair did not finish (see the log)", !ok);
+        if (ok) {
+          renderManagedComfyPanel(host, toggleFields);
+        } else {
+          // Same reasoning as the Set-up flow below: do not re-render over a
+          // failure log the toast just pointed the user at.
+          repair.disabled = false;
+          repair.textContent = "Repair";
+        }
+      });
+    return;
+  }
+
+  // "installing": a setup job is genuinely running right now (checked by
+  // reading the actual job registry, not inferred) - most likely another
+  // browser tab/session started it, or this page was reloaded mid-setup, so
+  // there is no local job id to re-attach a live log to here. Say so plainly
+  // rather than offering a Set-up button that would just 409.
+  pill.textContent = st.state === "installing" ? "installing..." : "not set up";
   host.appendChild(el("div", "sub",
-    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
-    + "can pin a known-good version and carry fixes. Off by default; your own "
-    + "ComfyUI is never modified."));
+    st.state === "installing"
+      ? "A setup is currently running (started from another tab or session) - "
+        + "this will update once it finishes."
+      : "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
+        + "can pin a known-good version and carry fixes. Off by default; your own "
+        + "ComfyUI is never modified."));
+  if (st.state === "installing") return;
 
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.

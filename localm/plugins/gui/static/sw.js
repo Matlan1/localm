@@ -35,7 +35,11 @@
 // per-plugin accent color on the Media section's three boxes in favor of one
 // consistent accent. A stale-cached client would keep the broken Browse
 // button and the mismatched accent colors.
-const CACHE = "localm-shell-v55";
+// v56: pages/settings.js's managed-ComfyUI panel gained a "corrupt install /
+// needs repair" state (Repair button, POST /api/comfy/repair) distinguishing
+// an abandoned setup attempt from a clean "not set up" - a stale-cached
+// client would keep showing the old dead-end Set-up-button-that-just-409s.
+const CACHE = "localm-shell-v56";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
