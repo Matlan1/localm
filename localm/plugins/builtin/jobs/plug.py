@@ -107,13 +107,18 @@ def _engine_resolver():
         from localm.inference.http_server import _engine as _live_engine
         if _live_engine is not None and _live_engine.loaded:
             return _live_engine
-    except Exception:
-        pass
+    except Exception as e:
+        # Fall through to the host resolver, but log so a persistently broken
+        # lookup is traceable rather than a silent degrade (AGENTS.md rule 5).
+        from localm.debuglog import logger
+        logger.debug("jobs engine resolver: live-engine lookup failed: %s", e)
     if _host is None:
         return None
     try:
         return _host.engine()
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("jobs engine resolver: host.engine() failed: %s", e)
         return None
 
 
