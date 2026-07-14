@@ -1184,6 +1184,8 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 }
 .comfy-model-label { flex: 0 0 auto; min-width: 110px; color: var(--text-dim); }
 .comfy-model-select { flex: 1; min-width: 0; }
+.comfy-model-missing { color: var(--danger, #d66); }
+.comfy-model-missing-value { flex: 1; min-width: 0; color: var(--danger, #d66); }
 
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so

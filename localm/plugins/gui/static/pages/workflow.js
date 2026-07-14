@@ -126,10 +126,28 @@ async function comfyModelPicker(media) {
     return wrap;
   }
   wrap.appendChild(el("h5", "comfy-model-picker-head", "Models"));
+  // A slot with zero live options means ComfyUI has NONE of that file type
+  // installed - distinct from the workflow having nothing to configure at all,
+  // and worth calling out since it is exactly the situation a user needs to
+  // act on (install the missing file(s)).
+  const missing = data.slots.filter((s) => !s.options || !s.options.length);
+  if (missing.length) {
+    wrap.appendChild(el("div", "sub comfy-model-missing",
+      `${missing.length} required model file${missing.length === 1 ? "" : "s"} `
+      + "not found in ComfyUI - see below."));
+  }
   const overrides = (modelOverrides[media] ??= {});
   for (const slot of data.slots) {
     const row = el("div", "comfy-model-row");
     row.appendChild(el("label", "comfy-model-label", slot.input_name));
+    if (!slot.options || !slot.options.length) {
+      // No live choices to render - a <select> with zero <option>s would show
+      // blank and unusable. Name the workflow's own current value instead so
+      // the user knows exactly what file to install.
+      row.appendChild(el("span", "comfy-model-missing-value", `${slot.current} (not installed)`));
+      wrap.appendChild(row);
+      continue;
+    }
     const sel = document.createElement("select");
     sel.className = "comfy-model-select";
     const chosen = overrides[slot.node_id]?.[slot.input_name] ?? slot.current;

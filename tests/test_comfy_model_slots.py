@@ -72,6 +72,31 @@ class TestWorkflowModelSlots:
         with patch.object(comfy_client, "comfy_object_info", return_value=_object_info()):
             assert comfy_client.workflow_model_slots(wf, "http://x") == []
 
+    def test_slot_surfaces_when_comfyui_has_none_of_that_file_type_installed(self):
+        """The reproduced bug: ComfyUI has ZERO files of a given type installed, so
+        its live /object_info reports that combo's options as [] - which alone can
+        never look like model files (_looks_like_model_files([]) is False). Without
+        folding the node's current value into that heuristic, every slot in a
+        workflow whose ComfyUI is missing all its models vanishes from the picker
+        instead of surfacing exactly the "you're missing these" case it exists for.
+        VAELoader's vae_name is ComfyUI's own built-in latent-space pseudo-option
+        ("pixel_space"), not a model file - it must still be recognized because the
+        workflow's current value is a real filename."""
+        info = _object_info()
+        info["UnetLoaderGGUFAdvanced"]["input"]["required"]["unet_name"] = [[], {}]
+        info["DualCLIPLoader"]["input"]["required"]["clip_name1"] = [[], {}]
+        info["DualCLIPLoader"]["input"]["required"]["clip_name2"] = [[], {}]
+        info["VAELoader"]["input"]["required"]["vae_name"] = [["pixel_space"], {}]
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
+            slots = comfy_client.workflow_model_slots(_workflow(), "http://x")
+        assert slots is not None
+        by_input = {s["input_name"]: s for s in slots}
+        assert set(by_input) == {"unet_name", "clip_name1", "clip_name2", "vae_name"}
+        assert by_input["unet_name"]["options"] == []
+        assert by_input["unet_name"]["current"] == "flux1-dev-Q8_0.gguf"
+        assert by_input["vae_name"]["options"] == ["pixel_space"]
+        assert by_input["vae_name"]["current"] == "ae.safetensors"
+
 
 class TestApplyModelOverrides:
     def test_applies_a_valid_override(self):

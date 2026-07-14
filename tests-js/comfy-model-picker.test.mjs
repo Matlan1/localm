@@ -119,6 +119,31 @@ test("model picker renders one dropdown per slot, defaulting to the workflow's c
   assert.equal(selects[1].value, "ae.safetensors");
 });
 
+test("model picker surfaces a slot ComfyUI has zero live options for, instead of hiding it", async () => {
+  // Reproduces the bug: ComfyUI is reachable but has none of a required file
+  // type installed, so the backend still resolves the slot (current value is
+  // a real filename) but its live `options` array is empty. The panel must
+  // show it as "not installed", not silently omit it or render a blank <select>.
+  const slots = [
+    { node_id: "1", class_type: "UnetLoaderGGUFAdvanced", input_name: "unet_name",
+      current: "flux1-dev-Q8_0.gguf", options: [] },
+    { node_id: "3", class_type: "VAELoader", input_name: "vae_name",
+      current: "ae.safetensors", options: ["ae.safetensors"] },
+  ];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([], { reachable: true, slots }) });
+  const box = await render(win);
+  const selects = box.querySelectorAll(".comfy-model-select");
+  assert.equal(selects.length, 1, "only the slot WITH live options gets a dropdown");
+  const missingValue = box.querySelector(".comfy-model-missing-value");
+  assert.ok(missingValue, "the missing slot's current value is shown instead");
+  assert.match(missingValue.textContent, /flux1-dev-Q8_0\.gguf/);
+  assert.match(missingValue.textContent, /not installed/);
+  const summary = [...box.querySelectorAll(".comfy-model-missing")]
+    .find((d) => /not found in ComfyUI/.test(d.textContent));
+  assert.ok(summary, "a summary line calls out the missing model file(s)");
+  assert.match(summary.textContent, /^1 required model file /);
+});
+
 test("changing a dropdown records the override and it survives a plain panel refresh", async () => {
   const slots = [
     { node_id: "1", class_type: "UnetLoaderGGUFAdvanced", input_name: "unet_name",

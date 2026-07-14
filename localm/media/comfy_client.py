@@ -193,13 +193,36 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
     return None
 
 
-def _looks_like_model_files(options: list) -> bool:
+def _looks_like_model_files(options: list, current: Optional[str] = None) -> bool:
     """True when a combo's options look like model files (a mismatch is then a
-    missing-model error we can name), not an enum like sampler_name / scheduler."""
-    if not options:
-        return False
-    hits = sum(1 for o in options if o.lower().endswith(_MODEL_FILE_EXTS))
-    return hits >= max(1, len(options) // 2)
+    missing-model error we can name), not an enum like sampler_name / scheduler.
+
+    With 2+ live options this is decided from *options* ALONE, exactly as
+    before *current* existed as a parameter: a real enum (sampler_name,
+    scheduler, ...) always has several live choices, and none of them can
+    ever look like a filename, so blending an unrelated *current* value into
+    that vote could only ever wrongly flip a genuine enum - it never helps.
+
+    With 0 or 1 live options there is not enough of a sample to judge alone:
+    that is exactly what "ComfyUI has NOTHING of this file type installed"
+    (an empty list) or "this loader's only live choice is a non-file
+    sentinel" (e.g. a VAE loader offering just its built-in pixel-space
+    passthrough when no external VAE is installed) looks like. There *current*
+    - the node's value already in the workflow JSON, a concrete filename
+    regardless of whether ComfyUI has it installed - is the fallback signal,
+    so the slot still surfaces as "install this" instead of silently
+    vanishing from the picker (and from preflight_models(), which walks the
+    same slots). A single-option enum whose lone value is itself a stray
+    extension-like string is the residual false-positive this cannot rule
+    out, but that requires a hand-crafted/corrupted workflow - implausible
+    from ComfyUI's own UI - and this validation is best-effort by design."""
+    opts = options or []
+    if len(opts) > 1:
+        hits = sum(1 for o in opts if o.lower().endswith(_MODEL_FILE_EXTS))
+        return hits >= max(1, len(opts) // 2)
+    if opts and opts[0].lower().endswith(_MODEL_FILE_EXTS):
+        return True
+    return bool(current) and current.lower().endswith(_MODEL_FILE_EXTS)
 
 
 def _normalize_model_base(name: str) -> str:
@@ -277,7 +300,7 @@ def workflow_model_slots(workflow: dict, api_url: str) -> Optional[list]:
             if not isinstance(value, str):
                 continue
             options = _combo_options(spec, input_name)
-            if options is None or not _looks_like_model_files(options):
+            if options is None or not _looks_like_model_files(options, current=value):
                 continue
             slots.append({
                 "node_id": str(node_id),
