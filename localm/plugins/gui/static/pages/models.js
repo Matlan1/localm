@@ -1209,7 +1209,7 @@ export function importComfyPreviewMessage(data) {
   return null;
 }
 
-export function openImportComfyModal() {
+export function openImportComfyModal(initialPath = "") {
   openModal("Import from ComfyUI", (body) => {
     const wrap = el("div", "import-comfy");
 
@@ -1217,11 +1217,20 @@ export function openImportComfyModal() {
     const pathInput = document.createElement("input");
     pathInput.type = "text";
     pathInput.placeholder = "ComfyUI install folder";
+    pathInput.value = initialPath;
     const browseBtn = el("button", "btn-secondary", "Browse…");
     browseBtn.type = "button";
+    // pickDirectory() opens its OWN modal, and this app has a single shared
+    // #modal/#modal-body (openModal() replaces its content, it does not
+    // stack) - so calling it from inside this already-open modal destroys
+    // THIS modal's own DOM (pathInput included) the moment the folder picker
+    // renders. Writing the result into `pathInput.value` afterward would land
+    // on an already-detached node - no visible effect, the picker just closes
+    // with nothing appearing to happen. Re-open this same modal fresh with
+    // the picked path instead of trying to keep the old DOM alive across it.
     browseBtn.onclick = async () => {
       const dir = await pickDirectory("Pick a ComfyUI folder", pathInput.value.trim());
-      if (dir) pathInput.value = dir;
+      if (dir) openImportComfyModal(dir);
     };
     pathRow.append(pathInput, browseBtn);
     wrap.appendChild(pathRow);
@@ -1334,7 +1343,12 @@ export function openImportComfyModal() {
 }
 
 if ($("models-import-comfy-btn")) {
-  $("models-import-comfy-btn").onclick = openImportComfyModal;
+  // Not a bare `= openImportComfyModal` assignment: a DOM onclick handler is
+  // called with the click's MouseEvent as its first argument, which would
+  // otherwise land in openImportComfyModal's initialPath parameter instead of
+  // its "" default (a real bug this introduced once - the button's own click
+  // event stringified into the path field on first open).
+  $("models-import-comfy-btn").onclick = () => openImportComfyModal();
 }
 
 // Bind Unload-all button click handler

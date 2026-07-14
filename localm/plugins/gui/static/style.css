@@ -1114,16 +1114,6 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   border-left-color: var(--accent, var(--border));
   padding: 10px 12px;
 }
-/* Per-box accent (JS assigns one of these classes by position, cycling, so
-   each installed media plugin gets a distinct identity color instead of all
-   boxes reading as "the same colour" - see MEDIA_ACCENT_CATS in settings.js).
-   Reuses the existing cat-* nav-category tokens, same convention as
-   .settings-nav-link.cat-* above, so the palette matches the rest of the app. */
-.media-subsection.cat-blue   { --accent: var(--cat-blue); }
-.media-subsection.cat-cyan   { --accent: var(--cat-cyan); }
-.media-subsection.cat-teal   { --accent: var(--cat-teal); }
-.media-subsection.cat-violet { --accent: var(--cat-violet); }
-.media-subsection.cat-amber  { --accent: var(--cat-amber); }
 .media-sub-head { margin: 0; font-size: 14px; }
 /* A field inheriting the shared default (no per-plugin override yet): the whole
    row reads dimmer (label AND the value box) so an override clearly stands out
