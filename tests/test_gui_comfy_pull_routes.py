@@ -78,7 +78,7 @@ class TestPreflightRoute:
 
         from localm.media import comfy_client as cc
         with patch.object(cc, "comfy_object_info", return_value=fake_info), \
-             patch("localm.image_gen.comfy._workflow_path", return_value=fake_wf):
+             patch("localm.image_gen.comfy.workflow_path", return_value=fake_wf):
             with TestClient(scoped_app) as c:
                 r = c.post("/api/media/image/preflight", json={})
 
@@ -105,7 +105,7 @@ class TestPreflightRoute:
         }))
         from localm.media import comfy_client as cc
         with patch.object(cc, "comfy_object_info", return_value=fake_info), \
-             patch("localm.image_gen.comfy._workflow_path", return_value=fake_wf):
+             patch("localm.image_gen.comfy.workflow_path", return_value=fake_wf):
             with TestClient(scoped_app) as c:
                 r = c.post("/api/media/image/preflight", json={})
         assert r.status_code == 200

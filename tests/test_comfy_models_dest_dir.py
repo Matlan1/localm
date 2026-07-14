@@ -25,11 +25,15 @@ def home(tmp_path, monkeypatch):
 
 
 def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
+    # is_managed_comfy_installed() also requires the provisioning completion
+    # marker (not just main.py + venv) - see its docstring / test_managed_comfy_s1.py.
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
     paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
     assert mc.is_managed_comfy_installed()
     return paths
 

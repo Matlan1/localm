@@ -114,11 +114,15 @@ def test_managed_destination_variant_of_the_same_round_trip(home, monkeypatch):
     """Same round trip, but with the MANAGED ComfyUI active instead of an
     external workdir - the file must land under <LOCALM_HOME>/comfyui-models,
     not the external path."""
+    # is_managed_comfy_installed() also requires the provisioning completion
+    # marker (not just main.py + venv) - see its docstring / test_managed_comfy_s1.py.
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in\n", encoding="utf-8")
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
     paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
     assert mc.is_managed_comfy_installed()
 
     source = resolve_comfy_model_source("clip_l.safetensors")
