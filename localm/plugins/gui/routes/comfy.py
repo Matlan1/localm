@@ -10,8 +10,13 @@ no provisioning logic of their own (S2/S3 own that in localm/media/managed_comfy
                                      request); returns {"job_id"} to stream.
   GET  /api/comfy/managed-status  -> is a managed instance installed, where, and is
                                      localm routing to it (the S1 coexistence state).
+                                     Also reports "corrupt" (an incomplete install
+                                     left behind by an abandoned setup attempt) vs
+                                     "installing" (a setup job genuinely still running).
   POST /api/comfy/remove          -> delete the managed instance under the data dir
                                      (the shared remove_managed_comfy helper).
+  POST /api/comfy/repair          -> clear an INCOMPLETE install (never a genuinely
+                                     installed one) and re-run setup, in one action.
 
 Off by default: nothing here changes behaviour until the user opts in. The S1
 coexistence toggle (comfy_target) is NOT duplicated here - it stays a Settings
@@ -37,7 +42,18 @@ def register(app: FastAPI, ctx) -> None:
     async def comfy_managed_status():
         """Whether localm's OWN ComfyUI is installed, where it lives, and whether
         media calls currently route to it (the S1 coexistence state). Drives the
-        GUI's swap between the Set-up button and the installed/Remove view."""
+        GUI's swap between the Set-up button, the installed/Remove view, and (new)
+        a "needs repair" view.
+
+        `state` distinguishes four cases the plain `installed` boolean alone
+        cannot: "not_installed" (nothing here, offer Set up), "installing" (the
+        setup job is genuinely still running right now - NOT corrupt, just not
+        done yet), "corrupt" (the install dir exists, is_managed_comfy_installed()
+        says no completion marker, and no setup job is currently running for
+        it - an earlier attempt was abandoned: a crashed process, a closed
+        browser tab mid-setup - offer Repair, not a dead-end "already exists"),
+        and "installed" (the normal ready state). `installed` (the plain
+        boolean) is kept for existing callers."""
         from localm.config import load_config
         from localm.media.managed_comfy import (
             MANAGED_COMFY_API_URL, is_managed_comfy_installed, managed_comfy_active,
@@ -46,14 +62,32 @@ def register(app: FastAPI, ctx) -> None:
         cfg = load_config()
         installed = is_managed_comfy_installed()
         paths = managed_comfy_paths()
+        if installed:
+            state = "installed"
+        elif jobs.has_running("comfy-setup"):
+            state = "installing"
+        elif paths.root.exists():
+            state = "corrupt"
+        else:
+            state = "not_installed"
         return {
             "installed": installed,
-            "path": str(paths.root) if installed else None,
+            "state": state,
+            "path": str(paths.root) if (installed or state == "corrupt") else None,
             "models_dir": str(paths.models_dir) if installed else None,
             "api_url": MANAGED_COMFY_API_URL,
             "target": cfg.get("comfy_target", "own"),
             "managed_active": managed_comfy_active(cfg),
         }
+
+    def _start_setup_job(request: Request, copy_custom_nodes: bool):
+        # Pass an EXPLICIT custom-nodes flag so the CLI never prompts (its
+        # resolve_copy_custom_nodes short-circuits on a set flag) - the job runs with
+        # stdin closed and must not hang. Default: a clean start (decision 3).
+        flag = "--copy-custom-nodes" if copy_custom_nodes else "--no-custom-nodes"
+        return jobs.start_cli(
+            "comfy-setup", ["comfy", "setup", flag],
+            host_label="ComfyUI setup", owner=principal_id(request))
 
     @app.post("/api/comfy/setup",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -62,20 +96,46 @@ def register(app: FastAPI, ctx) -> None:
         entry point as a background job (setup is long + multi-GB, so it must not
         block the request). Streams progress via /api/jobs/{id}/events, like a model
         pull. Refuses (409) when a managed instance already exists - the user removes
-        it first (mirrors provision_by_copy's own guard); we never silently clobber."""
+        it first (or uses /api/comfy/repair for an incomplete one - see
+        comfy_managed_status's "corrupt" state); we never silently clobber."""
         from localm.media.managed_comfy import managed_comfy_paths
         if managed_comfy_paths().root.exists():
             raise HTTPException(
                 409, "A managed ComfyUI already exists. Remove it first, then set up "
                 "again.")
-        # Pass an EXPLICIT custom-nodes flag so the CLI never prompts (its
-        # resolve_copy_custom_nodes short-circuits on a set flag) - the job runs with
-        # stdin closed and must not hang. Default: a clean start (decision 3).
-        flag = "--copy-custom-nodes" if copy_custom_nodes else "--no-custom-nodes"
-        job = jobs.start_cli(
-            "comfy-setup", ["comfy", "setup", flag],
-            host_label="ComfyUI setup", owner=principal_id(request))
+        job = _start_setup_job(request, copy_custom_nodes)
         return {"job_id": job.id}
+
+    @app.post("/api/comfy/repair",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def comfy_repair(request: Request, copy_custom_nodes: bool = False):
+        """Repair an INCOMPLETE managed ComfyUI (comfy_managed_status's "corrupt"
+        state: the checkout dir exists but was never finished - a crashed process
+        or a closed browser mid-setup) by removing just the checkout (never the
+        models folder - with_models=False, matching remove_managed_comfy's own
+        target list) and re-running setup. Config lives outside the checkout
+        entirely (LOCALM_HOME's own config.json/registry.json, a sibling of the
+        `comfyui` dir, not inside it) and the managed models live in a SEPARATE
+        `comfyui-models` sibling dir - neither is touched. Refuses (409) if the
+        instance actually reads as installed (never repair-away a real one) or a
+        setup job is already running (no double-launch)."""
+        from localm.media.managed_comfy import (
+            is_managed_comfy_installed, managed_comfy_paths, remove_managed_comfy,
+        )
+        if is_managed_comfy_installed():
+            raise HTTPException(409, "This managed ComfyUI is already installed - "
+                                "nothing to repair.")
+        if jobs.has_running("comfy-setup"):
+            raise HTTPException(409, "A ComfyUI setup is already running.")
+        if not managed_comfy_paths().root.exists():
+            raise HTTPException(409, "No managed ComfyUI install found to repair - "
+                                "use Set up instead.")
+        removed, failed = await run_in_threadpool(remove_managed_comfy, False)
+        if failed:
+            raise HTTPException(500, "Could not clear the incomplete install: "
+                                + "; ".join(failed))
+        job = _start_setup_job(request, copy_custom_nodes)
+        return {"job_id": job.id, "cleared": [str(p) for p in removed]}
 
     @app.post("/api/comfy/remove",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

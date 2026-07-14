@@ -31,17 +31,30 @@ const MEDIA = { plugins: [
 ]};
 
 const INSTALLED = {
-  installed: true, path: "/home/user/.localm/comfyui",
+  installed: true, state: "installed", path: "/home/user/.localm/comfyui",
   models_dir: "/home/user/.localm/comfyui-models",
   api_url: "http://127.0.0.1:8189", target: "own",
   managed_active: false,
 };
 const NOT_INSTALLED = {
-  installed: false, path: null, api_url: "http://127.0.0.1:8189",
+  installed: false, state: "not_installed", path: null, api_url: "http://127.0.0.1:8189",
   target: "own", managed_active: false,
 };
+// A checkout abandoned mid-setup (a crashed process, a closed tab) - the exact
+// dead end #653-follow-up fixed: is_managed_comfy_installed() correctly says
+// false, but the folder exists, so the OLD status response looked identical
+// to NOT_INSTALLED and Set-up would just hit the route's own 409.
+const CORRUPT = {
+  installed: false, state: "corrupt", path: "/home/user/.localm/comfyui",
+  api_url: "http://127.0.0.1:8189", target: "own", managed_active: false,
+};
+const INSTALLING = {
+  installed: false, state: "installing", path: null,
+  api_url: "http://127.0.0.1:8189", target: "own", managed_active: false,
+};
 
-function makeFetch(calls, { installed, schema = SCHEMA, managedActive }) {
+function makeFetch(calls, { installed, state, schema = SCHEMA, managedActive }) {
+  const STATES = { installed: INSTALLED, corrupt: CORRUPT, installing: INSTALLING };
   return async (url, opts = {}) => {
     const u = String(url);
     const method = opts.method || "GET";
@@ -55,7 +68,7 @@ function makeFetch(calls, { installed, schema = SCHEMA, managedActive }) {
     if (u === "/v1/comfy/status")
       return { ok: true, status: 200, json: async () => ({ alive: false, launched_by_localm: false }), text: async () => "" };
     if (u === "/api/comfy/managed-status") {
-      const body = installed ? INSTALLED : NOT_INSTALLED;
+      const body = state ? STATES[state] : (installed ? INSTALLED : NOT_INSTALLED);
       return { ok: true, status: 200, text: async () => "",
                json: async () => (managedActive === undefined ? body
                  : { ...body, managed_active: managedActive }) };
@@ -64,6 +77,8 @@ function makeFetch(calls, { installed, schema = SCHEMA, managedActive }) {
       return { ok: true, status: 200, json: async () => ({ job_id: "job123" }), text: async () => "" };
     if (u === "/api/comfy/remove" && method === "POST")
       return { ok: true, status: 200, json: async () => ({ status: "removed", removed: [INSTALLED.path] }), text: async () => "" };
+    if (u === "/api/comfy/repair" && method === "POST")
+      return { ok: true, status: 200, json: async () => ({ job_id: "job123", cleared: [CORRUPT.path] }), text: async () => "" };
     return { ok: true, status: 200, text: async () => "",
              json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
   };
@@ -203,4 +218,73 @@ test("changing comfy_target and clicking the top box's Save PATCHes /v1/config w
   const body = JSON.parse(patch.opts.body);
   assert.equal(body.comfy_target, "user", "the changed select's value is in the PATCH body");
   assert.equal(Object.keys(body).length, 1, "exactly this one key is sent, nothing else");
+});
+
+// #653-follow-up: state="corrupt" (an abandoned setup attempt, is_managed_
+// comfy_installed()=false but the checkout dir exists) used to be visually
+// IDENTICAL to state="not_installed" - a Set-up button that would just 409
+// "already exists", with no Remove button either (that only ever appears when
+// installed=true) - a genuine dead end reachable only via the CLI.
+
+test("corrupt -> a Repair button renders, not Set-up or Remove", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "corrupt" }) });
+  await render(win);
+  const doc = win.document;
+  const repair = doc.querySelector(".comfy-managed-repair-btn");
+  assert.ok(repair, "Repair button rendered");
+  assert.equal(repair.type, "button");
+  assert.ok(!doc.querySelector(".comfy-managed-setup-btn"),
+    "no Set-up button (it would just 409 'already exists')");
+  assert.ok(!doc.querySelector(".comfy-managed-remove-btn"),
+    "no Remove button (that only appears once genuinely installed)");
+  const panel = doc.querySelector(".media-comfy-box");
+  assert.match(panel.textContent, /incomplete/i);
+});
+
+test("clicking Repair confirms, then POSTs /api/comfy/repair", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "corrupt" }) });
+  await render(win);
+  // Repair clears a folder, so it goes through confirmDanger like Remove does.
+  runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
+  win.document.querySelector(".comfy-managed-repair-btn").onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const post = calls.find((c) => c.url === "/api/comfy/repair" && c.method === "POST");
+  assert.ok(post, "Repair POSTed /api/comfy/repair");
+});
+
+test("a successful Repair re-renders into the installed view", async () => {
+  const calls = [];
+  let installedNow = false;
+  const fetchImpl = async (url, opts = {}) => {
+    if (String(url) === "/api/comfy/managed-status") {
+      const body = installedNow ? INSTALLED : CORRUPT;
+      return { ok: true, status: 200, text: async () => "", json: async () => body };
+    }
+    return makeFetch(calls, {})(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  runScript(win, "streamJob = () => Promise.resolve({ status: 'done' });");
+  runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
+  await render(win);
+  installedNow = true;   // the repaired instance is ready by the time streamJob resolves
+  win.document.querySelector(".comfy-managed-repair-btn").onclick();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok(win.document.querySelector(".comfy-managed-remove-btn"),
+    "re-rendered into the normal installed/Remove view");
+  assert.ok(!win.document.querySelector(".comfy-managed-repair-btn"));
+});
+
+test("installing -> no action button, no dead 409-bound Set-up click available", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "installing" }) });
+  await render(win);
+  const doc = win.document;
+  assert.ok(!doc.querySelector(".comfy-managed-setup-btn"), "no Set-up button while installing");
+  assert.ok(!doc.querySelector(".comfy-managed-repair-btn"), "no Repair button while installing");
+  assert.ok(!doc.querySelector(".comfy-managed-remove-btn"), "no Remove button while installing");
+  const panel = doc.querySelector(".media-comfy-box");
+  assert.match(panel.textContent, /currently running/i);
 });
