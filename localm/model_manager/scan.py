@@ -9,7 +9,19 @@ from localm.model_manager.registry import _register_with_dedup, _entry_path
 from localm.media.comfy_client import comfy_object_info, _MODEL_FILE_EXTS, _looks_like_model_files
 from localm.debuglog import logger
 
-# Table mapping ComfyUI model subdirectories to localm model_types
+# Table mapping ComfyUI model subdirectories to localm model_types. Deliberately
+# narrower than ComfyUI's OWN folder set (see media/managed_comfy.py's
+# _MODEL_FOLDER_TYPES, which lists controlnet/upscale_models/embeddings/
+# clip_vision/style_models for ComfyUI's own extra_model_paths.yaml): those
+# conventions fall through to "unknown"/Other here BY DESIGN, not by omission.
+# MODEL_TYPES (registry.py) is a closed enum wired through plugins/engine.py's
+# routing, contract.py, and the CLI/GUI type-selector - localm's own generation
+# pipeline never picks "which controlnet" or "which upscaler" through localm's
+# model registry; ComfyUI resolves those itself from the workflow JSON via
+# extra_model_paths.yaml, which already points at the same folders. Widening
+# this table would need every one of those consumers taught new types for no
+# functional gain today - the files still get registered (as unknown/Other)
+# and remain fully usable by ComfyUI either way.
 SUBFOLDER_MAPPING = {
     "unet": "diffusion-unet",
     "unet_gguf": "diffusion-unet",
@@ -26,6 +38,14 @@ SUBFOLDER_MAPPING = {
 class ScanResult(NamedTuple):
     added: int
     skipped: int
+    method: str
+
+class ScanPreview(NamedTuple):
+    """Dry-run result: counts by model_type for NEW (not-yet-registered) files
+    only, plus how many discovered files are already registered. `method`
+    carries the same human-decodable reason ScanResult.method does."""
+    counts: Dict[str, int]
+    already_registered: int
     method: str
 
 def get_comfy_workdir() -> Optional[str]:
@@ -46,15 +66,35 @@ def get_comfy_api_url() -> str:
             return api_url
     return default_api_url()
 
-def scan_comfy_models(comfy_url: Optional[str] = None) -> ScanResult:
-    """Scan ComfyUI folders and/or /object_info and register newly discovered files."""
-    workdir = get_comfy_workdir()
-    if not workdir:
-        return ScanResult(added=0, skipped=0, method="none (comfy_workdir not configured)")
+def _existing_registered_paths(reg: dict) -> set:
+    """Resolved on-disk paths of every validly-pathed registry entry, skipping a
+    malformed entry (non-dict, or a null / non-string / empty path). `"path" in
+    entry` TypeErrors on a null entry and `Path(entry["path"])` raises on a null
+    / int path; routing every entry through _entry_path keeps one corrupt row
+    from crashing a scan or preview. Mirrors #562's registry consumers."""
+    existing = set()
+    for entry in reg.values():
+        epath = _entry_path(entry)
+        if epath is None:
+            continue
+        try:
+            existing.add(Path(epath).resolve())
+        except OSError:
+            continue
+    return existing
 
+
+def _discover_comfy_files(workdir: str, comfy_url: Optional[str] = None):
+    """Walk *workdir*/models (pass 1) and, if ComfyUI answers /object_info,
+    reconcile types against its loader specs (pass 2). Shared by scan_comfy_models
+    and preview_comfy_models so both use the EXACT same discovery logic.
+
+    Returns (found_files, method). found_files is None (method explains why)
+    only when the models folder itself is missing - the one discovery-level
+    error a caller must treat specially rather than as an empty result."""
     models_path = Path(workdir) / "models"
     if not models_path.is_dir():
-        return ScanResult(added=0, skipped=0, method=f"none (models folder not found under {workdir})")
+        return None, f"none (models folder not found under {workdir})"
 
     # Pass 1: Walk the local folders
     found_files: Dict[Path, str] = {}
@@ -116,22 +156,24 @@ def scan_comfy_models(comfy_url: Optional[str] = None) -> ScanResult:
                                         if path_rel.endswith(opt_norm):
                                             found_files[path] = inferred_type
 
+    return found_files, method
+
+
+def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None) -> ScanResult:
+    """Scan ComfyUI folders and/or /object_info and register newly discovered
+    files. *workdir* overrides the configured comfy_workdir for a one-off scan
+    of an arbitrary folder (e.g. the guided Import-from-ComfyUI flow) WITHOUT
+    reading or mutating the persistent comfy_workdir config value."""
+    wd = workdir or get_comfy_workdir()
+    if not wd:
+        return ScanResult(added=0, skipped=0, method="none (comfy_workdir not configured)")
+
+    found_files, method = _discover_comfy_files(wd, comfy_url)
+    if found_files is None:
+        return ScanResult(added=0, skipped=0, method=method)
+
     # Now register the found files
-    reg = load_registry()
-    # Build the set of already-registered paths, skipping any malformed entry
-    # (non-dict, or a null / non-string / empty path). `"path" in entry` TypeErrors
-    # on a null entry and `Path(entry["path"])` raises on a null / int path; route
-    # every entry through _entry_path so one corrupt row cannot crash the scan.
-    # Mirrors #562's registry consumers.
-    existing_paths = set()
-    for entry in reg.values():
-        epath = _entry_path(entry)
-        if epath is None:
-            continue
-        try:
-            existing_paths.add(Path(epath).resolve())
-        except OSError:
-            continue
+    existing_paths = _existing_registered_paths(load_registry())
 
     added = 0
     skipped = 0
@@ -160,3 +202,29 @@ def scan_comfy_models(comfy_url: Optional[str] = None) -> ScanResult:
             skipped += 1
 
     return ScanResult(added=added, skipped=skipped, method=method)
+
+
+def preview_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None) -> ScanPreview:
+    """Dry-run of scan_comfy_models: identical discovery, but registers NOTHING.
+    Returns per-type counts of NEW (not-yet-registered) files plus how many
+    discovered files are already registered, so the guided Import-from-ComfyUI
+    flow can show what a real scan WOULD do before the user confirms it."""
+    wd = workdir or get_comfy_workdir()
+    if not wd:
+        return ScanPreview(counts={}, already_registered=0,
+                            method="none (comfy_workdir not configured)")
+
+    found_files, method = _discover_comfy_files(wd, comfy_url)
+    if found_files is None:
+        return ScanPreview(counts={}, already_registered=0, method=method)
+
+    existing_paths = _existing_registered_paths(load_registry())
+    counts: Dict[str, int] = {}
+    already_registered = 0
+    for path, mtype in found_files.items():
+        if path.resolve() in existing_paths:
+            already_registered += 1
+            continue
+        counts[mtype] = counts.get(mtype, 0) + 1
+
+    return ScanPreview(counts=counts, already_registered=already_registered, method=method)
