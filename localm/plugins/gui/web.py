@@ -231,6 +231,17 @@ class SetTypeRequest(BaseModel):
     model_type: str
 
 
+class ScanRequest(BaseModel):
+    # None (the default, and an empty/absent POST body - the old Scan button
+    # sends no body at all) scans the configured comfy_workdir, unchanged. An
+    # explicit workdir is a one-off scan of that folder (never written back to
+    # config) - gated behind host filesystem access, same trust level as the
+    # folder browser, since it lets the caller point the scanner anywhere.
+    workdir: str | None = None
+    # True previews counts by category and registers nothing.
+    dry_run: bool = False
+
+
 class ShareClearRequest(BaseModel):
     ids: list[str] = []
 

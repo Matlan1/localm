@@ -11,6 +11,7 @@ import { $, MIB, authHeaders, confirmDanger, el, fetchImageURL, streamJob, toast
 import { emptyState } from "../app/icons.js";
 import { hideStop, showStop } from "./images.js";
 import { pickDirectory } from "../app/picker.js";
+import { modelOverrides } from "./workflow.js";
 
 /* ================================================================ */
 /*  Video page                                                       */
@@ -30,6 +31,9 @@ $("video-generate").onclick = async () => {
                              ["cfg", "video-cfg"]]) {
     const v = $(id).value.trim();
     if (v !== "" && !Number.isNaN(Number(v))) body[field] = Number(v);
+  }
+  if (modelOverrides.video && Object.keys(modelOverrides.video).length) {
+    body.model_overrides = modelOverrides.video;
   }
 
   $("video-generate").disabled = true;

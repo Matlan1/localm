@@ -9,6 +9,7 @@
 import { $, authHeaders, fetchImageURL, streamJob, toast } from "../app/helpers.js";
 import { hideStop, showStop } from "./images.js";
 import { refreshMusicHistory } from "./video.js";
+import { modelOverrides } from "./workflow.js";
 
 /* ================================================================ */
 /*  Music page                                                       */
@@ -26,6 +27,9 @@ $("music-generate").onclick = async () => {
                              ["cfg", "music-cfg"]]) {
     const v = $(id).value.trim();
     if (v !== "" && !Number.isNaN(Number(v))) body[field] = Number(v);
+  }
+  if (modelOverrides.music && Object.keys(modelOverrides.music).length) {
+    body.model_overrides = modelOverrides.music;
   }
 
   $("music-generate").disabled = true;

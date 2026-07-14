@@ -63,7 +63,16 @@ def _version() -> str:
         from importlib.metadata import version
         return version("localm")
     except Exception:
-        return "0.1.2"
+        # Both the live VERSION file and dist-info are unreadable. Return the
+        # honest "unknown" sentinel (already used by read_version above), NOT a
+        # hardcoded version literal: /whoami's version gates the post-update health
+        # watchdog by EQUALITY (LM-DA-011), so a stale literal that ever equalled
+        # the expected version would false-PASS a build whose version machinery is
+        # actually broken. "unknown" can never equal a real target -> fails safe
+        # (the watchdog rolls back).
+        logger.debug("instances: version undetermined; reporting 'unknown'",
+                     exc_info=True)
+        return "unknown"
 
 
 def _now_iso() -> str:

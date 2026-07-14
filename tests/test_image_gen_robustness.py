@@ -143,9 +143,9 @@ class TestSidecarContent:
 
         # Force the committed example workflow so the test is independent of any
         # personal flux_workflow.json on the dev's machine (gitignored, and it
-        # takes precedence in _workflow_path()); otherwise the test reads a
+        # takes precedence in workflow_path()); otherwise the test reads a
         # machine-specific graph and is non-deterministic across checkouts.
-        monkeypatch.setattr(comfy, "_workflow_path",
+        monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
 
         out = tmp_path / "art.png"

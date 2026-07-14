@@ -69,6 +69,15 @@ def test_scrub_strips_bearer_and_api_keys():
     assert "<redacted>" in out
 
 
+def test_scrub_strips_url_credentials():
+    """The standalone scrub() must mirror localm/bugreport.py _scrub_secrets, which
+    strips user:pass@ from URLs - otherwise a credentialed URL pasted into --summary
+    or --detail is scrubbed by the in-app reporter but leaks through this fallback."""
+    out = ri.scrub("POST http://admin:SECRETPASS@api.corp.local/v1 failed")
+    assert "SECRETPASS" not in out
+    assert "<redacted>" in out
+
+
 def test_scrub_empty_is_safe():
     assert ri.scrub("") == ""
     assert ri.scrub(None) is None
@@ -191,3 +200,65 @@ def test_main_yes_no_endpoint_configured_saves_and_returns_1(tmp_path, monkeypat
     assert rc == 1
     out = capsys.readouterr().out
     assert "No bug-report endpoint" in out
+
+
+def test_main_scrubs_home_path_in_uploaded_title(tmp_path, monkeypatch, capsys):
+    """HON-03: the issue TITLE lands on a PUBLIC GitHub issue, so it must be
+    scrubbed like the body/preview. A home path (username) in --summary must not
+    reach the title unredacted - the tool's banner claims the preview is 'exactly
+    what will be sent'."""
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
+    captured = {}
+
+    def _capture(url, token, title, body, **k):
+        captured["title"] = title
+        captured["body"] = body
+        return {"url": "https://github.com/o/r/issues/1"}
+
+    monkeypatch.setattr(ri, "post_report", _capture)
+    rc = ri.main(["--yes", "--summary", r"crash at C:\Users\bob\localm\home\x.log"])
+    assert rc == 0
+    # What post_report RECEIVES as the title (what actually gets filed) is scrubbed.
+    assert "bob" not in captured["title"]
+    assert "<redacted>" in captured["title"]
+    assert "bob" not in captured["body"]
+    # And the "exactly what will be sent" preview never showed the raw username.
+    assert "bob" not in capsys.readouterr().out
+
+
+def test_main_scrubs_url_credential_in_title_and_body(tmp_path, monkeypatch):
+    """A credentialed URL typed into --summary must not reach the PUBLIC issue title
+    or body (end-to-end through main() to what post_report is handed)."""
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
+    captured = {}
+
+    def _capture(url, token, title, body, **k):
+        captured["title"] = title
+        captured["body"] = body
+        return {"url": "https://github.com/o/r/issues/2"}
+
+    monkeypatch.setattr(ri, "post_report", _capture)
+    rc = ri.main(["--yes", "--summary",
+                  "login fails via http://admin:SECRETPASS@api.corp.local/v1"])
+    assert rc == 0
+    assert "SECRETPASS" not in captured["title"]
+    assert "SECRETPASS" not in captured["body"]
+
+
+def test_powershell_reporter_scrubs_title_and_credentials():
+    """The PowerShell no-Python fallback reporter (report_issue.ps1) must mirror the
+    Python fix: scrub the uploaded TITLE (not the raw $summary), and its Scrub must
+    strip URL credentials + API keys, not just home paths + bearer tokens. Static
+    guard - the .ps1 is not exercised by this Python suite - to catch a revert."""
+    ps1 = _MOD_PATH.parent / "report_issue.ps1"
+    text = ps1.read_text(encoding="utf-8")
+    # The uploaded title is scrubbed, never the raw $summary.
+    assert "title = (Scrub $summary)" in text
+    assert "title = $summary" not in text
+    # Scrub covers URL user:pass@ credentials and sk-/localm-sk API keys.
+    assert r"(://)[^/@\s]+@" in text
+    assert "localm[_-]sk" in text

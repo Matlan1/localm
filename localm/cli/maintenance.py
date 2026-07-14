@@ -3,6 +3,8 @@ import sys
 
 import click
 
+from localm.debuglog import logger
+
 from ._core import console, main
 
 
@@ -36,8 +38,13 @@ def _wire_plugin_cli_entries() -> None:
             mod = importlib.import_module(mod_name)
             main.add_command(getattr(mod, attr))
             wired.add(name)
-        except ImportError:
-            pass
+        except ImportError as e:
+            # Usually a plugin's optional pip extras are simply not installed
+            # (benign - the verb is just unavailable). But this ALSO catches a
+            # genuinely broken first-party plugin module, which would otherwise
+            # vanish from the CLI with no trace. Debug-log so the two are
+            # distinguishable without failing startup over an optional extra.
+            logger.debug("plugin CLI %r not wired (import failed): %s", name, e)
     if "coder" not in wired:
         @main.command("coder", context_settings={"ignore_unknown_options": True})
         def _coder_stub(**_):

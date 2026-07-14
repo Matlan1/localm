@@ -226,16 +226,14 @@ DEFAULT_CONFIG: dict = {
     # user's install nor shims a ComfyUI it did not start. Set by the reactive
     # offer or `localm config comfy_func_shim on`; self-expires once Comfy is fixed.
     "comfy_func_shim": False,
-    # localm-managed ComfyUI (opt-in, off by default). When ON *and* a managed
-    # instance is installed under <LOCALM_HOME>/comfyui *and* comfy_target is
-    # "own", image/music/video target the OWN managed ComfyUI, not the user's.
-    # Inert until an instance exists; user's ComfyUI never modified. This flag
-    # only routes (provisioning is stages S2/S3). See localm/media/managed_comfy.py.
-    "managed_comfy_enabled": False,
-    # Which ComfyUI localm targets when a managed instance exists (coexistence).
-    # "own" (default) = prefer the managed instance when installed; "user" =
-    # always use the user's ComfyUI (comfy_workdir / comfy_api_url). With no
-    # managed instance, both behave identically.
+    # Which ComfyUI localm targets (coexistence). "own" (default) = use a
+    # localm-managed instance once one is installed under <LOCALM_HOME>/comfyui
+    # (`localm comfy setup`); inert until then, so a fresh install behaves
+    # identically to today. "user" = always use the user's own ComfyUI
+    # (comfy_workdir / comfy_api_url), even if a managed instance exists. With
+    # no managed instance, both behave identically. This key only routes
+    # (provisioning is stages S2/S3) and never modifies the user's own ComfyUI.
+    # See localm/media/managed_comfy.py.
     "comfy_target": "own",
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)

@@ -138,13 +138,25 @@ def changed_areas(since: str, repo: Path = REPO) -> list[str]:
     """Top-level dirs/files that changed since ref *since* (the last release tag),
     sorted and de-duplicated. Used to SCOPE the verification: real-run the features whose
     code moved; the rest are covered by their tests + the import/smoke gate, so there is
-    no need to re-generate an image or re-run every model when that path did not change."""
+    no need to re-generate an image or re-run every model when that path did not change.
+
+    A git FAILURE (a mistyped or unfetched *since* ref -> non-zero exit; or git missing)
+    is NOT an empty diff: it raises SystemExit rather than returning []. Swallowing it
+    would let main() print 'changed since vX: (nothing)', so a human scopes the mandatory
+    cold-install verification to nothing and records a PASS off a diff that never ran
+    (AGENTS.md rule 5). '(nothing)' is reserved for a genuinely empty, SUCCESSFUL diff."""
     try:
-        out = subprocess.run(["git", "diff", "--name-only", f"{since}..HEAD"], cwd=repo,
-                             capture_output=True, text=True, check=True).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-    tops = {line.split("/", 1)[0] for line in out.splitlines() if line}
+        r = subprocess.run(["git", "diff", "--name-only", f"{since}..HEAD"], cwd=repo,
+                           capture_output=True, text=True)
+    except FileNotFoundError as e:
+        raise SystemExit(f"release verify: git is required to scope the verification ({e}).")
+    if r.returncode != 0:
+        raise SystemExit(
+            f"release verify: could not diff {since}..HEAD to scope the verification "
+            f"(git exit {r.returncode}): {r.stderr.strip() or 'unknown error'}. Fetch the "
+            "tag/ref (or fix it) and retry - refusing to report an empty change set from a "
+            "failed diff.")
+    tops = {line.split("/", 1)[0] for line in r.stdout.splitlines() if line}
     return sorted(tops)
 
 

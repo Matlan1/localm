@@ -251,7 +251,7 @@ def test_contain_skips_delete_for_temp_artifacts(stub):
 
 def test_generate_image_default_keeps_comfy_copy(stub, tmp_path, monkeypatch):
     # By default a generation leaves ComfyUI's own copy + history in place.
-    monkeypatch.setattr(comfy, "_workflow_path",
+    monkeypatch.setattr(comfy, "workflow_path",
                         lambda: comfy._WORKFLOW_EXAMPLE_PATH)
     out = tmp_path / "saved" / "img.png"
 
@@ -270,7 +270,7 @@ def test_generate_image_default_keeps_comfy_copy(stub, tmp_path, monkeypatch):
 def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):
     # force the committed example workflow so the test is independent of any
     # personal flux_workflow.json present on the dev's machine
-    monkeypatch.setattr(comfy, "_workflow_path",
+    monkeypatch.setattr(comfy, "workflow_path",
                         lambda: comfy._WORKFLOW_EXAMPLE_PATH)
     out = tmp_path / "saved" / "img.png"
 
@@ -288,7 +288,7 @@ def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):
 
 
 def test_generate_image_warns_without_dir(stub, tmp_path, monkeypatch):
-    monkeypatch.setattr(comfy, "_workflow_path",
+    monkeypatch.setattr(comfy, "workflow_path",
                         lambda: comfy._WORKFLOW_EXAMPLE_PATH)
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     out = tmp_path / "saved2" / "img.png"
@@ -310,7 +310,7 @@ def test_generate_image_warns_without_dir(stub, tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_generate_music_contains_via_env_dir(stub, tmp_path, monkeypatch):
-    monkeypatch.setattr(music_comfy, "_workflow_path",
+    monkeypatch.setattr(music_comfy, "workflow_path",
                         lambda: music_comfy._WORKFLOW_PATH)
     # music's generate_music has no comfy_output_dir param; resolution falls
     # back to the COMFY_OUTPUT_DIR env var

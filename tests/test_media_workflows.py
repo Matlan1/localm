@@ -129,7 +129,7 @@ def test_router_endpoints_list_upload_select_delete():
 
 
 def test_generator_uses_selected_workflow(monkeypatch):
-    # The image generator's _workflow_path() resolves the selected file first.
+    # The image generator's workflow_path() resolves the selected file first.
     from pathlib import Path
 
     from localm.image_gen import comfy
@@ -140,10 +140,10 @@ def test_generator_uses_selected_workflow(monkeypatch):
                         Path(__file__).parent / "_no_personal_flux_workflow.json")
     custom = mw.save_workflow("image", "custom.json", _WF)
     mw.select_workflow("image", custom)
-    assert comfy._workflow_path() == mw.active_workflow_path("image")
+    assert comfy.workflow_path() == mw.active_workflow_path("image")
     # cleared -> falls back to the committed example (no personal override here)
     mw.select_workflow("image", None)
-    assert comfy._workflow_path() == comfy._WORKFLOW_EXAMPLE_PATH
+    assert comfy.workflow_path() == comfy._WORKFLOW_EXAMPLE_PATH
 
 
 # ---------------------------------------------------------------------------
