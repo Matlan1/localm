@@ -287,6 +287,45 @@ def test_provision_copy_end_to_end(home, fake_user_comfy, monkeypatch):
     assert target.workdir == str(paths.root)
 
 
+def test_isolated_env_strips_pythonpath(monkeypatch):
+    """_isolated_env() must never leak localm's own PYTHONPATH into a subprocess that
+    drives the user's or the managed venv - see its docstring for why."""
+    from localm.media import managed_comfy_provision as prov
+    monkeypatch.setenv("PYTHONPATH", "some/leaked/path")
+    monkeypatch.setenv("SOME_OTHER_VAR", "kept")
+    env = prov._isolated_env()
+    assert "PYTHONPATH" not in env
+    assert env.get("SOME_OTHER_VAR") == "kept"
+
+
+def test_read_user_freeze_ignores_leaked_pythonpath(home, fake_user_comfy, monkeypatch):
+    """A PYTHONPATH set on the CALLING localm process must not contaminate pip freeze
+    of the user's venv. Reproduced live: with a dev PYTHONPATH pointing at localm's own
+    venv, `pip freeze` on a 1-package venv reported 91 packages - one of which needed a
+    source build this feature never intended to trigger, which surfaced downstream as a
+    confusing "offline pip cache is missing a build backend" failure with no hint that
+    the actual cause was environment leakage (see managed_comfy_provision._isolated_env()
+    and its module import of ``os``).
+
+    ``pip freeze`` enumerates installed DISTRIBUTIONS via their ``.dist-info``
+    metadata (not just importable modules), so the "leaked" directory here must be
+    dist-info-shaped - a bare importable package would not be picked up either way
+    and this test would pass even on the unfixed code, proving nothing."""
+    from localm.media import managed_comfy_provision as prov
+    leaked = home.parent / "leaked-site-packages"
+    dist_info = leaked / "unrelatedpkg-1.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: unrelatedpkg\nVersion: 1.0.0\n", encoding="utf-8")
+    (dist_info / "RECORD").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(leaked))
+
+    freeze = prov.read_user_freeze(fake_user_comfy.venv_python)
+    assert freeze is not None
+    assert len(freeze) == 1, freeze
+    assert fake_user_comfy.pkg_name in freeze[0]
+
+
 def test_provision_copy_leaves_out_custom_nodes_when_declined(home, fake_user_comfy,
                                                               monkeypatch):
     """--no-custom-nodes: everything provisions EXCEPT the user's custom nodes."""
