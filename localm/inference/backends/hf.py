@@ -432,8 +432,15 @@ class HFBackend(BaseBackend):
                         template_messages, tokenize=False, add_generation_prompt=True
                     )
                 return len(self._tokenizer.encode(text, add_special_tokens=False))
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface under --debug (mirroring count_tokens above): the
+                # super() return below is then a heuristic ESTIMATE, not an
+                # exact count, so context-budgeting downstream is trusting an
+                # approximation. Never a silent pass (rule 5).
+                logger.debug(
+                    "chat-template token count failed (%s); using heuristic estimate",
+                    type(e).__name__,
+                )
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #
