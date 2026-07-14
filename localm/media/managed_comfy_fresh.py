@@ -479,7 +479,8 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (localm's managed models dir).")
 
-        # 7) Provenance marker (documentation for S4; not load-bearing).
+        # 7) Provenance marker (documentation for S4 AND now load-bearing for
+        #    step 8 below - is_managed_comfy_installed() requires this file too).
         _write_fresh_marker(root, commit, spec, n_nodes, node_failures, patch_outcomes)
 
         # 8) Prove it installed (S1's contract), or roll back and say it did not.

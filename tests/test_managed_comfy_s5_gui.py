@@ -48,12 +48,15 @@ def home(tmp_path, monkeypatch):
 def _install_managed() -> mc.ManagedComfyPaths:
     """Minimal on-disk layout that makes is_managed_comfy_installed() true, using the
     module's OWN path accessors so the test is platform-agnostic (the venv
-    interpreter path differs on Windows vs POSIX)."""
+    interpreter path differs on Windows vs POSIX). Includes the completion
+    marker (#621 follow-up - main.py + venv alone means "still installing")."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
     paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
     assert mc.is_managed_comfy_installed()
     return paths
 

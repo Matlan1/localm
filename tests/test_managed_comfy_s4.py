@@ -307,11 +307,16 @@ def _commit_all(workdir: Path, msg: str) -> str:
 
 
 def _make_fake_venv(root: Path) -> None:
-    """A placeholder venv interpreter so is_managed_comfy_installed() reads True
-    (S4's update never rebuilds the venv; it only moves the git source + patches)."""
-    vp = mc.managed_comfy_paths().venv_python
-    vp.parent.mkdir(parents=True, exist_ok=True)
-    vp.write_text("", encoding="utf-8")
+    """A placeholder venv interpreter + completion marker so
+    is_managed_comfy_installed() reads True (S4's update never rebuilds the
+    venv; it only moves the git source + patches). The marker is included
+    because #621's fix made it load-bearing - main.py + venv alone now reads
+    as "still installing", not "installed"."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
+    paths = mc.managed_comfy_paths()
+    paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
 
 
 # =========================================================================== #

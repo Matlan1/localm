@@ -112,16 +112,31 @@ def rmtree_robust(path: Path) -> None:
 
 
 def is_managed_comfy_installed() -> bool:
-    """True when a usable managed ComfyUI is actually present on disk.
+    """True when a usable managed ComfyUI is actually present on disk AND the
+    provisioning pipeline (S2/S3) actually finished.
 
-    S1 requires BOTH the ComfyUI entry point (``main.py``) AND the managed venv
-    interpreter - i.e. code present AND runnable - so a half-copied or aborted
-    install (S2/S3) does NOT read as installed and reroute media to a broken
-    instance. A future stage may tighten this further (e.g. a marker file
-    recording the pinned commit), but the layout check is the honest floor."""
+    Requires the completion marker (S2/S3's ``MARKER_FILENAME``, written as the
+    SECOND-TO-LAST step of provision_fresh()/provision_by_copy(), right before
+    their own final self-check) IN ADDITION TO the ComfyUI entry point
+    (``main.py``) and the managed venv interpreter existing.
+
+    Checking only main.py + venv_python (the original S1 design - see git
+    history) reads "installed" true as soon as step 2 of an 7-8 step pipeline
+    finishes (the git clone, then `python -m venv`) - reproduced live: for the
+    ENTIRE remaining duration of a real install (torch, ComfyUI's own
+    requirements, custom nodes, localm's patches - which can take minutes),
+    this function, `localm comfy status`, the Settings page pill, AND the
+    actual Generate-button routing (managed_comfy_active() calls this) would
+    all have reported the instance ready, and a Generate click during that
+    window would launch a ComfyUI with no torch installed. The marker is
+    written only once every earlier step has succeeded, so it is the honest
+    completion signal; main.py/venv_python alone are not."""
     paths = managed_comfy_paths()
     try:
-        return paths.main_py.is_file() and paths.venv_python.is_file()
+        if not (paths.main_py.is_file() and paths.venv_python.is_file()):
+            return False
+        from localm.media.managed_comfy_provision import MARKER_FILENAME
+        return (paths.root / MARKER_FILENAME).is_file()
     except OSError:
         return False
 

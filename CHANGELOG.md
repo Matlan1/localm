@@ -175,6 +175,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   same underlying reason. Generation now correctly launches and targets the
   managed instance in both cases; a genuine per-plugin ComfyUI override
   (Settings > Media's Image/Music/Video panels) still always wins, as before.
+- **The managed-ComfyUI status no longer reports "installed" while it is
+  still installing.** Whether a managed instance is considered ready (the
+  Settings pill, `localm comfy status`, and the actual routing that decides
+  where Generate sends a request) used to be based only on the ComfyUI
+  checkout and its venv existing - which happens within the first few
+  seconds of a fresh install, well before the much longer torch/requirements/
+  custom-nodes steps that follow. For the entire rest of that install
+  (several minutes on a normal connection), the status looked fully ready and
+  a Generate click would try to use a ComfyUI with no PyTorch installed yet.
+  Readiness now also requires the install's own completion marker, so the
+  status - and Generate - correctly wait for the whole setup to actually
+  finish.
 - **Bug reports no longer lose the actual error.** The "Recent log (tail)"
   section used to be a blind cut of the last ~120 log lines, so a session that
   kept running afterward (even routine polling) could push the real error out

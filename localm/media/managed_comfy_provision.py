@@ -48,8 +48,11 @@ from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 ProgressCb = Optional[Callable[[str], None]]
 
 # Provenance marker localm drops in the managed dir recording what was replicated.
-# NOT load-bearing for is_managed_comfy_installed() (S1 checks main.py + venv), so a
-# missing/edited marker never fakes an install - it is documentation for S4.
+# ALSO load-bearing for is_managed_comfy_installed() (checked there IN ADDITION to
+# main.py + venv): checking only main.py/venv existing let a still-installing
+# instance (torch/requirements/nodes not done yet) read as fully "installed" for
+# the whole remaining pipeline duration - reproduced live and fixed by requiring
+# this marker too. Written only once every earlier step has succeeded.
 MARKER_FILENAME = ".localm-comfy.json"
 
 # Dirs that are the user's DATA / ENV, never part of the ComfyUI source to replicate.
@@ -478,7 +481,8 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (your models + localm's managed models).")
 
-        # 6) Provenance marker (documentation for S4; not load-bearing).
+        # 6) Provenance marker (documentation for S4 AND now load-bearing for
+        #    step 7 below - is_managed_comfy_installed() requires this file too).
         _write_marker(root, stack, n_nodes, n_pkgs, patch_outcomes)
 
         # 7) Prove it actually installed (S1's contract), or roll back and say it did not.
