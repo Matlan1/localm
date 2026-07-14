@@ -159,3 +159,71 @@ def test_gui_models_route_does_not_freeze_event_loop(hsclean, monkeypatch):
 
     result = asyncio.run(_drive())
     assert result == {"models": [], "active": None}
+
+
+# --------------------------------------------------------------------------- #
+#  embedder.active_requests() (added by #650's pin fix) has the IDENTICAL     #
+#  _LOCK-blocking hazard as loaded_dim()/loaded_path() above - it must also   #
+#  be executor-offloaded at both call sites that gate an embedder release on  #
+#  it. Structural check (does the call go through run_in_executor), not a    #
+#  full timing simulation: the mechanism is identical to what the timing     #
+#  tests above already prove for the same lock; this confirms the THIRD      #
+#  accessor was not missed when #650's pin check was merged in.              #
+# --------------------------------------------------------------------------- #
+
+class _FakeLoadedEmbedder:
+    dim = 384
+    active_requests = 0
+    model_path = "/fake/embedder.gguf"
+
+    def close(self):
+        pass
+
+
+def _recording_run_in_executor(loop, calls):
+    real = loop.run_in_executor
+
+    def _wrapped(executor, func, *args):
+        calls.append(func)
+        return real(executor, func, *args)
+
+    return _wrapped
+
+
+def test_unload_all_models_offloads_active_requests_check(hsclean, monkeypatch):
+    monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": None})
+    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
+    emb._EMBEDDER = _FakeLoadedEmbedder()
+
+    async def _drive():
+        loop = asyncio.get_running_loop()
+        calls = []
+        monkeypatch.setattr(loop, "run_in_executor", _recording_run_in_executor(loop, calls))
+        result = await hs.unload_all_models()
+        return result, calls
+
+    result, calls = asyncio.run(_drive())
+    assert result["embedder_unloaded"] is True
+    assert emb.active_requests in calls, (
+        "active_requests() must run via loop.run_in_executor, like loaded_dim() "
+        "just above it - a direct call reintroduces the event-loop-freeze "
+        "hazard this file's other tests already prove for the same lock")
+
+
+def test_unload_embedder_if_matches_offloads_active_requests_check(hsclean, monkeypatch):
+    monkeypatch.setattr("localm.config.load_registry",
+                        lambda: {"embed-model": {"path": "/fake/embedder.gguf"}})
+    emb._EMBEDDER = _FakeLoadedEmbedder()
+
+    async def _drive():
+        loop = asyncio.get_running_loop()
+        calls = []
+        monkeypatch.setattr(loop, "run_in_executor", _recording_run_in_executor(loop, calls))
+        result = await hs._unload_embedder_if_matches("embed-model", loop)
+        return result, calls
+
+    result, calls = asyncio.run(_drive())
+    assert result["status"] == "unloaded"
+    assert emb.active_requests in calls, (
+        "active_requests() must run via loop.run_in_executor - same hazard as "
+        "loaded_path() just above it in this same function")

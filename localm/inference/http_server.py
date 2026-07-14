@@ -653,19 +653,29 @@ async def unload_all_models() -> dict:
     # though the GUI reported everything released (only the chat engines'
     # VRAM actually dropped - the embedder's stayed resident).
     #
-    # loaded_dim() MUST run in the executor, not directly on this coroutine:
-    # get_embedder() can hold embedder._LOCK for the full duration of an
-    # IsolatedEmbedder native/subprocess load (up to its load timeout), and
-    # loaded_dim() blocks on that same lock. A synchronous call here would
-    # freeze the WHOLE event loop - every other request this server is
-    # serving - for that entire window, not just this coroutine (confirmed via
-    # live reproduction during review, 2026-07-14). Executor-offloading it, like
-    # every other blocking call in this function, keeps the wait local to this
-    # one coroutine instead.
-    embedder_was_loaded = await loop.run_in_executor(
-        None, lambda: _embedder_mod.loaded_dim() is not None)
-    if embedder_was_loaded:
-        await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+    # loaded_dim()/active_requests() MUST run in the executor, not directly on
+    # this coroutine: get_embedder() can hold embedder._LOCK for the full
+    # duration of an IsolatedEmbedder native/subprocess load (up to its load
+    # timeout), and both of those accessors block on that same lock. A
+    # synchronous call here would freeze the WHOLE event loop - every other
+    # request this server is serving - for that entire window, not just this
+    # coroutine (confirmed via live reproduction during review, 2026-07-14).
+    # Executor-offloading them, like every other blocking call in this
+    # function, keeps the wait local to this one coroutine instead.
+    embedder_was_loaded = False
+    embedder_dim = await loop.run_in_executor(None, _embedder_mod.loaded_dim)
+    if embedder_dim is not None:
+        # Honor the in-flight-request pin (AUDIT-CRIT-1) for the embedder too,
+        # exactly like the chat-engine loop above: a request mid-embed() must
+        # not have its embedder (and the isolated worker process it is
+        # waiting on) freed out from under it. Skip it and report it
+        # alongside the pinned chat engines instead of a lying "unloaded".
+        embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
+        if embedder_active > 0:
+            skipped_in_use.append("embedding model")
+        else:
+            await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+            embedder_was_loaded = True
 
     # Update compatibility pointers - but NOT if the active engine was a pinned one
     # we deliberately left loaded (clearing it would strand the in-flight request's
@@ -742,6 +752,18 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
             return None
     except OSError:
         return None
+
+    # Honor the in-flight-request pin (AUDIT-CRIT-1): a request mid-embed()
+    # must not have its embedder freed out from under it. Report it as still
+    # in use instead of a lying "unloaded", matching unload_one_model's own
+    # pinned-chat-engine check just below. Executor-offloaded for the same
+    # reason as loaded_path() above - active_requests() also blocks on
+    # embedder._LOCK, which get_embedder() can hold for the length of an
+    # IsolatedEmbedder load; a synchronous call here would freeze the whole
+    # event loop, not just this request.
+    embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
+    if embedder_active > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
@@ -1711,7 +1733,15 @@ def _do_shutdown() -> None:
     # but a failure stays discoverable (rule 5).
     try:
         from localm.inference import embedder as _embedder_mod
-        _embedder_mod.reset_embedder()
+        # Honor the in-flight-request pin (AUDIT-CRIT-1) here too: skip if a
+        # request is mid-embed(). Unlike the chat-engine unloads above (which
+        # always run, since the process is exiting regardless), this is not
+        # just best-effort teardown - releasing the embedder pulls the rug
+        # out from under the isolated worker process the pinned request is
+        # still waiting on. Nothing is lost by skipping: the worker is a
+        # daemon child, so it is still reclaimed when this process exits.
+        if _embedder_mod.active_requests() == 0:
+            _embedder_mod.reset_embedder()
     except Exception:
         _dbg_swallow("embedder reset during shutdown failed (non-fatal)")
     try:
@@ -1787,7 +1817,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
     # regardless, but a failure stays discoverable (rule 5).
     try:
         from localm.inference import embedder as _embedder_mod
-        _embedder_mod.reset_embedder()
+        # Honor the in-flight-request pin (AUDIT-CRIT-1) here too - see the
+        # matching comment in _do_shutdown above for the full rationale.
+        if _embedder_mod.active_requests() == 0:
+            _embedder_mod.reset_embedder()
     except Exception:
         _dbg_swallow("embedder reset during restart failed (non-fatal)")
     try:
