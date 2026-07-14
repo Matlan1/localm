@@ -14,6 +14,7 @@ from localm.image_gen import comfy
 # _amd_rocm_launch_env, _derive_workdir_from_cmd, apply_fast_dequant - stay on the
 # comfy re-export and need no change.)
 from localm.media import comfy_client
+from localm.media import managed_comfy as mc
 
 
 def test_derive_workdir_from_full_bat_path(tmp_path):
@@ -234,6 +235,126 @@ def test_disable_auto_launch_absent_by_default(tmp_path):
     assert "--disable-auto-launch" not in str(argv_unset)
     argv_false = _spawn_with_cfg(tmp_path, {"comfy_disable_auto_launch": False})
     assert "--disable-auto-launch" not in str(argv_false)
+
+
+def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
+    """#621 follow-up: when localm's own managed ComfyUI is installed and
+    selected, ensure_comfy must launch IT (its own venv + main.py) - the
+    managed install is a raw checkout with no bundled launcher script for
+    discovery to find, so before this fix it fell through to "not reachable,
+    configure your own ComfyUI install" even with a working managed instance.
+
+    Only managed_comfy_paths() is faked (not managed_comfy_launch_cmd() /
+    managed_comfy_workdir() themselves), so the REAL command-building/quoting
+    logic in managed_comfy.py actually runs and is asserted on - a prior
+    version of this test mocked managed_comfy_launch_cmd() directly and so
+    never exercised it (confirmed gap from the conserve-mode review)."""
+    comfy_client._confirmed_alive.clear()
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
+           "comfy_launch_timeout": 30}
+    managed_root = tmp_path / "comfyui"
+    managed_root.mkdir()
+    fake_paths = mc.ManagedComfyPaths(
+        root=managed_root,
+        models_dir=tmp_path / "comfyui-models",
+        main_py=managed_root / "main.py",
+        venv_python=managed_root / "venv" / "Scripts" / "python.exe",
+        extra_model_paths=managed_root / "extra_model_paths.yaml",
+    )
+    alive = iter([False, True])
+    spawned = {}
+
+    def fake_popen(argv, cwd=None, **kw):
+        spawned["argv"], spawned["cwd"] = argv, cwd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
+         patch("localm.media.managed_comfy.managed_comfy_paths", return_value=fake_paths), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8189")
+
+    assert ok is True, msg
+    assert spawned["cwd"] == str(managed_root)
+    # List MEMBERSHIP, not a stringified-list substring check: str(a_list) reprs
+    # each element (escaping backslashes), so a raw Windows path would never
+    # match as a substring of str(argv) even though the real argv is correct.
+    argv = spawned["argv"]
+    assert str(fake_paths.venv_python) in argv
+    assert str(fake_paths.main_py) in argv
+    assert "--listen" in argv and "127.0.0.1" in argv
+    assert "--port" in argv and "8189" in argv
+
+
+def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
+    """A caller that passes its OWN explicit workdir/launch_cmd (e.g. a
+    per-plugin override) must win over managed routing - same "caller override
+    wins" precedent default_api_url() already follows for the URL."""
+    comfy_client._confirmed_alive.clear()
+    own_launcher = tmp_path / f"comfyui.{_ext()}"
+    own_launcher.write_text("echo hi\n", encoding="utf-8")
+    alive = iter([False, True])
+    spawned = {}
+
+    def fake_popen(argv, cwd=None, **kw):
+        spawned["argv"], spawned["cwd"] = argv, cwd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    with patch("localm.config.load_config", return_value={"comfy_launch_timeout": 30}), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188", workdir=str(tmp_path))
+
+    assert ok is True, msg
+    assert spawned["cwd"] == str(tmp_path)
+    assert "comfyui" in str(spawned["argv"])
+
+
+def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
+    """If managed_comfy_workdir() succeeds but managed_comfy_launch_cmd() then
+    raises, workdir must NOT stay pointed at the managed folder - it must fall
+    back to the ordinary (non-managed) resolution cleanly, not leave a
+    workdir-with-no-matching-launch_cmd inconsistent state (low-severity but
+    real gap found by the conserve-mode review).
+
+    managed_root is populated with a real main.py + venv/Scripts/python.exe
+    (discover_launch_cmd's own fallback-detection targets) so this test
+    actually DISCRIMINATES the two behaviors: under the bug, a leaked
+    workdir makes discover_launch_cmd(managed_root) wrongly succeed and
+    launch a ComfyUI missing --listen/--port (defaulting to the WRONG port,
+    8188, while ensure_comfy keeps polling 8189) - an empty managed_root
+    would make both the fixed and buggy code return the same "not reachable"
+    outcome for the wrong reason, silently failing to catch the regression."""
+    comfy_client._confirmed_alive.clear()
+    managed_root = tmp_path / "comfyui"
+    (managed_root / "venv" / "Scripts").mkdir(parents=True)
+    (managed_root / "main.py").write_text("# fake ComfyUI entry point\n", encoding="utf-8")
+    (managed_root / "venv" / "Scripts" / "python.exe").write_bytes(b"")
+    # No comfy_workdir/comfy_launch_cmd configured either -> the clean
+    # fallback must be "no launch_cmd found" (the ordinary not-managed,
+    # nothing-configured outcome), never a launch attempt against managed_root.
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
+           "comfy_launch_timeout": 30}
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy_client, "_comfy_alive", return_value=False), \
+         patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
+         patch("localm.media.managed_comfy.managed_comfy_workdir",
+               return_value=str(managed_root)), \
+         patch("localm.media.managed_comfy.managed_comfy_launch_cmd",
+               side_effect=RuntimeError("simulated failure")), \
+         patch("subprocess.Popen") as popen:
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8189")
+
+    assert ok is False
+    assert "not reachable" in msg
+    popen.assert_not_called()
 
 
 def test_ensure_comfy_error_points_at_the_folder():

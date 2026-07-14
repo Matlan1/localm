@@ -25,6 +25,11 @@ Scans tracked files and fails on:
      dev-notes/gpu-split-capacity-fix/ for the incident this check was written
      for - vram_info() was single-GPU-only and 8 call sites read it as if it
      were the aggregate ceiling before discover.vram_capacity() existed).
+  6. A PWA-precached GUI static file (listed in sw.js's SHELL array) changed
+     without sw.js's own CACHE version constant also being bumped - an already-
+     installed PWA would keep serving the stale cached file forever, since a
+     service worker only re-checks its precached files when its own bytes
+     change. Shipped twice undetected by a human before this check existed.
 
 It also runs the release-file manifest gate (scripts/check_manifest.py,
 NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
@@ -358,6 +363,73 @@ def _raw_accessor_violations(files: list[Path]) -> list[str]:
     return problems
 
 
+# ---- check 6: PWA service-worker cache-version bump gate -------------------
+# The GUI's service worker (sw.js) serves its precached SHELL assets cache-first;
+# an already-installed PWA only re-checks a precached file when sw.js's OWN
+# bytes change (its CACHE version constant) - the browser's own update algorithm
+# has no other trigger. A precached file changing without a matching CACHE bump
+# means the change is invisible to anyone with the PWA already installed. This
+# has shipped TWICE undetected by a human before being caught (v49 for #621's
+# settings.js fix; again for the managed_comfy_enabled checkbox removal) - see
+# dev-notes/ for both incidents. Turned into an enforced check rather than a
+# third "please remember" note.
+_SW_JS = "localm/plugins/gui/static/sw.js"
+
+
+def _sw_shell_files(sw_js_text: str) -> set[str]:
+    """The SHELL precache array's asset URL paths, parsed out of sw.js's own
+    source (a plain regex over the fixed, hand-maintained JS array literal -
+    not a real JS parser, but sufficient for this one array)."""
+    m = re.search(r"const SHELL = \[(.*?)\];", sw_js_text, re.S)
+    if not m:
+        return set()
+    return set(re.findall(r'"(/[^"]+)"', m.group(1)))
+
+
+def _sw_cache_version(sw_js_text: str) -> str | None:
+    m = re.search(r'const CACHE = "([^"]+)"', sw_js_text)
+    return m.group(1) if m else None
+
+
+def _sw_cache_bump_violations() -> list[str]:
+    ref = _changelog_baseline_ref()
+    if ref is None:
+        return []                        # no git available: nothing to diff against
+    sw_path = REPO / _SW_JS
+    try:
+        working_sw = sw_path.read_text(encoding="utf-8")
+    except OSError:
+        return []                        # sw.js removed entirely: nothing to check
+    base_result = _git("show", f"{ref}:{_SW_JS}")
+    if base_result is None or base_result.returncode != 0:
+        return []                        # sw.js not in the baseline yet
+    base_sw = base_result.stdout
+    working_cache = _sw_cache_version(working_sw)
+    base_cache = _sw_cache_version(base_sw)
+    if working_cache is None or base_cache is None or working_cache != base_cache:
+        return []                        # unparseable, or already bumped - nothing to flag
+
+    static_root = sw_path.parent
+    problems = []
+    for url_path in sorted(_sw_shell_files(working_sw)):
+        if url_path == "/":
+            continue                     # not a distinct on-disk file
+        on_disk = static_root / url_path.lstrip("/")
+        if not on_disk.is_file():
+            continue
+        rel_to_repo = on_disk.relative_to(REPO).as_posix()
+        diff = _git("diff", "--quiet", ref, "--", rel_to_repo)
+        if diff is not None and diff.returncode == 1:
+            problems.append(
+                f"{rel_to_repo}: changed since {ref[:8]} but {_SW_JS}'s CACHE "
+                f"version was not bumped (still {working_cache!r}) - an already-"
+                "installed PWA will keep serving the OLD cached file forever, "
+                "since the browser only re-checks a service worker when ITS OWN "
+                "bytes change. Bump CACHE in sw.js and say why in the comment "
+                "above it.")
+    return problems
+
+
 def _install_hook() -> int:
     hook = REPO / ".git" / "hooks" / "pre-commit"
     if not hook.parent.is_dir():
@@ -410,6 +482,7 @@ def main(argv: list[str]) -> int:
         problems.extend(_scan(f))
     problems.extend(_changelog_append_only())
     problems.extend(_raw_accessor_violations(tracked))
+    problems.extend(_sw_cache_bump_violations())
     manifest = _manifest_problems()
     if problems or manifest:
         if problems:

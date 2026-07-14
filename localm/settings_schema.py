@@ -496,18 +496,14 @@ CORE_FIELDS: list = [
                  "always = always unload chat; never = keep chat hot.",
                  group="Media", owner="image",
                  options=["auto", "always", "never"]),
-    SettingField("managed_comfy_enabled", Widget.TOGGLE,
-                 "Use localm's own managed ComfyUI",
-                 "Let localm run its OWN ComfyUI (installed under the localm data "
-                 "folder) instead of your install. Off by default and inert until "
-                 "one is set up - your own ComfyUI is never modified. Set one up "
-                 "with 'localm comfy setup', then turn this on to route media to it "
-                 "(comfy_target must be 'own').",
-                 group="Media", owner="image", applies=Applies.RESTART),
     SettingField("comfy_target", Widget.SELECT, "ComfyUI to use",
-                 "When a managed ComfyUI is installed: own = use localm's managed "
-                 "instance; user = always use your own ComfyUI. With no managed "
-                 "instance, both use your own ComfyUI.",
+                 "own = use localm's OWN managed ComfyUI (installed under the "
+                 "localm data folder) once you set one up with 'localm comfy "
+                 "setup' - inert until then, so this is safe to leave on "
+                 "'own'. user = always use your own ComfyUI install, even if "
+                 "a managed one exists. Your own ComfyUI is never modified "
+                 "either way, and switching back and forth never loses either "
+                 "one's settings below.",
                  group="Media", owner="image", options=["own", "user"],
                  applies=Applies.RESTART),
     # ---- Network (web plugin) ----

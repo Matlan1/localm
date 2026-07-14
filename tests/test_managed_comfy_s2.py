@@ -280,8 +280,7 @@ def test_provision_copy_end_to_end(home, fake_user_comfy, monkeypatch):
     assert str(fake_user_comfy.workdir / "models") in bases
     # 6) Installed -> S1 routing targets the managed instance when comfy_target=own.
     assert mc.is_managed_comfy_installed() is True
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
     target = mc.resolve_comfy_target()
     assert target.managed is True
     assert target.api_url == mc.MANAGED_COMFY_API_URL
