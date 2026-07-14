@@ -186,7 +186,7 @@ never modified. Full guide: [docs/managed-comfyui.md](../docs/managed-comfyui.md
 
 ```bash
 localm comfy setup                 # provision it (copies your ComfyUI, or a fresh hardware-matched install)
-localm config managed_comfy_enabled true   # then route media to the managed instance
+                                    # media routes to it right away (comfy_target defaults to "own")
 localm comfy status                # is one installed, and which ComfyUI is targeted now
 localm comfy update                # advance to the shipped pinned version, re-apply localm's patches
 localm comfy remove [--models]     # delete it (keeps the managed models unless --models)
@@ -196,10 +196,10 @@ localm comfy remove [--models]     # delete it (keeps the managed models unless 
 only; you are asked when custom nodes are present). `localm comfy update` takes
 `--reinstall-requirements` and, for testing, `--commit <sha>`.
 
-Whether localm targets the managed instance is decided by two settings:
-`managed_comfy_enabled` (default off) and `comfy_target` (`own` by default, or
-`user` to force your own ComfyUI). localm uses the managed instance only when both
-line up and an instance is installed; otherwise it uses your own ComfyUI.
+Whether localm targets the managed instance is decided by one setting,
+`comfy_target` (`own` by default, or `user` to force your own ComfyUI) - localm
+uses the managed instance only when it is `own` AND an instance is installed;
+otherwise it uses your own ComfyUI.
 
 ---
 

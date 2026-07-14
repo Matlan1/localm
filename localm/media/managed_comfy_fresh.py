@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm import hwdetect
+from localm._mp_spawn import real_base_python
 from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
@@ -420,8 +421,16 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
 
         # 2) Fresh localm venv (same base Python as localm; torch wheels are
         #    Python-version specific, and localm's interpreter is the known-good one).
+        # Use the real base interpreter, never sys.executable directly: when this
+        # process IS the branded LocaLM.exe copy (applaunch.py), sys.executable is a
+        # renamed file whose basename never exists in the base install dir. stdlib
+        # venv's EnvBuilder (and its ensurepip bootstrap) match on that basename to
+        # decide what to copy/invoke inside the new venv, so "LocaLM.exe -m venv"
+        # silently creates a venv with no launcher of its own, and the mandatory pip
+        # bootstrap then fails with WinError 2 - reproduced live (#621).
+        venv_python = real_base_python() or sys.executable
         _say("Creating a fresh localm venv ...")
-        ok, out = _run([sys.executable, "-m", "venv", str(root / "venv")],
+        ok, out = _run([str(venv_python), "-m", "venv", str(root / "venv")],
                        on_progress=on_progress, timeout=300)
         if not ok or not paths.venv_python.is_file():
             return _fail(f"Could not create the managed venv: {_tail(out)}")
@@ -470,7 +479,8 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (localm's managed models dir).")
 
-        # 7) Provenance marker (documentation for S4; not load-bearing).
+        # 7) Provenance marker (documentation for S4 AND now load-bearing for
+        #    step 8 below - is_managed_comfy_installed() requires this file too).
         _write_fresh_marker(root, commit, spec, n_nodes, node_failures, patch_outcomes)
 
         # 8) Prove it installed (S1's contract), or roll back and say it did not.

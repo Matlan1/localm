@@ -34,6 +34,7 @@ import urllib.request  # noqa: F401
 from localm.media.comfy_client import (
     _localm_unload,
     _with_warning,
+    apply_model_overrides,
     comfy_exec_error_message,
     comfy_fetch_output,
     comfy_http_error_detail,
@@ -62,7 +63,7 @@ _WORKFLOW_PATH = Path(__file__).parent / "ace_workflow.json"
 _WORKFLOW_LOCAL_PATH = Path(__file__).parent / "ace_workflow_local.json"
 
 
-def _workflow_path() -> Path:
+def workflow_path() -> Path:
     # 1. a workflow the user selected for the music plugin, 2. the legacy
     # ace_workflow_local.json, 3. the committed template. Selection is additive.
     try:
@@ -157,6 +158,7 @@ def generate_music(
     cfg: float = 5.0,
     lyrics_strength: float = 0.99,
     ckpt_name: Optional[str] = None,
+    model_overrides: Optional[dict] = None,
     localm_url: Optional[str] = None,
     max_poll_seconds: int = 1800,
     on_progress=None,
@@ -196,6 +198,11 @@ def generate_music(
         How strongly the lyrics steer generation (0..1).
     ckpt_name
         Override the checkpoint filename inside ComfyUI's models/checkpoints.
+    model_overrides
+        Generic per-node model-slot overrides (see image_gen.comfy.generate_image's
+        docstring for the full explanation) - ``{node_id: {input_name: value}}``,
+        applied before ckpt_name/any other shaping, so an explicit ckpt_name for
+        the same field still wins if both are given.
     localm_url
         localm server /v1 URL to unload before generation (VRAM handoff).
     max_poll_seconds
@@ -230,9 +237,11 @@ def generate_music(
     # it costs the user a pointless unload + reload.
 
     try:
-        workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+        workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
     except Exception as e:
         return False, f"Failed to load ACE-Step workflow template: {e}"
+    if model_overrides:
+        apply_model_overrides(workflow, model_overrides)
 
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
     lyrics_text = (lyrics or "").strip() or _INSTRUMENTAL

@@ -193,13 +193,36 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
     return None
 
 
-def _looks_like_model_files(options: list) -> bool:
+def _looks_like_model_files(options: list, current: Optional[str] = None) -> bool:
     """True when a combo's options look like model files (a mismatch is then a
-    missing-model error we can name), not an enum like sampler_name / scheduler."""
-    if not options:
-        return False
-    hits = sum(1 for o in options if o.lower().endswith(_MODEL_FILE_EXTS))
-    return hits >= max(1, len(options) // 2)
+    missing-model error we can name), not an enum like sampler_name / scheduler.
+
+    With 2+ live options this is decided from *options* ALONE, exactly as
+    before *current* existed as a parameter: a real enum (sampler_name,
+    scheduler, ...) always has several live choices, and none of them can
+    ever look like a filename, so blending an unrelated *current* value into
+    that vote could only ever wrongly flip a genuine enum - it never helps.
+
+    With 0 or 1 live options there is not enough of a sample to judge alone:
+    that is exactly what "ComfyUI has NOTHING of this file type installed"
+    (an empty list) or "this loader's only live choice is a non-file
+    sentinel" (e.g. a VAE loader offering just its built-in pixel-space
+    passthrough when no external VAE is installed) looks like. There *current*
+    - the node's value already in the workflow JSON, a concrete filename
+    regardless of whether ComfyUI has it installed - is the fallback signal,
+    so the slot still surfaces as "install this" instead of silently
+    vanishing from the picker (and from preflight_models(), which walks the
+    same slots). A single-option enum whose lone value is itself a stray
+    extension-like string is the residual false-positive this cannot rule
+    out, but that requires a hand-crafted/corrupted workflow - implausible
+    from ComfyUI's own UI - and this validation is best-effort by design."""
+    opts = options or []
+    if len(opts) > 1:
+        hits = sum(1 for o in opts if o.lower().endswith(_MODEL_FILE_EXTS))
+        return hits >= max(1, len(opts) // 2)
+    if opts and opts[0].lower().endswith(_MODEL_FILE_EXTS):
+        return True
+    return bool(current) and current.lower().endswith(_MODEL_FILE_EXTS)
 
 
 def _normalize_model_base(name: str) -> str:
@@ -252,6 +275,70 @@ def _format_missing(missing: list) -> str:
     return "\n".join(lines)
 
 
+def workflow_model_slots(workflow: dict, api_url: str) -> Optional[list]:
+    """Every model-file combo slot in *workflow*, resolved against ComfyUI's live
+    ``/object_info``: ``[{"node_id", "class_type", "input_name", "current",
+    "options"}, ...]``. This is the node/input walk ``preflight_models()`` uses to
+    validate a workflow's model choices, exposed here for a model-picker UI too -
+    one shared walk, not two independently-maintained ones.
+
+    None when ``/object_info`` cannot be fetched (ComfyUI unreachable) - distinct
+    from ``[]`` (reachable, but this workflow genuinely has no model-file inputs),
+    so a caller can tell "cannot determine" from "determined: none"."""
+    info = comfy_object_info(api_url)
+    if not info:
+        return None
+    slots = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        spec = info.get(node.get("class_type"))
+        inputs = node.get("inputs")
+        if not isinstance(spec, dict) or not isinstance(inputs, dict):
+            continue
+        for input_name, value in inputs.items():
+            if not isinstance(value, str):
+                continue
+            options = _combo_options(spec, input_name)
+            if options is None or not _looks_like_model_files(options, current=value):
+                continue
+            slots.append({
+                "node_id": str(node_id),
+                "class_type": node.get("class_type"),
+                "input_name": input_name,
+                "current": value,
+                "options": options,
+            })
+    return slots
+
+
+def apply_model_overrides(workflow: dict, overrides: dict) -> int:
+    """Apply per-node model-slot overrides to *workflow* in place.
+
+    *overrides* is ``{node_id: {input_name: value}}`` (the shape a client builds
+    from ``workflow_model_slots()``'s ``node_id``/``input_name``). Only writes a
+    field that ALREADY exists as a plain string input on that node - never creates
+    a new key, never touches a link/number input - so a malformed or stale
+    override can at worst no-op, never corrupt the graph. Returns how many fields
+    were actually changed."""
+    changed = 0
+    if not isinstance(overrides, dict):
+        return 0
+    for node_id, fields in overrides.items():
+        node = workflow.get(str(node_id))
+        if not isinstance(node, dict) or not isinstance(fields, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_name, value in fields.items():
+            if (input_name in inputs and isinstance(inputs[input_name], str)
+                    and isinstance(value, str) and inputs[input_name] != value):
+                inputs[input_name] = value
+                changed += 1
+    return changed
+
+
 def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple[bool, str]:
     """Validate every loader's model file against ComfyUI ``/object_info`` BEFORE the
     caller unloads the chat model.
@@ -261,32 +348,21 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     specific, Workflow-panel-pointing error when a required model is missing and no
     one variant fits; ``ok=True`` (empty message) otherwise. Best-effort: returns
     ``(True, "")`` when /object_info is unavailable (defer to submit-time validation)."""
-    info = comfy_object_info(api_url)
-    if not info:
+    slots = workflow_model_slots(workflow, api_url)
+    if slots is None:
         return True, ""        # cannot validate -> defer to submit-time validation
     missing: list = []
     subs: list = []
-    for node in workflow.values():
-        if not isinstance(node, dict):
-            continue
-        spec = info.get(node.get("class_type"))
-        inputs = node.get("inputs")
-        if not isinstance(spec, dict) or not isinstance(inputs, dict):
-            continue           # unknown class / no inputs here -> can't validate; skip
-        for input_name, value in list(inputs.items()):
-            if not isinstance(value, str):
-                continue       # links and numbers are not model-file names
-            options = _combo_options(spec, input_name)
-            if options is None or not _looks_like_model_files(options):
-                continue
-            if value in options:
-                continue       # the file is present - good
-            variant = _pick_variant(value, options)
-            if variant is not None:
-                inputs[input_name] = variant
-                subs.append((node.get("class_type"), input_name, value, variant))
-            else:
-                missing.append((node.get("class_type"), input_name, value, options))
+    for slot in slots:
+        value, options = slot["current"], slot["options"]
+        if value in options:
+            continue            # the file is present - good
+        variant = _pick_variant(value, options)
+        if variant is not None:
+            workflow[slot["node_id"]]["inputs"][slot["input_name"]] = variant
+            subs.append((slot["class_type"], slot["input_name"], value, variant))
+        else:
+            missing.append((slot["class_type"], slot["input_name"], value, options))
     if on_progress:
         for cls, field, old, new in subs:
             try:
@@ -1028,19 +1104,44 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
 
     cfg = load_config()
 
-    # Resolve the ComfyUI folder (working dir) FIRST: explicit arg, then config.
-    # It anchors both launcher discovery and the cwd a relative launcher name
-    # runs from, so a bare "launch-comfyui.bat" works once the folder is known.
+    # A localm-managed instance (decision 6) knows its own launch command - its
+    # own venv + main.py, never the user's comfy_workdir/comfy_launch_cmd/
+    # discovery (a raw managed checkout has no bundled launcher script for
+    # discovery to find). Only applies when the CALLER did not already pass an
+    # explicit workdir/launch_cmd of its own - same "caller override wins"
+    # precedent default_api_url() already follows for the URL.
+    managed_launch_cmd = None
+    if workdir is None and not launch_cmd:
+        try:
+            from localm.media.managed_comfy import (
+                managed_comfy_active, managed_comfy_launch_cmd, managed_comfy_workdir)
+            if managed_comfy_active(cfg):
+                # Atomic: only adopt the managed workdir if BOTH calls succeed.
+                # Setting `workdir` from the first call and then having the
+                # second raise would leave `workdir` pointed at the managed
+                # folder with no matching launch_cmd, so the code below would
+                # fall through to unrelated global-config/discovery logic
+                # against that folder instead of a clean "not managed" outcome.
+                managed_workdir = managed_comfy_workdir()
+                managed_launch_cmd = managed_comfy_launch_cmd()
+                workdir = managed_workdir
+        except Exception:
+            managed_launch_cmd = None
+
+    # Resolve the ComfyUI folder (working dir): explicit arg / managed, then
+    # config. It anchors both launcher discovery and the cwd a relative
+    # launcher name runs from, so a bare "launch-comfyui.bat" works once the
+    # folder is known.
     if workdir is None:
         workdir = cfg.get("comfy_workdir")
 
-    # Resolve the launch command: explicit arg, then config, then - when the
-    # ComfyUI folder is known - auto-discover a launcher inside it (the user's
-    # own launch-comfyui.bat, else the stock comfyui.bat / run.bat). This is the
-    # "work with the install the user already has" path: pointing localm at the
-    # ComfyUI folder is enough; naming a script is optional.
+    # Resolve the launch command: explicit arg / managed, then config, then -
+    # when the ComfyUI folder is known - auto-discover a launcher inside it
+    # (the user's own launch-comfyui.bat, else the stock comfyui.bat / run.bat).
+    # This is the "work with the install the user already has" path: pointing
+    # localm at the ComfyUI folder is enough; naming a script is optional.
     if not launch_cmd:
-        launch_cmd = cfg.get("comfy_launch_cmd")
+        launch_cmd = managed_launch_cmd or cfg.get("comfy_launch_cmd")
     discovered = False
     if not launch_cmd and workdir:
         found = discover_launch_cmd(Path(workdir))

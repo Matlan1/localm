@@ -1173,6 +1173,19 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 }
 .workflow-del:hover { color: var(--danger, #d66); border-color: var(--danger, #d66); }
 .workflow-upload { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.comfy-launch-row { margin-top: 10px; }
+.comfy-model-picker { margin-top: 10px; }
+.comfy-model-picker-head {
+  margin: 0 0 6px; font-size: 12px; font-weight: 600;
+  color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;
+}
+.comfy-model-row {
+  display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 13px;
+}
+.comfy-model-label { flex: 0 0 auto; min-width: 110px; color: var(--text-dim); }
+.comfy-model-select { flex: 1; min-width: 0; }
+.comfy-model-missing { color: var(--danger, #d66); }
+.comfy-model-missing-value { flex: 1; min-width: 0; color: var(--danger, #d66); }
 
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so

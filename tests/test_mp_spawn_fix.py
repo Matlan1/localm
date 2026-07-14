@@ -83,6 +83,26 @@ def test_missing_base_python_leaves_default_untouched(monkeypatch, tmp_path):
     assert multiprocessing.spawn.get_executable() == before
 
 
+def test_real_base_python_finds_windows_exe(monkeypatch, tmp_path):
+    (tmp_path / "python.exe").write_bytes(b"")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path))
+    assert _mp_spawn.real_base_python() == tmp_path / "python.exe"
+
+
+def test_real_base_python_none_off_windows(monkeypatch, tmp_path):
+    (tmp_path / "python3").write_bytes(b"")
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path))
+    assert _mp_spawn.real_base_python() is None
+
+
+def test_real_base_python_none_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path))
+    assert _mp_spawn.real_base_python() is None
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only bug")
 class TestRealRenamedLauncherEndToEnd:
     """Builds an ACTUAL renamed-copy launcher (mirroring applaunch.py's
