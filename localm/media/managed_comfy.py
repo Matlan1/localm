@@ -221,6 +221,24 @@ def resolve_comfy_target(cfg: Optional[dict] = None) -> ComfyTarget:
                        workdir=cfg.get("comfy_workdir"), managed=False)
 
 
+def comfy_models_dest_dir(subfolder: str, cfg: Optional[dict] = None) -> Optional[Path]:
+    """Absolute ``models/<subfolder>`` directory for whichever ComfyUI
+    ``resolve_comfy_target()`` says is currently active - the destination a
+    downloaded model file needs to land in for THAT ComfyUI to see it.
+
+    Managed -> ``<LOCALM_HOME>/comfyui-models/<subfolder>``. External with a
+    configured ``comfy_workdir`` -> ``<comfy_workdir>/models/<subfolder>``.
+    External with no ``comfy_workdir`` configured -> None: there is no
+    known-safe filesystem location to write into, and the caller must say so
+    plainly rather than guessing."""
+    target = resolve_comfy_target(cfg)
+    if target.managed:
+        return managed_comfy_paths().models_dir / subfolder
+    if target.workdir:
+        return Path(target.workdir) / "models" / subfolder
+    return None
+
+
 # --------------------------------------------------------------------------- #
 #  extra_model_paths.yaml generator (decision 9)                              #
 #                                                                             #

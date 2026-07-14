@@ -154,6 +154,51 @@ class TestPreflight:
             assert comfy.comfy_object_info("http://127.0.0.1:9") is None
 
 
+class TestDescribeMissingModels:
+    """describe_missing_models() is the read-only sibling of preflight_models(),
+    used by the GUI pre-check BEFORE a user clicks Generate. It must report the
+    same missing slots preflight_models would, WITHOUT mutating the caller's
+    workflow - neither applying a substitution nor anything else."""
+
+    def test_reports_same_missing_slot_as_preflight(self):
+        wf = _wan_unet_workflow()
+        info = _object_info(["totally_different_model.safetensors"])
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
+            missing = comfy_client.describe_missing_models(wf, "http://x")
+        assert len(missing) == 1
+        slot = missing[0]
+        assert slot.class_type == "UNETLoader"
+        assert slot.input_name == "unet_name"
+        assert slot.filename == "wan2.2_ti2v_5B_fp16.safetensors"
+        assert "totally_different_model.safetensors" in slot.available_options
+
+    def test_does_not_mutate_workflow_even_with_a_substitutable_variant(self):
+        # preflight_models WOULD substitute this in place; describe_missing_models
+        # must not, since it exists to check inertly before a job even starts.
+        wf = _wan_unet_workflow()
+        original = wf["1"]["inputs"]["unet_name"]
+        info = _object_info(["wan2.2_ti2v_5B_fp8_scaled.safetensors"])
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
+            missing = comfy_client.describe_missing_models(wf, "http://x")
+        assert missing == []              # a variant WAS found - not "missing"
+        assert wf["1"]["inputs"]["unet_name"] == original   # but nothing was written
+
+    def test_present_model_reports_nothing_missing(self):
+        wf = _wan_unet_workflow()
+        info = _object_info(["wan2.2_ti2v_5B_fp16.safetensors", "other.safetensors"])
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
+            missing = comfy_client.describe_missing_models(wf, "http://x")
+        assert missing == []
+
+    def test_unreachable_object_info_reports_nothing_missing(self):
+        # Same best-effort contract as preflight_models: cannot validate -> defer,
+        # never surface a false "missing" for an unreachable ComfyUI.
+        wf = _wan_unet_workflow("does-not-exist.safetensors")
+        with patch.object(comfy_client, "comfy_object_info", return_value=None):
+            missing = comfy_client.describe_missing_models(wf, "http://x")
+        assert missing == []
+
+
 class TestPreflightBeforeUnload:
     """The whole point: a missing model fails BEFORE the chat model unload."""
 

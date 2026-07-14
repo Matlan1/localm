@@ -18,6 +18,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -238,32 +239,33 @@ def _pick_variant(missing_name: str, options: list) -> Optional[str]:
     return cands[0] if len(cands) == 1 else None
 
 
-def _format_missing(missing: list) -> str:
-    lines = ["ComfyUI is missing model files this workflow needs:"]
-    for cls, field, name, options in missing:
-        shown = ", ".join(options[:8]) + (", ..." if len(options) > 8 else "")
-        avail = f" Available {field}: {shown}." if options else ""
-        lines.append(
-            f"  - '{name}' (the {field} for the {cls} node) is not installed.{avail}")
-    lines.append(
-        "Install the file(s) into ComfyUI's models folder, or pick a workflow whose "
-        "models you have on the Workflow panel (Settings -> Media). The chat model was "
-        "NOT unloaded - fix this and run again.")
-    return "\n".join(lines)
+@dataclass(frozen=True)
+class MissingModelSlot:
+    """One workflow input whose model file ComfyUI's /object_info reports as not
+    installed, and no unambiguous precision/quant variant was found to sub in."""
+    class_type: str
+    input_name: str
+    filename: str
+    available_options: list
 
 
-def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple[bool, str]:
-    """Validate every loader's model file against ComfyUI ``/object_info`` BEFORE the
-    caller unloads the chat model.
+def _scan_workflow_models(workflow: dict, info: dict, *, apply: bool = False) -> tuple[list, list]:
+    """Enumerate every model-file-shaped input in *workflow* against ComfyUI's
+    live ``/object_info`` map *info*.
 
-    Mutates *workflow* in place to substitute the single unambiguous precision/quant
-    variant for a missing file. Returns ``(ok, message)``: ``ok=False`` with a
-    specific, Workflow-panel-pointing error when a required model is missing and no
-    one variant fits; ``ok=True`` (empty message) otherwise. Best-effort: returns
-    ``(True, "")`` when /object_info is unavailable (defer to submit-time validation)."""
-    info = comfy_object_info(api_url)
-    if not info:
-        return True, ""        # cannot validate -> defer to submit-time validation
+    When *apply* is False (the default), this is pure and never touches
+    *workflow*. When *apply* is True, an unambiguous precision/quant substitute is
+    written into the node's inputs in the same pass (the original single-pass
+    behavior of this check) - callers that must not mutate the caller's workflow
+    dict (a read-only pre-check) should leave *apply* False.
+
+    Returns ``(substitutions, missing)``:
+      - ``substitutions``: ``(class_type, input_name, old_filename, new_filename)``
+        tuples for inputs whose file is missing but has a single unambiguous
+        precision/quant variant available.
+      - ``missing``: ``MissingModelSlot`` entries for inputs whose file is missing
+        with no unambiguous substitute.
+    """
     missing: list = []
     subs: list = []
     for node in workflow.values():
@@ -283,10 +285,44 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
                 continue       # the file is present - good
             variant = _pick_variant(value, options)
             if variant is not None:
-                inputs[input_name] = variant
+                if apply:
+                    inputs[input_name] = variant
                 subs.append((node.get("class_type"), input_name, value, variant))
             else:
-                missing.append((node.get("class_type"), input_name, value, options))
+                missing.append(MissingModelSlot(node.get("class_type"), input_name,
+                                                 value, options))
+    return subs, missing
+
+
+def _format_missing(missing: list) -> str:
+    lines = ["ComfyUI is missing model files this workflow needs:"]
+    for slot in missing:
+        shown = (", ".join(slot.available_options[:8])
+                 + (", ..." if len(slot.available_options) > 8 else ""))
+        avail = f" Available {slot.input_name}: {shown}." if slot.available_options else ""
+        lines.append(
+            f"  - '{slot.filename}' (the {slot.input_name} for the {slot.class_type} "
+            f"node) is not installed.{avail}")
+    lines.append(
+        "Install the file(s) into ComfyUI's models folder, or pick a workflow whose "
+        "models you have on the Workflow panel (Settings -> Media). The chat model was "
+        "NOT unloaded - fix this and run again.")
+    return "\n".join(lines)
+
+
+def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple[bool, str]:
+    """Validate every loader's model file against ComfyUI ``/object_info`` BEFORE the
+    caller unloads the chat model.
+
+    Mutates *workflow* in place to substitute the single unambiguous precision/quant
+    variant for a missing file. Returns ``(ok, message)``: ``ok=False`` with a
+    specific, Workflow-panel-pointing error when a required model is missing and no
+    one variant fits; ``ok=True`` (empty message) otherwise. Best-effort: returns
+    ``(True, "")`` when /object_info is unavailable (defer to submit-time validation)."""
+    info = comfy_object_info(api_url)
+    if not info:
+        return True, ""        # cannot validate -> defer to submit-time validation
+    subs, missing = _scan_workflow_models(workflow, info, apply=True)
     if on_progress:
         for cls, field, old, new in subs:
             try:
@@ -298,6 +334,20 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     if missing:
         return False, _format_missing(missing)
     return True, ""
+
+
+def describe_missing_models(workflow: dict, api_url: str) -> list:
+    """Read-only variant of the ``preflight_models`` check: reports missing model
+    slots WITHOUT applying substitutions or otherwise mutating *workflow*. Used by
+    a pre-check (e.g. before a user clicks Generate) that must not have side
+    effects on the caller's workflow dict. Returns ``[]`` when /object_info is
+    unavailable (same best-effort behavior as ``preflight_models``) or nothing is
+    missing."""
+    info = comfy_object_info(api_url)
+    if not info:
+        return []
+    _subs, missing = _scan_workflow_models(workflow, info)
+    return missing
 
 
 # ---------------------------------------------------------------------------

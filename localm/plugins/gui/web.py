@@ -211,6 +211,26 @@ class PullTokenRedeemRequest(BaseModel):
     token: str
 
 
+class MediaPreflightRequest(BaseModel):
+    """Model-relevant overrides for a pre-generate model-existence check. Only
+    the fields that can change WHICH model filename a loader node references -
+    prompt text, seed, steps, dimensions, etc. never affect that and are not
+    accepted here. Image uses clip_name1/clip_name2/lora_name; music uses
+    ckpt_name; video has no per-request model overrides today (its workflow's
+    model filenames come entirely from the template)."""
+    clip_name1: str | None = None
+    clip_name2: str | None = None
+    lora_name: str | None = None
+    ckpt_name: str | None = None
+
+
+class ComfyPullRequest(BaseModel):
+    # Only a filename the client saw in a preceding preflight response - NEVER a
+    # client-supplied repo/path. The server re-resolves everything else from
+    # COMFY_MODEL_SOURCES itself (see model_pull_comfy_source in routes/models.py).
+    filename: str
+
+
 class RemoveModelRequest(BaseModel):
     model: str
 

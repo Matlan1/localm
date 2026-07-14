@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Offer to download a missing Flux model file.** When Image/Video/Music
+  generation detects a missing ComfyUI model file that has a known-good source
+  (currently the Flux UNET, text encoders, and VAE), it now offers to download
+  it for you - showing the exact repository, file, and size, with a real
+  confirm click before anything is fetched. It lands directly in the right
+  ComfyUI models folder, whether you use the managed ComfyUI or your own
+  install. A model without a known source still shows the same clear message
+  as before, telling you to install it yourself.
 - **See which memories a reply used.** When chat memory is on, each reply that drew
   on remembered facts now shows a small "🧠 N" chip; hovering lists the facts used,
   and clicking opens the memory panel so a wrong or stale fact is easy to correct.

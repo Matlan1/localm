@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
-import { $, MIB, authHeaders, confirmDanger, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { $, MIB, authHeaders, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { hideStop, showStop } from "./images.js";
 import { pickDirectory } from "../app/picker.js";
@@ -38,6 +38,7 @@ $("video-generate").onclick = async () => {
   log.textContent = "";
   $("video-result").replaceChildren();
   try {
+    await checkModelsBeforeGenerate("video", log);
     const r = await fetch("/api/video", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

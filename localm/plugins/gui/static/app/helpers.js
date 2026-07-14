@@ -542,3 +542,97 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
   });
 }
 
+/** Offer to download ONE curated missing model (repo/file/size shown in full,
+ *  a real Download button - never a silent auto-pull). Resolves true whether
+ *  the user downloads or skips (either way the caller proceeds to its real
+ *  preflight-gated generate call, which is the authoritative check); resolves
+ *  false only if the download itself failed after the user asked for it, so
+ *  the caller can decide whether to keep going.  *log*, when given, gets the
+ *  download's streamed progress lines appended (same log panel the page
+ *  already uses for the generation job itself). */
+function _offerModelDownload(missingModel, log) {
+  const { filename, source } = missingModel;
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(`Missing model: ${filename}`, (body) => {
+      body.appendChild(el("p", "",
+        `This workflow needs '${filename}' (${fmtBytes(source.size_bytes)}), `
+        + "which isn't installed."));
+      body.appendChild(el("p", "", `Source: ${source.repo} / ${source.file}`));
+      const row = el("div", "actions");
+      const skip = el("button", "btn-secondary", "Not now");
+      skip.onclick = () => finish(true);
+      const dl = el("button", "btn-secondary", "Download");
+      dl.onclick = async () => {
+        dl.disabled = true; skip.disabled = true; dl.textContent = "Starting…";
+        try {
+          const r = await fetch("/api/models/pull-comfy-source", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ filename }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.detail || r.statusText);
+          if (watch) clearInterval(watch);
+          $("modal").style.display = "none";
+          if (log) {
+            log.style.display = "block";
+            log.textContent += `Downloading ${filename} from ${source.repo}…\n`;
+          }
+          const end = await streamJob(data.job_id, (line) => {
+            if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
+          });
+          if (end.status !== "done") toast(`Download ${end.status}: ${filename}`, true);
+          resolve(true);
+        } catch (e) {
+          toast("Download failed: " + e.message, true);
+          resolve(false);
+        }
+      };
+      row.appendChild(skip);
+      row.appendChild(dl);
+      body.appendChild(row);
+    });
+    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // poll for it and treat as "not now" - those handlers are not ours (same
+    // pattern as picker.js's pickPath, for the same reason).
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(true);
+    }, 200);
+  });
+}
+
+/** Pre-generate model-existence check: calls the read-only preflight endpoint
+ *  for *kind* ("image" | "video" | "music") and, for each missing model that
+ *  has a curated download source, offers it via _offerModelDownload before
+ *  the caller submits its real generate request. Always resolves true
+ *  (proceed) - a missing model with NO curated source, or one the user chose
+ *  not to download, falls through unchanged to the real generate call's own
+ *  preflight_models() gate, which fails with today's exact existing message.
+ *  Best-effort: any failure to reach the pre-check itself also resolves true,
+ *  so this can never block generation on its own account. */
+export async function checkModelsBeforeGenerate(kind, log) {
+  let data;
+  try {
+    const r = await fetch(`/api/media/${kind}/preflight`, {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({}),
+    });
+    if (!r.ok) return true;
+    data = await r.json();
+  } catch (e) {
+    return true;
+  }
+  const curated = ((data && data.missing) || []).filter((m) => m.source);
+  for (const m of curated) {
+    await _offerModelDownload(m, log);
+  }
+  return true;
+}
+

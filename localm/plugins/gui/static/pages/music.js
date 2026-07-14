@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, streamJob, toast } from "../app/helpers.js";
 import { hideStop, showStop } from "./images.js";
 import { refreshMusicHistory } from "./video.js";
 
@@ -34,6 +34,7 @@ $("music-generate").onclick = async () => {
   log.textContent = "";
   $("music-result").replaceChildren();
   try {
+    await checkModelsBeforeGenerate("music", log);
     const r = await fetch("/api/music", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

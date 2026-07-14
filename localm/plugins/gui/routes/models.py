@@ -11,6 +11,7 @@ at the top of register(), so each handler body is identical to the original.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -21,7 +22,8 @@ from localm.inference.http_server import (principal_id, require_scope,
                                           unload_all_models, unload_one_model)
 import localm.inference.http_server as _hs
 from localm.plugins.executor import get_plugin_executor
-from localm.plugins.gui.web import (AliasRequest, LoadModelRequest,
+from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
+                                    LoadModelRequest, MediaPreflightRequest,
                                     PullRequest, PullTokenRedeemRequest,
                                     RemoveModelRequest, SetTypeRequest,
                                     UnloadModelRequest, consume_pull_grant)
@@ -245,6 +247,126 @@ def register(app: FastAPI, ctx) -> None:
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }, host_label=f"Model pull {spec}", owner=principal_id(request))
+        return {"job_id": job.id}
+
+    # --------------- ComfyUI missing-model pre-check + curated pull -------- #
+    # Read-only pre-check the frontend calls BEFORE submitting a generate job
+    # (see images.js/music.js/video.js): does the currently-configured workflow
+    # reference any model file ComfyUI doesn't have, and if so, is there a
+    # curated HuggingFace source to offer downloading it from? Does not modify
+    # generate_image/generate_video/generate_music or their own preflight_models
+    # call - this is purely additive.
+
+    class _NullConsole:
+        """A do-nothing stand-in for rich.console.Console, so a read-only
+        pre-check (possibly polled repeatedly) never spams server-side console
+        output the way an actual generation job's progress printing would."""
+        def print(self, *a, **kw):
+            pass
+
+    def _build_check_workflow(kind: str, overrides: MediaPreflightRequest):
+        """Load *kind*'s currently-configured workflow template and shape it
+        with the same model-relevant overrides the generate form has pending,
+        mirroring the load-template -> _build_*_workflow step generate_image /
+        generate_video / generate_music do - minus actually submitting a job.
+        input_image is always None: the image/video builders upload it to
+        ComfyUI as a real network call, which a read-only check must never do.
+        Returns the shaped workflow dict, or raises ValueError for an
+        unknown *kind*."""
+        if kind == "image":
+            from localm.image_gen.comfy import _build_image_workflow
+            from localm.image_gen.comfy import _workflow_path
+            workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+            _build_image_workflow(
+                workflow, prompt="", api_url="", guidance=None, negative_prompt=None,
+                cfg=None, seed=0, clip_name1=overrides.clip_name1,
+                clip_name2=overrides.clip_name2, lora_name=overrides.lora_name,
+                lora_strength_model=1.0, lora_strength_clip=0.5, input_image=None,
+                denoise=None, fast_dequant=True, con=_NullConsole())
+            return workflow
+        if kind == "video":
+            from localm.video_gen.comfy import _build_video_workflow
+            from localm.video_gen.comfy import _workflow_path
+            workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+            _build_video_workflow(
+                workflow, prompt="", negative_prompt=None, frames=1, fps=8,
+                width=None, height=None, steps=1, cfg=None, seed=0,
+                float_type=None, input_image=None, api_url="")
+            return workflow
+        if kind == "music":
+            from localm.music_gen.comfy import _build_music_workflow
+            from localm.music_gen.comfy import _workflow_path
+            workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+            _build_music_workflow(
+                workflow, tags="", lyrics_text="", duration_seconds=1.0, seed=0,
+                steps=1, cfg=1.0, lyrics_strength=1.0,
+                ckpt_name=overrides.ckpt_name, float_type=None)
+            return workflow
+        raise ValueError(f"Unknown media kind: {kind}")
+
+    @app.post("/api/media/{kind}/preflight",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def media_preflight(kind: str, req: MediaPreflightRequest):
+        if kind not in ("image", "video", "music"):
+            raise HTTPException(404, f"Unknown media kind: {kind}")
+        from localm.media.comfy_client import describe_missing_models
+        from localm.media.managed_comfy import comfy_models_dest_dir, resolve_comfy_target
+        from localm.model_manager.registry import resolve_comfy_model_source
+
+        def _check():
+            try:
+                workflow = _build_check_workflow(kind, req)
+            except Exception as e:
+                logger.debug("preflight workflow build failed for %s: %s", kind, e)
+                return []
+            target = resolve_comfy_target()
+            return describe_missing_models(workflow, target.api_url)
+
+        loop = asyncio.get_running_loop()
+        missing = await loop.run_in_executor(get_plugin_executor(), _check)
+
+        results = []
+        for slot in missing:
+            source = resolve_comfy_model_source(slot.filename)
+            entry = {
+                "class_type": slot.class_type,
+                "input_name": slot.input_name,
+                "filename": slot.filename,
+                "source": None,
+                "dest_dir": None,
+            }
+            if source is not None:
+                repo, file = source.spec.rsplit(":", 1)
+                dest_dir = comfy_models_dest_dir(source.comfy_subfolder)
+                entry["source"] = {
+                    "repo": repo, "file": file,
+                    "size_bytes": source.size_bytes, "model_type": source.model_type,
+                }
+                entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
+            results.append(entry)
+        return {"missing": results}
+
+    @app.post("/api/models/pull-comfy-source",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_pull_comfy_source(req: ComfyPullRequest, request: Request):
+        from localm.media.managed_comfy import comfy_models_dest_dir
+        from localm.model_manager.registry import resolve_comfy_model_source
+        source = resolve_comfy_model_source(req.filename.strip())
+        if source is None:
+            raise HTTPException(400, f"Not a curated download source: {req.filename}")
+        dest_dir = comfy_models_dest_dir(source.comfy_subfolder)
+        if dest_dir is None:
+            raise HTTPException(
+                400,
+                "No known ComfyUI models folder to download into - set a "
+                "ComfyUI working directory in Settings > Media, or enable the "
+                "managed ComfyUI instance.")
+        args = ["pull", "--type", source.model_type, "--comfy-dest-dir", str(dest_dir),
+                "--no-register", "--", source.spec]
+        job = jobs.start_cli("pull", args, extra_env={
+            "LOCALM_PROGRESS_JSON": "1",
+            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        }, host_label=f"Model pull {source.spec}", owner=principal_id(request))
         return {"job_id": job.id}
 
     @app.post("/api/models/remove", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])

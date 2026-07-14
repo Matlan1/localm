@@ -111,15 +111,21 @@ def _sha256_file_bytes(data: bytes) -> str:
 
 
 
-def _safe_models_filename(filename: str) -> Optional[str]:
-    """Return a single-component filename confined to ``MODELS_DIR``.
+def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Optional[str]:
+    """Return a single-component filename confined to *base_dir* (``MODELS_DIR``
+    by default).
 
-    A model download must never write outside the models folder. ``filename`` is
-    derived from untrusted input (a URL path or an ``owner/repo:file`` spec), so
-    a value like ``../../evil.gguf`` or ``sub/dir/evil.gguf`` must be rejected
-    rather than used as a destination. Returns the bare filename when it is a
-    single, non-traversing path component, else ``None`` (GAP-CLI-2).
+    A model download must never write outside its destination folder.
+    ``filename`` is derived from untrusted input (a URL path or an
+    ``owner/repo:file`` spec), so a value like ``../../evil.gguf`` or
+    ``sub/dir/evil.gguf`` must be rejected rather than used as a destination.
+    Returns the bare filename when it is a single, non-traversing path
+    component, else ``None`` (GAP-CLI-2). *base_dir* lets a caller routing a
+    download to a non-default destination (e.g. a ComfyUI models subfolder)
+    validate against the REAL destination instead of always against
+    ``MODELS_DIR``.
     """
+    base_dir = base_dir if base_dir is not None else _mm.MODELS_DIR
     if not filename:
         return None
     # An embedded NUL is not a legal filename on any OS and makes Path.resolve() /
@@ -136,8 +142,8 @@ def _safe_models_filename(filename: str) -> Optional[str]:
     if "/" in filename or "\\" in filename or os.sep in filename:
         return None
     try:
-        dest = (_mm.MODELS_DIR / name).resolve()
-        if dest.parent != _mm.MODELS_DIR.resolve():
+        dest = (base_dir / name).resolve()
+        if dest.parent != base_dir.resolve():
             return None
     except (OSError, ValueError):
         # ValueError also covers a null/odd path that slipped past the check above
