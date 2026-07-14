@@ -18,6 +18,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -261,6 +262,16 @@ def _pick_variant(missing_name: str, options: list) -> Optional[str]:
     return cands[0] if len(cands) == 1 else None
 
 
+@dataclass(frozen=True)
+class MissingModelSlot:
+    """One workflow input whose model file ComfyUI's /object_info reports as not
+    installed, and no unambiguous precision/quant variant was found to sub in."""
+    class_type: str
+    input_name: str
+    filename: str
+    available_options: list
+
+
 def _format_missing(missing: list) -> str:
     lines = ["ComfyUI is missing model files this workflow needs:"]
     for cls, field, name, options in missing:
@@ -374,6 +385,30 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     if missing:
         return False, _format_missing(missing)
     return True, ""
+
+
+def describe_missing_models(workflow: dict, api_url: str) -> list:
+    """Read-only variant of the ``preflight_models`` check: reports missing model
+    slots as ``MissingModelSlot`` entries WITHOUT applying substitutions or
+    otherwise mutating *workflow*. Used by a pre-check (e.g. before a user
+    clicks Generate) that must not have side effects on the caller's workflow
+    dict. Built on the same ``workflow_model_slots()`` walk ``preflight_models``
+    uses - one shared walk, not a third independently-maintained one. Returns
+    ``[]`` when /object_info is unavailable (same best-effort behavior as
+    ``preflight_models``) or nothing is missing."""
+    slots = workflow_model_slots(workflow, api_url)
+    if slots is None:
+        return []
+    missing = []
+    for slot in slots:
+        value, options = slot["current"], slot["options"]
+        if value in options:
+            continue            # the file is present - good
+        if _pick_variant(value, options) is not None:
+            continue            # an unambiguous substitute exists - not "missing"
+        missing.append(MissingModelSlot(slot["class_type"], slot["input_name"],
+                                         value, options))
+    return missing
 
 
 # ---------------------------------------------------------------------------

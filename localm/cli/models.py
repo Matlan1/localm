@@ -129,7 +129,17 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
               help="For a local PATH (not a HF/URL spec): bring the file/dir into "
                    "~/.localm/models before registering it, instead of registering "
                    "it in place at its original location.")
-def pull(model_spec, name, sha256, redownload, mmproj, type, store):
+@click.option("--comfy-dest-dir", default=None, hidden=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Internal: route a single-file HF pull to this directory "
+                   "instead of ~/.localm/models (used by the GUI's ComfyUI "
+                   "missing-model download flow).")
+@click.option("--register/--no-register", default=True, hidden=True,
+              help="Internal: whether to add the download to localm's own "
+                   "model registry (off for a file routed to --comfy-dest-dir, "
+                   "which belongs to ComfyUI, not localm's chat-model catalog).")
+def pull(model_spec, name, sha256, redownload, mmproj, type, store,
+         comfy_dest_dir, register):
     """Download a model from HuggingFace or a URL.
 
     \b
@@ -152,7 +162,8 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store):
     Models are stored in ~/.localm/models/ and registered automatically.
     """
     if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
-                       mmproj_spec=mmproj, model_type=type, store=store):
+                       mmproj_spec=mmproj, model_type=type, store=store,
+                       dest_dir=comfy_dest_dir, register=register):
         sys.exit(1)
 
 

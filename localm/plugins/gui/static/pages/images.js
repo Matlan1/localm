@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, authHeaders, cancelJob, confirmDanger, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
@@ -423,6 +423,7 @@ $("img-generate").onclick = async () => {
   log.textContent = "";
   $("img-result").replaceChildren();
   try {
+    await checkModelsBeforeGenerate("image", log, { model_overrides: modelOverrides.image });
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

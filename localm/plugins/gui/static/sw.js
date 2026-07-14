@@ -18,7 +18,10 @@
 // v51: index.html and pages/models.js changed (the ComfyUI re-scan button moved
 // out of its hidden tab-gated row into the "Add a model" card) - a stale-cached
 // client would keep the button invisible on the All/LLMs tabs.
-const CACHE = "localm-shell-v51";
+// v52: app/helpers.js and pages/images.js/music.js/video.js changed (the
+// ComfyUI missing-model download offer) - a stale-cached client would keep
+// missing the pre-generate model check and the download confirm modal.
+const CACHE = "localm-shell-v52";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
