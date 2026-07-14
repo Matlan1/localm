@@ -958,17 +958,6 @@ export function syncRagIndexingModeHint() {
 // Media plugins, in display order, that the Media section configures.
 export const MEDIA_PLUGIN_ORDER = ["image", "music", "video"];
 
-// Reliable per-box accent assignment: cycle through this palette BY POSITION
-// (not by plugin name), so each installed media plugin gets a visually
-// distinct identity color even when only a few are installed - three boxes in
-// the same neutral border would otherwise all read as "the same colour".
-// Reuses the app's existing cat-* nav-category tokens (so it matches the rest
-// of the design system instead of inventing new colors); cat-green and
-// cat-slate are left out here since --green already carries the semantic
-// "ComfyUI: Running" meaning on the status badge below - reusing it as a
-// decorative per-box accent too would blur that signal.
-export const MEDIA_ACCENT_CATS = ["cat-blue", "cat-amber", "cat-cyan", "cat-teal", "cat-violet"];
-
 /** Did a media control's value change from what was displayed? Treats
  *  null/undefined/"" as the same "empty", so saving an untouched inherited field
  *  does not pin it as an override. */
@@ -1039,16 +1028,13 @@ export async function buildMediaSection(form, fields) {
   _mediaControls = {};
   const grid = el("div", "media-grid");
   panel.appendChild(grid);
-  let visiblePos = 0;   // counts only boxes actually shown, so the accent cycle
-                        // has no gaps if a plugin is ever absent from byName
   for (const name of MEDIA_PLUGIN_ORDER) {
     const p = byName[name];
     if (!p) continue;
-    const sub = el("div", "media-subsection " + MEDIA_ACCENT_CATS[visiblePos % MEDIA_ACCENT_CATS.length]);
+    const sub = el("div", "media-subsection");
     sub.dataset.plugin = name;
     _mediaSubs[name] = { sub, label: p.label, fields: p.fields || [] };
     grid.appendChild(sub);
-    visiblePos++;
   }
   for (const name of MEDIA_PLUGIN_ORDER) {
     if (_mediaSubs[name]) renderMediaSubsection(name);

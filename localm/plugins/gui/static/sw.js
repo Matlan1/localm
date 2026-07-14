@@ -28,7 +28,14 @@
 // the shared embedding model's release, and a row for a registered model that
 // IS the resident embedder now correctly shows loaded/Unload) - a stale-cached
 // client would keep under-reporting freed VRAM and miss the per-row control.
-const CACHE = "localm-shell-v54";
+// v55: pages/models.js's "Import from ComfyUI..." Browse button was fixed (it
+// silently did nothing - openModal() has no stack, so the folder picker it
+// opened destroyed the Import dialog's own DOM before the picked path could be
+// written back); pages/settings.js and style.css dropped the rotating
+// per-plugin accent color on the Media section's three boxes in favor of one
+// consistent accent. A stale-cached client would keep the broken Browse
+// button and the mismatched accent colors.
+const CACHE = "localm-shell-v55";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
