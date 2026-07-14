@@ -34,6 +34,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   topics are recalled distinctly instead of collapsing into one vague note.
 
 ### Fixed
+- **The Models page shows the real error instead of "No models yet".** When the
+  Models page could not load your model list because the session had expired or the
+  API key lacked permission, it used to fall back to the empty "No models yet" state,
+  as if you had none. It now opens the key prompt on an expired session and otherwise
+  shows the actual status ("Could not load models (HTTP 403)"), so a sign-in or
+  permission problem is no longer mistaken for an empty model library.
+- **"Keep diagnostics" now warns when it cannot write its log.** If you turned on
+  keeping a diagnostic log for bug reports but the log file could not be created (for
+  example an unwritable or full data folder), localm used to start silently as though
+  it had, leaving your bug reports quietly without one. It now prints a warning at
+  startup that the diagnostic log could not be enabled, instead of appearing to
+  succeed; startup itself is unaffected.
+- **Adding documents to a knowledge collection reports the server's real error.**
+  When a document add was refused with a conflict, the GUI could show an internal
+  "body stream already read" message instead of the server's actual reason. It now
+  surfaces the real error detail.
 - **A damaged media-ownership record no longer exposes everyone's generated media.**
   On a multi-user server, the image, music, and video galleries record which key
   generated each file so a scoped key only ever sees its own. If that on-disk

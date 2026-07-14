@@ -319,20 +319,21 @@ export async function kbRunAdd(name, paths, embed, log, retried = false, reindex
         method: "POST", headers: authHeaders(),
         body: JSON.stringify({ paths, embed, reindex }),
       });
-    if (r.status === 409 && !retried) {
-      const info = await r.json().catch(() => ({}));
-      if (info && info.needs_consent) {
-        const folders = info.addable || [];
-        if (!(await kbConfirmAddRoots(folders))) {
-          log.textContent += "Cancelled - folders not added.\n";
-          return;
-        }
-        if (!(await kbAppendAllowedRoots(folders))) return;   // PATCH failed (toasted)
-        log.textContent += "Added to your allowed folders. Indexing…\n";
-        return kbRunAdd(name, paths, embed, log, true, reindex);   // retry once
+    // Read the body ONCE. A 409 needs_consent reply, a normal error, and a success
+    // all carry a JSON body; reading it twice on the same Response throws "body
+    // stream already read", which used to mask the server's real `detail` on a
+    // 409 that was NOT needs_consent (it fell through to a second r.json()).
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 409 && !retried && data.needs_consent) {
+      const folders = data.addable || [];
+      if (!(await kbConfirmAddRoots(folders))) {
+        log.textContent += "Cancelled - folders not added.\n";
+        return;
       }
+      if (!(await kbAppendAllowedRoots(folders))) return;   // PATCH failed (toasted)
+      log.textContent += "Added to your allowed folders. Indexing…\n";
+      return kbRunAdd(name, paths, embed, log, true, reindex);   // retry once
     }
-    const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";

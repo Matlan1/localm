@@ -10,7 +10,7 @@ import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState } from "../app/icons.js";
-import { modelCache, refreshModels, switchModel } from "../app/models-sidebar.js";
+import { modelCache, refreshModels, showKeyGate, switchModel } from "../app/models-sidebar.js";
 import { refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -53,6 +53,21 @@ export async function refreshModelsPage() {
   let models = [];
   try {
     const r = await fetch("/api/models" + typeParam, { headers: authHeaders() });
+    if (r.status === 401) {
+      // Expired/absent session (e.g. a network bind whose loopback key was never
+      // seeded): the JSON error body parses fine, so the models=[] fallback below
+      // would masquerade as "No models yet". Show the in-page key gate instead,
+      // mirroring the sidebar's refreshModels() (models-sidebar.js).
+      showKeyGate("This LocaLM server requires an API key.");
+      return;
+    }
+    if (!r.ok) {
+      // A non-401 error (403 = key lacks models.read, 500, 503, ...) also returns
+      // a body with no `models` array; the empty-list fallback would hide the real
+      // failure behind "No models yet". Surface the status instead.
+      box.appendChild(el("div", "sub", `Could not load models (HTTP ${r.status})`));
+      return;
+    }
     const data = await r.json();
     models = (data && Array.isArray(data.models)) ? data.models : [];
   } catch (e) {

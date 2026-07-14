@@ -235,8 +235,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 from localm.debuglog import enable_debug
                 console.print(f"[yellow]debug log (keep_diagnostics):[/yellow] "
                               f"{enable_debug()}")
-        except Exception:
-            pass
+        except Exception as e:
+            # The user opted into keep_diagnostics, but the debug log could not be
+            # opened (e.g. an unwritable or full LOCALM_HOME). Do NOT abort startup
+            # over a diagnostics nicety, but do NOT report success silently either
+            # (AGENTS.md rule 5): warn so the user knows their bug reports will not
+            # include a debug log, instead of the Settings toggle quietly lying.
+            console.print(
+                f"[yellow]could not enable the keep_diagnostics debug log:[/yellow] "
+                f"{e} - bug reports will not include one.")
 
     import os as _os
     from localm.audit import MODE_ENV_VAR, SessionMode, effective_mode
