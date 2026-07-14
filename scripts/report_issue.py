@@ -107,6 +107,11 @@ def scrub(text: str) -> str:
     flags = re.IGNORECASE if sys.platform == "win32" else 0
     text = re.sub(r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+",
                   r"\1<redacted>", text, flags=flags)
+    # Strip user:pass@ credentials from any URL-ish value (mirror _scrub_url_creds in
+    # localm/bugreport.py): a summary/detail or log line can carry an inline secret,
+    # e.g. a comfy/searx/remote-server URL. Without this the standalone reporter would
+    # ship a credential the in-app reporter scrubs.
+    text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
     # Defensive credential strip (a pasted token in a log line, a mistyped value).
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
@@ -365,7 +370,10 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        res = post_report(url, token, summary, body)
+        # Scrub the title too: it becomes a PUBLIC GitHub issue title, and the body
+        # already uses scrub(summary) (line above), so an unscrubbed title would
+        # leak a path/credential the preview claims is "exactly what will be sent".
+        res = post_report(url, token, scrub(summary), body)
     except Exception as e:
         # Honest failure: a failed send is NEVER reported as success.
         path = save_report(body, when)
