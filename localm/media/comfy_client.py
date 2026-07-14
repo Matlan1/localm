@@ -423,8 +423,10 @@ def default_api_url() -> str:
         managed = managed_comfy_api_url_if_active()
         if managed:
             return managed
-    except Exception:
-        pass
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("managed-ComfyUI URL lookup failed; falling back to the configured "
+                     "/ default ComfyUI URL: %s", e)
     try:
         from localm.config import load_config
         cfg_url = load_config().get("comfy_api_url")
@@ -649,7 +651,10 @@ def should_offer_managed_comfy_setup(detail, cfg: Optional[dict] = None) -> bool
         try:
             from localm.config import load_config
             cfg = load_config()
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("could not load config to check the managed-ComfyUI setup-offer "
+                         "flag; the one-time offer may show again: %s", e)
             cfg = {}
     try:
         return not bool(cfg.get(_MANAGED_SETUP_OFFERED_KEY))
@@ -827,7 +832,10 @@ def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
         try:
             from localm.config import load_config
             cfg = load_config()
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("could not load config to check the comfy_func_shim setting; "
+                         "the shim stays disabled for this spawn: %s", e)
             cfg = {}
     try:
         return bool(cfg.get("comfy_func_shim"))
