@@ -547,8 +547,12 @@ class PluginManager:
             name = getattr(_hs, "_active_model_name", None)
             if name and name in getattr(_hs, "_engines", {}):
                 return _hs._engines[name]
-        except Exception:
-            pass
+        except Exception as e:
+            # Fall back to the statically-injected engine, but log so the reason
+            # the live one was skipped is traceable (AGENTS.md rule 5).
+            from localm.debuglog import logger
+            logger.debug("plugin host: live inference-engine lookup failed, using "
+                         "static engine: %s", e)
         return self._inference_engine_static
 
     # ---- discovery (INSTALLED folder only) ---------------------------------

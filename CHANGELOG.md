@@ -34,6 +34,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   topics are recalled distinctly instead of collapsing into one vague note.
 
 ### Fixed
+- **Clearer errors when indexing an image fails.** If the image-description step
+  fails (a timeout, a connection error, or an error returned by the model), knowledge
+  indexing now reports the real reason, instead of a misleading "returned an empty
+  description" message that hid the actual failure.
 - **Semantic knowledge search now works on password-protected servers.** When localm
   is started with an API key saved to disk (`localm key generate`, or the launcher),
   indexing a document used to silently fall back to keyword-only search: the server
