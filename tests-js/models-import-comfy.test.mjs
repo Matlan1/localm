@@ -13,6 +13,22 @@ const flush = async () => {
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
+// A minimal real filesystem for the picker's /api/fs/dirs + /api/fs/places
+// (same shape as picker.test.mjs), so tests can drive the REAL pickDirectory()
+// end to end instead of stubbing it out - stubbing it would hide exactly the
+// bug this flow had (openModal() has no stack; a picker opened from inside an
+// already-open modal destroys that modal's own DOM, pathInput included).
+const FS = {
+  "": { path: "", parent: null, entries: [
+    { name: "comfy-root", is_dir: true, size: null, mtime: 1700000000 },
+  ] },
+  "comfy-root": {
+    path: "comfy-root", parent: "", entries: [
+      { name: "models", is_dir: true, size: null, mtime: 1700000000 },
+    ],
+  },
+};
+
 function makeFetch({ managedStatus, scanImpl } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
@@ -28,6 +44,18 @@ function makeFetch({ managedStatus, scanImpl } = {}) {
     }
     if (u === "/api/models" || u.startsWith("/api/models?")) {
       return { ok: true, status: 200, json: async () => ({ models: [], active: null }) };
+    }
+    if (u.includes("/api/fs/places")) {
+      return { ok: true, status: 200, json: async () => ({
+        places: [{ label: "Home", path: "/home/me", icon: "home" }],
+        drives: [{ label: "/", path: "/", icon: "drive" }],
+      }) };
+    }
+    if (u.includes("/api/fs/dirs")) {
+      const m = u.match(/[?&]path=([^&]*)/);
+      const p = decodeURIComponent(m ? m[1] : "");
+      const d = FS[p] || FS[""];
+      return { ok: true, status: 200, json: async () => d };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
   };
@@ -54,17 +82,45 @@ test("import-comfy: the button exists and opens a modal with a path field, Previ
   assert.ok(buttons.some((t) => t.includes("Import")), "an Import button is present");
 });
 
-test("import-comfy: Browse fills the path field via pickDirectory", async () => {
+test("import-comfy: Browse fills the path field via the REAL pickDirectory, surviving the modal being rebuilt", async () => {
+  // Regression test for a real shipped bug: openModal() has no stack (a single
+  // shared #modal-body, replaced not pushed), so pickDirectory()'s OWN
+  // openModal() call - fired from inside this already-open modal - wiped this
+  // modal's DOM out from under it, including the pathInput reference the old
+  // code tried to write into after the picker resolved. That landed on an
+  // already-detached node: no visible effect, exactly "click select and
+  // nothing happens". A version of this test that stubs pickDirectory() itself
+  // (as this test used to) cannot catch that - it never invokes the real
+  // openModal() nesting that causes it. Drives the REAL picker against a fake
+  // /api/fs/dirs + /api/fs/places filesystem instead (see picker.test.mjs).
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({}) });
-  window.pickDirectory = async () => "D:/comfy-install";
   openModalFor(window);
   await flush();
-  const body = window.document.getElementById("modal-body");
-  const input = body.querySelector("input[type=text]");
+  let body = window.document.getElementById("modal-body");
   const browseBtn = [...body.querySelectorAll("button")].find((b) => b.textContent.includes("Browse"));
   browseBtn.click();
   await flush();
-  assert.equal(input.value, "D:/comfy-install");
+  // Navigate into the one folder the fake filesystem offers, then confirm -
+  // by now the picker has replaced the Import-from-ComfyUI dialog's content
+  // in the shared modal.
+  const row = [...window.document.querySelectorAll(".picker-row")].find(
+    (r) => r.querySelector(".picker-name") && r.querySelector(".picker-name").textContent === "comfy-root");
+  assert.ok(row, "the real folder picker opened and listed the fake folder (not a stub)");
+  row.click();
+  await flush();
+  const okBtn = window.document.querySelector(".picker-foot .btn-primary");
+  assert.equal(okBtn.textContent, "Use this folder");
+  okBtn.click();
+  await flush();
+  // The Import-from-ComfyUI modal must be showing again (rebuilt), not just
+  // closed, with the picked path filled in - re-query, do not reuse the old
+  // (now-detached) input reference.
+  const modal = window.document.getElementById("modal");
+  assert.equal(modal.style.display, "flex", "the Import-from-ComfyUI dialog reopened, not left closed");
+  body = window.document.getElementById("modal-body");
+  const input = body.querySelector("input[type=text]");
+  assert.ok(input, "a path input is present in the rebuilt modal");
+  assert.equal(input.value, "comfy-root", "the picked folder was carried over");
 });
 
 test("import-comfy: a managed ComfyUI install shows the quick-fill row and it fills the path", async () => {
