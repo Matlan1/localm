@@ -4,9 +4,13 @@
   NEW-J           - console-script venv guard (localm / localcoder)
   REC-DEBUGENV    - LOCALM_DEBUG=1 must actually open the debug log file
   REC-LLAMALIB-SILENT - a bad LLAMA_CPP_LIB override warns instead of silent fallback
+  REC-RUNTIME-BROKEN  - a broken (installed but unimportable-as-expected)
+                        localm_llama_runtime warns instead of silent fallback
 """
 
 import logging
+import sys
+import types
 
 import pytest
 
@@ -142,3 +146,55 @@ def test_bad_llama_cpp_lib_warns_once(tmp_path, monkeypatch):
 
     hits = [m for m in records if "LLAMA_CPP_LIB" in m]
     assert len(hits) == 1, f"the warning must fire once per process, got {len(hits)}"
+
+
+# --------------------------------------------------------------------------- #
+#  REC-RUNTIME-BROKEN - a broken localm_llama_runtime install warns, but a
+#  simply-not-installed one (the normal pre-`setup-llama` state) stays silent
+# --------------------------------------------------------------------------- #
+
+def test_broken_llama_runtime_warns(monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+
+    fake = types.ModuleType("localm_llama_runtime")   # no lib_dir() attribute
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", fake)
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    h = _Capture()
+    _loader.logger.addHandler(h)
+    try:
+        _loader.runtime_binary_dir()
+    finally:
+        _loader.logger.removeHandler(h)
+
+    assert any("localm_llama_runtime" in m and "broken" in m for m in records), \
+        "an installed-but-broken localm_llama_runtime must warn, not silently fall back"
+
+
+def test_missing_llama_runtime_stays_silent(monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", None)  # simulates ImportError
+    monkeypatch.delenv("LLAMA_CPP_LIB", raising=False)
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    h = _Capture()
+    _loader.logger.addHandler(h)
+    try:
+        _loader.runtime_binary_dir()
+    finally:
+        _loader.logger.removeHandler(h)
+
+    assert records == [], \
+        "a simply-not-yet-installed runtime wheel is the normal pre-setup state, not a warning"
