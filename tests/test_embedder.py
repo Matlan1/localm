@@ -151,7 +151,7 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(emb, "GGUFEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _FakeEmbedder)
 
     # No model yet -> lexical fallback; the negative result must NOT be latched.
     assert emb.get_embedder() is None
@@ -176,7 +176,7 @@ def test_loaded_dim_and_last_error_track_state(monkeypatch):
         def __init__(self, *a, **k):
             raise RuntimeError("this llama.dll build does not expose the embeddings API")
 
-    monkeypatch.setattr(emb, "GGUFEmbedder", _Boom)
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Boom)
     assert emb.get_embedder() is None
     assert "embeddings API" in (emb.last_error() or "")
     assert emb.loaded_dim() is None                 # no dim on failure
@@ -190,11 +190,154 @@ def test_loaded_dim_and_last_error_track_state(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(emb, "GGUFEmbedder", _Ok)
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Ok)
     emb.reset_embedder()                            # clears the recorded error
     assert emb.last_error() is None
     assert emb.get_embedder() is not None
     assert emb.loaded_dim() == 7 and emb.last_error() is None
+
+
+# --------------------------------------------------------------------------- #
+#  IsolatedEmbedder - preflight dispatch + auto-respawn (parent-side only, no  #
+#  real subprocess - EmbedderRunner is stubbed, mirroring how                  #
+#  test_vram_preflight.py patches ModelRunner.spawn_and_load for GgufBackend)  #
+# --------------------------------------------------------------------------- #
+
+class _StubRunner:
+    """A fake EmbedderRunner that never actually spawns a process."""
+    instances = []
+
+    def __init__(self):
+        self.alive = True
+        self.loaded_params = None
+        self.embed_calls = []
+        self.shutdown_calls = 0
+        type(self).instances.append(self)
+
+    def is_alive(self):
+        return self.alive
+
+    def spawn_and_load(self, params, timeout=None):
+        self.loaded_params = params
+        return {"dim": 5}
+
+    def embed(self, texts, timeout=None):
+        self.embed_calls.append(list(texts))
+        return [[1.0] * 5 for _ in texts]
+
+    def shutdown(self, grace=5.0):
+        self.shutdown_calls += 1
+        self.alive = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_stub_runner():
+    _StubRunner.instances = []
+    yield
+
+
+def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None):
+    monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
+    monkeypatch.setattr("localm.discover.split_device_count", lambda cfg: split_devices)
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram",
+                        check_vram if check_vram is not None else (lambda self: None))
+    return emb.IsolatedEmbedder("model.gguf", n_gpu_layers=99)
+
+
+def test_isolated_embedder_single_gpu_runs_check_vram_preflight(monkeypatch):
+    """The single-GPU case (no split configured) must run the SAME
+    VramSizingMixin._check_vram() preflight the chat backend uses - the gap
+    this refactor closes (gpu_split_shortfall alone was a no-op here)."""
+    calls = {"n": 0}
+
+    def _check_vram(self):
+        calls["n"] += 1
+
+    e = _isolated_embedder(monkeypatch, split_devices=0, check_vram=_check_vram)
+    assert calls["n"] == 1
+    assert e.dim == 5
+
+
+def test_isolated_embedder_single_gpu_preflight_refusal_skips_spawn(monkeypatch):
+    """A _check_vram() refusal must raise BEFORE a child is ever spawned - no
+    process-spawn cost paid for a load that can never fit (mirrors
+    GgufBackend.load()'s fail-fast-before-spawn contract)."""
+    def _check_vram(self):
+        raise RuntimeError("Context too large for available VRAM")
+
+    with pytest.raises(RuntimeError, match="too large"):
+        _isolated_embedder(monkeypatch, split_devices=0, check_vram=_check_vram)
+    assert _StubRunner.instances == []          # never spawned
+
+
+def test_isolated_embedder_multi_gpu_uses_split_shortfall_not_check_vram(monkeypatch, tmp_path):
+    """>= 2 configured split devices: gpu_split_shortfall() gates instead of
+    _check_vram() (which only reasons about the single main GPU device)."""
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x" * 1000)
+    calls = {"check_vram": 0, "shortfall": 0}
+
+    def _check_vram(self):
+        calls["check_vram"] += 1
+
+    def _shortfall(vram, cfg):
+        calls["shortfall"] += 1
+        return []
+
+    monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram", _check_vram)
+    monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
+    monkeypatch.setattr("localm.discover.split_device_count", lambda cfg: 2)
+    monkeypatch.setattr("localm.discover.gpu_split_shortfall", _shortfall)
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+
+    e = emb.IsolatedEmbedder(str(f), n_gpu_layers=99)
+    assert calls["shortfall"] == 1
+    assert calls["check_vram"] == 0             # NOT called in the split path
+    assert e.dim == 5
+
+
+def test_isolated_embedder_embed_respawns_after_prior_crash(monkeypatch):
+    """A crash on a PRIOR embed() call must not permanently disable the
+    embedder: the NEXT call transparently respawns + reloads (so one
+    transient native fault does not disable embeddings for the process's
+    whole remaining life)."""
+    e = _isolated_embedder(monkeypatch)
+    runner1 = _StubRunner.instances[-1]
+    runner1.alive = False                       # simulate: died since last call
+
+    out = e.embed(["hello"])
+    assert out == [[1.0] * 5]
+    assert len(_StubRunner.instances) == 2      # a second runner was spawned
+    assert _StubRunner.instances[-1].embed_calls == [["hello"]]
+
+
+def test_isolated_embedder_embed_crash_clears_runner_for_next_call(monkeypatch):
+    """A crash DURING this call still raises to the caller (never silently
+    swallowed, rule 5) - but clears the runner so the NEXT call auto-reloads
+    instead of repeatedly hitting the same dead child."""
+    e = _isolated_embedder(monkeypatch)
+    runner1 = _StubRunner.instances[-1]
+
+    def _boom(texts, timeout=None):
+        raise RuntimeError("The embedding worker process crashed (exit code -6)")
+    runner1.embed = _boom
+
+    with pytest.raises(RuntimeError, match="crashed"):
+        e.embed(["hello"])
+    assert e._runner is None
+
+    out = e.embed(["hello again"])              # next call transparently reloads
+    assert out == [[1.0] * 5]
+    assert len(_StubRunner.instances) == 2
+
+
+def test_isolated_embedder_close_shuts_down_runner(monkeypatch):
+    e = _isolated_embedder(monkeypatch)
+    runner = _StubRunner.instances[-1]
+    e.close()
+    assert runner.shutdown_calls == 1
+    assert e._runner is None
 
 
 # --------------------------------------------------------------------------- #
@@ -224,6 +367,28 @@ def test_real_gguf_embeddings_are_semantic():
         assert abs(cos(e.embed(["a cat"])[0], V[0]) - 1.0) < 1e-4
     finally:
         e.close()
+
+
+@pytest.mark.real_gguf
+@pytest.mark.skipif(not _EMBED_MODEL,
+                    reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
+def test_real_gguf_embeddings_via_isolated_embedder(monkeypatch):
+    """The isolation-wrapped path (IsolatedEmbedder / get_embedder(), running
+    the real native load in a CHILD process) must produce the same real,
+    semantically-correct embeddings as the raw GGUFEmbedder class above -
+    proving the subprocess boundary does not silently corrupt or degrade
+    output."""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": _EMBED_MODEL, "n_gpu_layers": 99,
+                                 "net_mode": "off"})
+    e = emb.get_embedder()
+    assert e is not None and e.dim > 0
+    V = e.embed(["a cat", "a kitten", "quantum chromodynamics"])
+    assert len(V) == 3 and all(len(v) == e.dim for v in V)
+
+    def cos(a, b):
+        return sum(x * y for x, y in zip(a, b))
+    assert cos(V[0], V[1]) > cos(V[0], V[2])       # kitten closer to cat than QCD
 
 
 # --------------------------------------------------------------------------- #
