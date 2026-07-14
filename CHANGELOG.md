@@ -52,6 +52,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   managed instance automatically next time - `localm comfy status` shows what is
   currently targeted, and `localm config comfy_target user` (or the same dropdown
   in Settings > Media) opts back out if you'd rather it stay off.
+- **The ComfyUI re-scan is easier to find.** The button that re-scans your configured
+  `comfy_workdir` used to live in a spot that only appeared after switching to the
+  Diffusion/Encoders/VAEs/LoRAs/Other tab - invisible by default and on the LLMs tab,
+  with nothing hinting it existed. It's now a labelled **Re-scan ComfyUI folder**
+  option in the "Add a model" card, next to **Import from ComfyUI…**, and it stays
+  visible no matter which tab is active.
 
 ### Fixed
 - **Clearer errors when indexing an image fails.** If the image-description step
