@@ -128,13 +128,30 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
     def _rollback(reason: str) -> ProvisionResult:
         """Return the managed source to prev_commit and re-apply the patch set, then
         report *reason*. Rolls back the git source exactly; if even the rollback
-        checkout fails, say so rather than pretend the tree is clean (rule 5)."""
+        checkout fails - OR the checkout succeeds but the localm patch set cannot be
+        re-applied on the restored source - say so rather than pretend the tree is
+        clean (rule 5)."""
         note = ""
         ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet",
                         prev_commit], on_progress=on_progress, timeout=300)
         if ok:
-            apply_patches(root)  # restore the prior patch set on the restored source
-            _emit(on_progress, f"Rolled back to the previous ComfyUI ({prev_commit[:12]}).")
+            # Re-apply the prior patch set on the restored source. The --force checkout
+            # discarded our patch edits (they are re-applied here), so a FAILED re-apply
+            # leaves the install UNPATCHED (the __func__ fix gone, ACE-Step music broken)
+            # while the tree otherwise reads as the prior install. Surface it in the note
+            # instead of reporting a clean rollback (rule 5: a safety step that fails must
+            # never claim success).
+            failed = [o for o in apply_patches(root) if not o.ok]
+            if failed:
+                detail = "; ".join(f"{o.name}: {o.detail}" for o in failed)
+                note = (f" The localm patch set could not be re-applied on the restored "
+                        f"install ({detail}); run 'localm comfy update' again or reinstall "
+                        "it with 'localm comfy remove' then 'localm comfy setup'.")
+                _emit(on_progress, f"Rolled back to the previous ComfyUI "
+                      f"({prev_commit[:12]}), but re-applying localm's patches failed.")
+            else:
+                _emit(on_progress,
+                      f"Rolled back to the previous ComfyUI ({prev_commit[:12]}).")
         else:
             note = (f" The rollback to {prev_commit[:12]} ALSO failed ({_tail(out)}); the "
                     "managed ComfyUI may be in a mixed state - reinstall it with "
