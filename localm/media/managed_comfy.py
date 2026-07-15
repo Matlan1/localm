@@ -197,16 +197,23 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     same way a user's own launch command is expected to be (see ensure_comfy's
     shlex/cmd handling).
 
-    Names ONE GPU via ``--cuda-device`` when the user configured a split or a main
-    GPU (REG-532). ComfyUI MASKS devices rather than sharding: it turns
-    ``--cuda-device`` into ``CUDA_VISIBLE_DEVICES`` and still loads the model onto a
-    single ``torch.cuda.current_device()``. Leaving the device unnamed let the swap
-    gate (which reads COMBINED free VRAM across the split) and the actual loader
-    disagree about which hardware they meant, so a media job that "fit" in 2x4 GB
-    combined would OOM on one 4 GB card. Naming one deliberately chosen card makes
-    them agree. A comma-separated set is deliberately NEVER emitted: it would only
-    mask visibility while placement stayed single-card, which would look like split
-    support without being it. See ``dev-notes/media-split-gpu/SPEC.md``.
+    Names a PREFERRED GPU via ``--default-device`` when the user configured a split or
+    a main GPU (REG-532), so the swap gate (which reads COMBINED free VRAM across the
+    split) and the actual loader agree on which card the work lands on. Without it a
+    media job that "fit" in 2x4 GB combined would OOM on one 4 GB card.
+
+    ``--default-device``, NOT ``--cuda-device``. This is the whole point and it was
+    shipped wrong once (f094d3d0). Both flags express "use this card", but
+    ``--cuda-device`` sets ``CUDA_VISIBLE_DEVICES`` to that one id
+    (``main.py:78-81``), DELETING the other cards from torch's view - which silently
+    disables ComfyUI core's own per-component placement nodes
+    (``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``,
+    ``comfy_extras/nodes_multigpu.py``, registered ``nodes.py:2440``), since a
+    ``gpu:1`` that no longer exists is a no-op. ``--default-device`` REORDERS the
+    visible list so the chosen card leads and the rest stay usable
+    (``main.py:69-76``). Masking a multi-GPU box down to one card in the name of
+    "choosing the best card" is the exact soft-degrade this feature exists to remove.
+    See ``dev-notes/media-split-gpu/SPEC.md``.
 
     Creates nothing on disk. No longer strictly pure, though: resolving the device
     reads config and probes the GPU via ``discover.list_gpus()``. That probe is
@@ -216,10 +223,10 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     paths = managed_comfy_paths()
     cmd = (f'"{paths.venv_python}" "{paths.main_py}" '
            f'--listen 127.0.0.1 --port {MANAGED_COMFY_PORT}')
-    from localm.discover import resolve_whole_model_device
-    device = resolve_whole_model_device(config)
+    from localm.discover import resolve_preferred_device
+    device = resolve_preferred_device(config)
     if device is not None:
-        cmd += f" --cuda-device {device}"
+        cmd += f" --default-device {device}"
     return cmd
 
 

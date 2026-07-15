@@ -1028,33 +1028,38 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> li
     return shortfall
 
 
-def resolve_whole_model_device(config: Optional[dict] = None, *,
-                              gpus: Optional[list] = None) -> Optional[int]:
-    """The ONE device a workload that CANNOT be split should load onto, or ``None``
-    when nothing is configured and we must not invent a choice.
+def resolve_preferred_device(config: Optional[dict] = None, *,
+                            gpus: Optional[list] = None) -> Optional[int]:
+    """The device a media workload should DEFAULT to, with every OTHER card left
+    VISIBLE. ``None`` when nothing is configured, or when no torch-visible device can
+    be named honestly.
 
-    This is NOT :func:`resolve_gpu_split`'s question, and NOT
-    :func:`gpu_split_shortfall`'s. Both of those encode a placement where the model is
-    DIVIDED across the split by a static ratio (:func:`apply_gpu_split` ->
-    ``tensor_split``). Some workloads cannot do that at all: ComfyUI consumes
-    ``--cuda-device`` as ``CUDA_VISIBLE_DEVICES`` masking and then loads onto a single
-    ``torch.cuda.current_device()``, so the WHOLE model lands on ONE card however many
-    are visible (verified against ComfyUI git 867404b: ``main.py:78-81``,
-    ``model_management.py:194``). For those, "which devices can this draw on" is the
-    wrong predicate, and a per-device RATIO share would UNDER-check them: a card
-    holding 40% of a split would be asked for 40% of the model and then handed 100% of
-    it. See ``dev-notes/media-split-gpu/SPEC.md``.
+    NEVER use this to MASK the other cards away. That was a real, shipped bug (see the
+    rename from ``resolve_whole_model_device``): ComfyUI core ships per-component GPU
+    PLACEMENT - ``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``
+    (``comfy_extras/nodes_multigpu.py``, registered at ``nodes.py:2440``), which call
+    ``deepclone_multigpu`` to rehome a component onto another card with independent
+    weights. Masking to one device (ComfyUI's ``--cuda-device``, or a bare
+    ``CUDA_VISIBLE_DEVICES=N``) deletes the other cards from torch's view and turns
+    every one of those nodes into a silent no-op. Prefer ComfyUI's ``--default-device``,
+    which reorders rather than masks (``main.py:69-76``), or :func:`visible_device_order`
+    for an install we cannot pass argv to.
 
-    On a configured split this is a CAPACITY-informed choice: the split device with the
-    MOST live free VRAM, so the whole model has the best chance of fitting. It is
-    deliberately NOT :func:`resolve_main_gpu_index`, which answers IDENTITY ("which
-    device is primary") and resolves an unset value to device 0 - using that here would
-    silently pick card 0 and ignore the split entirely, the shape of the #661
-    regression (a scalar index used where a choice across a set was needed).
+    The predicate here is PREFERENCE, not exclusivity: "which card should lead", not
+    "which card is the only one". It is deliberately NOT :func:`resolve_main_gpu_index`,
+    which answers IDENTITY ("which device is primary") and resolves an unset value to
+    device 0 - using that here would silently pick card 0 and ignore the split, the
+    shape of the #661 regression. On a configured split this is a CAPACITY-informed
+    choice: the split device with the MOST live free VRAM.
 
-    Returns ``None`` when neither a split nor a ``main_gpu_index`` is configured, so a
-    plain box keeps today's behaviour (no device named) instead of being pinned to an
-    invented card - which would also mask a second GPU the user later adds.
+    INDEX SPACE (this is load-bearing): the answer is always a TORCH device index,
+    because media runs on torch (ComfyUI), and :func:`list_gpus` enumerates via
+    torch.cuda. It must never leak :func:`resolve_gpu_split`'s Vulkan pass-through
+    (GPU-SPLIT-VKINDEX): on the ``vulkan`` llama.cpp build that function returns
+    indices UNVALIDATED, in ggml-vulkan's own index space, which torch does not share.
+    Handing one of those to ComfyUI as a CUDA/HIP id would name the wrong card. So a
+    device is returned only when it is genuinely torch-visible; otherwise ``None``, and
+    ComfyUI keeps its own default.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -1063,33 +1068,78 @@ def resolve_whole_model_device(config: Optional[dict] = None, *,
     if not split and main is None:
         return None                 # nothing configured: do not invent a device
     devices = gpus if gpus is not None else list_gpus()
+    by_index = {g.get("index"): g for g in devices}
+    if not by_index:
+        # No torch-visible device at all, so any index we named would be a guess in an
+        # index space we cannot check. Let ComfyUI choose; do not pretend to know.
+        return None
     if split:
         pairs = resolve_gpu_split(split, cfg.get("gpu_split_ratios"), gpus=devices)
         if len(pairs) >= 2:
-            by_index = {g.get("index"): g for g in devices}
-            measured = [(idx, by_index[idx]["free"]) for idx, _ in pairs
-                        if by_index.get(idx) is not None
-                        and by_index[idx].get("free") is not None]
+            visible = [idx for idx, _ in pairs if idx in by_index]
+            measured = [(idx, by_index[idx]["free"]) for idx in visible
+                        if by_index[idx].get("free") is not None]
             if measured:
                 return max(measured, key=lambda t: t[1])[0]
-            # A split IS configured but NO split device reports free VRAM, so the
-            # capacity-informed choice cannot be made. Fall back to the first valid
-            # split device and SAY SO (rule 5): the workload may land on the emptier
-            # card, which is a real degradation, not a cosmetic detail. Warned rather
-            # than raised - refusing here would break a working setup over a probe
-            # that is allowed to be unmeasurable.
+            if visible:
+                # Split devices ARE torch-visible but none reports free VRAM, so the
+                # capacity-informed choice cannot be made. Lead with the first visible
+                # one and SAY SO (rule 5): it may not be the emptiest card. Warned, not
+                # raised - refusing would break a working setup over a probe that is
+                # allowed to be unmeasurable.
+                logger.warning(
+                    "gpu_split is configured but no split device reports free VRAM, so "
+                    "the best card cannot be chosen for media; defaulting to device %d, "
+                    "which may have less free VRAM than its peers.", visible[0])
+                return visible[0]
+            # NOT ONE configured split device is torch-visible. resolve_gpu_split()
+            # passes indices through UNVALIDATED on the vulkan llama.cpp build
+            # (GPU-SPLIT-VKINDEX), so these are very likely ggml-vulkan indices, which
+            # mean something else entirely to torch. Naming one would point ComfyUI at
+            # the wrong card. Say so and let ComfyUI default.
             logger.warning(
-                "gpu_split is configured but no split device reports free VRAM, so "
-                "the emptiest card cannot be chosen for a whole-model workload; "
-                "using device %d, which may have less free VRAM than its peers.",
-                pairs[0][0])
-            return pairs[0][0]
+                "gpu_split %r resolves to no torch-visible device, so media cannot name "
+                "one: those indices are not in torch's index space (a Vulkan-only "
+                "llama.cpp split does this). Leaving the device to ComfyUI's default.",
+                split)
+            return None
         # A split was configured but did not resolve to 2+ detected devices.
         # resolve_gpu_split() has already WARNED about the dropped indices; fall
         # through to the main-index answer below rather than guess a device.
     if main is None:
         return None
-    return resolve_main_gpu_index(main, gpus=devices)
+    idx = resolve_main_gpu_index(main, gpus=devices)
+    return idx if idx in by_index else None
+
+
+def visible_device_order(config: Optional[dict] = None, *,
+                         gpus: Optional[list] = None) -> Optional[list]:
+    """Every torch-visible device index with the PREFERRED one FIRST, or ``None`` when
+    no device should be named.
+
+    For a ComfyUI localm cannot pass argv to: the user's OWN install, started by their
+    own launcher (possibly ZLUDA-wrapped), where the child env is the only lever. This
+    mirrors exactly what ComfyUI's own ``--default-device`` does at ``main.py:69-76`` -
+    it REORDERS ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES`` so the chosen device
+    leads, leaving the rest visible - rather than what ``--cuda-device`` does at
+    ``main.py:78-81``, which masks them away and silently disables core's
+    ``Select*Device`` placement nodes.
+
+    Every index is torch-visible by construction (:func:`resolve_preferred_device` and
+    :func:`list_gpus` share torch's index space), so this never emits a Vulkan-space id.
+
+    NOTE the consequence, which callers must respect: after this reorder the preferred
+    card becomes torch index 0, so a workflow's ``gpu:N`` refers to the REORDERED
+    position, not to localm's own ``list_gpus`` index. Anything emitting ``gpu:N`` into
+    a workflow has to map through this order, not around it.
+    """
+    devices = gpus if gpus is not None else list_gpus()
+    chosen = resolve_preferred_device(config, gpus=devices)
+    if chosen is None:
+        return None
+    rest = sorted(g.get("index") for g in devices
+                  if g.get("index") is not None and g.get("index") != chosen)
+    return [chosen] + rest
 
 
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:

@@ -985,32 +985,42 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
 
     - ONLY when the shim is enabled, PREPENDS the localm-owned shim dir to PYTHONPATH
       (preserving any pre-existing PYTHONPATH).
-    - ONLY for a USER'S OWN ComfyUI, pins ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES``
-      to the one device a whole-model workload should land on (REG-532).
+    - ONLY for a USER'S OWN ComfyUI, ORDERS ``CUDA_VISIBLE_DEVICES``/
+      ``HIP_VISIBLE_DEVICES`` so the preferred card leads and EVERY OTHER CARD STAYS
+      VISIBLE (REG-532).
 
-    Why the device goes in the ENV here and on the ARGV for the managed instance: for a
-    managed ComfyUI localm builds the command itself, so it passes ``--cuda-device``
-    (see ``managed_comfy_launch_cmd``). A user's own ComfyUI is started by THEIR
-    launcher - often a .bat, possibly ZLUDA-wrapped - which localm must not rewrite, so
-    the child env is the only lever. Both routes end in the same place: ComfyUI's
-    ``main.py:78-81`` does nothing with ``--cuda-device`` except set exactly these two
-    variables. Setting both mirrors what ComfyUI itself does, which matters on this
-    ZLUDA/ROCm path where CUDA is emulated over HIP. Deliberately NOT set for the
-    managed instance, so there is exactly ONE source of truth for its device (the argv)
-    rather than two that could disagree.
+    ORDER, NEVER MASK. This shipped wrong once (f094d3d0) as a bare
+    ``CUDA_VISIBLE_DEVICES=<one id>``, which deletes the other cards from torch's view
+    and silently disables ComfyUI core's per-component placement nodes
+    (``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``,
+    ``comfy_extras/nodes_multigpu.py``, registered ``nodes.py:2440``): a ``gpu:1`` that
+    no longer exists is a no-op. So we emit the full ordered list ("1,0,2"), exactly
+    what ComfyUI's own ``--default-device`` writes at ``main.py:69-76``, rather than
+    the single id ``--cuda-device`` writes at ``main.py:78-81``.
 
-    Nothing is pinned when the user configured no split and no main GPU:
-    ``resolve_whole_model_device()`` returns None and a plain box spawns exactly as it
-    does today, rather than being masked to an invented card (which would also hide a
-    second GPU the user later adds). Never writes anything to disk."""
+    Why the ENV here and the ARGV for the managed instance: for a managed ComfyUI
+    localm builds the command itself, so it passes ``--default-device`` (see
+    ``managed_comfy_launch_cmd``). A user's own ComfyUI is started by THEIR launcher -
+    often a .bat, possibly ZLUDA-wrapped - which localm must not rewrite, so the child
+    env is the only lever. Both routes end in the same place: those two env vars.
+    Setting both mirrors ComfyUI itself, which matters on the ZLUDA/ROCm path where
+    CUDA is emulated over HIP. Deliberately NOT set for the managed instance, so its
+    device has exactly ONE source of truth (the argv) rather than two that could
+    disagree.
+
+    Nothing is set when the user configured no split and no main GPU, or when no
+    torch-visible device can be named honestly: ``visible_device_order()`` returns None
+    and a plain box spawns exactly as it does today, rather than being pinned to an
+    invented card (which would also hide a second GPU the user later adds). Never
+    writes anything to disk."""
     base = _amd_rocm_launch_env()
 
-    device = None
+    order = None
     try:
         from localm.media.managed_comfy import managed_comfy_active
         if not managed_comfy_active(cfg):
-            from localm.discover import resolve_whole_model_device
-            device = resolve_whole_model_device(cfg)
+            from localm.discover import visible_device_order
+            order = visible_device_order(cfg)
     except Exception as e:
         # Do NOT silently spawn with no device: that is the REG-532 defect (the swap
         # gate reads combined free VRAM while the model lands on one card). We cannot
@@ -1018,12 +1028,12 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
         # surface it and continue exactly as before (rule 5: a note, not silence, and
         # not an escalation).
         from localm.debuglog import logger
-        logger.warning("could not resolve a GPU device for the ComfyUI child env "
-                       "(%s); launching without pinning one. On a multi-GPU box the "
-                       "media VRAM check may not match the card ComfyUI uses.", e)
+        logger.warning("could not resolve a GPU device order for the ComfyUI child env "
+                       "(%s); launching without one. On a multi-GPU box the media VRAM "
+                       "check may not match the card ComfyUI uses.", e)
 
     shim_on = func_shim_enabled(cfg)
-    if not shim_on and device is None:
+    if not shim_on and not order:
         return base          # unchanged: exactly what the launch used before
     env = base if base is not None else dict(os.environ)
     if shim_on:
@@ -1034,9 +1044,13 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
             env["PYTHONPATH"] = prev
         else:
             env["PYTHONPATH"] = shim + (os.pathsep + prev if prev else "")
-    if device is not None:
-        env["CUDA_VISIBLE_DEVICES"] = str(device)
-        env["HIP_VISIBLE_DEVICES"] = str(device)
+    if order:
+        # The FULL order, not order[0]: every card stays visible, the preferred one
+        # merely leads. Emitting just the first id here is the masking bug this
+        # replaced.
+        visible = ",".join(str(i) for i in order)
+        env["CUDA_VISIBLE_DEVICES"] = visible
+        env["HIP_VISIBLE_DEVICES"] = visible
     return env
 
 

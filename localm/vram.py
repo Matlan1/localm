@@ -135,15 +135,22 @@ def media_single_device_shortfall(settings: dict, *,
 
     THE OTHER HALF OF ``decide_media_swap`` (REG-532). That gate reads COMBINED free
     across a configured split, which is the right CAPACITY question and MUST stay that
-    way (every capacity decision uses the combined number). But ComfyUI cannot SPAN a
-    split: it consumes ``--cuda-device`` as ``CUDA_VISIBLE_DEVICES`` masking and loads
-    the whole model onto a single ``torch.cuda.current_device()``. So the gate can be
+    way (every capacity decision uses the combined number). But no single model is
+    DIVIDED across the split the way a tensor_split GGUF is: each component loads whole
+    onto one ``get_torch_device()`` (``model_management.py:194``). So the gate can be
     satisfied by 2x4 GB = 8 GB combined while a 4 GB model lands on ONE 4 GB card and
     OOMs, spills to shared RAM, or trips the ROCm TDR. The gate is not wrong; it simply
     cannot see placement.
 
+    NOTE, and do not let this rot: ComfyUI core CAN place DIFFERENT components (model /
+    CLIP / VAE) on different cards via ``comfy_extras/nodes_multigpu.py``'s
+    ``Select*Device`` nodes. localm does not emit those yet. When it does, this check
+    must become per-component against each component's chosen card, not one card for
+    the whole job - the estimate here would then be over-strict rather than wrong, but
+    it would still be measuring a placement that no longer happens.
+
     This answers the placement question instead: does the specific card
-    ``discover.resolve_whole_model_device()`` chose hold the WHOLE model plus the same
+    ``discover.resolve_preferred_device()`` chose hold the WHOLE model plus the same
     headroom the aggregate demands. Deliberately NOT ``discover.gpu_split_shortfall``,
     which checks a per-device RATIO SHARE - right for a tensor_split GGUF, an
     UNDER-check here (a card holding 40% of a split would be asked for 40% of the model
@@ -165,13 +172,13 @@ def media_single_device_shortfall(settings: dict, *,
     if not isinstance(need, int) or need <= 0:
         return None
     from localm.config import load_config
-    from localm.discover import (list_gpus, resolve_whole_model_device,
+    from localm.discover import (list_gpus, resolve_preferred_device,
                                  split_device_count)
     cfg = config if config is not None else load_config()
     if split_device_count(cfg) < 2:
         return None
     gpus = list_gpus()
-    idx = resolve_whole_model_device(cfg, gpus=gpus)
+    idx = resolve_preferred_device(cfg, gpus=gpus)
     if idx is None:
         return None
     dev = {g.get("index"): g for g in gpus}.get(idx)
@@ -199,17 +206,18 @@ def media_split_notice(config: Optional[dict] = None) -> Optional[str]:
     never nagged about a shortfall that does not exist.
     """
     from localm.config import load_config
-    from localm.discover import resolve_whole_model_device, split_device_count
+    from localm.discover import resolve_preferred_device, split_device_count
     cfg = config if config is not None else load_config()
     n = split_device_count(cfg)
     if n < 2:
         return None
-    idx = resolve_whole_model_device(cfg)
+    idx = resolve_preferred_device(cfg)
     where = f"GPU {idx}" if idx is not None else "a single GPU"
     return (f"Note: your GPU split spans {n} cards, but image/music/video generation "
-            f"runs on ONE card ({where}, the one with the most free VRAM). ComfyUI "
-            "selects a device rather than splitting a model across cards, so the split "
-            "cannot be used here. Chat and embeddings still use the full split.")
+            f"currently runs on ONE card ({where}, the one with the most free VRAM). "
+            "A single model cannot be divided across cards the way chat and embeddings "
+            "are, so your split ratios do not apply here. Chat and embeddings still use "
+            "the full split.")
 
 
 def decide_embedder_swap(embedder_estimate_bytes: Optional[int], *,
