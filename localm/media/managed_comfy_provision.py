@@ -121,8 +121,10 @@ def pip_cache_dir() -> Path:
     multi-GB. Without a cache, every re-provision (remove + setup again, a retry after a
     failed install) re-downloads all of it. The cost of keeping it is disk INSIDE the
     data dir, where it is visible, contained, and removed with the data dir - which is
-    the point."""
-    return config.cache_dir() / "pip"
+    the point. Delegates to ``config.pip_cache_dir()`` so the pip-cache location has ONE
+    definition shared with the other localm-driven pip subprocesses (plugins/deps.py,
+    setup_llama.py)."""
+    return config.pip_cache_dir()
 
 
 def _isolated_env() -> dict:
