@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
-from localm.plugins.builtin.jobs.store import Job
+from localm.plugins.builtin.jobs.store import Job, JobStore
 
 # Upper bound on how long the runner blocks its worker thread waiting for the
 # server loop to complete a guarded shared-engine unload (see
@@ -366,8 +366,31 @@ def _shell_still_authorized(job: Job) -> bool:
     from localm.auth import _hash_key, get_api_key, key_hash_live
     owner_key = get_api_key()
     if owner_key and _hash_key(owner_key) == job.owner:
+        # This run PROVES the job is the owner's, because the owner key still has
+        # the value it was stamped with. Record that now, while it is still
+        # provable: a job created before this field existed would otherwise lose
+        # shell on the owner's next roll, exactly as REG-509 describes. After this
+        # the flag short-circuits above, so it is a one-time write per job.
+        _remember_owner_key_job(job)
         return True
     return key_hash_live(job.owner)
+
+
+def _remember_owner_key_job(job: Job) -> None:
+    """Persist ``owner_is_owner_key`` on a legacy job we just proved is the
+    owner's (best-effort).
+
+    Failing to persist is not fatal - this run is authorized either way, and the
+    next run re-proves it the same way - so it must not break the job. But it is
+    not silenced either: if it keeps failing, the job stays exposed to REG-509 on
+    the next key roll, and that has to be discoverable (AGENTS.md rule 5).
+    """
+    job.owner_is_owner_key = True
+    try:
+        JobStore().update(job.id, owner_is_owner_key=True)
+    except (KeyError, OSError, RuntimeError, ValueError) as e:
+        logger.debug("jobs: could not persist the owner-key stamp for job %s "
+                     "(%s); it will be re-derived on the next run", job.id, e)
 
 
 def _run_coder(job: Job, *, engine=None) -> str:

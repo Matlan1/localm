@@ -30,6 +30,7 @@ revoked ADMIN/coder:full key still loses shell.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -261,6 +262,152 @@ def test_revoked_coder_full_key_still_loses_shell_after_owner_rotation(
     result = runner.run_job(_stored(job_id), engine=None)
     assert result["status"] == "ok"
     assert captured["restricted"] is True
+
+
+def _cookie_request(sid):
+    """A minimal Request-alike carrying a session cookie, enough for
+    principal_id/caller_scopes (which read only cookies + headers)."""
+    from localm.inference import http_server as hs
+
+    class _Req:
+        cookies = {hs.SESSION_COOKIE: sid}
+        headers: dict = {}
+    return _Req()
+
+
+def test_expired_admin_keystore_key_over_a_live_cookie_is_not_the_owner(home):
+    """THE HOLE the pre-merge security review caught, pinned so it cannot come
+    back.
+
+    revoke_key DELETES a keystore record, but EXPIRY does not - and
+    _principal_from_token exempts an ADMIN session from key_hash_live, so an
+    expired ADMIN-scoped keystore key's cookie session still resolves a principal
+    that key_hash_live calls dead. The first version of this fix asked the
+    NEGATIVE question ("absent from the keystore, so it must be the owner") and
+    therefore stamped that expired, revocable key as the OWNER - handing it
+    permanent shell and re-opening LM-DA-014.
+
+    Note the bearer path canNOT show this (verify() rejects an expired key), which
+    is exactly why the original negative test missed it: it used a Bearer header.
+    """
+    from localm import auth, sessions
+    from localm.inference.http_server import caller_scopes, principal_id
+    from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
+
+    auth.set_api_key(KEY_ONE)
+    created = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True,
+                              expires=time.time() + 3600)
+    kh = auth._hash_key(created["key"])
+    sid = sessions.create(scopes={S.ADMIN}, key_hash=kh, fs_access="host")
+
+    # The key expires. The record survives; the ADMIN session survives with it.
+    ks = auth._load_keystore()
+    for rec in ks:
+        rec["expires"] = time.time() - 10
+    auth._save_keystore(ks)
+
+    req = _cookie_request(sid)
+    # Preconditions: this is the exact state that fooled the negative test.
+    assert auth.verify(created["key"]) is None          # bearer would be rejected
+    assert auth.key_hash_live(kh) is False              # "not live"...
+    assert sessions.lookup(sid) is not None             # ...but the cookie lives
+    assert caller_scopes(req) == {S.ADMIN}
+    assert principal_id(req) == kh
+
+    assert _caller_is_owner_key(req) is False, (
+        "an EXPIRED admin-scoped keystore key was stamped as the owner key - "
+        "that hands a revoked credential permanent shell (LM-DA-014)")
+
+
+def test_an_unreadable_keystore_cannot_promote_a_key_to_owner(home, monkeypatch):
+    """The other half: _load_keystore() swallows OSError/ValueError and returns
+    [], so key_hash_live says "not live" for a perfectly LIVE key on a transient
+    corrupt/locked auth.json. A PERMANENT privilege stamp must never be derived
+    from a fail-open read."""
+    from localm import auth, sessions
+    from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
+
+    auth.set_api_key(KEY_ONE)
+    created = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
+    kh = auth._hash_key(created["key"])
+    sid = sessions.create(scopes={S.ADMIN}, key_hash=kh, fs_access="host")
+
+    # auth.json becomes unreadable/corrupt -> _load_keystore returns [].
+    monkeypatch.setattr(auth, "_load_keystore", lambda: [])
+    assert auth.key_hash_live(kh) is False       # a LIVE key now reads as dead
+
+    assert _caller_is_owner_key(_cookie_request(sid)) is False, (
+        "a keystore read failure promoted a live scoped key to owner")
+
+
+def test_the_owner_key_over_a_cookie_session_is_the_owner(home):
+    """Positive control for the two negatives above: the owner's own session
+    (minted by the owner key, key unchanged) IS recognised."""
+    from localm import auth, sessions
+    from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
+
+    auth.set_api_key(KEY_ONE)
+    sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY_ONE),
+                          fs_access="host")
+    assert _caller_is_owner_key(_cookie_request(sid)) is True
+
+
+def test_legacy_owner_job_is_restamped_so_a_later_rotation_cannot_strip_it(
+        home, tmp_path, monkeypatch):
+    """A job persisted BEFORE this field existed must not stay exposed: the first
+    run that proves it is the owner's (the key still matches by value) records
+    that, so the owner's NEXT roll does not strip its shell."""
+    from localm import auth
+    from localm.plugins.builtin.jobs.store import Job, JobStore
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    store = JobStore()
+    legacy = Job.from_dict({
+        "name": "legacy", "task_kind": "coder", "prompt": "x", "cwd": str(work),
+        "schedule_kind": "interval", "schedule": 60, "allow_shell": OPT_IN,
+        "owner": auth._hash_key(KEY_ONE),      # no owner_is_owner_key key at all
+    })
+    store.add(legacy)
+    assert store.get(legacy.id).owner_is_owner_key is False
+
+    # One ordinary run, while the key still matches.
+    assert runner.run_job(store.get(legacy.id), engine=None)["status"] == "ok"
+    assert captured["restricted"] is False
+    assert store.get(legacy.id).owner_is_owner_key is True, \
+        "the proven owner stamp was not persisted"
+
+    # NOW the owner rolls their key. The legacy job must keep its shell.
+    auth.regenerate_key()
+    captured.clear()
+    assert runner.run_job(store.get(legacy.id), engine=None)["status"] == "ok"
+    assert captured["restricted"] is False
+
+
+def test_restamp_failure_does_not_break_the_run(home, tmp_path, monkeypatch):
+    """The re-stamp is best-effort: a store write failure must not fail the job
+    (this run is authorized either way), and must not be silent."""
+    from localm import auth
+    from localm.plugins.builtin.jobs import runner as runner_mod
+    from localm.plugins.builtin.jobs.store import Job
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    job = Job(name="x", task_kind="coder", prompt="p", cwd=str(work),
+              schedule_kind="interval", schedule=60, allow_shell=OPT_IN,
+              owner=auth._hash_key(KEY_ONE))     # not in any store -> update KeyErrors
+
+    def _boom(*a, **kw):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(runner_mod.JobStore, "update", _boom)
+    result = runner.run_job(job, engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is False       # still authorized
 
 
 def test_owner_stamp_is_not_set_for_a_keystore_key(jobs_app, tmp_path):
