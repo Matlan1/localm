@@ -68,6 +68,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Knowledge and memory no longer mix up results when two things are indexed at
+  once.** If a background knowledge re-index overlapped with a chat memory lookup,
+  the two could receive each other's results, storing or matching against the wrong
+  text with no error shown - which could quietly leave wrong entries in your
+  knowledge and memory stores and make recall return unrelated results. Overlapping
+  requests are now kept apart, so each one always gets its own.
 - **Saving a memory no longer freezes the app.** On some setups, saving, editing,
   or adding a remembered fact could make the whole app stop responding for several
   minutes the first time an embedding model needed to load, because that load ran on
