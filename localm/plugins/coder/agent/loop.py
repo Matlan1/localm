@@ -81,6 +81,11 @@ class _LoopMixin:
         Agentic loop: call LLM → parse tool calls → execute → repeat.
         Returns the final response text.
         """
+        # Record whether this session owns a terminal it can prompt on. A spawned
+        # child always runs _loop(interactive=False), so without this a child had
+        # no way to tell an unattended run (nobody to ask -> fail closed) from a
+        # parent sitting in the REPL (a user who can answer). REG-507.
+        self._interactive = interactive
         # Live-attribute access so tests patching agent.parse_tool_calls /
         # confirm / print_warning / TOOL_REGISTRY are honoured (the names moved
         # into this submodule when agent.py became a package).
@@ -90,6 +95,8 @@ class _LoopMixin:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY
         final_response = ""
         self._stop_requested = False       # a stale stop must not kill a new task
+        self._user_stopped = False         # per-run: a stop in an EARLIER run must
+                                           # not mute this run's failure lesson
         start_turns = self._turns          # turns used by *this* task only
         budget_escalated = False           # uncertainty escalation fires at most once per task
         # Per-task one-shot flags for the no-tool-calls handler (split out below):
@@ -103,6 +110,7 @@ class _LoopMixin:
                     self._stop_requested = False
                     final_response = "[stopped by user]"
                     self._last_run_ok = False
+                    self._user_stopped = True
                     break
 
                 # Mid-task steering: deliver queued user messages before the
@@ -148,6 +156,7 @@ class _LoopMixin:
                                 "task exceeded its turn budget]"
                             )
                             self._last_run_ok = False
+                            self._user_stopped = True
                             break
                     else:
                         self._emit(
@@ -177,6 +186,7 @@ class _LoopMixin:
                     self._add_assistant(response)
                     final_response = response or "[stopped by user]"
                     self._last_run_ok = False
+                    self._user_stopped = True
                     break
 
                 # ---- repeated-scaffold breaker (REC-CODER-LOOPBREAK) ------
