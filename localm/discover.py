@@ -1028,6 +1028,70 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> li
     return shortfall
 
 
+def resolve_whole_model_device(config: Optional[dict] = None, *,
+                              gpus: Optional[list] = None) -> Optional[int]:
+    """The ONE device a workload that CANNOT be split should load onto, or ``None``
+    when nothing is configured and we must not invent a choice.
+
+    This is NOT :func:`resolve_gpu_split`'s question, and NOT
+    :func:`gpu_split_shortfall`'s. Both of those encode a placement where the model is
+    DIVIDED across the split by a static ratio (:func:`apply_gpu_split` ->
+    ``tensor_split``). Some workloads cannot do that at all: ComfyUI consumes
+    ``--cuda-device`` as ``CUDA_VISIBLE_DEVICES`` masking and then loads onto a single
+    ``torch.cuda.current_device()``, so the WHOLE model lands on ONE card however many
+    are visible (verified against ComfyUI git 867404b: ``main.py:78-81``,
+    ``model_management.py:194``). For those, "which devices can this draw on" is the
+    wrong predicate, and a per-device RATIO share would UNDER-check them: a card
+    holding 40% of a split would be asked for 40% of the model and then handed 100% of
+    it. See ``dev-notes/media-split-gpu/SPEC.md``.
+
+    On a configured split this is a CAPACITY-informed choice: the split device with the
+    MOST live free VRAM, so the whole model has the best chance of fitting. It is
+    deliberately NOT :func:`resolve_main_gpu_index`, which answers IDENTITY ("which
+    device is primary") and resolves an unset value to device 0 - using that here would
+    silently pick card 0 and ignore the split entirely, the shape of the #661
+    regression (a scalar index used where a choice across a set was needed).
+
+    Returns ``None`` when neither a split nor a ``main_gpu_index`` is configured, so a
+    plain box keeps today's behaviour (no device named) instead of being pinned to an
+    invented card - which would also mask a second GPU the user later adds.
+    """
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    split = cfg.get("gpu_split_indices")
+    main = cfg.get("main_gpu_index")
+    if not split and main is None:
+        return None                 # nothing configured: do not invent a device
+    devices = gpus if gpus is not None else list_gpus()
+    if split:
+        pairs = resolve_gpu_split(split, cfg.get("gpu_split_ratios"), gpus=devices)
+        if len(pairs) >= 2:
+            by_index = {g.get("index"): g for g in devices}
+            measured = [(idx, by_index[idx]["free"]) for idx, _ in pairs
+                        if by_index.get(idx) is not None
+                        and by_index[idx].get("free") is not None]
+            if measured:
+                return max(measured, key=lambda t: t[1])[0]
+            # A split IS configured but NO split device reports free VRAM, so the
+            # capacity-informed choice cannot be made. Fall back to the first valid
+            # split device and SAY SO (rule 5): the workload may land on the emptier
+            # card, which is a real degradation, not a cosmetic detail. Warned rather
+            # than raised - refusing here would break a working setup over a probe
+            # that is allowed to be unmeasurable.
+            logger.warning(
+                "gpu_split is configured but no split device reports free VRAM, so "
+                "the emptiest card cannot be chosen for a whole-model workload; "
+                "using device %d, which may have less free VRAM than its peers.",
+                pairs[0][0])
+            return pairs[0][0]
+        # A split was configured but did not resolve to 2+ detected devices.
+        # resolve_gpu_split() has already WARNED about the dropped indices; fall
+        # through to the main-index answer below rather than guess a device.
+    if main is None:
+        return None
+    return resolve_main_gpu_index(main, gpus=devices)
+
+
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:
     """
     Capacity badge for one file, against a single-GPU (or combined-split) VRAM
