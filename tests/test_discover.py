@@ -505,6 +505,47 @@ class TestListGpusSafety:
         assert elapsed < 2.0
         assert fallback == good, "a wedged probe must serve the last-known-good value, not []"
 
+    def test_reset_orphans_an_abandoned_probe_so_it_cannot_bleed(self, monkeypatch):
+        """An abandoned probe must not land its reading after a reset has retired it.
+
+        A probe that overruns its deadline is ABANDONED, not cancelled (a wedged
+        native call cannot be interrupted from Python), so that thread outlives the
+        reset and used to write _gpu_last_good afterwards - landing inside whatever
+        ran next. That is not hypothetical: a cold ROCm init (~6.5s, see this
+        module's own note) overruns the 4s deadline, so this box's REAL card was
+        arriving inside later tests that assert a fake or empty reading, failing
+        them intermittently (~15% of runs) with 'AMD Radeon RX 6900 XT'.
+
+        Guards the epoch fence in _reset_gpu_probe_cache. Clearing the globals
+        alone CANNOT fix this (the write happens after the clear), so a fix that
+        only re-clears would still fail this test."""
+        import threading
+        import time
+
+        from localm import discover
+
+        landed = threading.Event()
+
+        def _slow_probe():
+            time.sleep(0.4)          # still running when the reset below lands
+            landed.set()
+            return [{"index": 0, "name": "STRAGGLER", "total": 1, "free": 1}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow_probe)
+        assert list_gpus(deadline=0.05) == []      # overruns -> thread abandoned
+
+        # The next test's autouse fixture, while the probe thread is still running.
+        discover._reset_gpu_probe_cache()
+
+        assert landed.wait(5), "probe thread never finished; test cannot conclude"
+        time.sleep(0.2)   # give the straggler's write every chance to land
+        with discover._gpu_probe_lock:
+            leaked = discover._gpu_last_good
+        assert leaked is None, (
+            f"an abandoned probe wrote {leaked!r} into _gpu_last_good AFTER the "
+            f"reset retired it - it would be served to the next test/caller as a "
+            f"last-known-good reading")
+
 
 class TestListGpusTimeoutStatus:
     """A timed-out cold probe must be DISTINGUISHABLE from a genuine empty result
