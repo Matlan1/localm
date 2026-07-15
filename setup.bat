@@ -47,6 +47,7 @@ echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) ins
 echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
 echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
 set "STOREPICK="
+call :flush
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
 set "CONTAINED=0"
@@ -75,6 +76,7 @@ if not errorlevel 1 goto uv_ready
 
 echo  [!] uv (the Python package manager localm builds on) is not installed.
 set "GETUV="
+call :flush
 set /p "GETUV=  Install it now with Astral's official installer? [Y/n]: "
 if not defined GETUV set "GETUV=Y"
 if /i "!GETUV:~0,1!"=="N" goto uv_manual
@@ -148,8 +150,10 @@ if exist ".venv\.localm-venv" set "OURS=1"
 if exist ".venv\Scripts\localm.exe" set "OURS=1"
 echo.
 if "%OURS%"=="1" (
+    call :flush
     choice /c YN /n /m "  LocalM .venv found. Replace it? [y/N]: "
 ) else (
+    call :flush
     choice /c YN /n /m "  Foreign .venv found. Replace it? [y/N]: "
 )
 rem choice sets errorlevel: 1=Y, 2=N. Test the higher index first.
@@ -170,6 +174,7 @@ if errorlevel 1 (
     echo      If you see "Access is denied" or "os error 5", a localm process is still running.
     echo      Please close any open LocaLM launchers, chat windows, or server consoles.
     echo.
+    call :flush
     choice /c YN /n /m "  Try again? [Y/n]: "
     if errorlevel 2 (
         echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
@@ -236,6 +241,7 @@ echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained
 echo    [5] cpu        - no GPU
 echo    [6] I will build / provide my own (skip the download)
 set "BSEL="
+call :flush
 set /p "BSEL=  Pick 1-6 [1]: "
 if not defined BSEL set "BSEL=1"
 set "BACKEND=%REC%"
@@ -281,6 +287,7 @@ rem  build), and places them in this venv so the install is runnable.
 echo.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
+    call :flush
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
@@ -316,6 +323,7 @@ rem  keypress, so the user's habitual confirming Enter used to leak into the cus
 rem  path's set /p below and be read as an empty path (SETUP-2). With set /p the
 rem  Enter belongs to THIS prompt, so the path prompt starts clean.
 set "DATAPICK="
+call :flush
 set /p "DATAPICK=  Pick 1 or 2 [1]: "
 if not defined DATAPICK set "DATAPICK=1"
 rem DATADIR + DATACREATED feed the install manifest (DATACREATED=1 only when WE
@@ -353,6 +361,7 @@ echo    [2] Web GUI directly
 echo    [3] None
 rem  set /p for a consistent "type a number then Enter" across every menu.
 set "SCPICK="
+call :flush
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
 set "SCPATH="
@@ -388,6 +397,7 @@ rem  uninstaller. Default No - the CLI already works via .venv\Scripts\localm.
 echo.
 echo  Make 'localm' runnable from any terminal? (adds .\bin to your PATH)
 set "GLOBALPICK="
+call :flush
 set /p "GLOBALPICK=  [y/N]: "
 if not defined GLOBALPICK set "GLOBALPICK=N"
 set "PATHDIR="
@@ -457,6 +467,7 @@ if exist "%PYBIN%" (
     echo  [!] No venv Python found - only the marked .venv will be removed.
 )
 echo.
+call :flush
 choice /c YN /n /m "  Proceed? [y/N]: "
 if errorlevel 2 (
     echo  Aborted - nothing changed.
@@ -482,12 +493,40 @@ rem  :offer_report "summary" "detail" - offer to file a bug report for a setup
 rem  failure via the standalone reporter (report-issue.bat), which works even
 rem  though setup did not finish (it needs no working install). Returns so the
 rem  CALLER still exits non-zero with its original error - reporting never masks the
+rem ===========================================================================
+rem  :flush - drop any TYPE-AHEAD before asking a question.
+rem
+rem  Setup runs long steps between questions (a uv download, a Python download, a
+rem  venv build, a backend provision). Anything typed while one of those runs sits
+rem  in the CONSOLE INPUT QUEUE and is delivered to the NEXT prompt - answering a
+rem  question the user never saw. One stray Enter silently accepts a default; a
+rem  double Enter accepts two questions in a row.
+rem
+rem  This is SETUP-2 again, and the reason it came back: that fix only swapped one
+rem  `choice` for a `set /p` at a single site (see the data-dir prompt), so the
+rem  Enter belonged to its own prompt. It never emptied the queue, so anything
+rem  typed DURING a long step still leaks into whatever asks next - and the four
+rem  remaining `choice` prompts consume a buffered keypress outright. Emptying the
+rem  queue is the fix that generalises; the per-site set /p choice is now belt and
+rem  braces rather than the mechanism.
+rem
+rem  FlushInputBuffer() empties the queue of the console this process is attached
+rem  to, which the powershell child shares. Best-effort by design: if it cannot run
+rem  (no console - piped/CI), the prompt still works exactly as before, so this can
+rem  never block an install. Errors are swallowed for that reason only.
+rem ===========================================================================
+:flush
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $Host.UI.RawUI.FlushInputBuffer() } catch { }" >nul 2>nul
+goto :eof
+
+rem ===========================================================================
 rem  failure ("we do not hide problems"). No-op if the reporter is missing.
 rem ===========================================================================
 :offer_report
 if not exist "%~dp0report-issue.bat" goto :eof
 echo.
 set "DOREP="
+call :flush
 set /p "DOREP=  Report this problem to the maintainer (no GitHub account needed)? [Y/n]: "
 if not defined DOREP set "DOREP=Y"
 if /i "!DOREP:~0,1!"=="N" goto :eof
@@ -505,9 +544,11 @@ rem  default when left blank.
 rem ===========================================================================
 :do_custom_home
 set "CUSTOMHOME="
+call :flush
 set /p "CUSTOMHOME=  Enter the data directory path, or leave blank for the portable .\home: "
 if not defined CUSTOMHOME goto custom_home_blank
 set "OKHOME="
+call :flush
 set /p "OKHOME=  Use '!CUSTOMHOME!'? [Y/n]: "
 if not defined OKHOME set "OKHOME=Y"
 if /i "!OKHOME:~0,1!"=="N" goto do_custom_home
