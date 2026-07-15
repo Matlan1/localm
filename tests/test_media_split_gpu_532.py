@@ -27,6 +27,8 @@ from __future__ import annotations
 import pytest
 
 import localm.config as cfg
+import localm.vram as vram
+from localm.media import comfy_client
 from localm.media import managed_comfy as mc
 
 
@@ -50,11 +52,19 @@ def _fake_gpus(monkeypatch, *specs):
 
     Patched at its definition site in localm.discover so every caller
     (resolve_gpu_split's validation, the device chooser) sees the same fake box.
+
+    Also pins non-Vulkan so resolve_gpu_split's membership validation actually
+    runs, regardless of what native backend is provisioned in the ambient
+    environment (GPU-SPLIT-VKINDEX: on Vulkan, list_gpus() cannot see Vulkan-only
+    devices, so resolve_gpu_split deliberately passes the configured indices
+    through UNCHECKED - which would make these tests depend on how the box that
+    runs them happens to be provisioned). Same pin, same reason, as #671.
     """
     import localm.discover as disc
     gpus = [{"index": i, "name": f"fake{i}", "free": free, "total": free * 2}
             for i, free in specs]
     monkeypatch.setattr(disc, "list_gpus", lambda **kw: list(gpus))
+    monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: False)
     return gpus
 
 
@@ -149,3 +159,162 @@ def test_launch_cmd_still_targets_the_managed_venv_and_port(home, monkeypatch):
     assert "main.py" in cmd
     assert "--listen 127.0.0.1" in cmd
     assert f"--port {mc.MANAGED_COMFY_PORT}" in cmd
+
+
+# --------------------------------------------------------------------------- #
+#  CHECK 2: a USER'S OWN ComfyUI gets the device via the child ENV.            #
+#  localm cannot rewrite their launcher (.bat, possibly ZLUDA-wrapped), so the #
+#  env is the only lever. ComfyUI's own main.py:78-81 does nothing with        #
+#  --cuda-device except set exactly these two variables.                       #
+# --------------------------------------------------------------------------- #
+
+def test_own_comfy_child_env_pins_the_chosen_card(home, monkeypatch):
+    """Split [0,1], card 1 emptier -> the spawned ComfyUI is masked to card 1.
+
+    Nothing is installed under the throwaway LOCALM_HOME, so managed_comfy_active()
+    is False and this is the user's-own path.
+    """
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
+    cfg.save_config(conf)
+
+    env = comfy_client.comfy_child_env(conf)
+
+    assert env is not None, "expected a child env pinning the device, got None (inherit)"
+    assert env.get("CUDA_VISIBLE_DEVICES") == "1"
+    assert env.get("HIP_VISIBLE_DEVICES") == "1", (
+        "HIP_VISIBLE_DEVICES must be set too: this is the ZLUDA/ROCm path where CUDA "
+        "is emulated over HIP, and ComfyUI's own main.py sets both.")
+
+
+def test_managed_comfy_child_env_does_not_pin_the_device(home, monkeypatch):
+    """The managed instance carries its device on the ARGV (--cuda-device), so the
+    env must NOT also set it: one source of truth, not two that could disagree."""
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
+    cfg.save_config(conf)
+    monkeypatch.setattr(mc, "managed_comfy_active", lambda c=None: True)
+
+    env = comfy_client.comfy_child_env(conf)
+
+    if env is not None:
+        assert "CUDA_VISIBLE_DEVICES" not in env
+        assert "HIP_VISIBLE_DEVICES" not in env
+
+
+def test_unconfigured_box_child_env_is_untouched(home, monkeypatch):
+    """NEGATIVE-TEST: nothing configured -> spawn exactly as today.
+
+    Masking a plain box to an invented card would also hide a second GPU the user
+    later adds, which is the opposite of what this feature is for.
+    """
+    _fake_gpus(monkeypatch, (0, 8 * GB))
+    cfg.save_config({})
+
+    env = comfy_client.comfy_child_env({})
+
+    if env is not None:
+        assert "CUDA_VISIBLE_DEVICES" not in env
+        assert "HIP_VISIBLE_DEVICES" not in env
+
+
+# --------------------------------------------------------------------------- #
+#  CHECK 3: the per-device preflight. THE LITERAL REG-532 SCENARIO.            #
+# --------------------------------------------------------------------------- #
+
+def test_reg532_combined_says_fits_but_no_single_card_does(home, monkeypatch):
+    """THE BUG, as a test. Two cards, 4 GB free EACH (8 GB combined), a 4 GB job.
+
+    decide_media_swap reads the COMBINED 8 GB, sees 8 >= 4 + headroom, and says "both
+    fit, keep the chat model loaded". The media model then lands WHOLE on ONE 4 GB
+    card and OOMs. The combined gate is not wrong - it cannot see placement. The
+    preflight must catch it.
+
+    Note a per-device RATIO check would PASS this wrongly: each card would be asked
+    for its 50% share (2 GB) and 4 GB free covers that. The whole-model predicate is
+    what makes this fail correctly.
+    """
+    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
+    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
+    cfg.save_config(conf)
+    s = {"vram_estimate_bytes": 4 * GB, "swap_policy": "auto"}
+
+    # The gate itself is UNCHANGED and still says "fits" on the combined number.
+    assert vram.decide_media_swap(s, read_free=lambda: 8 * GB) is False
+
+    shortfall = vram.media_single_device_shortfall(s, config=conf)
+
+    assert shortfall is not None, (
+        "preflight must refuse: 8 GB combined free, but the 4 GB model lands WHOLE "
+        "on one 4 GB card. This is the REG-532 OOM.")
+    assert shortfall["index"] in (0, 1)
+    assert shortfall["free"] == 4 * GB
+    assert shortfall["needed"] == 4 * GB + vram._DEFAULT_HEADROOM, (
+        "the per-device check must use the SAME headroom as the aggregate, so it is "
+        "not held to a thinner margin than the ceiling it composes with")
+
+
+def test_preflight_allows_a_job_that_genuinely_fits_the_chosen_card(home, monkeypatch):
+    """NEGATIVE-TEST: do NOT block a load that would have worked.
+
+    Card 1 has 20 GB free and takes the whole 4 GB model comfortably.
+    """
+    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 20 * GB))
+    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
+    cfg.save_config(conf)
+    s = {"vram_estimate_bytes": 4 * GB, "swap_policy": "auto"}
+
+    assert vram.media_single_device_shortfall(s, config=conf) is None
+
+
+def test_preflight_is_a_noop_without_a_split(home, monkeypatch):
+    """No split -> the combined reading already IS the single card's. Nothing to add."""
+    _fake_gpus(monkeypatch, (0, 4 * GB))
+    conf = {}
+    cfg.save_config(conf)
+    s = {"vram_estimate_bytes": 40 * GB, "swap_policy": "auto"}
+
+    assert vram.media_single_device_shortfall(s, config=conf) is None
+
+
+def test_preflight_respects_an_explicit_swap_policy(home, monkeypatch):
+    """'never' is the user's explicit choice (e.g. a big workstation card).
+
+    Never silently override an explicit user selection: detect, inform, offer.
+    """
+    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
+    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
+    cfg.save_config(conf)
+    s = {"vram_estimate_bytes": 4 * GB, "swap_policy": "never"}
+
+    assert vram.media_single_device_shortfall(s, config=conf) is None
+
+
+# --------------------------------------------------------------------------- #
+#  CHECK 8: the user-visible shortfall notice.                                 #
+# --------------------------------------------------------------------------- #
+
+def test_split_box_gets_a_notice_that_media_uses_one_card(home, monkeypatch):
+    """The user configured a split and is NOT getting it for media: say so.
+
+    Asserts the OBSERVABLE returned string, NOT that a log record exists - #637
+    shipped a dead module-scope logger.debug() green because caplog forces level 0
+    under pytest while production emitted nothing.
+    """
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
+    cfg.save_config(conf)
+
+    note = vram.media_split_notice(conf)
+
+    assert note is not None
+    assert "GPU 1" in note, "should name the card it actually chose"
+    assert "ONE card" in note
+
+
+def test_unsplit_box_gets_no_notice(home, monkeypatch):
+    """NEGATIVE-TEST: never nag a single-GPU user about a shortfall that cannot exist."""
+    _fake_gpus(monkeypatch, (0, 8 * GB))
+    cfg.save_config({})
+
+    assert vram.media_split_notice({}) is None
