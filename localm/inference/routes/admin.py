@@ -50,8 +50,13 @@ def register(app: FastAPI, ctx) -> None:
         """R18: restart this server in place (owner / config-write scope). The model
         is unloaded first, then the process re-execs the same command line and comes
         back on the same port - a Settings button calls this, and the GUI's reconnect
-        overlay auto-reconnects when the fresh process is up."""
-        _request_restart()
+        overlay auto-reconnects when the fresh process is up.
+
+        "The same port" only holds if we say which one: the re-exec'd process
+        otherwise re-runs pick_port() and can bind elsewhere, leaving the reconnect
+        overlay waiting forever on a port nothing is listening on (the same root
+        cause as REG-605's false rollback, minus the watchdog)."""
+        _request_restart(port=getattr(app.state, "instance_port", None))
         return {"restarting": True}
 
     @app.post("/api/bug-report",
@@ -226,6 +231,13 @@ def register(app: FastAPI, ctx) -> None:
                     "update applied but the instance has no bind port/version to "
                     "probe (never fully advertised); restarting WITHOUT a health "
                     "watchdog")
-            _request_restart(update_watchdog=watchdog)
+            # Pin the port we are actually bound to into the re-exec, so the new
+            # process comes back on the SAME port the watchdog above is about to
+            # probe. Without it the restart re-runs pick_port() and can bind a
+            # different one (this instance may have been auto-bumped off a busy
+            # default that is free again by now), the watchdog polls a port
+            # nothing answers on, and a perfectly healthy update is auto-rolled
+            # back after its 90s timeout (REG-605).
+            _request_restart(update_watchdog=watchdog, port=port)
             res["restarting"] = True
         return res
