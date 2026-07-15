@@ -150,6 +150,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it exited with an error and repaired nothing, on exactly the stale indexes it
   exists to rebuild. It now keeps the embeddings and repairs, telling you it did.
   Pass `--yes` to drop them instead, or `--embed` to recompute them.
+- **An API key with an accented or non-English character no longer locks you out.**
+  Setting a key like `pässwort-key` left the server unable to answer any
+  authenticated request: your own correct key and a wrong one both failed with
+  "Internal server error" rather than letting you in or cleanly refusing. The same
+  fault let any caller trigger that error without a key at all, just by sending a
+  bearer token containing a non-English character, which filled the log with
+  tracebacks. Keys are now compared safely whatever characters they contain, so a
+  wrong key is refused cleanly and the right one works.
+- **`localm key set` now says which characters a key may use.** An API key travels
+  in an HTTP request header, which cannot carry spaces, punctuation, or non-English
+  letters reliably, so a key using them left you unable to sign in from most
+  clients. Such a key is now refused with a message naming what is allowed: letters,
+  numbers, `-` and `_`, the same characters `localm key generate` produces.
 - **A model you switched away from mid-load can be used again.** If you picked a
   model and then quickly picked a different one, the first model could be left
   permanently unusable: every later message to it failed with "Model load was

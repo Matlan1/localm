@@ -9,8 +9,6 @@ swap is reflected here.
 
 from __future__ import annotations
 
-import hmac
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
@@ -84,11 +82,13 @@ def register(app: FastAPI, ctx) -> None:
         the same-origin guard (a local non-browser caller has no Origin); this
         token/key check is the gate. Idempotent: a full instance returns
         already_mounted."""
+        from localm.auth import ct_equal
         presented = _bearer_token(request)
         st = request.app.state
         inst_token = getattr(st, "instance_token", None)
-        ok = bool(presented and inst_token
-                  and hmac.compare_digest(presented, inst_token))
+        # ct_equal, not compare_digest: the presented token is a caller-supplied,
+        # latin-1 decoded header, so a non-ASCII one would raise instead of 403.
+        ok = ct_equal(presented, inst_token)
         if not ok and presented:
             # Fall back to an owner/ADMIN API key (protected mode).
             from localm.auth import any_key_configured, verify

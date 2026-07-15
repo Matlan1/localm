@@ -26,8 +26,10 @@ an empty file both mean open mode, not a usable empty key).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -45,6 +47,36 @@ _TRUTHY = ("1", "true", "yes", "on")
 # (cli._exposed_bind_warning), so a trivially-guessable key supplied via the
 # LOCALM_API_KEY env var or a hand-edited auth.key cannot be served to the LAN.
 MIN_KEY_LEN = 8
+
+# Characters an owner key may contain, enforced at set time (set_api_key). This is
+# EXACTLY the alphabet generate_key() emits (secrets.token_urlsafe -> base64url), so
+# a generated key always passes; note ~49% of generated keys contain an underscore,
+# so "-" alone would reject half of them. It is also a strict subset of RFC 7235
+# token68, so a conforming key is always safe to put in an Authorization header.
+# Explicit ASCII classes, not \w or str.isalnum(): both match non-ASCII letters and
+# digits ("ä", "٣"), which is the very thing this rejects. See set_api_key.
+_KEY_CHARSET = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+
+
+def ct_equal(presented: Optional[str], expected: Optional[str]) -> bool:
+    """Constant-time compare of two secrets. Safe for ANY input, never raises.
+
+    Use this for every secret comparison rather than calling hmac.compare_digest()
+    on str. compare_digest() raises TypeError if EITHER operand is a non-ASCII str,
+    so an ASCII expected value (a token_urlsafe or a hexdigest) does NOT protect the
+    compare: a bearer/CSRF token reaches us as a latin-1 decoded HTTP header, so any
+    caller can supply a non-ASCII operand and turn a wrong-credential 401/403 into an
+    unhandled 500. Comparing bytes keeps the compare constant-time AND total.
+
+    surrogatepass because os.environ carries lone surrogates on Windows, which a
+    plain utf-8 encode raises on - that would swap one crash for another.
+    """
+    # A falsy operand means "no credential presented" / "no secret configured";
+    # neither is secret-dependent, so short-circuiting leaks nothing.
+    if not presented or not expected:
+        return False
+    return hmac.compare_digest(presented.encode("utf-8", "surrogatepass"),
+                               expected.encode("utf-8", "surrogatepass"))
 
 
 def key_file() -> Path:
@@ -166,7 +198,13 @@ def get_api_key() -> Optional[str]:
 
 def set_api_key(key: Optional[str]) -> None:
     """Persist *key* to ``auth.key`` (atomic write, owner-only perms). An empty
-    or None *key* clears it, returning the server to open mode."""
+    or None *key* clears it, returning the server to open mode.
+
+    Raises ValueError if *key* is shorter than MIN_KEY_LEN or uses characters
+    outside _KEY_CHARSET. Both are CONFIG-time guards on what a user may CHOOSE
+    here; they are not a promise about what verify() will see. The LOCALM_API_KEY
+    env var and a hand-edited auth.key both bypass this function entirely, so
+    verify() stays liberal and never raises on whatever it is handed."""
     if not key or not key.strip():
         clear_api_key()
         return
@@ -174,6 +212,22 @@ def set_api_key(key: Optional[str]) -> None:
     if len(key) < MIN_KEY_LEN:
         raise ValueError(
             f"API key must be at least {MIN_KEY_LEN} characters long.")
+    if not _KEY_CHARSET.match(key):
+        # A key is carried in an HTTP Authorization header, which cannot hold these
+        # characters reliably. A NON-ASCII key is the sharp case and is verified:
+        # clients send UTF-8 but RFC 7230 obs-text decodes latin-1, so the server
+        # sees mojibake and refuses the owner's OWN key from most clients. Spaces
+        # and control characters break or inject into the header outright. Refuse at
+        # set time rather than persist a key that mysteriously fails to log in.
+        # This guard does NOT make verify() safe: LOCALM_API_KEY and a hand-edited
+        # auth.key never come through here, and a hostile caller picks its own
+        # presented token anyway. verify() is total on its own (see ct_equal);
+        # this only stops you CHOOSING a key that will not work.
+        raise ValueError(
+            "API key must use only letters, numbers, '-' and '_' (the characters "
+            "'localm key generate' produces). Spaces, punctuation, and non-English "
+            "letters cannot be sent reliably in an HTTP Authorization header, so "
+            "most clients would fail to authenticate with such a key.")
     from localm.config import ensure_dirs
     ensure_dirs()
     path = key_file()
@@ -297,7 +351,11 @@ def keystore_file() -> Path:
 
 
 def _hash_key(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+    # surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
+    # UnicodeEncodeError on a lone surrogate, which would just move the crash here
+    # from the compare. Byte-identical to encode("utf-8") for every key that
+    # encodes at all, so no stored hash changes.
+    return hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _load_keystore() -> list:
@@ -606,16 +664,18 @@ def verify(presented: Optional[str]) -> Optional[set]:
     if it matches nothing. The owner key grants ADMIN (every scope)."""
     if not presented or not presented.strip():
         return None
-    import hmac
     from localm import scopes as S
     presented = presented.strip()
     owner = get_api_key()
-    if owner and hmac.compare_digest(presented, owner):
+    if ct_equal(presented, owner):
         return {S.ADMIN}
     presented_hash = _hash_key(presented)
     for r in _load_keystore():
+        # ct_equal, not compare_digest: both sides are normally hexdigests, but a
+        # hand-edited or corrupted keystore row could hold a non-ASCII "hash" and
+        # must fail to match, not 500 every request that reaches this loop.
         h = r.get("hash", "")
-        if h and hmac.compare_digest(h, presented_hash):
+        if ct_equal(h, presented_hash):
             exp = r.get("expires")
             if exp is not None and time.time() > float(exp):
                 return None       # matched a real key, but it has expired
