@@ -77,6 +77,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Your own saved facts come back when you ask about yourself.** Without an
+  embedding model installed, memory could only match facts that shared an exact
+  word with your question, so asking "what is my name" never surfaced "User is
+  called Sam" - it silently answered as if you had saved nothing. When you ask
+  about yourself, memory now falls back to a couple of your own saved facts
+  instead of staying silent. Questions that are not about you still stay silent,
+  and installing an embedding model (`localm setup-embeddings`) is still what
+  gives you full meaning-based recall.
 - **Picking a Main GPU no longer stops large transformers models from loading.**
   With a Main GPU selected, localm pinned the whole model onto that one card, so a
   transformers model bigger than its free memory failed with an out-of-memory error
