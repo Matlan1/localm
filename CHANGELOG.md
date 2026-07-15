@@ -135,6 +135,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   It now still uses only the card you picked, but falls back to system memory for
   whatever does not fit, as it did before. The same fallback was restored for a
   configured multi-GPU split.
+- **Image, music and video generation no longer run out of memory on a multi-GPU
+  box.** With a GPU split configured, localm added up the free memory across every
+  card in the split and concluded a generation would fit, so it kept the chat model
+  loaded. But an image, music or video model loads onto a single card, so the
+  generation could still fail with an out-of-memory error, quietly fall back to
+  system memory and run many times slower, or lock up the display driver. localm now
+  picks the card with the most free memory, tells ComfyUI to use that one, and checks
+  that card on its own has room before starting - unloading the chat model first if
+  it does not. If you have a split configured, generation also now tells you plainly
+  that it runs on one card and which one: a single image, music or video model cannot
+  be divided across cards the way a chat model can, so your split ratios do not apply
+  there. Chat and embeddings still use the full split. Nothing changes on a
+  single-GPU machine, or if you have not configured a split or a Main GPU.
 - **A failing command no longer reports success.** Certain real failures (reading a
   folder where a file was expected, an invalid path, some native calls) were
   mistaken for "the output pipe closed", so localm exited quietly with a success
