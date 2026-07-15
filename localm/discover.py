@@ -1142,6 +1142,48 @@ def visible_device_order(config: Optional[dict] = None, *,
     return [chosen] + rest
 
 
+def comfy_gpu_option(device_index: int, config: Optional[dict] = None, *,
+                     gpus: Optional[list] = None) -> Optional[str]:
+    """The ``gpu:N`` string ComfyUI will understand for OUR *device_index*, or ``None``
+    when it cannot be named honestly.
+
+    THE INDEX-SPACE GATE. Three coordinate systems meet here and an off-by-one puts a
+    component on the wrong card and STILL RENDERS - a silent wrong answer, not a crash:
+
+    1. localm's own device index (``list_gpus()`` -> ``torch.cuda`` enumeration of the
+       UNMASKED box). This is what ``gpu_split_indices`` and ``main_gpu_index`` mean.
+    2. The VISIBLE ORDER we impose (:func:`visible_device_order`), written into
+       ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES`` either by ComfyUI's own
+       ``--default-device`` (``main.py:69-76``) or by us for a ComfyUI we cannot pass
+       argv to.
+    3. ComfyUI's ``gpu:N`` widget value, which is a POSITION, not a device id:
+       ``get_gpu_device_options`` (``model_management.py:246-257``) emits
+       ``gpu:{i} for i in range(len(get_all_torch_devices()))``, and
+       ``get_all_torch_devices`` enumerates torch AFTER the mask/reorder has applied.
+
+    So ``gpu:N`` means "the Nth entry of the visible order", and the mapping is
+    DERIVABLE rather than guessable precisely because localm is the one that imposes
+    that order. This is the whole reason we must never mask: masking collapses the
+    order to one entry and ``get_gpu_device_options`` then emits no ``gpu:N`` at all
+    (it gates on ``len(devices) > 1``), so every placement node silently no-ops.
+
+    Returns ``None`` when no order is established (nothing configured, or no
+    torch-visible device) or when *device_index* is not in it, rather than guessing a
+    position. Callers must treat None as "do not emit a device for this component".
+
+    VERIFY, DO NOT TRUST, at runtime: this mapping is derived from source
+    (``model_management.py:246-257`` read at ComfyUI git 867404b) and is UNPROVEN on a
+    real multi-GPU box - this one has a single card, where the order is trivially
+    ``[0]``. Before placement is enabled by default, confirm against the live server's
+    ``/object_info`` (does ``SelectModelDevice`` actually offer this ``gpu:N``?) and
+    ``/system_stats`` (does that position correspond to the card we meant?).
+    """
+    order = visible_device_order(config, gpus=gpus)
+    if not order or device_index not in order:
+        return None
+    return f"gpu:{order.index(device_index)}"
+
+
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:
     """
     Capacity badge for one file, against a single-GPU (or combined-split) VRAM

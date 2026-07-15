@@ -226,3 +226,42 @@ def test_split_with_no_torch_visible_device_names_nothing(home, monkeypatch):
     assert disc.resolve_preferred_device() is None, (
         "a Vulkan-space index must never be emitted as a torch/CUDA device id")
     assert _flag(mc.managed_comfy_launch_cmd(), "default-device") is None
+
+
+# --------------------------------------------------------------------------- #
+#  THE INDEX-SPACE GATE: gpu:N is a POSITION in the order we impose.           #
+# --------------------------------------------------------------------------- #
+
+def test_gpu_option_is_a_position_in_the_order_we_impose(home, monkeypatch):
+    """gpu:N maps through visible_device_order(), NOT through our own device ids.
+
+    ComfyUI's get_gpu_device_options (model_management.py:246-257) emits
+    `gpu:{i} for i in range(len(get_all_torch_devices()))`, and get_all_torch_devices
+    enumerates torch AFTER the reorder we impose. So on a box where card 1 is preferred,
+    the visible order is [1, 0] and therefore:
+        our device 1 -> gpu:0   (it LEADS, so it is torch index 0)
+        our device 0 -> gpu:1
+    Getting this backwards puts a component on the wrong card and STILL RENDERS. That is
+    a silent wrong answer, which is why it is pinned here.
+    """
+    import localm.discover as disc
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]})
+
+    assert disc.visible_device_order() == [1, 0], "card 1 has more free VRAM, so it leads"
+    assert disc.comfy_gpu_option(1) == "gpu:0", (
+        "our card 1 leads the visible order, so ComfyUI sees it at position 0")
+    assert disc.comfy_gpu_option(0) == "gpu:1", (
+        "our card 0 is second in the visible order, so ComfyUI sees it at position 1")
+
+
+def test_gpu_option_none_for_unknown_or_unconfigured(home, monkeypatch):
+    """NEGATIVE-TEST: never guess a position."""
+    import localm.discover as disc
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    cfg.save_config({"gpu_split_indices": [0, 1]})
+    assert disc.comfy_gpu_option(7) is None, "a device not in the order has no position"
+
+    cfg.save_config({})
+    assert disc.comfy_gpu_option(0) is None, (
+        "nothing configured means no order is imposed, so no gpu:N can be named")
