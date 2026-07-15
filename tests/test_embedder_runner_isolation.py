@@ -265,6 +265,88 @@ def _fifo_child(req_q, resp_q, stop):
         resp_q.put(("ok", [_vec_for(t) for t in cmd[1]]))
 
 
+class TestCleanEmbedErrorKeepsTheWorker:
+    """A clean embed error must NOT orphan a healthy worker.
+
+    The child answers an ordinary embed failure with an ("error", msg) envelope
+    and keeps serving (embedding is stateless per call - see
+    test_embed_dispatch_catches_ordinary_exceptions_without_crashing above). The
+    parent sees the SAME RuntimeError for that as for a real crash, so dropping
+    self._runner unconditionally left a LIVE child blocked on req_q.get() with
+    the model still resident in VRAM: EmbedderRunner has no __del__, GC never
+    terminates an mp.Process, and close()/reset_embedder()/release_for_exit() all
+    only reach the CURRENT runner - so the orphan was unreachable, survived even
+    the os._exit/os.execv restart path, and the next call spawned a second worker
+    beside it. One leaked worker per clean embed error (24 MB for the default
+    bge-small, up to 7.49 GB for a configured Qwen3-Embedding-8B).
+    """
+
+    def test_a_clean_error_keeps_the_live_worker_instead_of_orphaning_it(self, monkeypatch):
+        # A REAL worker process, spawned with no model loaded: "embed" then hits
+        # embedder is None -> AttributeError -> the child's own except -> a clean
+        # ("error", ...) envelope, with the child still alive. Exactly the shape
+        # a real "embedding decode failed (code N)" takes.
+        runner = EmbedderRunner()
+        runner._spawn()
+        try:
+            def fake_reload(self):
+                self._runner = runner
+                self.dim = 4
+
+            monkeypatch.setattr(IsolatedEmbedder, "_reload", fake_reload)
+            e = IsolatedEmbedder("does-not-matter.gguf")
+
+            with pytest.raises(RuntimeError):
+                e.embed(["hello"])
+
+            assert runner.is_alive(), "precondition: the child survives a clean error"
+            assert e._runner is runner, (
+                "a healthy worker was discarded after a clean embed error: it is "
+                "now unreachable (no __del__, GC never terminates an mp.Process), "
+                "so it keeps its model resident in VRAM forever while the next "
+                "embed() spawns a second worker beside it")
+
+            # And it must still serve the next call rather than be respawned.
+            with pytest.raises(RuntimeError):
+                e.embed(["again"])
+            assert e._runner is runner
+            assert runner.is_alive()
+        finally:
+            runner.shutdown(grace=0)
+
+    def test_a_dead_worker_is_still_dropped_and_torn_down(self, monkeypatch):
+        """The negative case: auto-reload after a genuine crash must still work,
+        so this fix cannot be 'never drop the runner'."""
+        class _DeadRunner:
+            def __init__(self):
+                self.shutdown_calls = []
+
+            def is_alive(self):
+                return False
+
+            def embed(self, texts):
+                raise RuntimeError("The embedding worker process crashed")
+
+            def shutdown(self, grace=5.0):
+                self.shutdown_calls.append(grace)
+
+        dead = _DeadRunner()
+        e = IsolatedEmbedder.__new__(IsolatedEmbedder)
+        e.model_path = "x.gguf"
+        e.active_requests = 0
+        e._rpc_lock = threading.RLock()
+        e._runner = dead
+        # is_alive() is False, so embed() reloads FIRST; keep that reload a no-op
+        # so the crash arrives from the RPC itself.
+        monkeypatch.setattr(IsolatedEmbedder, "_reload", lambda self: None)
+
+        with pytest.raises(RuntimeError):
+            e.embed(["hi"])
+        assert e._runner is None, "a dead worker must be dropped so the next call reloads"
+        assert dead.shutdown_calls == [0], (
+            "a dropped runner must have its queues/handles released, not leaked")
+
+
 class TestConcurrentEmbedSerialization:
     """The worker protocol has NO request-id correlation: one req_q/resp_q pair
     feeds one child, so two overlapping embed() calls are two threads blocked in

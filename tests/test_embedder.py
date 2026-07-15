@@ -665,6 +665,13 @@ def test_isolated_embedder_embed_crash_clears_runner_for_next_call(monkeypatch):
     runner1 = _StubRunner.instances[-1]
 
     def _boom(texts, timeout=None):
+        # A real crash is DETECTED by the child being gone: _wait raises this
+        # exact error only after proc.is_alive() came back False. The double must
+        # model that, or it is really a LIVE worker returning a clean error - and
+        # discarding one of those orphans it (it keeps the model resident in VRAM
+        # with nothing left able to reach it; see test_embedder_runner_isolation
+        # .py::TestCleanEmbedErrorKeepsTheWorker).
+        runner1.alive = False
         raise RuntimeError("The embedding worker process crashed (exit code -6)")
     runner1.embed = _boom
 
