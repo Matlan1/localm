@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -597,37 +598,61 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
-#  Readiness cache - ComfyUI does not need re-checking on every task
+#  Readiness cache - de-duplicate back-to-back reachability probes
 #
 #  Before this, ensure_comfy() pinged /system_stats on EVERY call, and every
 #  media submission called it twice back-to-back (once at the route-handler
 #  layer via ensure_available, once again at the top of the generator
 #  function) - plain redundant network round-trips, on top of the GUI's own
-#  5-second poll (settings.js, removed separately). ComfyUI does not appear
-#  or disappear on its own between requests, so once it has been confirmed
-#  reachable for a given api_url in this process's lifetime, later calls
-#  trust that instead of re-pinging: check on app start, on the Settings/
-#  Media page being opened, before the FIRST task submission, and on an
-#  explicit status request are enough. mark_comfy_dead() (called from
-#  stop_comfy(), and internally when ensure_comfy() can no longer reach it)
-#  clears the entry so the next check is real again.
+#  5-second poll (settings.js, removed separately). So a confirmation is
+#  remembered per api_url and reused instead of re-pinging.
+#
+#  It is remembered for a few SECONDS, not for the process lifetime. The
+#  original version cached it forever, on the premise that "ComfyUI does not
+#  appear or disappear on its own between requests" - which is false on this
+#  stack: an OOM on a large render, a ZLUDA/ROCm torch crash, the user closing
+#  its window, or VRAM eviction all kill it mid-session. A permanent entry then
+#  reported a DEAD ComfyUI as running, so every later generation submitted to a
+#  dead server and failed with an opaque ConnectionError, with both recovery
+#  paths (auto-launch from comfy_workdir, and the actionable "not reachable"
+#  message) silently disabled until the user hit Stop or reopened a media page -
+#  and on the CLI / the coder's generate_image path, where nothing re-primes the
+#  cache, for the whole process (REG-444).
+#
+#  The TTL keeps the entire win: the double-ping inside one submission is
+#  milliseconds apart, far inside the window. A ping is a ~1ms loopback call
+#  against a generation costing seconds to minutes, so a SHORT window is nearly
+#  free and a longer one would only widen the stale gap for no gain.
+#  mark_comfy_dead() (from stop_comfy(), and internally when ensure_comfy() can
+#  no longer reach it) still clears the entry outright.
 # ---------------------------------------------------------------------------
 
-_confirmed_alive: set[str] = set()
+# How long a confirmed-reachable result stays trusted. Sized for the back-to-back
+# double-ping this cache exists to collapse, NOT for "ComfyUI stays up".
+_CONFIRM_TTL_SECONDS = 5.0
+
+# api_url -> time.monotonic() when it was last confirmed reachable. monotonic, so
+# a wall-clock change (NTP, DST) cannot make an entry look fresh or ancient.
+_confirmed_alive: dict[str, float] = {}
 
 
 def mark_comfy_alive(api_url: str) -> None:
-    _confirmed_alive.add(api_url.rstrip("/"))
+    _confirmed_alive[api_url.rstrip("/")] = time.monotonic()
 
 
 def mark_comfy_dead(api_url: str) -> None:
-    _confirmed_alive.discard(api_url.rstrip("/"))
+    _confirmed_alive.pop(api_url.rstrip("/"), None)
 
 
 def is_comfy_confirmed(api_url: Optional[str] = None) -> bool:
-    """True when *api_url* has already been confirmed reachable this process
-    lifetime and nothing has invalidated that since (see module docstring)."""
-    return (api_url or default_api_url()).rstrip("/") in _confirmed_alive
+    """True when *api_url* was confirmed reachable within the last
+    ``_CONFIRM_TTL_SECONDS`` and nothing has invalidated it since.
+
+    Deliberately time-bounded: a confirmation is evidence that ComfyUI was up a
+    moment ago, never a promise that it still is (see the section comment above).
+    """
+    seen = _confirmed_alive.get((api_url or default_api_url()).rstrip("/"))
+    return seen is not None and (time.monotonic() - seen) < _CONFIRM_TTL_SECONDS
 
 
 def warm_comfy_status_async(api_url: Optional[str] = None) -> None:

@@ -104,6 +104,12 @@ class Agent(
         self.auto_approve   = auto_approve
         self.always_confirm = always_confirm or set()
         self.dry_run        = dry_run
+        # True only while _loop(interactive=True) runs, i.e. this session owns a
+        # terminal a user can answer a confirmation on. Defaults False so a bare
+        # Agent (or an unattended run_task) never claims a channel it lacks; set
+        # by _loop. spawn_agent reads it to route a child's confirmations to the
+        # parent's REAL channel instead of hard-denying them (REG-507).
+        self._interactive   = False
         self.patch_mode     = False        # set via Agent.enable_patch_mode()
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
@@ -144,6 +150,12 @@ class Agent(
         self._repeat_response_count: int = 0   # consecutive identical responses
         self._compact_warned: bool = False
         self._last_run_ok: bool = True    # False when the last _loop hit max_turns
+        # True when the last _loop ended because the USER stopped it (Ctrl-C, or
+        # declining "keep going?"), as opposed to a genuine failure (max_turns, a
+        # circuit breaker). Both clear _last_run_ok, but only the latter carries a
+        # lesson worth a close-time reflection - and a user who just asked to stop
+        # is the last person who should wait on a model call (REG-594).
+        self._user_stopped: bool = False
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
         # Changed-files tracker: rel path -> {original: bytes|None, writes: int,

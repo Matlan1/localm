@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
-from localm.plugins.builtin.jobs.store import Job
+from localm.plugins.builtin.jobs.store import Job, JobStore
 
 # Upper bound on how long the runner blocks its worker thread waiting for the
 # server loop to complete a guarded shared-engine unload (see
@@ -341,19 +341,56 @@ def _shell_still_authorized(job: Job) -> bool:
     (store.py) - the same value ``auth.key_hash_live()`` checks for a cookie
     session. Two cases need no re-check: a job with no owner (``allow_shell``
     needed no privileged key when ``any_key_configured()`` was False at creation,
-    so there is no key whose liveness matters), and a job owned by the OWNER key
+    so there is no key whose liveness matters), and a job created by the OWNER key
     itself (the owner key is not a keystore entry and is not revocable/expirable
     the way a scoped key is - mirrors ``key_hash_live``'s own "owner sessions are
     not gated on this" contract). Any other owner hash must still resolve to a
     live (unrevoked, unexpired) keystore key, or the run is downgraded to
-    restricted rather than trusting a stale grant."""
+    restricted rather than trusting a stale grant.
+
+    The owner case is decided by the ``owner_is_owner_key`` flag STAMPED AT
+    CREATION, not by comparing key values here: the owner key is not a keystore
+    entry, so once the owner ROTATES it (keys regenerate / GUI roll / key clear)
+    a value comparison against the new key fails and ``key_hash_live`` of the old
+    hash says "not live" - silently and permanently stripping shell from the
+    owner's OWN scheduled jobs (REG-509). The distinction cannot be recovered at
+    run time: revocation deletes the keystore record, so a revoked scoped key and
+    a rotated-away owner key both hash to nothing. The key-value comparison is
+    kept only as the back-compat path for jobs persisted before the flag existed
+    (they load with it False), where it still authorizes correctly as long as the
+    owner has not rotated."""
     if job.owner is None:
+        return True
+    if getattr(job, "owner_is_owner_key", False):
         return True
     from localm.auth import _hash_key, get_api_key, key_hash_live
     owner_key = get_api_key()
     if owner_key and _hash_key(owner_key) == job.owner:
+        # This run PROVES the job is the owner's, because the owner key still has
+        # the value it was stamped with. Record that now, while it is still
+        # provable: a job created before this field existed would otherwise lose
+        # shell on the owner's next roll, exactly as REG-509 describes. After this
+        # the flag short-circuits above, so it is a one-time write per job.
+        _remember_owner_key_job(job)
         return True
     return key_hash_live(job.owner)
+
+
+def _remember_owner_key_job(job: Job) -> None:
+    """Persist ``owner_is_owner_key`` on a legacy job we just proved is the
+    owner's (best-effort).
+
+    Failing to persist is not fatal - this run is authorized either way, and the
+    next run re-proves it the same way - so it must not break the job. But it is
+    not silenced either: if it keeps failing, the job stays exposed to REG-509 on
+    the next key roll, and that has to be discoverable (AGENTS.md rule 5).
+    """
+    job.owner_is_owner_key = True
+    try:
+        JobStore().update(job.id, owner_is_owner_key=True)
+    except (KeyError, OSError, RuntimeError, ValueError) as e:
+        logger.debug("jobs: could not persist the owner-key stamp for job %s "
+                     "(%s); it will be re-derived on the next run", job.id, e)
 
 
 def _run_coder(job: Job, *, engine=None) -> str:
@@ -384,7 +421,21 @@ def _run_coder(job: Job, *, engine=None) -> str:
     # scheduler tick has no request/caller to re-check (unlike run-now, which
     # re-validates the CALLER), so the runner re-validates the OWNING key's live
     # state on every run instead (LM-DA-014).
-    restricted = not (getattr(job, "allow_shell", False) and _shell_still_authorized(job))
+    allow_shell = bool(getattr(job, "allow_shell", False))
+    downgraded = allow_shell and not _shell_still_authorized(job)
+    restricted = not allow_shell or downgraded
+    if downgraded:
+        # Never a silent degrade (rule 5): the job asked for shell and is not
+        # getting it, so the run does less than the owner configured. Say so in
+        # the log AND in the run's own output, where the user actually looks -
+        # otherwise the automation just quietly stops doing half its work. The
+        # run still proceeds restricted (the safe default a no-opt-in coder job
+        # already gets); a downgrade is not a reason to fail the whole job.
+        logger.warning(
+            "job %r (%s) opted into shell, but its owning key is no longer "
+            "authorized (revoked or expired); running RESTRICTED (no run_shell). "
+            "Re-create the job with a live key to restore shell access.",
+            job.name, job.id)
 
     from localm.plugins.coder.agent import Agent
     agent = Agent(
@@ -396,7 +447,14 @@ def _run_coder(job: Job, *, engine=None) -> str:
         restricted=restricted,
     )
     try:
-        return (agent.run_task(job.prompt) or "").strip()
+        out = (agent.run_task(job.prompt) or "").strip()
+        if downgraded:
+            note = ("[jobs] This job opted into shell execution, but its owning "
+                    "key is no longer authorized (revoked or expired), so it ran "
+                    "RESTRICTED: no run_shell. Re-create it with a live key to "
+                    "restore shell access.")
+            out = f"{note}\n\n{out}" if out else note
+        return out
     finally:
         close = getattr(agent, "close", None)
         if callable(close):
