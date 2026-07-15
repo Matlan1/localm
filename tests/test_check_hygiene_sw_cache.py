@@ -165,13 +165,17 @@ def test_binary_asset_outside_shell_is_flagged(tmp_path, monkeypatch):
     assert any("KaTeX_Main-Regular.woff2" in p for p in problems)
 
 
-def test_deleted_precached_file_is_flagged(tmp_path, monkeypatch):
-    """A DELETED asset is a change too. The old per-file `if not is_file(): continue`
-    walk skipped deletions entirely, so removing a shell file went unnoticed."""
+def test_staged_deletion_of_precached_file_is_flagged(tmp_path, monkeypatch):
+    """A DELETED asset is a change too, and the deletion must be STAGED (`git rm`) to
+    match reality: the pre-commit hook runs after `git add`, and CI diffs a committed
+    HEAD. An earlier version filtered the diff against `git ls-files` (the INDEX), which
+    silently dropped every staged or committed deletion - i.e. every deletion a real
+    invocation produces. The unstaged-unlink variant below is the ONLY case that passed
+    then, which is why testing it alone was false confidence."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
-    (static / "pages" / "models.js").unlink()
+    _git(tmp_path, "rm", "-q", f"{_STATIC}/pages/models.js")
     # Drop it from SHELL too, as a real removal would - the gate must still notice.
     sw = static / "sw.js"
     sw.write_text(sw.read_text(encoding="utf-8").replace(', "/pages/models.js"', ""),
@@ -179,7 +183,20 @@ def test_deleted_precached_file_is_flagged(tmp_path, monkeypatch):
 
     problems = ch._sw_cache_bump_violations()
 
-    assert problems, "deleting a cached asset without a bump must be flagged"
+    assert problems, "a STAGED deletion of a cached asset without a bump must be flagged"
+    assert any("pages/models.js" in p for p in problems)
+
+
+def test_unstaged_deletion_of_precached_file_is_flagged(tmp_path, monkeypatch):
+    """The same deletion left unstaged must flag too (kept as a distinct case so a
+    regression cannot pass by handling only one of the two states)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    static = _init_fake_repo(tmp_path)
+    (static / "pages" / "models.js").unlink()
+
+    problems = ch._sw_cache_bump_violations()
+
     assert any("pages/models.js" in p for p in problems)
 
 
@@ -198,6 +215,41 @@ def test_dropping_a_shell_entry_cannot_disarm_the_gate(tmp_path, monkeypatch):
 
     assert any("pages/models.js" in p and "CACHE" in p for p in problems), \
         "removing a file's SHELL entry must not silence its staleness"
+
+
+def test_sw_js_itself_does_not_self_flag(tmp_path, monkeypatch):
+    """sw.js gates the others and cannot gate itself: editing it (a comment, or the
+    SHELL list) must not demand a CACHE bump for sw.js AS AN ASSET, or every bump commit
+    would flag itself. Had no coverage; a mutant dropping the exclusion survived."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    static = _init_fake_repo(tmp_path)
+    sw = static / "sw.js"
+    sw.write_text("// a comment-only edit, no CACHE change\n"
+                  + sw.read_text(encoding="utf-8"), encoding="utf-8")
+
+    problems = ch._sw_cache_bump_violations()
+
+    assert not any("sw.js:" in p and "was not bumped" in p for p in problems), problems
+
+
+def test_uncached_paths_are_not_watched(tmp_path, monkeypatch):
+    """sw.js's fetch handler returns early for /api, /v1, /plugins and /localm-ca.crt,
+    so those can never go stale from a missed bump and must not demand one. _SW_UNCACHED
+    had NO coverage in either direction; mutants neutering it survived."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+
+    assert ch._sw_is_cacheable(f"{_STATIC}/pages/models.js")
+    assert ch._sw_is_cacheable(f"{_STATIC}/vendor/jsQR.min.js")
+    assert not ch._sw_is_cacheable(f"{_STATIC}/api/thing.json")
+    assert not ch._sw_is_cacheable(f"{_STATIC}/v1/thing.json")
+    assert not ch._sw_is_cacheable(f"{_STATIC}/localm-ca.crt")
+    assert not ch._sw_is_cacheable(_STATIC + "/sw.js"), "sw.js cannot gate itself"
+    assert not ch._sw_is_cacheable("scripts/check_hygiene.py"), "outside the static tree"
+    # The off-by-one that would break the ^-anchored regex: a leading "/" left on the
+    # relative path makes _SW_UNCACHED never match again.
+    assert not ch._sw_is_cacheable(f"{_STATIC}/api/nested/deep.json")
 
 
 # ---- rule 5: a check that cannot run must say so, never pass silently -----------
@@ -234,7 +286,11 @@ def test_unparseable_shell_array_fails_loud(tmp_path, monkeypatch):
     problems = ch._sw_cache_bump_violations()
 
     assert problems, "an unparseable SHELL array must fail loud, not silently pass"
-    assert any("SHELL" in p for p in problems)
+    # Assert the PARSE diagnosis specifically. Asserting merely `"SHELL" in p` passed
+    # even with the guard removed, because execution then fell through to the coverage
+    # check, which says "... NOT listed in sw.js's SHELL" for every module - loud, but
+    # the wrong diagnosis (it tells you to add N files rather than "I cannot read it").
+    assert any("could not parse the SHELL" in p for p in problems), problems
 
 
 def test_moved_sw_js_fails_loud(tmp_path, monkeypatch):

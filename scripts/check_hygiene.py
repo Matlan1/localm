@@ -544,8 +544,24 @@ def _sw_cache_version(sw_js_text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _sw_cacheable_assets() -> list[str]:
+def _sw_is_cacheable(rel: str) -> bool:
+    """Can the service worker cache this repo-relative path? A pure predicate, so it
+    applies to a DIFFED path as well as a tracked one. Applying it directly is what
+    makes deletions work: a staged `git rm` leaves the path in the diff but NOT in the
+    index, so intersecting the diff with `git ls-files` silently dropped every staged or
+    committed deletion - i.e. every deletion a pre-commit hook or CI would ever see (the
+    only case that survived was an unstaged unlink, which no real invocation produces)."""
+    if not rel.startswith(_SW_STATIC + "/"):
+        return False
+    if rel == _SW_JS:
+        return False                     # sw.js gates the others; it cannot gate itself
+    return not _SW_UNCACHED.match(rel[len(_SW_STATIC) + 1:])
+
+
+def _sw_cacheable_assets() -> list[str] | None:
     """Repo-relative paths of every tracked static asset the service worker can cache.
+    None => git could not enumerate them; callers must fail loud, not read it as "no
+    assets" (rule 5).
 
     Deliberately re-enumerates via git instead of reusing main()'s _tracked_files():
     that list drops _BINARY_EXTS (.woff2, .png) and skips the whole vendor/ directory,
@@ -553,15 +569,8 @@ def _sw_cacheable_assets() -> list[str]:
     the assets it most needs to watch (the KaTeX fonts and jsQR both live there)."""
     out = _git("ls-files", "-z", "--", _SW_STATIC)
     if out is None or out.returncode != 0:
-        return []
-    assets = []
-    for rel in out.stdout.split("\0"):
-        if not rel or rel == _SW_JS:
-            continue                     # sw.js gates the others; it cannot gate itself
-        if _SW_UNCACHED.match(rel[len(_SW_STATIC) + 1:]):
-            continue
-        assets.append(rel)
-    return assets
+        return None
+    return [rel for rel in out.stdout.split("\0") if rel and _sw_is_cacheable(rel)]
 
 
 def _sw_cache_bump_violations() -> list[str]:
@@ -582,7 +591,12 @@ def _sw_cache_bump_violations() -> list[str]:
         # worker at all has genuinely nothing to gate, but one where the rest of the
         # static tree is present means sw.js MOVED and the gate is now pointed at
         # nothing - which must not pass silently.
-        if _sw_cacheable_assets():
+        assets = _sw_cacheable_assets()
+        if assets is None:
+            return [f"{_SW_JS}: missing, and `git ls-files {_SW_STATIC}` failed, so the "
+                    "PWA cache-bump gate cannot even tell whether this checkout ships a "
+                    "GUI. It checked NOTHING."]
+        if assets:
             return [f"{_SW_JS}: missing, but {_SW_STATIC}/ still ships assets - the PWA "
                     "cache-bump gate is pointed at a file that no longer exists and just "
                     "checked NOTHING. Update _SW_JS in this script to the new path."]
@@ -622,12 +636,17 @@ def _sw_cache_bump_violations() -> list[str]:
         return problems                  # bumped: exactly what this gate asks for
 
     # One diff over the whole static tree, so an asset that was DELETED or ADDED counts
-    # too - a per-file is_file() walk silently skipped deletions.
+    # too - a per-file is_file() walk silently skipped deletions. Filter with the
+    # predicate rather than against `git ls-files`: the index does not hold a staged
+    # deletion, so intersecting with it dropped exactly the deletions this must catch.
+    # -z keeps non-ASCII paths raw (core.quotepath would otherwise mangle them).
     changed = _git("diff", "--name-only", "-z", ref, "--", _SW_STATIC)
     if changed is None or changed.returncode != 0:
+        problems.append(
+            f"{_SW_STATIC}: `git diff` against the baseline ({ref[:8]}) failed, so the "
+            "PWA cache-bump gate could not tell which assets changed. It checked NOTHING.")
         return problems
-    watched = set(_sw_cacheable_assets())
-    stale = sorted(p for p in changed.stdout.split("\0") if p in watched)
+    stale = sorted(p for p in changed.stdout.split("\0") if p and _sw_is_cacheable(p))
     for rel in stale:
         problems.append(
             f"{rel}: changed since {ref[:8]} but {_SW_JS}'s CACHE version was not bumped "
