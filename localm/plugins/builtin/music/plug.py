@@ -96,8 +96,25 @@ async def music(req: MusicRequest, request: Request):
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
-        from localm.vram import decide_media_swap, unload_chat_for_media
+        from localm.vram import (decide_media_swap, media_single_device_shortfall,
+                                 media_split_notice, unload_chat_for_media)
+        notice = media_split_notice()
+        if notice:
+            job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
+        # REG-532: the gate reads COMBINED free VRAM across a configured GPU split,
+        # but ComfyUI masks devices and loads the WHOLE model onto ONE card, so a job
+        # that "fits" in 2x4 GB combined can still OOM on one 4 GB card. When the
+        # chosen card cannot hold it, swap anyway: unloading the chat model frees
+        # VRAM on every split card, including that one.
+        shortfall = media_single_device_shortfall(s)
+        if shortfall and not swap:
+            swap = True
+            job.push({"type": "line", "text":
+                      f"GPU {shortfall['index']} has "
+                      f"{shortfall['free'] / 1024 ** 3:.1f} GB free, but this job "
+                      f"needs {shortfall['needed'] / 1024 ** 3:.1f} GB on a single "
+                      "card - unloading the chat model first."})
         gen_swap = False
         if swap:
             if not unload_chat_for_media(job, self_url, "music"):
