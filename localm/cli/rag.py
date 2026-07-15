@@ -101,10 +101,14 @@ def rag_repair(collection, embed, url, yes):
 
     Use this when an index may be out of date (e.g. files edited in place
     without a size change). Re-reads and re-chunks every indexed document.
-    Pass --embed to also (re)compute embeddings; without it, a collection that
-    already has semantic search goes back to lexical-only (BM25) - repair is a
-    full re-index, not an in-place patch, and cannot tell the difference
-    between "no embeddings were ever computed" and "you want to keep them".
+
+    Repair is a full re-index, not an in-place patch, so without --embed every
+    re-indexed chunk gets no vector and a collection that had semantic search
+    drops to lexical-only (BM25). On a collection that HAS embeddings you are
+    asked before that happens. Run non-interactively (cron, CI, a script) there
+    is nothing to answer, so repair keeps the embeddings rather than dropping
+    them silently or refusing to run; pass --yes to accept the drop, or --embed
+    to recompute them explicitly.
     """
     from rich.console import Console
     from ..rag import Collection
@@ -135,7 +139,29 @@ def rag_repair(collection, embed, url, yes):
             f"[yellow]'{collection}' currently has semantic (hybrid) search. "
             "Repairing without --embed will REMOVE the existing embeddings for "
             "every re-indexed document (it goes back to BM25/lexical-only).[/yellow]")
-        click.confirm("Continue and drop the embeddings?", abort=True)
+        # Deliberately NOT `abort=True`: it collapses "the user answered no" and
+        # "there was no user to answer" into the same Abort. That is REG-589 - run
+        # from cron/CI/a script with no stdin, click.confirm hits EOF, and repair
+        # exits non-zero having done NOTHING, on exactly the stale/corrupt hybrid
+        # indexes it exists to rebuild. Without abort=True, an explicit "no"
+        # RETURNS False while EOF still raises Abort, so the two are separable.
+        try:
+            proceed = click.confirm("Continue and drop the embeddings?")
+        except click.Abort:
+            # Nobody was there to answer. Both alternatives are bad: aborting
+            # stops repairing (REG-589), and proceeding would silently delete this
+            # collection's semantic search (REC-RAG-REPAIR-EMBED, the reason this
+            # prompt exists). So take the branch that loses NOTHING - preserve the
+            # embeddings the collection already has - and SAY so rather than
+            # choosing silently (rule 5). The repair still happens, exit 0.
+            console.print(
+                "[yellow]Not an interactive terminal, so nothing can answer that. "
+                "Repairing WITH embeddings so they are not lost - pass --yes to "
+                "repair lexical-only instead, or --embed to silence this.[/yellow]")
+            embed = True
+        else:
+            if not proceed:
+                raise click.Abort()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     result = coll.add_paths(paths, force=True, embed_fn=embed_fn,
                             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
