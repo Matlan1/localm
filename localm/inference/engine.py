@@ -258,30 +258,61 @@ class Engine:
         except Exception:
             return None
 
+    def _embed_via_dedicated(self, texts: List[str]) -> List[List[float]]:
+        """Embed with the small DEDICATED on-device embedding model
+        (:mod:`localm.inference.embedder`), or raise with the one command that
+        fixes it. Raising (rather than returning the chat model's own vectors)
+        is the point: RAG catches this and degrades to lexical-only BM25 with a
+        warning, which measurably beats blending unusable vectors into its
+        50/50 lexical+vector score."""
+        from localm.inference.embedder import embed_texts
+        vecs = embed_texts(list(texts))
+        if vecs is not None:
+            return vecs
+        raise NotImplementedError(
+            "No embedding model available. Run 'localm setup-embeddings' (or "
+            "set net_mode=allow) to enable semantic search; memory and RAG use "
+            "lexical BM25 until then.")
+
     def embed(self, texts: List[str]) -> List[List[float]]:
         """
         Return embedding vectors for a list of texts.
 
-        A backend that can embed the loaded model itself (HuggingFace) is used
-        directly. The bundled GGUF chat backend cannot (``can_embed=False``); for
-        it we use a small DEDICATED on-device embedding model
-        (:mod:`localm.inference.embedder`) instead of loading the large chat model
-        just to fail, so semantic search works on the default runtime. Raises
-        ``NotImplementedError`` only when no embedding path is available.
+        A backend that can genuinely embed its own loaded model (a HuggingFace
+        encoder / sentence-transformer) is used directly. Anything that cannot is
+        served by a small DEDICATED on-device embedding model
+        (:mod:`localm.inference.embedder`). Two backends cannot, for different
+        reasons and at different times:
+
+        - the bundled GGUF chat backend NEVER can (``can_embed = False``, a fixed
+          class attribute: the ctypes binding exposes no create_embedding), which
+          is known up front, so the large chat model is not loaded just to fail;
+        - the HF backend can only tell once the weights are LOADED, because it
+          depends on what the checkpoint is: an encoder can embed, a chat decoder
+          cannot (see ``HFBackend.can_embed`` for the measurements).
+
+        Hence the capability is checked TWICE, before and after the load. Checking
+        only before it meant an HF chat decoder - which reports the "unknown" True
+        while unloaded - fell straight through to ``backend.embed()`` and silently
+        returned mean-pooled chat vectors that cannot separate related from
+        unrelated text, to both /v1/embeddings and RAG, even with a real embedding
+        model installed. Raises ``NotImplementedError`` only when no embedding path
+        is available at all.
         """
         if getattr(self._backend, "can_embed", True) is False:
-            from localm.inference.embedder import embed_texts
-            vecs = embed_texts(list(texts))
-            if vecs is not None:
-                return vecs
-            raise NotImplementedError(
-                "No embedding model available. Run 'localm setup-embeddings' (or "
-                "set net_mode=allow) to enable semantic search; memory and RAG use "
-                "lexical BM25 until then.")
+            return self._embed_via_dedicated(texts)
         if not self._backend.loaded:
             with _LOAD_LOCK:
                 if not self._backend.loaded:
                     self._backend.load()
+        if getattr(self._backend, "can_embed", True) is False:
+            # Only knowable now (HF): the loaded checkpoint is a chat decoder.
+            # Substituting the dedicated embedder is the CORRECT outcome, not a
+            # degradation, but it must not be invisible either (rule 5).
+            logger.debug(
+                "%s is not an embedding model; embedding via the dedicated "
+                "on-device embedder instead", self.display_name)
+            return self._embed_via_dedicated(texts)
         return self._backend.embed(texts)
 
     def validate_grammar(self, grammar: Optional[str]) -> None:
