@@ -139,7 +139,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Stopping a reply can no longer break that model until you restart.** If you
   stopped a reply while the model was busy in a step it could not interrupt, the
   model was shut down but still looked loaded, so every later message to it failed
-  with an internal error, permanently. It now reloads itself on the next message.
+  with an internal error, permanently. It now reloads itself on the next message,
+  and the same applies to the token counts and grammar checks that run alongside
+  chat - they fall back to their normal estimate instead of failing.
 - **An update no longer undoes itself.** After "Update now", localm checks that the
   new version comes back up healthy and rolls back if it does not. That check looked
   for the server on the port it had *before* restarting, which is not always the port
