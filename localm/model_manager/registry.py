@@ -5,6 +5,7 @@ dedup, disk sync, add-local, and removal. Depends on the gguf helpers."""
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -982,6 +983,37 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
 
 
+def _same_volume(a: Path, b: Path) -> bool:
+    """True when *a* and *b* live on the same volume, so a move between them is a
+    rename rather than a copy+delete. ``st_dev`` is the device id on POSIX and the
+    volume serial on Windows, which is why this beats comparing drive letters (it
+    is right for junctions, mount points and UNC paths too).
+
+    Fails SAFE: if the volume cannot be read, return False so the caller keeps its
+    full free-space check. A wrong "same volume" would skip a check that is real
+    and let a cross-volume move fill the disk; a wrong "different volume" only
+    asks for space we may not need.
+    """
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
+def _space_needed(sources_on: Path, action: str, total: int) -> int:
+    """Bytes that must be free in MODELS_DIR to perform *action*.
+
+    A same-volume move is an os.rename (shutil.move's fast path): it needs ~0
+    extra bytes, so demanding the whole model size falsely refused
+    `localm add --on-duplicate move` whenever free < model size - which is exactly
+    when a user picks move over copy (REG-450). A copy, or a cross-volume move
+    (copy+delete under the hood), really does need the bytes.
+    """
+    if action == "move" and _same_volume(sources_on, _mm.MODELS_DIR):
+        return 0
+    return total
+
+
 def _store_into_models_dir(path: Path, action: str) -> Path:
     """Copy or move an external model (file or directory) INTO ``MODELS_DIR``, so
     it can be registered from there and treated exactly like a pulled model
@@ -1023,7 +1055,7 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
         if dest.exists():
             raise RuntimeError(f"Cannot {action}: {dest} already exists")
         total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-        if not _mm._check_disk_space(_mm.MODELS_DIR, total):
+        if not _mm._check_disk_space(_mm.MODELS_DIR, _space_needed(path, action, total)):
             raise RuntimeError(
                 f"Not enough disk space to {action} {path} into {_mm.MODELS_DIR}"
             )
@@ -1053,7 +1085,9 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
 
     to_transfer = [(s, d) for s, d in zip(sources, dests) if s.resolve() != d.resolve()]
     total = sum(s.stat().st_size for s, _ in to_transfer if s.exists())
-    if not _mm._check_disk_space(_mm.MODELS_DIR, total):
+    # Every source is a sibling of *path*, so one volume check covers them all.
+    if not _mm._check_disk_space(_mm.MODELS_DIR,
+                                 _space_needed(path.parent, action, total)):
         raise RuntimeError(
             f"Not enough disk space to {action} {path.name} into {_mm.MODELS_DIR}"
         )

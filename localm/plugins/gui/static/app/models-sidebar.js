@@ -463,6 +463,15 @@ export async function switchModel(model) {
   const data = await r.json().catch(() => ({ status: "loaded", model }));
   if (data.status === "superseded") return data;
   setStatus("ok", data.model || model);
+  // Publish the newly active model NOW. refreshModels() is the only other writer
+  // and it polls every 30s, so without this the client believes no model is
+  // loaded until the next poll: sendChat's empty-model guard reads
+  // modelCache.active and would falsely refuse "No model loaded" for up to ~30s
+  // after a sidebar load actually succeeded (REG-471). Use the name the SERVER
+  // reports (an alias may resolve to a different one); the next poll reconciles
+  // the rest of the cache. Deliberately after the superseded return: that load
+  // was abandoned, so claiming it would publish a model that is not loaded.
+  modelCache.active = data.model || model;
   return data;
 }
 

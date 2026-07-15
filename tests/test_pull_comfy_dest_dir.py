@@ -163,3 +163,102 @@ class TestPullModelDestDirGuard:
 
         assert ok is True
         assert (dest_dir / "clip_l.safetensors").is_file()
+
+
+# ---------------------------------------------------------------------------
+# REG-641: a dest_dir download must not "succeed" without writing the file.
+#
+# The pre-download duplicate check asks localm's own REGISTRY "do we already have
+# these bytes?". With dest_dir set the file is wanted somewhere ELSE entirely
+# (ComfyUI's models folder), so a registry hit says nothing about the
+# destination. In a pull JOB (no TTY) _prompt_predownload_dup returns "skip" and
+# the pull returned True: the modal showed the download succeeded while nothing
+# reached the ComfyUI folder, and the next generate still failed "model missing".
+# The existing dest_dir tests never stub _hf_file_sha256 (no network -> None), so
+# verify_digest was None and this whole branch went unexercised.
+# ---------------------------------------------------------------------------
+
+_DIGEST = "ab" * 32
+
+
+class TestDestDirDuplicateSkip:
+    def test_dest_dir_download_happens_even_when_the_sha256_is_registered(
+            self, fake_registry, tmp_path, monkeypatch):
+        """The file must physically land in dest_dir. Reporting success without
+        writing it is an AGENTS.md rule 5 violation (a step reporting success
+        after not doing the work)."""
+        store, models_dir = fake_registry
+        # The very same bytes are already registered in localm's own registry...
+        already = models_dir / "flux1-dev-Q8_0.gguf"
+        already.write_bytes(b"fake-model-bytes")
+        store["flux-local"] = {"path": str(already), "source": "local",
+                               "sha256": _DIGEST, "model_type": "diffusion-unet"}
+        # ...and HF metadata reports that same digest for the file being pulled.
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: _DIGEST)
+        _wire_fake_download(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "unet"
+
+        ok = mm._pull_gguf_file(
+            "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf", None,
+            model_type="diffusion-unet", dest_dir=dest_dir, register=False)
+
+        assert ok is True
+        assert (dest_dir / "flux1-dev-Q8_0.gguf").is_file(), (
+            "the pull reported success, so the file must actually be in the "
+            "ComfyUI folder - a registry dup elsewhere does not put it there")
+
+    def test_dest_dir_pull_does_not_alias_into_the_registry(
+            self, fake_registry, tmp_path, monkeypatch):
+        """A dest_dir pull is explicitly register=False. Aliasing the dup (the
+        other half of the dup branch) would write localm's registry for a file
+        the caller asked to keep out of it, and STILL not deliver it."""
+        store, models_dir = fake_registry
+        already = models_dir / "clip_l.safetensors"
+        already.write_bytes(b"fake-model-bytes")
+        store["clip-local"] = {"path": str(already), "source": "local",
+                               "sha256": _DIGEST, "model_type": "text-encoder"}
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: _DIGEST)
+        _wire_fake_download(monkeypatch)
+        dest_dir = tmp_path / "comfyui-models" / "clip"
+
+        ok = mm._pull_gguf_file(
+            "comfyanonymous/flux_text_encoders:clip_l.safetensors", None,
+            model_type="text-encoder", dest_dir=dest_dir, register=False)
+
+        assert ok is True
+        assert (dest_dir / "clip_l.safetensors").is_file()
+        assert list(store) == ["clip-local"], "no new registry entry/alias"
+
+    def test_a_normal_pull_still_skips_a_known_duplicate(
+            self, fake_registry, tmp_path, monkeypatch):
+        """Negative case: with NO dest_dir the destination IS localm's models dir,
+        so an already-registered identical file is a real duplicate and the
+        no-TTY skip must still apply. The fix must be scoped to dest_dir, not
+        disable dedup for every pull."""
+        store, models_dir = fake_registry
+        already = models_dir / "other.gguf"
+        already.write_bytes(b"fake-model-bytes")
+        store["already-have"] = {"path": str(already), "source": "local",
+                                 "sha256": _DIGEST, "model_type": "llm"}
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: _DIGEST)
+
+        downloaded = []
+
+        def _fake_download(repo_id, filename, local_dir, **kw):
+            downloaded.append(filename)
+            p = Path(local_dir) / filename
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"fake-model-bytes")
+            return str(p)
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(
+            headers={"content-length": "16"}))
+
+        ok = mm._pull_gguf_file("city96/FLUX.1-dev-gguf:brand-new.gguf", None,
+                                model_type="llm")
+
+        assert ok is True
+        assert downloaded == [], (
+            "a duplicate destined for MODELS_DIR is still skipped without a TTY")
