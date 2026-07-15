@@ -18,18 +18,61 @@ import logging
 import pytest
 
 
+@pytest.fixture
+def pristine_logging(monkeypatch):
+    """Reproduce the REAL import-time logging state, and restore it afterwards.
+
+    Getting this exactly right IS the test: the window being reproduced is "no
+    handler on the localm logger, level NOTSET so the root's WARNING is what is
+    in force". Two traps make a naive reset silently wrong, and both were found
+    by this file's own precondition assert failing in a full-suite run while
+    passing standalone:
+
+    1. logging.Logger.isEnabledFor() MEMOISES its answer per level in
+       Logger._cache, and only setLevel()/_clear_cache() invalidate it. Assigning
+       `.level` directly (e.g. monkeypatch.setattr(logger, "level", NOTSET))
+       leaves a stale entry, so after any earlier test in the same worker called
+       enable_debug() (test_debug_scrub.py does), isEnabledFor(DEBUG) keeps
+       answering True and the window is NOT reproduced.
+    2. enable_debug() is idempotent via the LOCALM_DEBUG env var: if an earlier
+       test left it set, enable_debug() returns the OLD path without opening a
+       new log, and assertions read the wrong file.
+
+    Note this deliberately does NOT use caplog, which attaches a root handler and
+    forces level 0 - that would mask the very condition under test.
+    """
+    from localm import debuglog
+    root = logging.getLogger()
+    saved_level = debuglog.logger.level
+    saved_handlers = list(debuglog.logger.handlers)
+    saved_root_level = root.level
+
+    monkeypatch.delenv("LOCALM_DEBUG", raising=False)   # else enable_debug() no-ops
+    debuglog.logger.handlers = []
+    debuglog.logger.setLevel(logging.NOTSET)            # setLevel() clears the cache
+    root.setLevel(logging.WARNING)                      # the real default at import
+    logging.Logger.manager._clear_cache()
+    try:
+        yield
+    finally:
+        # enable_debug() adds a file handler and lowers the level; leaving that in
+        # place would pollute every later test in this worker.
+        debuglog.logger.handlers = saved_handlers
+        debuglog.logger.setLevel(saved_level)
+        root.setLevel(saved_root_level)
+        logging.Logger.manager._clear_cache()
+
+
 class TestDeferLog:
-    def test_defer_log_survives_the_no_handler_import_window(self, tmp_path, monkeypatch):
+    def test_defer_log_survives_the_no_handler_import_window(
+            self, tmp_path, monkeypatch, pristine_logging):
         """A record queued while the logger has NO handler and an inherited
         WARNING level still reaches the debug log once enable_debug() runs."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         from localm import debuglog
 
-        # Reproduce the real import-time state: no handlers, level NOTSET so the
-        # root's WARNING is what is in force. This is what kills a bare
-        # logger.debug() - assert that precondition rather than assuming it.
-        monkeypatch.setattr(debuglog.logger, "handlers", [])
-        monkeypatch.setattr(debuglog.logger, "level", logging.NOTSET)
+        # The precondition IS the point: a DEBUG record must be dropped in this
+        # state, or the test is not reproducing the import-time window.
         assert not debuglog.logger.isEnabledFor(logging.DEBUG), (
             "precondition: a DEBUG record must be dropped in this state - if this "
             "fails the test is no longer reproducing the import-time window"
@@ -41,14 +84,13 @@ class TestDeferLog:
         # Nothing emitted yet, but nothing lost either.
         assert len(debuglog._deferred_records) == 1
 
-        monkeypatch.delenv("LOCALM_DEBUG_FILE", raising=False)
         path = debuglog.enable_debug()
         text = path.read_text(encoding="utf-8", errors="replace")
         assert "queued diagnostic here" in text
         # Drained, so a second enable_debug() cannot double-replay it.
         assert debuglog._deferred_records == []
 
-    def test_flush_is_idempotent(self, tmp_path, monkeypatch):
+    def test_flush_is_idempotent(self, tmp_path, monkeypatch, pristine_logging):
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         from localm import debuglog
         monkeypatch.setattr(debuglog, "_deferred_records", [])
