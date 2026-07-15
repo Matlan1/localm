@@ -587,6 +587,41 @@ def reset_embedder() -> None:
         _LAST_ERROR = None
 
 
+def reap_worker_for_exit() -> bool:
+    """Force-terminate the isolated embedder worker, for a caller that is about
+    to ``os._exit()`` / ``os.execv()``. Returns True if a worker was reaped.
+
+    Both of those bypass ``atexit`` - and multiprocessing's daemon-child
+    reclamation IS an atexit hook (``multiprocessing.util._exit_function``) - so
+    a worker left running does NOT die with the parent: it survives as an orphan
+    still holding its model in VRAM until killed by hand, and the restarted
+    server spawns a second one next to it. Verified live (2026-07-15): a daemon
+    child is reclaimed on a normal interpreter exit, but survives BOTH os._exit
+    and os.execv.
+
+    Use this INSTEAD of reset_embedder() when a request is mid-embed(): the
+    pinned request cannot be answered either way once the process exits, so
+    there is nothing left to protect, and skipping the release entirely (the
+    only alternative) is what leaks the worker.
+
+    Deliberately does NOT take ``_LOCK`` and does NOT wait for the in-flight
+    embed to finish: ``_LOCK`` can be held for the full duration of a model
+    load, so blocking on it here would hang the very stop/restart the user
+    asked for. Reading the singleton without it is a best-effort snapshot -
+    the caller is exiting, and a hard exit racing a load that has not yet
+    published its embedder is inherent to any hard exit."""
+    emb = _EMBEDDER
+    if emb is None:
+        return False
+    runner = getattr(emb, "_runner", None)
+    if runner is None:
+        return False
+    # grace=0: skip the polite "shutdown" command, which would otherwise queue
+    # behind the in-flight embed() and stall the exit for the grace period.
+    runner.shutdown(grace=0)
+    return True
+
+
 # A daemon worker already dies with the parent, but tear it down explicitly at
 # interpreter exit so its queue feeder threads never delay shutdown - mirrors
 # voice.py's atexit registration for the identical process-wide-singleton shape
