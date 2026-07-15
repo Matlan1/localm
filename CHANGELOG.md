@@ -85,6 +85,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of staying silent. Questions that are not about you still stay silent,
   and installing an embedding model (`localm setup-embeddings`) is still what
   gives you full meaning-based recall.
+- **Your saved memories are recalled again when an API key is set.** With a key
+  configured, everything you saved (and everything memory learned on its own) was
+  filed under one identity but looked up under a different one, so chat quietly
+  recalled none of it. The Memory page still listed every fact, which made it look
+  like the model was simply ignoring them. Both paths now use the same identity.
+- **The app no longer freezes while memory is distilling in the background.** After
+  a turn, memory quietly distils new facts, which takes one model call per candidate
+  fact. It held the memory lock for that whole stretch, so your next message - and
+  every other request, token stream, and health check - waited for it to finish:
+  seconds to minutes on a local model. It now does that thinking without holding the
+  lock, so chat stays responsive while memory grows.
+- **The first memory distil after an upgrade no longer monopolises the model.** With
+  a backlog of past conversations, the first background distil summarised every past
+  session, one model generation each, back to back - starving chat for as long as it
+  took. It now summarises a few per pass and works through the backlog over time.
+- **A conversation is remembered as one entry, even if you come back to it.** An
+  in-progress conversation could be summarised while it was still going, and a
+  conversation you resumed later could be summarised again, leaving several
+  overlapping partial memories of the same session. Each conversation now waits
+  until it is finished and keeps a single summary, updated to cover the whole thing.
 - **Picking a Main GPU no longer stops large transformers models from loading.**
   With a Main GPU selected, localm pinned the whole model onto that one card, so a
   transformers model bigger than its free memory failed with an out-of-memory error
@@ -127,7 +147,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Stopping a reply can no longer break that model until you restart.** If you
   stopped a reply while the model was busy in a step it could not interrupt, the
   model was shut down but still looked loaded, so every later message to it failed
-  with an internal error, permanently. It now reloads itself on the next message.
+  with an internal error, permanently. It now reloads itself on the next message,
+  and the same applies to the token counts and grammar checks that run alongside
+  chat - they fall back to their normal estimate instead of failing.
 - **An update no longer undoes itself.** After "Update now", localm checks that the
   new version comes back up healthy and rolls back if it does not. That check looked
   for the server on the port it had *before* restarting, which is not always the port
@@ -174,6 +196,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it exited with an error and repaired nothing, on exactly the stale indexes it
   exists to rebuild. It now keeps the embeddings and repairs, telling you it did.
   Pass `--yes` to drop them instead, or `--embed` to recompute them.
+- **An API key with an accented or non-English character no longer locks you out.**
+  Setting a key like `pässwort-key` left the server unable to answer any
+  authenticated request: your own correct key and a wrong one both failed with
+  "Internal server error" rather than letting you in or cleanly refusing. The same
+  fault let any caller trigger that error without a key at all, just by sending a
+  bearer token containing a non-English character, which filled the log with
+  tracebacks. Keys are now compared safely whatever characters they contain, so a
+  wrong key is refused cleanly and the right one works.
+- **`localm key set` now says which characters a key may use.** An API key travels
+  in an HTTP request header, which cannot carry spaces, punctuation, or non-English
+  letters reliably, so a key using them left you unable to sign in from most
+  clients. Such a key is now refused with a message naming what is allowed: letters,
+  numbers, `-` and `_`, the same characters `localm key generate` produces.
 - **Document search no longer embeds with the chat model itself.** If you ran a
   HuggingFace-format model, localm quietly made embeddings out of the chat model
   rather than the small dedicated embedding model, even when you had one

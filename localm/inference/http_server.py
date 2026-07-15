@@ -1541,11 +1541,14 @@ def _csrf_ok(request) -> bool:
     so a valid session always has a usable token. A cross-site page can neither read
     the HttpOnly session cookie nor the token (SOP), and cannot set a non-simple
     header; SameSite=Strict and the same-origin guard remain in force."""
+    from localm.auth import ct_equal
     header = request.headers.get(CSRF_HEADER, "")
     sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
     if not header or not sid:
         return False
-    return hmac.compare_digest(header, csrf_token_for(request, sid))
+    # ct_equal, not compare_digest: the header is caller-supplied and latin-1
+    # decoded, so a non-ASCII one would raise and turn this 403 into a 500.
+    return ct_equal(header, csrf_token_for(request, sid))
 
 
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
@@ -2503,12 +2506,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             and not request.url.path.startswith("/v1/models")
         )
         if (is_unsafe or is_metadata_get) and not request.url.path.startswith(_CROSS_ORIGIN_OK):
-            from localm.auth import any_key_configured, require_auth_enabled
+            from localm.auth import (any_key_configured, ct_equal,
+                                     require_auth_enabled)
             if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)
                 presented = _bearer_token(request)
-                token_ok = bool(token and presented
-                                 and hmac.compare_digest(presented, token))
+                token_ok = ct_equal(presented, token)
                 # AUD-CORSTOKEN: an unsafe-method request already passed the
                 # same-origin check above (or is exempt as _CROSS_ORIGIN_OK,
                 # which never reaches here); a metadata GET never went through

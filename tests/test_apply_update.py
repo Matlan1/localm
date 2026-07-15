@@ -360,7 +360,6 @@ def test_swap_with_backup_surfaces_double_failure(tmp_path, monkeypatch):
 # A stale file then survived while apply()/rollback() reported success. _prune now
 # RETURNS the file-removal failures so the caller surfaces them.
 
-from pathlib import Path   # noqa: E402  (used by the _prune-failure tests below)
 
 
 def test_prune_returns_error_for_unremovable_file(tmp_path, monkeypatch):

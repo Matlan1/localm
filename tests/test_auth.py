@@ -242,6 +242,119 @@ def test_owner_key_is_admin(auth, monkeypatch):
     assert auth.verify("nope") is None
 
 
+def test_ct_equal_is_total_and_correct(auth):
+    """ct_equal is the house idiom for every secret compare, so its contract is
+    'never raises, whatever the caller sends'. The vulnerable shape is a non-ASCII
+    operand against an ASCII secret (a token_urlsafe or a hexdigest): compare_digest
+    raises if EITHER side is non-ASCII, so the ASCII side does not protect it."""
+    token = "aGVsbG8-d29ybGQ_1234"          # the shape secrets.token_urlsafe emits
+    # Correct matches (the negative case: a blanket False would pass everything else).
+    assert auth.ct_equal(token, token) is True
+    assert auth.ct_equal("pässwort", "pässwort") is True
+    assert auth.ct_equal("key\ud800bad", "key\ud800bad") is True
+    # Wrong values reject.
+    assert auth.ct_equal("wrong", token) is False
+    assert auth.ct_equal("pässwort", "pässworT") is False
+    # The bug shape: non-ASCII on either side must reject, not raise.
+    assert auth.ct_equal("pässwort", token) is False
+    assert auth.ct_equal(token, "pässwort") is False
+    assert auth.ct_equal("key\ud800bad", token) is False
+    # Absent operands are "no credential" / "no secret", never a match.
+    for a, b in [(None, token), (token, None), ("", token), (token, ""), (None, None)]:
+        assert auth.ct_equal(a, b) is False
+
+
+def test_non_ascii_presented_token_rejects_and_never_raises(auth, monkeypatch):
+    """hmac.compare_digest() raises TypeError on a non-ASCII str, and it raises if
+    EITHER operand is non-ASCII - so an ASCII owner key does NOT protect the compare.
+    A bearer token reaches verify() as a latin-1 decoded header, so any caller could
+    turn a clean 401 into an unhandled 500 by sending a non-ASCII token."""
+    from localm import scopes as S
+    monkeypatch.setenv("LOCALM_API_KEY", "asciiownerkey1234")
+    # Negative cases: rejection and acceptance must both still work on ASCII, or
+    # this test would pass on a verify() that simply rejected everything.
+    assert auth.verify("wrong-ascii-key") is None
+    assert auth.verify("asciiownerkey1234") == {S.ADMIN}
+    # The bug: a non-ASCII presented token must reject cleanly, not raise.
+    assert auth.verify("pässwort") is None
+    assert auth.verify("ünïcode-guess") is None
+
+
+def test_non_ascii_owner_key_verifies_and_rejects_wrong(auth, monkeypatch):
+    """A non-ASCII owner key (from the env var, or an auth.key written before
+    set_api_key refused them) must still authenticate its owner and cleanly reject
+    a wrong key. Before the fix BOTH answered 500, locking the owner out."""
+    from localm import scopes as S
+    monkeypatch.setenv("LOCALM_API_KEY", "pässwort-owner-key")
+    assert auth.verify("pässwort-owner-key") == {S.ADMIN}
+    # Negative cases: a wrong key must not ride in on the non-ASCII path.
+    assert auth.verify("wrong-ascii-key") is None
+    assert auth.verify("pässwort-owner-keX") is None
+
+
+def test_lone_surrogate_token_rejects_and_never_raises(auth, monkeypatch):
+    """os.environ can carry lone surrogates on Windows (surrogatepass decoding), and
+    a plain .encode("utf-8") raises UnicodeEncodeError on one - which would swap the
+    non-ASCII crash for a surrogate crash. The compare must be total."""
+    monkeypatch.setenv("LOCALM_API_KEY", "asciiownerkey1234")
+    assert auth.verify("key\ud800bad") is None
+
+
+def test_set_api_key_refuses_characters_a_header_cannot_carry(auth):
+    """A key rides in an HTTP Authorization header, so it is restricted to the
+    generator's own alphabet at set time. Non-ASCII is the sharp case (clients send
+    UTF-8, RFC 7230 obs-text decodes latin-1 -> mojibake -> the owner's own key is
+    refused); spaces and control characters break the header outright."""
+    for bad in ("pässwort-key", "key with spaces", "key\r\ninjected",
+                "key!punctuation", "key\ud800surrogate"):
+        with pytest.raises(ValueError, match="letters, numbers"):
+            auth.set_api_key(bad)
+        assert auth.get_api_key() is None              # nothing was persisted
+    # Negative cases: every character the generator emits must still be accepted,
+    # or `localm key generate` would reject its own output.
+    auth.set_api_key("passwort-key")
+    assert auth.get_api_key() == "passwort-key"
+    auth.set_api_key("Under_scores-and-Digits123")
+    assert auth.get_api_key() == "Under_scores-and-Digits123"
+
+
+def test_set_api_key_accepts_every_generated_key(auth):
+    """~49% of generate_key() outputs contain an underscore and ~48% a dash, so a
+    charset that allowed only "-" would reject about half of them. regenerate_key()
+    feeds generate_key() straight into set_api_key(), so a mismatch here would make
+    `localm key generate` fail at random."""
+    for _ in range(200):
+        key = auth.generate_key()
+        auth.set_api_key(key)                          # must never raise
+        assert auth.get_api_key() == key
+
+
+def test_non_ascii_bearer_token_gets_401_not_500(auth, monkeypatch):
+    """End-to-end shape of the bug: an UNAUTHENTICATED caller sending a non-ASCII
+    bearer token to a protected route must get a clean 401, never an unhandled 500.
+    raise_server_exceptions=False so a server-side raise surfaces as a real 500
+    response instead of propagating out of the client call (the house default of
+    True would re-raise the TypeError and never yield a status to assert on)."""
+    from fastapi.testclient import TestClient
+    from localm.inference.http_server import create_app
+
+    monkeypatch.setattr("localm.config.load_registry", lambda: {})
+    auth.set_api_key("asciiownerkey1234")
+    app = create_app(None)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        # httpx refuses to encode a non-ASCII str header, so send raw bytes -
+        # exactly what an attacker puts on the wire. Starlette decodes latin-1.
+        r = client.get("/v1/models",
+                       headers={"Authorization": b"Bearer p\xc3\xa4sswort"})
+        assert r.status_code == 401, f"expected a clean 401, got {r.status_code}"
+        # Negative cases: a wrong ASCII key must still 401, and the real owner
+        # key must still 200, or a blanket-reject would pass this test.
+        assert client.get("/v1/models", headers={
+            "Authorization": "Bearer wrong-ascii-key"}).status_code == 401
+        assert client.get("/v1/models", headers={
+            "Authorization": "Bearer asciiownerkey1234"}).status_code == 200
+
+
 def test_require_scope_enforcement(auth):
     from fastapi import HTTPException
     from localm import scopes as S
