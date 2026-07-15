@@ -68,6 +68,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **An empty `auth.key` no longer locks you out of your own server.** If an
+  `auth.key` file existed but held no key - you created it by hand to paste a key
+  in later, an editor or PowerShell saved it empty, or a backup left it truncated
+  - localm treated it as "a key is set" while having no key to check against, so
+  every request was rejected with 401 and there was no way back in short of
+  deleting the file by hand. A key file that holds no key now means exactly what
+  it says (no key, so the server runs open, as it did before), and localm says so
+  in the log rather than changing your server's security posture silently. A key
+  file that cannot be READ still locks the server, as it should - that is the case
+  where localm genuinely cannot tell whether you have a key. A key saved with a
+  byte-order mark (what Windows editors and PowerShell add) now also works
+  instead of silently never matching.
 - **Knowledge and memory no longer mix up results when two things are indexed at
   once.** If a background knowledge re-index overlapped with a chat memory lookup,
   the two could receive each other's results, storing or matching against the wrong
