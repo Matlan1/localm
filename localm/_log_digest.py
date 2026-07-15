@@ -32,7 +32,7 @@ This module instead:
 from __future__ import annotations
 
 import re
-from typing import List, Optional, TypedDict
+from typing import List, TypedDict
 
 
 class LogRecord(TypedDict):
@@ -142,12 +142,27 @@ def build_digest(text: str, *, max_chars: int = 6000) -> str:
         return ""
 
 
+# Marker for an error kept only in part (see _fit_budget). The reader must never
+# mistake a cut-down trace for a complete one and diagnose from it as if it were.
+_TRUNCATED_MARK = ("... (this error was truncated for space - its start is in "
+                   "the full log file) ...\n")
+# Below this much room for actual error text, a tail is too small to be worth
+# anything; fall back to declaring the error omitted instead.
+_MIN_ERROR_TAIL = 40
+
+
 def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
     """Re-render, this time dropping benign (collapsed or not) lines from the
     FRONT first - oldest activity goes first, errors are never touched -
     until it fits. If the errors alone still exceed the budget, keep the
     MOST RECENT ones (most actionable) and say plainly how many earlier
-    errors were omitted rather than quietly truncating them."""
+    errors were omitted.
+
+    The most recent error is kept even when it ALONE exceeds the budget, cut down
+    to its tail and marked as truncated. Dropping it whole (keeping only blocks
+    that fit entire) returned a digest of just the "N omitted" notice - a bug
+    report with no error in it at all, for exactly the giant native-crash
+    traceback this digest exists to carry (REG-619)."""
     error_idxs = [i for i, r in enumerate(records) if is_error_record(r)]
     error_blocks = ["\n".join(records[i]["lines"]) for i in error_idxs]
     errors_text = "\n".join(error_blocks)
@@ -177,11 +192,24 @@ def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
     used = 0
     omitted = 0
     for block in reversed(error_blocks):
-        if used + len(block) + 1 > max_chars - 80:   # leave room for the notice
-            omitted += 1
+        room = max_chars - 80 - used - 1             # leave space for the notice
+        if len(block) <= room:
+            kept_blocks.append(block)
+            used += len(block) + 1
             continue
-        kept_blocks.append(block)
-        used += len(block) + 1
+        if not kept_blocks and room > len(_TRUNCATED_MARK) + _MIN_ERROR_TAIL:
+            # This is the MOST RECENT error and it does not fit whole. Dropping it
+            # (what the loop used to do with anything oversized) leaves the digest
+            # with nothing but the "N omitted" notice and ZERO bytes of the actual
+            # crash - strictly worse than the _recent_log_tail this replaced, which
+            # always returned the last max_chars. Keep its TAIL: a traceback's
+            # innermost exception type+message, the one line that names the
+            # failure, is at the END (REG-619).
+            tail = block[-(room - len(_TRUNCATED_MARK)):]
+            kept_blocks.append(_TRUNCATED_MARK + tail)
+            used += len(_TRUNCATED_MARK) + len(tail) + 1
+            continue
+        omitted += 1
     kept_blocks.reverse()
     notice = (f"... ({omitted} earlier error(s) omitted for space - see the "
               "full log file) ..." if omitted else "")

@@ -68,6 +68,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **An update no longer undoes itself.** After "Update now", localm checks that the
+  new version comes back up healthy and rolls back if it does not. That check looked
+  for the server on the port it had *before* restarting, which is not always the port
+  it comes back on - so a perfectly good update could be silently reverted a minute
+  or two later. Restarting now keeps the server on the port it was already using,
+  which also means a plain "Restart" no longer moves it out from under an open tab.
+- **Bug reports no longer blame an old freeze for a new problem.** localm attaches a
+  freeze snapshot when it has one, but it attached the newest one it could find,
+  however old and whatever it was from - so a report about something else entirely
+  (a wrong answer, a failed download) could arrive captioned with an unrelated freeze
+  from weeks ago, pointing at the wrong cause. Only a freeze from the run you are
+  reporting on is attached now.
+- **A crash report no longer arrives with the crash missing.** When the error was
+  large (a deep native model-load failure, which is exactly when localm asks you to
+  file a report), it did not fit the report's size limit and was dropped whole,
+  leaving a report that said an error had been left out but not what it was. The
+  error is now included, trimmed to fit and marked as trimmed, keeping the part that
+  names the failure.
 - **A model you switched away from mid-load can be used again.** If you picked a
   model and then quickly picked a different one, the first model could be left
   permanently unusable: every later message to it failed with "Model load was

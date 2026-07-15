@@ -1848,22 +1848,46 @@ def _request_shutdown(delay: float = 0.25) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _restart_argv() -> list:
+def _restart_argv(port: Optional[int] = None) -> list:
     """The command line to re-launch this server. Always ``python -m localm <args>``
     - the canonical entry the codebase uses - so a restart works regardless of how
     the server was originally started (a console-script .exe, ``-m``, or a script
-    path, any of which can make ``sys.argv[0]`` un-re-runnable by the interpreter)."""
+    path, any of which can make ``sys.argv[0]`` un-re-runnable by the interpreter).
+
+    *port* (the port this instance is ACTUALLY bound to) is appended as an explicit
+    ``-p``, so the new process comes back on the same port instead of re-running
+    pick_port() and picking a different one. Without it, an instance that was
+    auto-bumped off a busy default (started with no -p while another localm held
+    8642, so pick_port() gave it 8643) re-execs with no port token at all, calls
+    pick_port(None), finds 8642 free again now that the other instance is gone,
+    and silently moves - stranding the user's open GUI tab on a dead port, and
+    making the post-update watchdog poll the old port until it times out and
+    auto-rolls back a perfectly healthy build (REG-605).
+
+    Appending is safe against a user-supplied -p: click takes the LAST occurrence
+    of an option, and *port* is the port that value already resolved to, so the
+    two agree. Only serve/gui reach a restart, and both accept -p; a caller with
+    no known port (a bare create_app() that never advertised) passes None and gets
+    the untouched command line."""
     import sys
-    return [sys.executable, "-m", "localm", *sys.argv[1:]]
+    argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
+    if port:
+        argv += ["-p", str(port)]
+    return argv
 
 
-def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
+def _do_restart(*, update_watchdog: Optional[dict] = None,
+                port: Optional[int] = None) -> None:
     """R18: restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
     clear the crash marker so this intentional restart is not reported as a crash,
     then re-exec the same command line so the server comes back on the same port.
     os.execv replaces the process image and does not return on success. Separated
     from the route so it can be tested without actually re-execing.
+
+    *port* is the port this instance is actually bound to (app.state.instance_port,
+    set by advertise()); it is pinned into the re-exec command line so "comes back
+    on the same port" is TRUE rather than merely intended - see _restart_argv.
 
     *update_watchdog*, when given (only by the post-update restart path - see
     routes/admin.py's /api/update/apply), is a
@@ -1997,19 +2021,20 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
             except Exception:
                 pass
 
-    os.execv(sys.executable, _restart_argv())
+    os.execv(sys.executable, _restart_argv(port))
 
 
-def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None) -> None:
+def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
+                     port: Optional[int] = None) -> None:
     """Run _do_restart shortly after returning, so the 200 response flushes to the
     client before the process re-execs (mirrors _request_shutdown). *update_watchdog*
-    is forwarded to _do_restart unchanged - see its docstring."""
+    and *port* are forwarded to _do_restart unchanged - see its docstring."""
     import threading
     import time as _t
 
     def _run():
         _t.sleep(delay)
-        _do_restart(update_watchdog=update_watchdog)
+        _do_restart(update_watchdog=update_watchdog, port=port)
 
     threading.Thread(target=_run, daemon=True).start()
 

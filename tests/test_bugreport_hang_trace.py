@@ -3,15 +3,25 @@
 into a bug report automatically, so a non-technical tester who just files their
 normal report carries the freeze diagnosis with them - no env var, no py-spy."""
 
+import os
+
 import localm.config as cfg
 from localm import bugreport
 
 
-def _seed_hang(home, name="hang_2026-07-10_120000_4242.log", body=None):
+def _seed_hang(home, name=None, body=None):
+    """Seed a hang capture the way the product actually produces one: the stall
+    watchdog runs INSIDE the server process (http_server.py) and names the file
+    hang_<date>_<os.getpid()>.log, and the only caller of save_user_report is a
+    route in that same process. So the trace of the run being reported carries
+    THIS process's pid - seeding a foreign pid would test a file the product
+    never creates on this path (and one a report must NOT attach, since it would
+    belong to some other run - REG-542)."""
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    name = name or f"hang_2026-07-10_120000_{os.getpid()}.log"
     body = body or (
-        "===== LOCALM HANG WATCHDOG: event loop stalled 31.0s (pid 4242) =====\n"
+        f"===== LOCALM HANG WATCHDOG: event loop stalled 31.0s (pid {os.getpid()}) =====\n"
         'File "engine.py", line 302, in _list_gpus_probe\n'
         "    free, total = torch.cuda.mem_get_info(i)\n")
     (logs / name).write_text(body, encoding="utf-8")
@@ -22,7 +32,7 @@ def test_recent_hang_traces_reads_the_capture(tmp_path, monkeypatch):
     home = tmp_path / ".localm"
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     _seed_hang(home)
-    ht = bugreport._recent_hang_traces()
+    ht = bugreport._recent_hang_traces(pid=os.getpid())
     assert "LOCALM HANG WATCHDOG" in ht
     assert "mem_get_info" in ht        # the culprit frame is carried through
 
@@ -31,7 +41,7 @@ def test_recent_hang_traces_empty_when_no_freeze(tmp_path, monkeypatch):
     home = tmp_path / ".localm"
     (home / "logs").mkdir(parents=True)
     monkeypatch.setattr(cfg, "HOME_DIR", home)
-    assert bugreport._recent_hang_traces() == ""     # healthy run leaves nothing
+    assert bugreport._recent_hang_traces(pid=os.getpid()) == ""   # healthy run leaves nothing
 
 
 def test_build_report_renders_hang_section():
