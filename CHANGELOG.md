@@ -68,6 +68,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **A model you switched away from mid-load can be used again.** If you picked a
+  model and then quickly picked a different one, the first model could be left
+  permanently unusable: every later message to it failed with "Model load was
+  superseded by a newer request", even though nothing was loading any more, until
+  you explicitly switched to it again. It now loads normally.
+- **Stopping or restarting while knowledge is indexing no longer leaves a model
+  stuck in GPU memory.** The embedding helper could survive the restart as an
+  orphan still holding its model in VRAM, so a restarted server ran a second copy
+  beside it and "Stop" did not actually free everything. Both now release it.
+- **The app stays responsive while models load and unload.** On a multi-GPU setup
+  with a specific main GPU selected, each load or unload could briefly freeze every
+  other request (up to a few seconds) while it wrote coordination state and probed
+  the GPU. That work now happens off the request-handling path.
+- **A second localm no longer loses its models for nothing.** When two localm
+  instances share a GPU, one could ask the other to drop every model it had loaded
+  even when that could not possibly free enough room, and could keep re-asking in a
+  loop that never finished. It now only asks when it would actually help, and asks
+  each instance once.
 - **Knowledge and memory no longer mix up results when two things are indexed at
   once.** If a background knowledge re-index overlapped with a chat memory lookup,
   the two could receive each other's results, storing or matching against the wrong
