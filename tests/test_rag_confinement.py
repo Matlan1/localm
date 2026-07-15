@@ -427,7 +427,7 @@ class TestExplicitSecretFileUnderPolicy:
         pem.write_text(_PEM, encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(pem, _wl())
-        assert ei.value.reason == "blacklisted_file"
+        assert ei.value.reason == "secret_file"
 
     def test_explicit_key_suffix_blocked(self, home_env):
         home, _ = home_env
@@ -435,7 +435,7 @@ class TestExplicitSecretFileUnderPolicy:
         key.write_text("key placeholder", encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(key, _wl())
-        assert ei.value.reason == "blacklisted_file"
+        assert ei.value.reason == "secret_file"
 
     def test_explicit_extensionless_secret_name_blocked(self, home_env):
         home, _ = home_env
@@ -443,7 +443,7 @@ class TestExplicitSecretFileUnderPolicy:
         key.write_text("ssh key placeholder", encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(key, _wl())
-        assert ei.value.reason == "blacklisted_file"
+        assert ei.value.reason == "secret_file"
 
     def test_explicit_dotenv_blocked(self, home_env):
         home, _ = home_env
@@ -451,7 +451,7 @@ class TestExplicitSecretFileUnderPolicy:
         env.write_text("AWS_SECRET_ACCESS_KEY=xyz", encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(env, _wl())
-        assert ei.value.reason == "blacklisted_file"
+        assert ei.value.reason == "secret_file"
 
     def test_secret_blocked_in_blacklist_mode_too(self, home_env):
         # It is a hard, mode-independent refusal: a .pem is refused even where the
@@ -461,7 +461,7 @@ class TestExplicitSecretFileUnderPolicy:
         pem.write_text(_PEM, encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(pem, _bl())
-        assert ei.value.reason == "blacklisted_file"
+        assert ei.value.reason == "secret_file"
 
     def test_secret_takes_precedence_over_outside_allowed(self, home_env, tmp_path):
         # A secret file OUTSIDE the whitelist must be refused as a secret, NEVER
@@ -472,7 +472,7 @@ class TestExplicitSecretFileUnderPolicy:
         pem.write_text("ssh key", encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(pem, _wl())
-        assert ei.value.reason == "blacklisted_file"   # not "outside_allowed"
+        assert ei.value.reason == "secret_file"   # not "outside_allowed"
 
     @pytest.mark.parametrize("fname", [
         "deploy.ppk", "signing.p8", "key.pk8", "bundle.pkcs12",
@@ -487,7 +487,7 @@ class TestExplicitSecretFileUnderPolicy:
         f.write_text("secret-ish placeholder body", encoding="utf-8")
         with pytest.raises(ConfinementError) as ei:
             confine_index_path(f, _wl())
-        assert ei.value.reason == "blacklisted_file"
+        assert ei.value.reason == "secret_file"
 
     def test_cli_policy_none_still_honours_explicit_secret(self, home_env):
         # The CLI local operator (policy=None) can already read their own files;

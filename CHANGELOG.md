@@ -80,6 +80,34 @@ permanent public record of what shipped and are never rewritten; the in-progress
   stopped a reply while the model was busy in a step it could not interrupt, the
   model was shut down but still looked loaded, so every later message to it failed
   with an internal error, permanently. It now reloads itself on the next message.
+- **Knowledge folders no longer silently skip symlinked files.** If a folder you
+  added contained a symlink to a document stored elsewhere (a very common way to
+  collect docs from several projects), that document was quietly left out: you
+  saw "indexed N chunks" with no hint anything was missing, and searching for its
+  content found nothing. Linked files are indexed again. Linked folders are still
+  not followed, so a looping shortcut cannot hang indexing.
+- **One damaged archive no longer aborts a whole folder index.** A truncated or
+  corrupt `.gz`/`.tar.gz` (a half-finished download, say) crashed the entire
+  indexing run, so every other file in the folder went unindexed, and uploading
+  one to chat returned a server error. The bad file is now reported on its own
+  and everything around it indexes normally.
+- **A video or database in a multi-select no longer blocks the whole add.**
+  Picking several files where one happened to be a `.mp4`, `.db`, `.7z`, or model
+  weights file rejected the entire request and indexed nothing. The files that do
+  contain text are now indexed, and the one that doesn't is listed as a single
+  skipped file with the reason. Key and credential files are still refused
+  outright.
+- **`.env.example` files are indexed again.** The template files that document
+  which settings a project needs (`.env.example`, `.env.template`, `.env.sample`)
+  were being dropped from knowledge folders as if they were secrets. They are
+  documentation and are indexed again. Real `.env` files, including `.env.local`,
+  are still skipped.
+- **`localm rag repair` works again from scripts and scheduled jobs.** On a
+  collection with semantic search, repair asked before dropping its embeddings -
+  but run without a terminal (cron, CI, a script) there was nothing to answer, so
+  it exited with an error and repaired nothing, on exactly the stale indexes it
+  exists to rebuild. It now keeps the embeddings and repairs, telling you it did.
+  Pass `--yes` to drop them instead, or `--embed` to recompute them.
 - **A model you switched away from mid-load can be used again.** If you picked a
   model and then quickly picked a different one, the first model could be left
   permanently unusable: every later message to it failed with "Model load was
