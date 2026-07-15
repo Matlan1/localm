@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Choose how your embedding model is pooled.** Settings > Models has a new
+  Embedding pooling option. The default (`mean`) suits the bundled `bge-small`
+  and `nomic` choices and matches everything you have already indexed, so nothing
+  changes unless you want it to. If you point `embedding_model` at a
+  decoder-based embedder such as Qwen3-Embedding, which is built for `last`-token
+  pooling, localm now warns you that it is being pooled the wrong way and names
+  the setting that fixes it, instead of silently giving you weaker embeddings.
+  Changing the setting means re-indexing, since existing vectors were built the
+  old way.
 - **Offer to download a missing Flux model file.** When Image/Video/Music
   generation detects a missing ComfyUI model file that has a known-good source
   (currently the Flux UNET, text encoders, and VAE), it now offers to download
@@ -150,6 +159,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it exited with an error and repaired nothing, on exactly the stale indexes it
   exists to rebuild. It now keeps the embeddings and repairs, telling you it did.
   Pass `--yes` to drop them instead, or `--embed` to recompute them.
+- **Document search no longer embeds with the chat model itself.** If you ran a
+  HuggingFace-format model, localm quietly made embeddings out of the chat model
+  rather than the small dedicated embedding model, even when you had one
+  installed. Those vectors look perfectly healthy but barely tell related text
+  from unrelated (on one 0.5B chat model the *most unrelated* pair we tested
+  scored higher than the *least related* one), so document (Knowledge/RAG) search
+  and the `/v1/embeddings` API silently returned worse results with nothing to
+  indicate it. localm now uses your installed embedding model, and when none is
+  installed it says so and falls back to keyword search instead of handing back
+  unusable vectors. GGUF models, the default, were never affected, and neither
+  was chat memory.
 - **A model you switched away from mid-load can be used again.** If you picked a
   model and then quickly picked a different one, the first model could be left
   permanently unusable: every later message to it failed with "Model load was

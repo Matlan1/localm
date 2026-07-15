@@ -105,6 +105,351 @@ def test_engine_embed_uses_backend_when_it_can_embed(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  A backend that only learns its embedding capability at LOAD time (HF)       #
+# --------------------------------------------------------------------------- #
+
+class _LoadTimeCapabilityBackend:
+    """Mirrors HFBackend: whether the model is a genuine embedder is UNKNOWN
+    until it is loaded, so ``can_embed`` answers True (= "load to find out")
+    while unloaded and only tells the truth once the weights are in."""
+
+    def __init__(self, embeds_for_real: bool):
+        self._embeds_for_real = embeds_for_real
+        self._loaded = False
+        self.backend_embed_calls = 0
+
+    @property
+    def can_embed(self) -> bool:
+        if not self._loaded:
+            return True
+        return self._embeds_for_real
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    def load(self) -> None:
+        self._loaded = True
+
+    def embed(self, texts):
+        self.backend_embed_calls += 1
+        return [[7.0]] * len(texts)
+
+
+def test_engine_embed_rechecks_can_embed_after_load(monkeypatch):
+    """A chat decoder must NOT self-embed, even though it looked capable before load.
+
+    The HF backend cannot know whether its model is a genuine embedder until the
+    model is loaded (a causal LM's mean-pooled hidden states are not embeddings -
+    see HFBackend.can_embed). Engine.embed therefore has to re-check can_embed
+    AFTER the load. Checking only BEFORE it (the old behaviour) let a loaded chat
+    decoder fall through to backend.embed() and silently return unusable vectors
+    to /v1/embeddings and RAG.
+    """
+    backend = _LoadTimeCapabilityBackend(embeds_for_real=False)
+    monkeypatch.setattr(emb, "embed_texts", lambda texts: [[0.5]] * len(texts))
+    engine = _engine_with_backend(monkeypatch, backend)
+
+    assert engine.embed(["a", "b"]) == [[0.5], [0.5]]
+    assert backend.backend_embed_calls == 0     # never self-embedded
+
+
+def test_engine_embed_uses_backend_that_can_embed_after_load(monkeypatch):
+    """The mirror case: a genuine HF embedding model (an encoder, or one exposing
+    .encode()) still embeds with the backend itself once loaded. The re-check must
+    not push a real embedder onto the dedicated one."""
+    backend = _LoadTimeCapabilityBackend(embeds_for_real=True)
+    monkeypatch.setattr(emb, "embed_texts",
+                        lambda texts: (_ for _ in ()).throw(
+                            AssertionError("a real HF embedder must not be bypassed")))
+    engine = _engine_with_backend(monkeypatch, backend)
+
+    assert engine.embed(["x"]) == [[7.0]]
+    assert backend.backend_embed_calls == 1
+
+
+def test_engine_embed_chat_decoder_without_embedder_raises(monkeypatch):
+    """No dedicated embedder + a chat decoder -> the actionable error, NOT the chat
+    model's own vectors. Silently returning unusable vectors is the defect (rule 5);
+    this is the same path the GGUF backend already takes, and RAG catches it and
+    degrades to lexical-only with a warning."""
+    backend = _LoadTimeCapabilityBackend(embeds_for_real=False)
+    monkeypatch.setattr(emb, "embed_texts", lambda texts: None)
+    engine = _engine_with_backend(monkeypatch, backend)
+
+    with pytest.raises(NotImplementedError, match="setup-embeddings"):
+        engine.embed(["x"])
+    assert backend.backend_embed_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+#  HFBackend.can_embed - honest capability reporting                           #
+# --------------------------------------------------------------------------- #
+
+def _hf_backend(model=None):
+    from localm.inference.backends.hf import HFBackend
+    be = HFBackend("does-not-need-to-exist")
+    be._model = model
+    return be
+
+
+def test_hf_can_embed_false_for_generative_decoder():
+    """A causal/chat LM reports can_embed=False: mean-pooling its last hidden
+    states yields vectors that cannot separate related from unrelated text
+    (measured 2026-07-15: Qwen2.5-0.5B max-unrelated cosine 0.7523 EXCEEDS its
+    min-related 0.7518), so they must never stand in for a real embedder."""
+    assert _hf_backend(types.SimpleNamespace(can_generate=lambda: True)).can_embed is False
+
+
+def test_hf_can_embed_true_for_encoder():
+    """A non-generative encoder (AutoModel/BERT-family) is a legitimate embedder:
+    mean-pooling its last hidden states is the standard recipe."""
+    model = types.SimpleNamespace(
+        can_generate=lambda: False,
+        config=types.SimpleNamespace(architectures=["BertModel"]))
+    assert _hf_backend(model).can_embed is True
+
+
+def test_hf_can_embed_trusts_the_declared_arch_over_the_loaded_class():
+    """A REAL encoder checkpoint answers can_generate() True, so the declared
+    architecture - not the loaded class - has to decide.
+
+    load() tries AutoModelForCausalLM BEFORE AutoModel, and transformers registers
+    the encoder families as causal LMs (5.12.1: bert -> BertLMHeadModel, roberta,
+    xlm-roberta, electra). So bge-small / all-MiniLM / e5, which declare
+    ["BertModel"], load as BertLMHeadModel and report can_generate() True while
+    being perfectly good embedders. Reading can_generate() alone therefore
+    misroutes localm's OWN default embedding model to the dedicated embedder (or
+    to a 422 when none is installed). Pins the real shape: can_generate() True but
+    a non-generative DECLARED architecture -> still an embedder.
+    """
+    model = types.SimpleNamespace(
+        can_generate=lambda: True,                       # what BertLMHeadModel says
+        config=types.SimpleNamespace(architectures=["BertModel"]))
+    assert _hf_backend(model).can_embed is True
+
+
+def test_hf_can_embed_false_for_declared_causal_lm():
+    """The mirror: a chat checkpoint declares a generative architecture, so it is
+    not an embedder even though nothing else about the object says so."""
+    model = types.SimpleNamespace(
+        can_generate=lambda: True,
+        config=types.SimpleNamespace(architectures=["Qwen2ForCausalLM"]))
+    assert _hf_backend(model).can_embed is False
+
+
+def test_hf_can_embed_falls_back_when_nothing_is_declared():
+    """No declared architecture -> the loaded class's own answer is all there is."""
+    no_arch = types.SimpleNamespace(architectures=None)
+    assert _hf_backend(types.SimpleNamespace(
+        can_generate=lambda: True, config=no_arch)).can_embed is False
+    assert _hf_backend(types.SimpleNamespace(
+        can_generate=lambda: False, config=no_arch)).can_embed is True
+
+
+def test_hf_can_embed_covers_the_generative_head_names():
+    """Every generative task head transformers names is caught, and the bare
+    encoder ``*Model`` names are not. (The suffix list itself is pinned against
+    transformers' own GenerationMixin by the integration test.)"""
+    def _embeds(arch):
+        return _hf_backend(types.SimpleNamespace(
+            can_generate=lambda: True,
+            config=types.SimpleNamespace(architectures=[arch]))).can_embed
+
+    for arch in ("Qwen2ForCausalLM", "GPT2LMHeadModel", "BertLMHeadModel",
+                 "T5ForConditionalGeneration", "LlamaForCausalLM"):
+        assert _embeds(arch) is False, f"{arch} generates; it is not an embedder"
+    for arch in ("BertModel", "XLMRobertaModel", "NomicBertModel",
+                 "T5EncoderModel", "DistilBertModel", "MPNetModel"):
+        assert _embeds(arch) is True, f"{arch} is an encoder; it embeds"
+
+
+def test_hf_can_embed_never_imports_transformers(monkeypatch):
+    """can_embed must not drag in transformers (hence torch).
+
+    Importing torch in a process that already loaded the bundled llama.dll dies
+    with OSError [WinError 127] (rocm_sdk.preload_libraries; reproduced
+    2026-07-15) - and an import guard would swallow that and answer WRONGLY,
+    which is how the encoder case regressed. It never needs the import: it only
+    runs on an already-loaded model. Fails the import outright to prove the
+    property never reaches for it.
+    """
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_transformers(name, *a, **k):
+        if name.split(".")[0] == "transformers":
+            raise AssertionError(f"can_embed must not import {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_transformers)
+    model = types.SimpleNamespace(
+        can_generate=lambda: True,
+        config=types.SimpleNamespace(architectures=["BertModel"]))
+    assert _hf_backend(model).can_embed is True
+
+
+def test_hf_can_embed_true_for_sentence_transformer():
+    """A sentence-transformer exposes .encode(); that is a purpose-built embedding
+    path and wins regardless of what can_generate() says."""
+    model = types.SimpleNamespace(encode=lambda t, **k: [], can_generate=lambda: True)
+    assert _hf_backend(model).can_embed is True
+
+
+def test_hf_can_embed_unknown_before_load_is_true():
+    """Unloaded, the capability is genuinely unknown. Answer True so callers still
+    load the model and find out (routes/chat.py force-loads on this), rather than
+    silently skipping a real HF embedding model. Engine.embed re-checks after load."""
+    assert _hf_backend(None).can_embed is True
+
+
+def test_hf_can_embed_false_when_capability_unprovable():
+    """An exotic model object that does not answer can_generate() is NOT proof of
+    an embedder. Fail towards the dedicated embedder rather than silently pooling
+    something that may be a chat decoder (rule 5: never assume 'probably fine')."""
+    class _Odd:
+        def can_generate(self):
+            raise RuntimeError("no idea")
+    assert _hf_backend(_Odd()).can_embed is False
+
+
+# --------------------------------------------------------------------------- #
+#  Pooling: honour the model, never silently mis-pool it                       #
+# --------------------------------------------------------------------------- #
+
+def test_pooling_setting_resolution():
+    """Every documented embedding_pooling choice maps to its llama.cpp value."""
+    assert emb.resolve_pooling_setting("mean") == emb._POOLING_MEAN
+    assert emb.resolve_pooling_setting("cls") == emb._POOLING_CLS
+    assert emb.resolve_pooling_setting("last") == emb._POOLING_LAST
+    assert emb.resolve_pooling_setting("none") == emb._POOLING_NONE
+    assert emb.resolve_pooling_setting("auto") == emb.POOLING_AUTO
+    assert emb.resolve_pooling_setting("  LAST ") == emb._POOLING_LAST   # tolerant
+
+
+def test_pooling_setting_defaults_to_mean():
+    """Unset/blank keeps the documented default. A BOGUS value must not fail the
+    load, but must not pass silently either (it is logged by resolve_*)."""
+    assert emb.resolve_pooling_setting(None) == emb._POOLING_MEAN
+    assert emb.resolve_pooling_setting("") == emb._POOLING_MEAN
+    assert emb.resolve_pooling_setting("nonsense") == emb._POOLING_MEAN
+
+
+def test_default_pooling_is_mean_not_the_declared_type():
+    """Guards the deliberate choice NOT to follow the model by default.
+
+    bge-small (the default embedder) declares CLS, yet every existing index was
+    built with MEAN at the same 384 dims. Following the declaration by default
+    would silently invalidate those indexes with no dim guard to catch it, so
+    MEAN stays the default and a mis-pooled model is fixed by opting in."""
+    assert emb.resolve_pooling_setting(
+        emb_config_default("embedding_pooling")) == emb._POOLING_MEAN
+
+
+def emb_config_default(key):
+    from localm.config import DEFAULT_CONFIG
+    return DEFAULT_CONFIG[key]
+
+
+def test_auto_honours_the_declared_pooling():
+    """auto = use what the GGUF declares. Qwen3-Embedding declares LAST (verified
+    2026-07-15: qwen3.pooling_type=3); forcing MEAN on it is the defect."""
+    assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_LAST) == emb._POOLING_LAST
+    assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_CLS) == emb._POOLING_CLS
+    assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_MEAN) == emb._POOLING_MEAN
+
+
+def test_declared_unspecified_reads_as_not_declared(monkeypatch):
+    """A GGUF that declares UNSPECIFIED (-1) has declared nothing usable; it must
+    read the same as an absent key so auto falls back to MEAN."""
+    class _Api:
+        @staticmethod
+        def has_model_meta_api():
+            return True
+
+        @staticmethod
+        def llama_model_meta_val_str(model, key):
+            return {"general.architecture": "bert",
+                    "bert.pooling_type": "-1"}.get(key)
+
+    assert emb.declared_pooling_type(object(), _Api) is None
+
+
+def test_declared_pooling_survives_a_stripped_or_broken_dll():
+    """No metadata API, or a junk value, must not fail an otherwise fine load -
+    the caller just keeps its configured pooling (debug-logged, never silent)."""
+    class _NoMeta:
+        @staticmethod
+        def has_model_meta_api():
+            return False
+
+    class _Junk:
+        @staticmethod
+        def has_model_meta_api():
+            return True
+
+        @staticmethod
+        def llama_model_meta_val_str(model, key):
+            return "bert" if key == "general.architecture" else "not-an-int"
+
+    assert emb.declared_pooling_type(object(), _NoMeta) is None
+    assert emb.declared_pooling_type(object(), _Junk) is None
+
+
+def test_auto_falls_back_to_mean_when_nothing_usable_is_declared():
+    """A model declaring nothing (gte-Qwen2, chat GGUFs) or NONE must not be left
+    NONE-pooled: llama_get_embeddings_seq then returns NULL and every embed call
+    fails. MEAN is the rescue that made it the historical default."""
+    assert emb._effective_pooling(emb.POOLING_AUTO, None) == emb._POOLING_MEAN
+    assert emb._effective_pooling(emb.POOLING_AUTO, emb._POOLING_NONE) == emb._POOLING_MEAN
+
+
+def test_explicit_pooling_is_never_overridden_by_the_model():
+    """An explicit user choice wins over the declaration - never silently
+    'corrected' (hard-won rule: do not override an explicit selection)."""
+    assert emb._effective_pooling(emb._POOLING_MEAN, emb._POOLING_LAST) == emb._POOLING_MEAN
+    assert emb._effective_pooling(emb._POOLING_LAST, emb._POOLING_CLS) == emb._POOLING_LAST
+
+
+def _mispool_probe(monkeypatch, declared, effective):
+    """An IsolatedEmbedder with the pooling facts a load would have reported,
+    without spawning a worker; returns the warnings it emitted."""
+    warnings = []
+    monkeypatch.setattr("localm.debuglog.logger.warning",
+                        lambda msg, *a: warnings.append(msg % a if a else msg))
+    probe = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
+    probe.model_path = "Qwen3-Embedding-0.6B-Q8_0.gguf"
+    probe.declared_pooling = declared
+    probe.effective_pooling = effective
+    probe._warn_if_mispooled()
+    return warnings
+
+
+def test_warns_when_a_last_pooling_model_is_mean_pooled(monkeypatch):
+    """THE defect-2 surfacing: a decoder-based embedder pooled against its own
+    training still returns healthy normalised vectors, so nothing else would ever
+    tell the user. Warn, name the model, and name the fix (rule 5)."""
+    warnings = _mispool_probe(monkeypatch, emb._POOLING_LAST, emb._POOLING_MEAN)
+    assert len(warnings) == 1
+    text = warnings[0]
+    assert "Qwen3-Embedding-0.6B-Q8_0.gguf" in text
+    assert "embedding_pooling" in text          # names the fix
+    assert "re-index" in text                   # and its consequence
+
+
+def test_no_warning_when_the_model_gets_the_pooling_it_declares(monkeypatch):
+    assert _mispool_probe(monkeypatch, emb._POOLING_LAST, emb._POOLING_LAST) == []
+
+
+def test_no_warning_for_the_default_bge_setup(monkeypatch):
+    """bge declares CLS and is pooled MEAN, which measures fine (+0.29 margin)
+    and matches every existing index. Warning on the DEFAULT setup would be noise
+    on every user's box, not signal - so this stays quiet (debug only)."""
+    assert _mispool_probe(monkeypatch, emb._POOLING_CLS, emb._POOLING_MEAN) == []
+    assert _mispool_probe(monkeypatch, None, emb._POOLING_MEAN) == []
+
+
+# --------------------------------------------------------------------------- #
 #  singleton get_embedder / embed_texts                                        #
 # --------------------------------------------------------------------------- #
 
