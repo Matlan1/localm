@@ -70,8 +70,16 @@ label.
 
 ## How retrieval works (and why it's lexical-first)
 
-The chat model does not produce embeddings, so semantic vectors come from a
-small dedicated embedding model instead:
+Semantic vectors come from a small dedicated embedding model, never from the chat
+model. A chat model is a decoder LLM trained to predict the next token, not to
+place related texts near each other, so pooling its hidden states yields vectors
+that look fine (non-zero, normalised) but barely separate related from unrelated
+text: measured on this codebase, Qwen2.5-0.5B's *most unrelated* pair scored
+higher (0.7523 cosine) than its *least related* pair (0.7518), so no threshold
+tells them apart, while `bge-small` leaves a comfortable 0.29 margin. The bundled
+GGUF runtime cannot embed a chat model at all; a HuggingFace-format chat model
+technically can, and used to, which is why localm now routes it to the dedicated
+embedder too rather than quietly returning those vectors.
 
 - **BM25** over ~1200-character paragraph-aware chunks is the always-on
   baseline - pure stdlib, deterministic, fast at home scale.

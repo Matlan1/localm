@@ -78,6 +78,37 @@ def honor_env_debug() -> None:
         enable_debug()
 
 
+_deferred_records: "list[tuple[int, str, tuple]]" = []
+
+
+def defer_log(level: int, msg: str, *args) -> None:
+    """Queue a diagnostic raised BEFORE any log handler exists, for replay once
+    one does. Use this instead of ``logger.<level>()`` at MODULE-IMPORT scope.
+
+    Import-time code in ``localm/cli/**`` runs before Click invokes ``main()``
+    (which calls install_ring_buffer) and before any ``enable_debug()``, so at
+    that moment the localm logger has no handler and still inherits the root's
+    WARNING threshold. A plain ``logger.debug()`` there is therefore dropped AT
+    THE CALL and no later handler can recover it - a log line that looks like a
+    fix but is dead code (the failure mode that shipped in the first
+    _wire_plugin_cli_entries fix). Queued records are replayed by enable_debug(),
+    so they reach the debug log whichever way debug is turned on (LOCALM_DEBUG
+    via honor_env_debug, or a per-command --debug flag later in the run).
+
+    Bounded: a runaway producer can never grow this without limit."""
+    if len(_deferred_records) < 100:
+        _deferred_records.append((level, msg, args))
+
+
+def _flush_deferred() -> None:
+    """Emit and clear anything defer_log() queued. Idempotent: the queue is
+    drained, so a second enable_debug() call replays nothing twice."""
+    global _deferred_records
+    pending, _deferred_records = _deferred_records, []
+    for level, msg, args in pending:
+        logger.log(level, msg, *args)
+
+
 def uvicorn_log_level() -> str:
     """The uvicorn log level for a server launch: verbose ``info`` in debug mode
     so the console window shows requests / connections / errors live (SRV-5),
@@ -363,6 +394,7 @@ def enable_debug() -> Path:
 
     _install_thread_hook()
     logger.debug("debug mode enabled (pid %d)", os.getpid())
+    _flush_deferred()   # replay import-time diagnostics now the log file exists
     return path
 
 

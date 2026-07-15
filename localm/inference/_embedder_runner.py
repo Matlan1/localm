@@ -92,7 +92,14 @@ def _runner_main(req_q, resp_q) -> None:
             from localm.inference.embedder import GGUFEmbedder
             try:
                 embedder = GGUFEmbedder(**payload)
-                resp_q.put(("ok", {"dim": embedder.dim}))
+                # The pooling facts travel back with the load so the PARENT can
+                # warn about a mis-pooled model: only the child ever holds the
+                # model handle the declared type is read from.
+                resp_q.put(("ok", {
+                    "dim": embedder.dim,
+                    "declared_pooling": embedder.declared_pooling,
+                    "effective_pooling": embedder.pooling_type,
+                }))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # A hard native abort during GGUFEmbedder(...) is NOT caught here -

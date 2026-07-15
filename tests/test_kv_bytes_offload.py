@@ -185,11 +185,21 @@ class _StubLlm:
 
 
 def _gguf_backend(tmp_path, size_bytes, n_ctx=4096, n_gpu_layers=99):
+    # A tiny REAL file (so is_file()/stat work), with the multi-GB "on disk" size
+    # FAKED via _model_bytes - the same pattern test_auto_gpu_layers.py uses.
+    # NEVER truncate() to the real size here: Windows truncate() is not sparse and
+    # allocates REAL disk (memory: windows-truncate-not-sparse). Measured on this
+    # box: one truncate(2GB) consumed 1.61 GB. This helper is called with sizes up
+    # to 9 GB, ~20 GB per pass, once per test's own tmp_path - times the xdist
+    # workers, times pytest's retention of the last 3 basetemps. That is what
+    # filled D: to 99.5% and crashed the box (2026-07-15). The size is only ever
+    # READ back through _model_bytes(), so allocating it was never needed.
     from localm.inference.backends.gguf import GgufBackend
     f = tmp_path / "model.gguf"
-    with open(f, "wb") as fh:
-        fh.truncate(size_bytes)
-    return GgufBackend(str(f), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    f.write_bytes(b"\0" * 4096)
+    b = GgufBackend(str(f), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    b._model_bytes = lambda: size_bytes
+    return b
 
 
 class TestGrowCheckUsesAccurateKv:

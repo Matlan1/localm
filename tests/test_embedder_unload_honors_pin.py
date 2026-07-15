@@ -167,57 +167,48 @@ def test_unload_one_model_releases_idle_matching_embedder(isolated, monkeypatch)
 #  _do_shutdown / _do_restart                                                 #
 # --------------------------------------------------------------------------- #
 
-def test_do_shutdown_skips_pinned_embedder(monkeypatch):
-    monkeypatch.setattr(emb, "active_requests", lambda: 1)
-    calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+def _spy_exit_release(monkeypatch):
+    """Record which release path _do_shutdown/_do_restart take."""
+    reset_calls, released = [], []
+    monkeypatch.setattr(emb, "reset_embedder", lambda: reset_calls.append(1))
+    monkeypatch.setattr(emb, "release_for_exit",
+                        lambda: (released.append(1), True)[1])
     monkeypatch.setattr(hs, "_engine", None)
+    return reset_calls, released
+
+
+def test_do_shutdown_releases_the_embedder_without_the_load_lock(monkeypatch):
+    """The exit paths deliberately do NOT go through reset_embedder() (nor the
+    active_requests() guard that used to gate it): both take the embedder's load
+    lock, which get_embedder() holds for a whole embedding-model load, so a stop
+    issued mid-load blocked there and never reached the worker teardown. They
+    call the lock-free release_for_exit() instead, which makes the busy/idle
+    decision itself - see tests/test_embedder_worker_reaped_on_exit.py for that
+    full contract (busy -> terminate at once, idle -> polite close, never blocks
+    on _LOCK, and the worker really does die)."""
+    reset_calls, released = _spy_exit_release(monkeypatch)
     monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
     try:
         hs._do_shutdown()
     except SystemExit:
         pass
-    assert calls == [], "a pinned embedder must survive shutdown's release"
+    assert released == [1], "shutdown must release the embedder worker"
+    assert reset_calls == [], (
+        "the exit path must not take the lock-holding reset_embedder() route")
 
 
-def test_do_shutdown_releases_idle_embedder(monkeypatch):
-    monkeypatch.setattr(emb, "active_requests", lambda: 0)
-    calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
-    monkeypatch.setattr(hs, "_engine", None)
-    monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
-
-    try:
-        hs._do_shutdown()
-    except SystemExit:
-        pass
-    assert calls == [1]
-
-
-def test_do_restart_skips_pinned_embedder(monkeypatch):
-    monkeypatch.setattr(emb, "active_requests", lambda: 1)
-    calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
-    monkeypatch.setattr(hs, "_engine", None)
+def test_do_restart_releases_the_embedder_without_the_load_lock(monkeypatch):
+    """Same contract as shutdown above: os.execv replaces this process image but
+    not the worker child, so the release must run - and must not be able to hang
+    on the embedder load lock."""
+    reset_calls, released = _spy_exit_release(monkeypatch)
     monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
 
     try:
         hs._do_restart()
     except SystemExit:
         pass
-    assert calls == [], "a pinned embedder must survive restart's release"
-
-
-def test_do_restart_releases_idle_embedder(monkeypatch):
-    monkeypatch.setattr(emb, "active_requests", lambda: 0)
-    calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
-    monkeypatch.setattr(hs, "_engine", None)
-    monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
-
-    try:
-        hs._do_restart()
-    except SystemExit:
-        pass
-    assert calls == [1]
+    assert released == [1], "restart must release the embedder worker"
+    assert reset_calls == [], (
+        "the exit path must not take the lock-holding reset_embedder() route")

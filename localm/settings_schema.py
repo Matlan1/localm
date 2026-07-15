@@ -63,6 +63,11 @@ class Applies:
 
 _PRIVACY = ["privacy", "log", "full"]
 _PRIVACY_INHERIT = ["", "privacy", "log", "full"]   # "" = inherit the global mode
+# Embedding pooling choices, default first (see config.py embedding_pooling).
+# Spelled out here rather than imported so this module stays free of the
+# inference stack; tests/test_settings_schema.py asserts it against the one
+# source of truth (embedder.POOLING_CHOICES) so the two cannot drift apart.
+_EMBEDDING_POOLING = ["mean", "auto", "cls", "last", "none"]
 # Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
 # logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
 LOGO_STYLE_IDS = ["local-m", "loca-lm", "localm"]
@@ -304,6 +309,16 @@ CORE_FIELDS: list = [
                  "name, or a path to a GGUF. Run 'localm setup-embeddings' to fetch "
                  "it; until then, memory/RAG use lexical search.",
                  group="Models", applies=Applies.NEXT_LOAD),
+    SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
+                 "How the embedding model's token states become one vector. "
+                 "mean suits bge/nomic (the default) and matches everything you "
+                 "have already indexed. A decoder-based embedder (Qwen3-Embedding, "
+                 "gte-Qwen2) is trained for last-token pooling and is degraded by "
+                 "mean: choose last, or auto to follow whatever the model "
+                 "declares. Changing this invalidates existing document "
+                 "collections and memory vectors - re-index after you change it.",
+                 group="Models", applies=Applies.NEXT_LOAD,
+                 options=_EMBEDDING_POOLING),
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
                  "Ask for confirmation before `localm rm` deletes a model's "
