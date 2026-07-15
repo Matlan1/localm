@@ -114,7 +114,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         Cached from the child's load response (self._supports_images) rather
         than read live off a real LlamaCpp instance - that instance now lives
         in the isolated worker process, not here."""
-        return bool(self._loaded and self._supports_images)
+        return bool(self.loaded and self._supports_images)   # property: a dead worker has no vision
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -345,7 +345,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         so a bad grammar is a clean 400 rather than a native fault that would latch
         _grammar_unsupported and silently strip grammar from later requests. No-op
         when not loaded (no vocab to parse against) or when *grammar* is empty."""
-        if grammar and self._loaded and self._runner is not None:
+        if grammar and self.loaded and self._runner is not None:   # property, see count_tokens
             try:
                 self._runner.check_grammar(grammar)
             except RunnerBusy:
@@ -372,7 +372,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         """Return exact token count using the loaded model's vocabulary (an
         RPC to the isolated worker), or the chars/4 heuristic when the worker
         is busy streaming or the model is not loaded yet."""
-        if self._loaded and self._runner is not None:
+        # `self.loaded`, NOT the raw `self._loaded`: the property is what knows the
+        # worker is gone. _simple_request kills it on its own timeout (and the
+        # cancel-drain does the same), nulling the queues while _loaded stays True -
+        # so gating on the attribute here called straight into a dead runner and
+        # `self._req_q.put(...)` raised AttributeError on None, which is not
+        # RunnerBusy and so escaped uncaught, on every later count (REG-606).
+        if self.loaded and self._runner is not None:
             try:
                 return self._runner.count_tokens(text)
             except RunnerBusy:
@@ -394,7 +400,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         """Return exact token count of the structured messages formatted with
         the model's embedded chat template (an RPC to the isolated worker,
         which alone holds the native model pointer the template needs)."""
-        if self._loaded and self._runner is not None:
+        if self.loaded and self._runner is not None:   # the property - see count_tokens
             try:
                 return self._runner.count_messages_tokens(messages)
             except RunnerBusy:
