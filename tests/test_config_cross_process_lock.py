@@ -210,6 +210,14 @@ def test_cross_process_lock_release_does_not_steal_a_reclaimed_lock(home, monkey
     old = cfg.time.time() - 10  # A's hold is now far older than the stale threshold
     os.utime(lockpath, (old, old))
 
+    # A separate OS process has its own pid AND its own in-memory record of the
+    # locks IT holds (config._held_lock_tokens). Faking only getpid() would leave
+    # B sharing A's record and correctly concluding "I already hold this" - a
+    # nested call, which is precisely what a real second process can never be. So
+    # give B an empty record, exactly as a process boundary would. (Ownership is
+    # keyed on the fencing token rather than the pid number because pids are
+    # reused across process lifetimes - see REG-586.)
+    monkeypatch.setattr(cfg, "_held_lock_tokens", {})
     monkeypatch.setattr(cfg.os, "getpid", lambda: 222222)
     cm_b = cfg._cross_process_lock(cfg.CONFIG_FILE)
     cm_b.__enter__()  # simulated "process B" sees A's lock as stale and reclaims it

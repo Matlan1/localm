@@ -510,6 +510,34 @@ def _transient_backoff(attempt: int) -> None:
     time.sleep(min(_REPLACE_BACKOFF * (attempt + 1), _REPLACE_BACKOFF_CAP))
 
 
+def _is_transient_permission_error(e: OSError) -> bool:
+    """True when a PermissionError plausibly reflects a TRANSIENT file lock worth
+    riding out, rather than a stable denial no retry can change.
+
+    Windows is the only platform with the race this retry exists for: another
+    handle (a concurrent atomic replace, antivirus, the indexer, Windows Search)
+    holds the file open for microseconds and open()/os.replace raises
+    PermissionError - ERROR_SHARING_VIOLATION (32), or ERROR_ACCESS_DENIED (5)
+    when a replace collides with an AV lock. A genuine Windows ACL denial also
+    surfaces as winerror 5 and is indistinguishable from the AV case at this
+    layer, so Windows keeps retrying it: ~1s to be sure is the documented,
+    accepted trade there.
+
+    POSIX has no such race. open() raises EACCES/EPERM only when the mode or ACL
+    genuinely denies us (a mode-000 or root-owned file left by an earlier sudo
+    run), which is a stable state - the retry can never succeed and just burns
+    ~1s of time.sleep while holding _io_lock, which serializes config access
+    process-wide, including the per-request auth path (auth.require_auth ->
+    load_config). So on POSIX we fall back at once (the failure is still
+    surfaced by the caller, never hidden - it just is not retried)."""
+    if os.name != "nt":
+        return False
+    # winerror is absent only if this was not raised by the Windows layer at all
+    # (e.g. a test double); treat that as transient to preserve the established
+    # Windows behaviour rather than silently narrowing it.
+    return getattr(e, "winerror", None) in (5, 32, None)
+
+
 def _replace_atomic(src: Path, dst: Path) -> None:
     """``os.replace(src, dst)`` with a bounded retry on a transient Windows
     sharing violation.
@@ -521,13 +549,16 @@ def _replace_atomic(src: Path, dst: Path) -> None:
     the save. A genuine, persistent permission problem still surfaces (re-raised
     after the last attempt) - we retry the transient race, we never hide a real
     failure. On POSIX os.replace does not hit this, so the loop succeeds first
-    try."""
+    try; if it does raise there it is a STABLE denial (see
+    _is_transient_permission_error), re-raised at once rather than stalling ~1s
+    under _io_lock AND the cross-process lock for a retry that cannot succeed
+    (REG-566)."""
     for attempt in range(_REPLACE_RETRIES):
         try:
             os.replace(src, dst)
             return
-        except PermissionError:
-            if attempt == _REPLACE_RETRIES - 1:
+        except PermissionError as e:
+            if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 raise
             _transient_backoff(attempt)
 
@@ -600,7 +631,12 @@ def _read_json(path: Path, default):
                 # scanner does not make us spuriously fall back to .bak/defaults
                 # and momentarily discard live settings. A persistent EACCES
                 # surfaces after the retries via the same warning + fall-through.
-                if attempt < _REPLACE_RETRIES - 1:
+                # A STABLE denial (any POSIX EACCES - see
+                # _is_transient_permission_error) skips the retry entirely: it
+                # can never succeed, and this loop runs under _io_lock, so ~1s of
+                # backoff would stall every config read process-wide - including
+                # the per-request auth path - for nothing (REG-566).
+                if attempt < _REPLACE_RETRIES - 1 and _is_transient_permission_error(e):
                     _transient_backoff(attempt)
                     continue
                 print(f"[localm] {candidate.name} is unreadable ({e}); "
@@ -801,6 +837,30 @@ def _lock_owner_pid(raw: bytes):
         return None
 
 
+# The fencing tokens of locks THIS process currently holds, keyed by lock path.
+# This - not the pid recorded in the file - is what identifies a lock as ours.
+#
+# REG-586: a pid NUMBER is not an identity. The OS reuses pids freely across
+# process lifetimes, so a lock LEAKED by a crashed holder can carry the very pid
+# the OS later hands to a new localm process. Reading that as "held by me" turned
+# the clear nested-call error into a permanent wedge of every config/registry
+# write for that process's whole life, and short-circuited the staleness reclaim
+# that exists to prevent exactly that. The uuid4 nonce in each token makes this
+# exact instead: a leaked file can never match a token we are holding right now,
+# whatever pid it records.
+_held_lock_tokens: dict = {}
+_held_lock_tokens_guard = threading.Lock()
+
+
+def _lock_is_held_by_us(lockpath: Path, held: bytes) -> bool:
+    """True only when *held* is a fencing token THIS process wrote and still
+    holds - i.e. a genuine nested acquisition, not a pid collision."""
+    if not held:
+        return False
+    with _held_lock_tokens_guard:
+        return _held_lock_tokens.get(str(lockpath)) == held
+
+
 @contextlib.contextmanager
 def _cross_process_lock(target: Path):
     """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
@@ -832,12 +892,16 @@ def _cross_process_lock(target: Path):
     update_config()/update_registry() that calls back into either for the same
     file - not supported, this lock is not reentrant like _io_lock) from a
     confusing _CROSS_LOCK_TIMEOUT-long stall into an immediate, clear error: the
-    PID embedded in the token reveals "this is already held by ME," which is
-    only possible via the calling process's own nested acquisition (a sibling
-    thread in this process would already be blocked on the outer _io_lock before
-    ever reaching here).
+    token on disk matches one in _held_lock_tokens, which is only possible via
+    the calling process's own nested acquisition (a sibling thread in this
+    process would already be blocked on the outer _io_lock before ever reaching
+    here). Ownership is decided by that exact token, NOT by the pid recorded in
+    the file: pids are reused across process lifetimes, so a leaked lock carrying
+    our own pid must still be treated as foreign, and stay eligible for the
+    staleness reclaim below (REG-586 - a self-pid check here wedged every write
+    for the process's whole life, defeating that reclaim).
 
-    A lock file older than _CROSS_LOCK_STALE_AGE (and not self-held) is assumed
+    A lock file older than _CROSS_LOCK_STALE_AGE that we do not hold is assumed
     to belong to a crashed holder (a killed CLI, a hard-killed server) and is
     reclaimed instead of wedging every future config/registry write for the rest
     of the install's life; the reclaim is logged, never silent."""
@@ -853,7 +917,7 @@ def _cross_process_lock(target: Path):
                 held = lockpath.read_bytes()
             except OSError:
                 held = b""
-            if _lock_owner_pid(held) == os.getpid():
+            if _lock_is_held_by_us(lockpath, held):
                 raise RuntimeError(
                     f"{lockpath.name} is already held by this same process "
                     f"(pid {os.getpid()}) - a mutator passed to update_config()/"
@@ -900,10 +964,23 @@ def _cross_process_lock(target: Path):
             except OSError:
                 pass
             raise
+        # Record the token only once it is actually ON DISK: a failed write above
+        # unlinks the file, so registering earlier would leave us believing we
+        # hold a lock that does not exist.
+        with _held_lock_tokens_guard:
+            _held_lock_tokens[str(lockpath)] = token
         break
     try:
         yield
     finally:
+        # Forget our claim FIRST, and unconditionally: once we leave this block we
+        # no longer hold the lock, whatever happens to the file below. Leaving a
+        # stale entry here would make a LATER acquisition of the same path read a
+        # foreign lock as our own nested call (the REG-586 wedge, rebuilt in
+        # memory).
+        with _held_lock_tokens_guard:
+            if _held_lock_tokens.get(str(lockpath)) == token:
+                del _held_lock_tokens[str(lockpath)]
         # Fencing-token release (see docstring): only remove the lock file if it
         # still holds the token WE wrote. If it doesn't, another process reclaimed
         # it as stale while we were still legitimately inside our critical section

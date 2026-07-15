@@ -117,7 +117,15 @@ def register(app: FastAPI, ctx) -> None:
         # used to be) has an unlocked window where a concurrent config write
         # (e.g. set_media_config() below, which already uses update_config())
         # can be silently lost.
-        return update_config(lambda cfg: cfg.update(validated))
+        #
+        # OFF the event loop (REG-586): update_config() takes a cross-PROCESS
+        # lock, so when another localm process holds it (the user running
+        # `localm config ...` while the GUI is up) it waits in a blocking
+        # time.sleep for up to _CROSS_LOCK_TIMEOUT. This handler is `async def`,
+        # so doing that inline would freeze the whole server - health checks,
+        # token streaming, every concurrent request - for the entire wait.
+        return await run_in_threadpool(update_config,
+                                       lambda cfg: cfg.update(validated))
 
     # ---------------------------------------------------------------- #
     #  Per-plugin media config (image / music / video)                   #
@@ -185,7 +193,10 @@ def register(app: FastAPI, ctx) -> None:
                 block = plugins[name] = {}
             _deep_merge(block, merge)
 
-        update_config(_mutate)
+        # Off the event loop for the same reason as patch_config above (REG-586):
+        # update_config() can block for up to _CROSS_LOCK_TIMEOUT waiting on the
+        # cross-process lock, and this handler is `async def`.
+        await run_in_threadpool(update_config, _mutate)
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
         return {"plugin": name, "fields": media_schema_json(name, block, cfg)}
