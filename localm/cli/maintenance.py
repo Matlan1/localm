@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import logging
 import sys
 
 import click
 
-from localm.debuglog import logger
+from localm.debuglog import defer_log
 
 from ._core import console, main
 
@@ -42,9 +43,15 @@ def _wire_plugin_cli_entries() -> None:
             # Usually a plugin's optional pip extras are simply not installed
             # (benign - the verb is just unavailable). But this ALSO catches a
             # genuinely broken first-party plugin module, which would otherwise
-            # vanish from the CLI with no trace. Debug-log so the two are
+            # vanish from the CLI with no trace. Record so the two are
             # distinguishable without failing startup over an optional extra.
-            logger.debug("plugin CLI %r not wired (import failed): %s", name, e)
+            #
+            # defer_log, NOT logger.debug: this runs at module-import time (see
+            # the _wire_plugin_cli_entries() call below), before Click invokes
+            # main() to install any handler, so a direct logger.debug() is
+            # dropped at the call and the diagnostic is silently lost.
+            defer_log(logging.DEBUG, "plugin CLI %r not wired (import failed): %s",
+                      name, e)
     if "coder" not in wired:
         @main.command("coder", context_settings={"ignore_unknown_options": True})
         def _coder_stub(**_):
