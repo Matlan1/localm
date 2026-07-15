@@ -763,13 +763,18 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
     + mtime. Deduped against existing episodics (0.85). Best-effort; the caller
     confirmed writes are allowed (privacy). Returns the number of episodes stored.
 
-    BOUNDED + SETTLED (REG-591): at most EPISODIC_MAX_PER_RUN real summaries per run
-    (a large first-pass backlog drains over several runs, never one unbounded serial
-    burst), and only SETTLED sessions (idle >= EPISODIC_SETTLE_SECONDS) are
-    summarised. The watermark advances only past a file that was actually processed
-    (summarised, or seen-but-empty), NOT past an unsettled/still-growing file nor
-    past files deferred by the per-run cap, so nothing is re-summarised or retried
-    forever and an active session is summarised exactly once after it goes quiet.
+    BOUNDED + SETTLED + ONE-PER-SESSION (REG-591):
+      - at most EPISODIC_MAX_PER_RUN real summaries per run, so a large first-pass
+        backlog drains over several runs instead of one unbounded serial burst;
+      - only SETTLED sessions (idle >= EPISODIC_SETTLE_SECONDS) are summarised, so a
+        conversation is never distilled mid-flight from partial content;
+      - the watermark advances only past a file actually processed (summarised, or
+        seen-but-empty), never past an unsettled file nor past files the cap deferred;
+      - a session that is RESUMED (grows after being summarised, so its mtime
+        re-crosses the watermark) SUPERSEDES its own earlier episode via the
+        meta["session"] stem tag, rather than accumulating a second record for the
+        same conversation. Net: exactly ONE episode per session stem, always the
+        fullest summary of it.
 
     *embed_fn*: reuse an already-resolved embedder (synthesize_memory calls this
     right after run_consolidation, in the same round, so it passes its own
@@ -805,6 +810,20 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
         gens = 0                                   # real model generations this run (bounded)
         newest = watermark
         newest_stems = set(wm_stems)               # carry forward stems recorded at `watermark`
+        # This session's OWN existing episodes, keyed by source stem, so a resumed
+        # session supersedes its earlier record instead of adding a duplicate
+        # (REG-591 residual; see the supersede branch below). A stem can map to
+        # SEVERAL records on a store written before that fix (the pass then
+        # re-summarised a grown session on every run), so this keeps a list and the
+        # supersede branch collapses them. Built once: each run sees each stem at most
+        # once (glob yields distinct paths), and add/update/delete reload internally.
+        prior_by_stem: dict = {}
+        for _r in store.all():
+            if getattr(_r, "kind", None) != "episodic":
+                continue
+            _meta = getattr(_r, "meta", None)
+            if isinstance(_meta, dict) and _meta.get("session"):
+                prior_by_stem.setdefault(_meta["session"], []).append(_r)
 
         def _advance(mt: float, stem: str) -> None:
             """Move the (mtime, stems-at-mtime) cursor past a processed file. A
@@ -842,6 +861,44 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
             if not summ:
                 continue
             lo = summ.lower()
+            # REG-591 (MEDIUM residual): ONE episode PER SESSION. The settle gate above
+            # only stops summarising a session while it is still being written; it does
+            # NOT stop a RESUMED session (the user continues the conversation later, the
+            # file grows, its mtime re-crosses the watermark) from being summarised a
+            # SECOND time. This pass has always tagged each episode with its source stem
+            # but never read that tag back, so the later summary landed as a SECOND
+            # record for the SAME conversation whenever it differed enough to clear the
+            # 0.85 dedup - which a grown conversation does by construction. Superseding
+            # (not skipping) is the right resolution: _session_text reads the WHOLE file,
+            # so the later summary is the fuller whole-experience record this pass exists
+            # to keep (audit [14]), and the earlier one is the partial.
+            priors = prior_by_stem.get(f.stem) or []
+            if priors:
+                # Collapse to ONE record for this conversation. A store written before
+                # this fix can hold several overlapping partials for the same stem;
+                # they are synth episodics this pass owns (it already dedups them and
+                # prune() evicts them by decay), and by definition they describe the
+                # SAME session the record we keep now covers in full. Bounded on
+                # purpose: only the stem being processed is collapsed, never a global
+                # sweep of the store.
+                priors.sort(key=lambda r: (getattr(r, "meta", None) or {}).get(
+                    "session_mtime") or 0.0)
+                keep = priors[-1]
+                for extra in priors[:-1]:
+                    store.delete(extra.id)
+                if SequenceMatcher(None, lo, keep.text.lower()).ratio() > 0.85:
+                    # Substantively the same story: keep the text, just re-stamp which
+                    # state of the session it reflects (no re-embed needed).
+                    store.update(keep.id,
+                                 meta={"session": f.stem, "session_mtime": mt})
+                    continue
+                # update() re-embeds on a text change, so the vector cannot go stale
+                # against the superseded text (memory-audit F3).
+                store.update(keep.id, text=summ, embed_fn=ef,
+                             meta={"session": f.stem, "session_mtime": mt})
+                continue
+            # Cross-stem dedup (unchanged): a DIFFERENT session whose summary near-
+            # duplicates an existing episode adds nothing.
             if any(r.kind == "episodic"
                    and SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85
                    for r in store.all()):
