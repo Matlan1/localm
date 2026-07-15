@@ -1,23 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-532: media generation must tell ComfyUI which ONE device to use.
+"""REG-532: media generation names a PREFERRED GPU without MASKING the others away.
 
-WHY THIS EXISTS (verified against the real ComfyUI source, git 867404b):
-ComfyUI MASKS devices - `main.py:78-81` consumes `--cuda-device` by setting
-`CUDA_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` - and then loads a model onto ONE
-device (`model_management.py:194`, `get_torch_device()` -> `torch.cuda.current_device()`).
-It has NO tensor_split equivalent, and no MultiGPU/DisTorch node is installed. So
-media CANNOT span a GPU split the way the GGUF embedder does via `apply_gpu_split(mp)`.
+WHY THIS EXISTS (verified against the real ComfyUI source at git 867404b):
+ComfyUI core ships per-component GPU PLACEMENT - `SelectModelDevice` /
+`SelectCLIPDevice` / `SelectVAEDevice` (`comfy_extras/nodes_multigpu.py`, registered at
+`nodes.py:2440`), which call `deepclone_multigpu` to rehome a component onto another
+card with its own independent weights. So a second GPU CAN carry real work.
 
-Today localm passes ComfyUI no device at all. On a split box the swap gate
-(`vram.decide_media_swap`, which reads COMBINED free across the split) and the actual
-loader therefore disagree about which hardware they mean: the gate sees 2x4 GB = 8 GB
-free and says a 4 GB media job fits, so the chat model is kept; the media model then
-lands on ONE card with 4 GB and OOMs (or spills to shared RAM, or trips the ROCm TDR).
+That capability is destroyed by masking. ComfyUI has two flags that both read as "use
+this card", and they are NOT interchangeable:
 
-The fix is NOT to make the gate read single-GPU (rejected: it would need a
-_RAW_ACCESSOR_GUARDS self-exemption, and capacity questions must use the combined
-number). It is to make the media consumer pick ONE card deliberately, name it to
-ComfyUI, and preflight THAT card for the WHOLE model.
+  --cuda-device N    -> CUDA_VISIBLE_DEVICES = "N"        (main.py:78-81)  DELETES the
+                        other cards from torch's view, so every gpu:1 placement node
+                        silently becomes a no-op.
+  --default-device N -> CUDA_VISIBLE_DEVICES = "N,0,1,.." (main.py:69-76)  REORDERS so
+                        N leads and the rest stay usable.
+
+localm shipped `--cuda-device` (f094d3d0) and thereby made multi-GPU media impossible by
+construction, while claiming to have improved multi-GPU support. These tests exist so
+that cannot come back.
+
+The swap gate (`vram.decide_media_swap`) reads COMBINED free VRAM across the split; the
+loader must agree about which card leads, or a 4 GB job "fits" in 2x4 GB combined, the
+chat model is kept, and the media model OOMs on one 4 GB card. Naming the preferred card
+makes them agree WITHOUT amputating the box.
 
 Spec + full rationale: dev-notes/media-split-gpu/SPEC.md
 """
@@ -27,8 +33,6 @@ from __future__ import annotations
 import pytest
 
 import localm.config as cfg
-import localm.vram as vram
-from localm.media import comfy_client
 from localm.media import managed_comfy as mc
 
 
@@ -53,12 +57,12 @@ def _fake_gpus(monkeypatch, *specs):
     Patched at its definition site in localm.discover so every caller
     (resolve_gpu_split's validation, the device chooser) sees the same fake box.
 
-    Also pins non-Vulkan so resolve_gpu_split's membership validation actually
-    runs, regardless of what native backend is provisioned in the ambient
-    environment (GPU-SPLIT-VKINDEX: on Vulkan, list_gpus() cannot see Vulkan-only
-    devices, so resolve_gpu_split deliberately passes the configured indices
-    through UNCHECKED - which would make these tests depend on how the box that
-    runs them happens to be provisioned). Same pin, same reason, as #671.
+    Also pins non-Vulkan so resolve_gpu_split's membership validation actually runs,
+    regardless of what native backend is provisioned in the ambient environment
+    (GPU-SPLIT-VKINDEX: on Vulkan, list_gpus() cannot see Vulkan-only devices, so
+    resolve_gpu_split deliberately passes the configured indices through UNCHECKED -
+    which would make these tests depend on how the box that runs them happens to be
+    provisioned). Same pin, same reason, as #671.
     """
     import localm.discover as disc
     gpus = [{"index": i, "name": f"fake{i}", "free": free, "total": free * 2}
@@ -71,61 +75,58 @@ def _fake_gpus(monkeypatch, *specs):
 GB = 1024 ** 3
 
 
-def _cuda_device_arg(cmd: str):
-    """The value passed to --cuda-device in a launch command, or None."""
+def _flag(cmd: str, name: str):
+    """The value passed to --<name> in a launch command, or None."""
     parts = cmd.split()
     for i, p in enumerate(parts):
-        if p == "--cuda-device":
+        if p == f"--{name}":
             return parts[i + 1] if i + 1 < len(parts) else ""
-        if p.startswith("--cuda-device="):
+        if p.startswith(f"--{name}="):
             return p.split("=", 1)[1]
     return None
 
 
 # --------------------------------------------------------------------------- #
-#  CHECK 1: managed_comfy_launch_cmd() names ONE deliberately-chosen device.   #
+#  THE REGRESSION THAT MATTERS: never mask.                                    #
 # --------------------------------------------------------------------------- #
 
-def test_split_box_picks_the_card_with_most_free_vram(home, monkeypatch):
-    """THE REG-532 CORE. Split [0,1]; card 1 has MORE free VRAM -> ComfyUI must be
-    told to use card 1.
+def test_never_emits_cuda_device_which_would_mask_the_other_cards(home, monkeypatch):
+    """--cuda-device must NEVER be emitted. This is the whole point of the fix.
 
-    This is also the #661 trap negative-test: `resolve_main_gpu_index(None)` returns
-    **0** (discover.py:528-540), so an unset main_gpu_index does NOT mean "no split",
-    it means "device 0". Choosing the device with an IDENTITY default here would
-    silently pick card 0 and ignore the split - which is the exact bug PR #661 shipped
-    and reverted (it dropped a peer holding VRAM on GPU 1 because `1 == 0` was false).
-    Which card a whole-model workload lands on is a CAPACITY-informed choice.
+    It sets CUDA_VISIBLE_DEVICES to a single id (main.py:78-81), which deletes every
+    other card from torch's view and turns ComfyUI core's SelectModelDevice /
+    SelectCLIPDevice / SelectVAEDevice nodes into silent no-ops - a gpu:1 that does not
+    exist does nothing. localm shipped exactly this in f094d3d0 and made multi-GPU media
+    impossible while claiming to support it.
     """
     _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
     cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]})
 
-    got = _cuda_device_arg(mc.managed_comfy_launch_cmd())
+    cmd = mc.managed_comfy_launch_cmd()
+
+    assert _flag(cmd, "cuda-device") is None, (
+        "--cuda-device masks the other GPUs out of existence and disables ComfyUI's "
+        "own per-component placement nodes. Use --default-device, which reorders.")
+
+
+def test_split_box_prefers_the_card_with_most_free_vram(home, monkeypatch):
+    """Split [0,1]; card 1 has MORE free VRAM -> ComfyUI defaults to card 1.
+
+    Also the #661 trap negative-test: resolve_main_gpu_index(None) returns 0
+    (discover.py:528-540), so an unset main_gpu_index does NOT mean "no split", it means
+    "device 0". Choosing via that IDENTITY default would silently pick card 0 and ignore
+    the split - the bug PR #661 shipped and reverted. Which card leads is a CAPACITY
+    question.
+    """
+    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
+    cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]})
+
+    got = _flag(mc.managed_comfy_launch_cmd(), "default-device")
 
     assert got == "1", (
-        f"expected --cuda-device 1 (card 1 has 7 GB free vs card 0's 2 GB), got {got!r}. "
-        "Picking 0 here is the resolve_main_gpu_index(None) -> 0 trap: an identity "
+        f"expected --default-device 1 (card 1 has 7 GB free vs card 0's 2 GB), got "
+        f"{got!r}. Picking 0 is the resolve_main_gpu_index(None) -> 0 trap: an identity "
         "default answering a capacity question.")
-
-
-def test_split_box_never_emits_a_device_set(home, monkeypatch):
-    """`--cuda-device 0,1` would be a FACADE.
-
-    It is expressible (cli_args.py:52 takes a comma-separated list), but main.py:78-81
-    consumes it as CUDA_VISIBLE_DEVICES masking only, and the model still lands on ONE
-    card - chosen by ComfyUI's own `current_device()` rule (the first visible), not by
-    us. Passing the set would LOOK like split support while changing placement not at
-    all, leave us unable to preflight the right card, and make an upstream ComfyUI
-    "first visible" change break us silently. Pick one card and name it.
-    """
-    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
-    cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]})
-
-    got = _cuda_device_arg(mc.managed_comfy_launch_cmd())
-
-    assert got is not None and "," not in got, (
-        f"--cuda-device must name exactly ONE device, got {got!r}. A comma-separated "
-        "set only masks visibility; ComfyUI cannot shard a model across the split.")
 
 
 def test_single_gpu_box_with_main_gpu_index_names_that_card(home, monkeypatch):
@@ -133,20 +134,21 @@ def test_single_gpu_box_with_main_gpu_index_names_that_card(home, monkeypatch):
     _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
     cfg.save_config({"main_gpu_index": 1})
 
-    assert _cuda_device_arg(mc.managed_comfy_launch_cmd()) == "1"
+    assert _flag(mc.managed_comfy_launch_cmd(), "default-device") == "1"
 
 
 def test_unconfigured_box_emits_no_device_flag(home, monkeypatch):
     """NEGATIVE-TEST: nothing configured -> do NOT invent a device.
 
-    A plain single-GPU box must keep working byte-identically to today. Emitting
-    `--cuda-device 0` here would be inventing a choice the user never made, and would
-    mask any second card they later add without telling them.
+    A plain box must keep working byte-identically to today. Naming a device here would
+    invent a choice the user never made, and would mask any second card they later add.
     """
     _fake_gpus(monkeypatch, (0, 8 * GB))
     cfg.save_config({})
 
-    assert _cuda_device_arg(mc.managed_comfy_launch_cmd()) is None
+    cmd = mc.managed_comfy_launch_cmd()
+    assert _flag(cmd, "default-device") is None
+    assert _flag(cmd, "cuda-device") is None
 
 
 def test_launch_cmd_still_targets_the_managed_venv_and_port(home, monkeypatch):
@@ -162,159 +164,65 @@ def test_launch_cmd_still_targets_the_managed_venv_and_port(home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  CHECK 2: a USER'S OWN ComfyUI gets the device via the child ENV.            #
-#  localm cannot rewrite their launcher (.bat, possibly ZLUDA-wrapped), so the #
-#  env is the only lever. ComfyUI's own main.py:78-81 does nothing with        #
-#  --cuda-device except set exactly these two variables.                       #
+#  A user's OWN ComfyUI: the child env must ORDER, not MASK.                   #
 # --------------------------------------------------------------------------- #
 
-def test_own_comfy_child_env_pins_the_chosen_card(home, monkeypatch):
-    """Split [0,1], card 1 emptier -> the spawned ComfyUI is masked to card 1.
+def test_own_comfy_child_env_keeps_every_card_visible(home, monkeypatch):
+    """The env route must ORDER the devices, not pin one.
 
-    Nothing is installed under the throwaway LOCALM_HOME, so managed_comfy_active()
-    is False and this is the user's-own path.
+    localm cannot pass argv to a user's own launcher, so the child env is the only
+    lever. Setting CUDA_VISIBLE_DEVICES="1" would mask exactly as --cuda-device does.
+    We must emit the full order ("1,0"), which is what --default-device itself writes.
     """
+    from localm.media.comfy_client import comfy_child_env
     _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
-    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
-    cfg.save_config(conf)
+    cfg.save_config({"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5],
+                     "comfy_target": "external"})
 
-    env = comfy_client.comfy_child_env(conf)
+    env = comfy_child_env() or {}
 
-    assert env is not None, "expected a child env pinning the device, got None (inherit)"
-    assert env.get("CUDA_VISIBLE_DEVICES") == "1"
-    assert env.get("HIP_VISIBLE_DEVICES") == "1", (
-        "HIP_VISIBLE_DEVICES must be set too: this is the ZLUDA/ROCm path where CUDA "
-        "is emulated over HIP, and ComfyUI's own main.py sets both.")
-
-
-def test_managed_comfy_child_env_does_not_pin_the_device(home, monkeypatch):
-    """The managed instance carries its device on the ARGV (--cuda-device), so the
-    env must NOT also set it: one source of truth, not two that could disagree."""
-    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
-    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
-    cfg.save_config(conf)
-    monkeypatch.setattr(mc, "managed_comfy_active", lambda c=None: True)
-
-    env = comfy_client.comfy_child_env(conf)
-
-    if env is not None:
-        assert "CUDA_VISIBLE_DEVICES" not in env
-        assert "HIP_VISIBLE_DEVICES" not in env
+    assert env.get("CUDA_VISIBLE_DEVICES") == "1,0", (
+        f"expected the full ordered list '1,0' (preferred card leads, other card still "
+        f"visible), got {env.get('CUDA_VISIBLE_DEVICES')!r}. A single id is a MASK.")
+    assert env.get("HIP_VISIBLE_DEVICES") == "1,0", (
+        "HIP must match CUDA: on the ZLUDA/ROCm path CUDA is emulated over HIP, and "
+        "ComfyUI's own main.py sets both.")
 
 
-def test_unconfigured_box_child_env_is_untouched(home, monkeypatch):
-    """NEGATIVE-TEST: nothing configured -> spawn exactly as today.
-
-    Masking a plain box to an invented card would also hide a second GPU the user
-    later adds, which is the opposite of what this feature is for.
-    """
+def test_own_comfy_child_env_unset_when_nothing_configured(home, monkeypatch):
+    """NEGATIVE-TEST: a plain box spawns exactly as today, no vars injected."""
+    from localm.media.comfy_client import comfy_child_env
     _fake_gpus(monkeypatch, (0, 8 * GB))
-    cfg.save_config({})
+    cfg.save_config({"comfy_target": "external"})
 
-    env = comfy_client.comfy_child_env({})
+    env = comfy_child_env() or {}
 
-    if env is not None:
-        assert "CUDA_VISIBLE_DEVICES" not in env
-        assert "HIP_VISIBLE_DEVICES" not in env
-
-
-# --------------------------------------------------------------------------- #
-#  CHECK 3: the per-device preflight. THE LITERAL REG-532 SCENARIO.            #
-# --------------------------------------------------------------------------- #
-
-def test_reg532_combined_says_fits_but_no_single_card_does(home, monkeypatch):
-    """THE BUG, as a test. Two cards, 4 GB free EACH (8 GB combined), a 4 GB job.
-
-    decide_media_swap reads the COMBINED 8 GB, sees 8 >= 4 + headroom, and says "both
-    fit, keep the chat model loaded". The media model then lands WHOLE on ONE 4 GB
-    card and OOMs. The combined gate is not wrong - it cannot see placement. The
-    preflight must catch it.
-
-    Note a per-device RATIO check would PASS this wrongly: each card would be asked
-    for its 50% share (2 GB) and 4 GB free covers that. The whole-model predicate is
-    what makes this fail correctly.
-    """
-    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
-    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
-    cfg.save_config(conf)
-    s = {"vram_estimate_bytes": 4 * GB, "swap_policy": "auto"}
-
-    # The gate itself is UNCHANGED and still says "fits" on the combined number.
-    assert vram.decide_media_swap(s, read_free=lambda: 8 * GB) is False
-
-    shortfall = vram.media_single_device_shortfall(s, config=conf)
-
-    assert shortfall is not None, (
-        "preflight must refuse: 8 GB combined free, but the 4 GB model lands WHOLE "
-        "on one 4 GB card. This is the REG-532 OOM.")
-    assert shortfall["index"] in (0, 1)
-    assert shortfall["free"] == 4 * GB
-    assert shortfall["needed"] == 4 * GB + vram._DEFAULT_HEADROOM, (
-        "the per-device check must use the SAME headroom as the aggregate, so it is "
-        "not held to a thinner margin than the ceiling it composes with")
-
-
-def test_preflight_allows_a_job_that_genuinely_fits_the_chosen_card(home, monkeypatch):
-    """NEGATIVE-TEST: do NOT block a load that would have worked.
-
-    Card 1 has 20 GB free and takes the whole 4 GB model comfortably.
-    """
-    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 20 * GB))
-    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
-    cfg.save_config(conf)
-    s = {"vram_estimate_bytes": 4 * GB, "swap_policy": "auto"}
-
-    assert vram.media_single_device_shortfall(s, config=conf) is None
-
-
-def test_preflight_is_a_noop_without_a_split(home, monkeypatch):
-    """No split -> the combined reading already IS the single card's. Nothing to add."""
-    _fake_gpus(monkeypatch, (0, 4 * GB))
-    conf = {}
-    cfg.save_config(conf)
-    s = {"vram_estimate_bytes": 40 * GB, "swap_policy": "auto"}
-
-    assert vram.media_single_device_shortfall(s, config=conf) is None
-
-
-def test_preflight_respects_an_explicit_swap_policy(home, monkeypatch):
-    """'never' is the user's explicit choice (e.g. a big workstation card).
-
-    Never silently override an explicit user selection: detect, inform, offer.
-    """
-    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
-    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
-    cfg.save_config(conf)
-    s = {"vram_estimate_bytes": 4 * GB, "swap_policy": "never"}
-
-    assert vram.media_single_device_shortfall(s, config=conf) is None
+    assert env.get("CUDA_VISIBLE_DEVICES") is None
+    assert env.get("HIP_VISIBLE_DEVICES") is None
 
 
 # --------------------------------------------------------------------------- #
-#  CHECK 8: the user-visible shortfall notice.                                 #
+#  INDEX SPACE: never leak a Vulkan-space index into a torch decision.         #
 # --------------------------------------------------------------------------- #
 
-def test_split_box_gets_a_notice_that_media_uses_one_card(home, monkeypatch):
-    """The user configured a split and is NOT getting it for media: say so.
+def test_split_with_no_torch_visible_device_names_nothing(home, monkeypatch):
+    """GPU-SPLIT-VKINDEX: a split whose indices torch cannot see must name NO device.
 
-    Asserts the OBSERVABLE returned string, NOT that a log record exists - #637
-    shipped a dead module-scope logger.debug() green because caplog forces level 0
-    under pytest while production emitted nothing.
+    resolve_gpu_split() passes indices through UNVALIDATED on the `vulkan` llama.cpp
+    build, because list_gpus() is structurally blind to Vulkan-only devices. Those
+    indices live in ggml-vulkan's index space. Media is torch (ComfyUI), so handing one
+    of them to ComfyUI as a CUDA/HIP id would point it at the WRONG CARD. Returning None
+    (ComfyUI keeps its own default) is the only honest answer.
     """
-    _fake_gpus(monkeypatch, (0, 2 * GB), (1, 7 * GB))
-    conf = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [0.5, 0.5]}
-    cfg.save_config(conf)
+    import localm.discover as disc
+    # A box where torch sees ONLY device 0, but a split names 3 and 4 (as a Vulkan-only
+    # split legitimately can). Vulkan pass-through is ON, so resolve_gpu_split does not
+    # drop them.
+    gpus = [{"index": 0, "name": "fake0", "free": 8 * GB, "total": 16 * GB}]
+    monkeypatch.setattr(disc, "list_gpus", lambda **kw: list(gpus))
+    monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: True)
+    cfg.save_config({"gpu_split_indices": [3, 4], "gpu_split_ratios": [0.5, 0.5]})
 
-    note = vram.media_split_notice(conf)
-
-    assert note is not None
-    assert "GPU 1" in note, "should name the card it actually chose"
-    assert "ONE card" in note
-
-
-def test_unsplit_box_gets_no_notice(home, monkeypatch):
-    """NEGATIVE-TEST: never nag a single-GPU user about a shortfall that cannot exist."""
-    _fake_gpus(monkeypatch, (0, 8 * GB))
-    cfg.save_config({})
-
-    assert vram.media_split_notice({}) is None
+    assert disc.resolve_preferred_device() is None, (
+        "a Vulkan-space index must never be emitted as a torch/CUDA device id")
+    assert _flag(mc.managed_comfy_launch_cmd(), "default-device") is None
