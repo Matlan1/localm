@@ -137,11 +137,17 @@ def _clear_keep_diagnostics_env():
 
 @pytest.fixture(autouse=True)
 def _reset_gpu_probe_cache():
-    """discover.list_gpus() caches its GPU probe for a few seconds (so a wedged
-    driver call cannot block the event loop repeatedly). That module-level cache
-    would otherwise bleed one test's mocked devices into the next within its TTL,
-    so a test that fakes two GPUs would leak them into a later "no GPU" test.
-    Clear it before and after every test so each starts from a cold probe."""
+    """discover.list_gpus() keeps a module-level last-known-good reading (served
+    only when a probe overruns its deadline - there is deliberately NO TTL cache;
+    every call re-probes). Without this, one test's mocked devices bleed into the
+    next: a test that fakes two GPUs would leak them into a later "no GPU" test.
+
+    Clearing alone is NOT sufficient, which is why _reset_gpu_probe_cache also
+    bumps a probe epoch: an overrunning probe is abandoned rather than cancelled,
+    so it outlives this fixture and writes its reading afterwards. A cold ROCm
+    init (~6.5s) overruns the 4s deadline, so the real card landed in a LATER
+    test that asserts a fake or empty reading. The epoch makes that late write a
+    no-op. Runs before and after every test so each starts from a cold probe."""
     from localm import discover
     discover._reset_gpu_probe_cache()
     yield

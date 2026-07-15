@@ -324,15 +324,32 @@ GPU_PROBE_BUSY = "busy"        # another probe is inflight, or the probe thread 
 _gpu_probe_lock = threading.Lock()
 _gpu_last_good: Optional[list] = None    # last SUCCESSFUL probe; served on a wedge
 _gpu_probe_inflight = False
+# Bumped by _reset_gpu_probe_cache() to ORPHAN any probe thread still in flight.
+# An abandoned probe (see the DEADLINE note above) is by definition still running
+# and will write its reading whenever the native call finally returns - which can
+# be long after the reset. Clearing the globals alone cannot prevent that write,
+# so a stale thread's result is fenced out by epoch instead of raced against.
+_gpu_probe_epoch = 0
 
 
 def _reset_gpu_probe_cache() -> None:
-    """Test hook: drop the last-known-good GPU reading + in-flight flag so a test
-    that exercised the wedge fallback cannot bleed into the next test."""
-    global _gpu_last_good, _gpu_probe_inflight
+    """Test hook: drop the last-known-good GPU reading + in-flight flag, and
+    INVALIDATE any probe still in flight so it cannot bleed into the next test.
+
+    Clearing the globals is not enough on its own: an overrunning probe is
+    abandoned, not cancelled (a wedged native call cannot be interrupted from
+    Python), so that thread outlives this reset and would otherwise write its
+    reading into _gpu_last_good AFTERWARDS. Measured: a cold ROCm/CUDA init takes
+    ~6.5s and overruns _GPU_PROBE_DEADLINE, so the abandoned thread lands its
+    write several seconds later, inside whichever test is running by then - which
+    made the GPU tests fail intermittently with THIS machine's real card where
+    they assert a fake or empty reading. Bumping the epoch makes that late write
+    a no-op (see _run), which the clears alone provably could not do."""
+    global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
+        _gpu_probe_epoch += 1
 
 
 def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False):
@@ -392,6 +409,10 @@ def _list_gpus_with_status(deadline: float) -> tuple:
             served = list(_gpu_last_good) if _gpu_last_good is not None else []
             return served, GPU_PROBE_BUSY
         _gpu_probe_inflight = True
+        # Captured under the SAME lock that claims the in-flight slot: an unlocked
+        # read here could pair this probe with an epoch a concurrent reset has
+        # already retired, which is the exact race the epoch exists to close.
+        my_epoch = _gpu_probe_epoch
 
     result: dict = {}
     done = threading.Event()
@@ -404,9 +425,25 @@ def _list_gpus_with_status(deadline: float) -> tuple:
         except Exception as e:   # the probe swallows its own errors; belt-and-braces
             logger.debug("list_gpus: probe raised unexpectedly: %s", e)
         with _gpu_probe_lock:
-            if value is not None:
-                _gpu_last_good = value
-            _gpu_probe_inflight = False
+            if _gpu_probe_epoch != my_epoch:
+                # A reset retired this probe while it ran: its reading describes a
+                # state the owner has explicitly dropped, and the in-flight slot is
+                # no longer ours to clear (a later probe may already own it). Drop
+                # BOTH writes rather than corrupt the current epoch's state.
+                # Surfaced, not silenced (AGENTS.md rule 5): debug is the right
+                # altitude because this is the deliberate consequence of a reset,
+                # not a fault.
+                logger.debug("list_gpus: discarding probe result from retired "
+                             "epoch %s (current %s)", my_epoch, _gpu_probe_epoch)
+            else:
+                if value is not None:
+                    _gpu_last_good = value
+                _gpu_probe_inflight = False
+        # Deliberately OUTSIDE the epoch gate and unconditional: a caller still
+        # inside its deadline is waiting on `done`, and withholding it would make
+        # it wait out the full deadline and report a COMPLETED probe as a TIMEOUT -
+        # manufacturing the very "no GPU"/inconclusive lie the status contract
+        # above exists to prevent.
         result["value"] = value
         done.set()
 
@@ -417,9 +454,12 @@ def _list_gpus_with_status(deadline: float) -> tuple:
         # in-flight guard so a LATER call can retry (never leave it stuck True with
         # no thread to clear it), surface it at debug (rule 5), and degrade to the
         # last-known-good reading rather than propagating a 500 to the caller. No
-        # fresh reading was taken -> BUSY.
+        # fresh reading was taken -> BUSY. Epoch-gated for the same reason as the
+        # clear in _run: if a reset retired us, the slot is no longer ours and may
+        # already belong to a newer probe we must not clear.
         with _gpu_probe_lock:
-            _gpu_probe_inflight = False
+            if _gpu_probe_epoch == my_epoch:
+                _gpu_probe_inflight = False
         logger.debug("list_gpus: could not start probe thread: %s", e)
         served = list(_gpu_last_good) if _gpu_last_good is not None else []
         return served, GPU_PROBE_BUSY
