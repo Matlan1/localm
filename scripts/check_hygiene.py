@@ -591,15 +591,15 @@ def _sw_cache_bump_violations() -> list[str]:
         # worker at all has genuinely nothing to gate, but one where the rest of the
         # static tree is present means sw.js MOVED and the gate is now pointed at
         # nothing - which must not pass silently.
-        assets = _sw_cacheable_assets()
-        if assets is None:
-            return [f"{_SW_JS}: missing, and `git ls-files {_SW_STATIC}` failed, so the "
-                    "PWA cache-bump gate cannot even tell whether this checkout ships a "
-                    "GUI. It checked NOTHING."]
-        if assets:
+        if _sw_cacheable_assets():
             return [f"{_SW_JS}: missing, but {_SW_STATIC}/ still ships assets - the PWA "
                     "cache-bump gate is pointed at a file that no longer exists and just "
                     "checked NOTHING. Update _SW_JS in this script to the new path."]
+        # Falls through on [] (a checkout with no GUI) and on None (git could not
+        # enumerate, e.g. REPO is not a git tree). Neither is hidden: a tree git cannot
+        # enumerate ALREADY fails loud in main(), which refuses to report clean without
+        # scanning anything, so duplicating that alarm here would only fire on non-git
+        # callers that have nothing to gate in the first place.
         return []
     except OSError as e:
         return [f"{_SW_JS}: exists but could not be read ({e}) - the PWA cache-bump gate "
