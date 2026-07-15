@@ -75,39 +75,84 @@ _KEY_READ_BACKOFF = 0.01       # seconds; escalates linearly to the cap
 _KEY_READ_BACKOFF_CAP = 0.05
 
 
-def _read_key_file() -> Optional[str]:
-    """The persisted owner key, or None when the file is absent or persistently
-    unreadable. A transient Windows sharing violation is ridden out with a bounded
-    retry (see the constants above); a persistent unreadable file returns None but
-    is separately treated as auth-in-effect by any_key_configured() (fail closed).
-    A read failure is SURFACED (rule 5), never silently equated with "no key"."""
+# The three genuinely distinct states auth.key can be in. Keep them distinct:
+# collapsing "unreadable" into "absent" silently opens a keyed server, and
+# collapsing "holds nothing" into "holds a key" locks its owner out (REG-579).
+_KEY_ABSENT = "absent"
+_KEY_UNREADABLE = "unreadable"
+_KEY_OK = "ok"
+
+
+def _read_owner_key_file():
+    """Read auth.key once and report WHICH state it is in: ``(status, text, err)``.
+
+      (_KEY_ABSENT, None, None)     no file -> no owner key, open by design
+      (_KEY_UNREADABLE, None, err)  it exists but cannot be read or decoded: we
+                                    cannot TELL whether a key exists -> callers
+                                    fail CLOSED
+      (_KEY_OK, text, None)         we read it; *text* is what it holds (maybe "")
+
+    THE single place that decides what auth.key contains. The value path
+    (get_api_key) and the in-effect path (any_key_configured) each used to read
+    and judge this file on their own, and REG-579 was precisely those two
+    disagreeing: one read "empty means no key", the other read "the file exists,
+    so a key exists", and the server locked its owner out of it. One reader, one
+    answer, so they cannot drift apart again.
+
+    A transient Windows sharing violation (a concurrent set_api_key replace, an
+    antivirus, the indexer holding it for a microsecond) is ridden out with a
+    bounded retry rather than flapping the owner's auth.
+
+    ``utf-8-sig``, not ``utf-8``: a BOM is what a Windows editor or PowerShell's
+    ``Out-File -Encoding utf8`` writes at the front of a hand-made file, and
+    ``str.strip()`` does NOT remove U+FEFF. Read as plain utf-8, a BOM-only
+    "empty" file would look like a key nobody can present (the REG-579 lockout
+    again), and a BOM + a real key would stop the owner's correct key matching."""
     path = key_file()
     for attempt in range(_KEY_READ_RETRIES):
         try:
-            text = path.read_text(encoding="utf-8").strip()
-            return text or None
+            return _KEY_OK, path.read_text(encoding="utf-8-sig"), None
         except FileNotFoundError:
-            return None                        # genuinely absent -> open by design
+            return _KEY_ABSENT, None, None     # genuinely absent -> open by design
         except PermissionError as e:
-            # Transient class on Windows (a concurrent replace / AV / indexer).
-            # Retry briefly; a persistent failure falls through to the warning.
+            # Transient class on Windows. Retry briefly; a persistent failure
+            # falls through to unreadable (and the caller's warning).
             if attempt < _KEY_READ_RETRIES - 1:
                 time.sleep(min(_KEY_READ_BACKOFF * (attempt + 1),
                                _KEY_READ_BACKOFF_CAP))
                 continue
-            logger.warning("owner key file %s exists but is unreadable (%s); "
-                           "treating auth as IN EFFECT (fail closed) until it can "
-                           "be read - fix its permissions", path, e)
-            return None
+            return _KEY_UNREADABLE, None, e
         except (OSError, ValueError) as e:
-            # Not the transient sharing-violation class (a real IO/permission
-            # error, a directory, or non-UTF-8 content): do not spin the retry
-            # budget. Still surfaced, and still fails closed via _owner_key_present.
-            logger.warning("owner key file %s exists but is unreadable (%s); "
-                           "treating auth as IN EFFECT (fail closed) until it can "
-                           "be read - fix its permissions", path, e)
-            return None
-    return None
+            # Not the transient sharing-violation class (a real IO error, a
+            # directory in its place, undecodable bytes): do not spin the budget.
+            return _KEY_UNREADABLE, None, e
+    return _KEY_UNREADABLE, None, None
+
+
+def _key_text_or_none(text: str) -> Optional[str]:
+    """The key *text* holds, or None when it holds none.
+
+    NUL bytes are stripped alongside whitespace: a file truncated by a crash or a
+    sync is padded with NULs, and a run of NULs is not a key anyone could ever
+    present - so it means "no key", exactly like an empty file. Treating it as a
+    key would put auth in effect with nothing to match: the REG-579 lockout."""
+    return text.strip().strip("\x00").strip() or None
+
+
+def _read_key_file() -> Optional[str]:
+    """The persisted owner key, or None when the file is absent or persistently
+    unreadable. A persistent unreadable file returns None but is separately
+    treated as auth-in-effect by any_key_configured() (fail closed). A read
+    failure is SURFACED (rule 5), never silently equated with "no key"."""
+    status, text, err = _read_owner_key_file()
+    if status == _KEY_UNREADABLE:
+        logger.warning("owner key file %s exists but is unreadable (%s); "
+                       "treating auth as IN EFFECT (fail closed) until it can "
+                       "be read - fix its permissions", key_file(), err)
+        return None
+    if status == _KEY_ABSENT:
+        return None
+    return _key_text_or_none(text)
 
 
 def get_api_key() -> Optional[str]:
@@ -439,40 +484,79 @@ def _keystore_configured() -> bool:
     return bool(data) if isinstance(data, list) else True
 
 
+# One-shot latch for the empty-auth.key notice (see _owner_key_present). This runs
+# on EVERY request via any_key_configured() -> require_auth, so an unthrottled
+# warning would put one line per request in the log for a persistent state.
+_empty_owner_key_warned = False
+
+
 def _owner_key_present() -> bool:
     """True when an owner key is in effect: the LOCALM_API_KEY env var is set, OR
-    the auth.key file EXISTS - readable or NOT.
+    the auth.key file exists AND is not readably empty.
 
-    A present-but-unreadable file counts as present so auth stays IN EFFECT (fail
+    A present-but-UNREADABLE file counts as present so auth stays IN EFFECT (fail
     CLOSED) instead of silently dropping to open/keyless mode when a read glitch
     (a transient AV/indexer lock, or a persistent permissions/profile change)
-    makes auth.key unreadable to the running process. This mirrors
-    _keystore_configured's own missing-vs-unreadable branching; only a genuinely
-    ABSENT file (and no env key) is "no owner key" -> open by design.
+    makes auth.key unreadable to the running process. Only a genuinely ABSENT
+    file, or one we can READ and see holds no key, is "no owner key" -> open by
+    design.
 
-    Distinct from get_api_key(), which still returns the key VALUE (or None when it
+    That empty-means-no-key split is what _keystore_configured already does for
+    the identical question (absent or empty ``[]`` -> not configured; unreadable
+    or corrupt -> fail closed), and what get_api_key()/set_api_key() already do
+    for an empty value. Fail-closed is for "we cannot TELL whether a key exists";
+    a readable empty file is not that case - we can tell, and the answer is no.
+    Treating it as a key put auth in effect with nothing for verify() to match,
+    401ing every request and locking the owner out of their own server with no
+    way back (POST /v1/keys needs auth, and keys.py's loopback auto-seed only
+    fires when the server was_open), for a file that unambiguously means no key
+    (REG-579). localm itself never writes one - set_api_key('') unlinks instead -
+    so an empty file is always an anomaly, and it is surfaced once rather than
+    silently changing the server's security posture.
+
+    Distinct from get_api_key(), which returns the key VALUE (or None when it
     cannot be read): when the file is present but unreadable this returns True
     (auth in effect) while verify() matches nothing, so every request is rejected
     (401 / locked) rather than served open - the safe direction."""
+    global _empty_owner_key_warned
     env = os.environ.get(ENV_VAR)
     if env and env.strip():
         return True
-    try:
-        return key_file().exists()
-    except OSError:
-        # Cannot even stat the path (e.g. a parent-directory permission problem):
-        # fail CLOSED rather than assume the owner key is absent.
+    status, text, _err = _read_owner_key_file()
+    if status == _KEY_ABSENT:
+        return False                       # genuinely absent -> open by design
+    if status == _KEY_UNREADABLE:
+        # Present but we cannot read or decode it (a permission/profile change, a
+        # parent-directory problem, a directory in its place, undecodable bytes):
+        # we cannot tell whether a key exists, so fail CLOSED. Surfaced by
+        # _read_key_file's own warning on the value path.
         return True
+    if _key_text_or_none(text) is not None:
+        # Re-arm the notice: a server that later drops KEYED -> OPEN (the file is
+        # truncated while running) must say so again, or the second downgrade
+        # would be the silent one.
+        _empty_owner_key_warned = False
+        return True
+    if not _empty_owner_key_warned:
+        _empty_owner_key_warned = True
+        logger.warning(
+            "owner key file %s exists but holds no key; treating it as NO key, "
+            "so the server runs in OPEN (keyless) mode - set a key (the "
+            "launcher, `localm key set`, or LOCALM_API_KEY) or delete the file",
+            key_file())
+    return False
 
 
 def any_key_configured() -> bool:
-    """True when auth is in effect: an owner key (env, or an auth.key file that is
-    present even if unreadable - see _owner_key_present) OR a configured scoped
-    keystore. When this is False the server runs open (unless
-    require_auth_enabled()). A corrupt/unreadable keystore, and now a
-    present-but-unreadable owner key, both count as configured so they fail CLOSED
-    rather than silently open: a keyed install must not lose its auth to a damaged
-    or unreadable credential file (checkup 2026-07-11 HIGH)."""
+    """True when auth is in effect: an owner key (env, or an auth.key file holding
+    one - see _owner_key_present) OR a configured scoped keystore. When this is
+    False the server runs open (unless require_auth_enabled()). A corrupt/
+    unreadable keystore, and a present-but-unreadable owner key, both count as
+    configured so they fail CLOSED rather than silently open: a keyed install must
+    not lose its auth to a damaged or unreadable credential file (checkup
+    2026-07-11 HIGH). A credential file we CAN read and which holds no key (an
+    empty auth.key, an empty ``[]`` keystore) is not that case - it means exactly
+    what it says, no key (REG-579)."""
     return _owner_key_present() or _keystore_configured()
 
 
