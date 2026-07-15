@@ -43,6 +43,18 @@ _MAX_EPISODES = 200
 # than dragging in an irrelevant past lesson.
 _MIN_SCORE = 0.10
 _RETRIEVE_K = 3
+# Retry schedule for a transient Windows PermissionError (WinError 5, a sharing
+# violation) when add()'s atomic replace or all()'s read races a concurrent
+# holder of the same file. Measured empirically: a holder keeping the file open
+# for as little as ~90ms already exhausted a naive 5-attempt/20ms (~85ms total)
+# budget, and real contention (OS scheduling stalls under a loaded box,
+# antivirus scanning a freshly-written file) can hold a handle open far longer
+# than the sub-millisecond common case. This schedule stays instant when there
+# is no contention (first retry after 20ms) while surviving multi-hundred-ms
+# stalls, bounded at ~1.55s total so a genuinely stuck lock still surfaces as an
+# error rather than hanging the caller.
+_PERMISSION_RETRY_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.25, 0.25, 0.25, 0.25, 0.25)
+
 # Absolute cosine floor for the SEMANTIC half of recall (when an on-device
 # embedding model is available). A past lesson is recalled when it matches the
 # task lexically (BM25 > _MIN_SCORE) OR semantically (cosine > _COS_MIN). Both are
@@ -143,22 +155,22 @@ class EpisodeStore:
 
     def all(self) -> list:
         """Every stored episode, oldest first. Malformed lines are skipped (a
-        partial write must not break recall). Retries briefly on a transient
+        partial write must not break recall). Retries with backoff on a transient
         PermissionError: on Windows, a concurrent add()'s atomic replace can
         momentarily deny an open of the same path while the rename is in flight."""
         if not self._file.is_file():
             return []
         text = None
-        for attempt in range(5):
+        for delay in (*_PERMISSION_RETRY_DELAYS, None):
             try:
                 text = self._file.read_text(encoding="utf-8")
                 break
             except FileNotFoundError:
                 return []          # removed/replaced between the is_file() check and the read
             except PermissionError:
-                if attempt == 4:
+                if delay is None:
                     raise
-                time.sleep(0.02)
+                time.sleep(delay)
         out: list = []
         for line in text.splitlines():
             line = line.strip()
@@ -173,8 +185,9 @@ class EpisodeStore:
     def add(self, ep: Episode) -> Episode:
         """Append *ep*, capping the log to the newest ``_MAX_EPISODES``. Written
         atomically (temp + replace) so a crash mid-write cannot corrupt the log.
-        Retries briefly on a transient PermissionError: on Windows, a concurrent
-        reader with the destination open can momentarily deny the rename."""
+        Retries with backoff on a transient PermissionError: on Windows, a
+        concurrent reader with the destination open can momentarily deny the
+        rename."""
         eps = self.all()
         eps.append(ep)
         eps = eps[-_MAX_EPISODES:]
@@ -182,14 +195,14 @@ class EpisodeStore:
         body = "\n".join(json.dumps(e.to_dict(), ensure_ascii=False) for e in eps)
         tmp = self._file.with_name(self._file.name + ".tmp")
         tmp.write_text(body + "\n", encoding="utf-8")
-        for attempt in range(5):
+        for delay in (*_PERMISSION_RETRY_DELAYS, None):
             try:
                 tmp.replace(self._file)
                 break
             except PermissionError:
-                if attempt == 4:
+                if delay is None:
                     raise
-                time.sleep(0.02)
+                time.sleep(delay)
         return ep
 
     def _vectors(self, texts: list, ef) -> Optional[list]:
