@@ -86,6 +86,18 @@ class Job:
     # another principal's scheduled jobs (mirrors the kernel JobManager, #248).
     # Persisted so it survives a restart; stripped from the API response.
     owner: Optional[str] = None
+    # Was the credential that created this job the OWNER KEY itself (or an owner
+    # session), rather than a minted keystore key? Stamped at creation because it
+    # is NOT recoverable later: revoking a keystore key deletes its record, so at
+    # run time a revoked scoped key and a rotated-away owner key look identical
+    # (both hash to no keystore entry). The runner needs the difference to
+    # re-validate shell without punishing an owner-key ROTATION - the owner key is
+    # not a keystore entry and is not revocable/expirable the way a scoped key is
+    # (REG-509; same reasoning as auth's owner-session exemption from
+    # key_hash_live, and memory_principal's owner collapse, AUDIT-MED-14).
+    # Legacy jobs persisted before this field default False and fall back to the
+    # runner's key-value comparison. Internal, like `owner`: never sent to a client.
+    owner_is_owner_key: bool = False
 
     def __post_init__(self) -> None:
         if not self.id:

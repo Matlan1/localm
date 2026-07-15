@@ -393,7 +393,15 @@ async def session_stop(session_id: str, request: Request):
 @_router.delete("/api/coder/sessions/{session_id}")
 async def session_delete(session_id: str, request: Request):
     _get_session(request, session_id)   # principal check: 404 unless it is the caller's
-    if _sessions(request).remove(session_id) is None:
+    # remove() -> CoderSession.close() -> agent.close() is BLOCKING work: a
+    # checkpoint write, the audit close, and - for a session that ran run_shell -
+    # _detect_shell_changes(), which shells out to `git status --porcelain`
+    # (timeout 10) plus up to two `git diff`s (timeout 15 each). Inline on this
+    # async handler that froze the whole event loop, and every concurrent request
+    # with it, for the git duration (REG-594). Offload it, matching the pattern
+    # the other potentially-slow routes here already use.
+    from starlette.concurrency import run_in_threadpool
+    if await run_in_threadpool(_sessions(request).remove, session_id) is None:
         raise HTTPException(404, f"No such session: {session_id}")
     return {"status": "closed"}
 

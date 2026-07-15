@@ -142,6 +142,36 @@ permanent public record of what shipped and are never rewritten; the in-progress
   already had the same file registered in localm, the "Missing model -> Download"
   offer reported success while nothing was written to the ComfyUI folder, and
   generation then failed with the model still missing.
+- **Rotating your API key no longer breaks your own scheduled jobs.** If you had a
+  scheduled coder job with shell access enabled and then rolled or cleared your API
+  key, the job silently kept running but lost its shell step, forever, with no
+  notice. Your own jobs now keep their shell access across a key change. A job whose
+  access genuinely was revoked still loses shell, as intended, but now says so in
+  the job's output instead of quietly doing less.
+- **The coder can delegate real work again in the terminal.** When running
+  `localm coder` without `--yes`, any task the assistant handed to a sub-agent had
+  every file edit and command blocked outright, so the delegated work just failed.
+  Sub-agents now ask you to approve their changes at the same prompt the main
+  session already uses, so you can say yes and the work happens.
+- **Quitting the coder is instant again.** Ending an ordinary look-around session
+  could hang for many seconds while it ran a full model reflection you never asked
+  for - triggered by nothing more than a couple of incidental errors, or by your own
+  Ctrl-C. Sessions that changed no files now exit immediately; a run that genuinely
+  failed still records what it learned.
+- **The app stays responsive while a coder session closes, and while the model
+  picker loads.** Closing a coder session from the web UI, and opening the Workflow
+  panel on the Images/Music/Video pages, each ran slow work on the server's request
+  path - freezing every other request, including chat streaming, until it finished.
+- **A crashed ComfyUI is noticed instead of being reported as running.** If ComfyUI
+  died mid-session (an out-of-memory on a big render, a crash, or you closed its
+  window), localm kept believing it was up, so every later generation failed with a
+  confusing error and it would not restart it for you. It now re-checks, and starts
+  ComfyUI again or tells you exactly what to do.
+- **Generating or deleting media no longer fails when antivirus is mid-scan.** On
+  Windows, if a background process (an antivirus scan, the search indexer, a backup
+  tool) happened to have the gallery's index file open at the wrong moment, the
+  request failed with an error even though the file itself was fine, and left a
+  stray temp file behind each time. It now waits briefly for the file to free up.
 - **Saving a memory no longer freezes the app.** On some setups, saving, editing,
   or adding a remembered fact could make the whole app stop responding for several
   minutes the first time an embedding model needed to load, because that load ran on
