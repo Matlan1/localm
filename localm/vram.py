@@ -128,6 +128,90 @@ def decide_media_swap(settings: dict, *,
         policy=settings.get("swap_policy", "auto"))
 
 
+def media_single_device_shortfall(settings: dict, *,
+                                  config: Optional[dict] = None) -> Optional[dict]:
+    """``{"index", "needed", "free"}`` when the ONE card ComfyUI will actually use
+    cannot hold the WHOLE media model, else ``None`` (fine, or nothing to check).
+
+    THE OTHER HALF OF ``decide_media_swap`` (REG-532). That gate reads COMBINED free
+    across a configured split, which is the right CAPACITY question and MUST stay that
+    way (every capacity decision uses the combined number). But ComfyUI cannot SPAN a
+    split: it consumes ``--cuda-device`` as ``CUDA_VISIBLE_DEVICES`` masking and loads
+    the whole model onto a single ``torch.cuda.current_device()``. So the gate can be
+    satisfied by 2x4 GB = 8 GB combined while a 4 GB model lands on ONE 4 GB card and
+    OOMs, spills to shared RAM, or trips the ROCm TDR. The gate is not wrong; it simply
+    cannot see placement.
+
+    This answers the placement question instead: does the specific card
+    ``discover.resolve_whole_model_device()`` chose hold the WHOLE model plus the same
+    headroom the aggregate demands. Deliberately NOT ``discover.gpu_split_shortfall``,
+    which checks a per-device RATIO SHARE - right for a tensor_split GGUF, an
+    UNDER-check here (a card holding 40% of a split would be asked for 40% of the model
+    and then handed 100% of it).
+
+    Uses the SAME headroom as ``should_swap_for_media`` so the per-device check is not
+    held to a thinner margin than the aggregate ceiling it composes with (the
+    convention ``gpu_split_shortfall`` documents).
+
+    Returns None (nothing to check) when the policy is not 'auto' (an explicit
+    always/never is the user's choice and is not second-guessed), when no split is
+    configured (the combined reading already IS the single card's), when the estimate
+    is unknown ('auto' already swaps on unknown), or when per-device free is
+    unmeasurable (cannot check; do not block a load that might work).
+    """
+    if settings.get("swap_policy", "auto") != "auto":
+        return None
+    need = settings.get("vram_estimate_bytes")
+    if not isinstance(need, int) or need <= 0:
+        return None
+    from localm.config import load_config
+    from localm.discover import (list_gpus, resolve_whole_model_device,
+                                 split_device_count)
+    cfg = config if config is not None else load_config()
+    if split_device_count(cfg) < 2:
+        return None
+    gpus = list_gpus()
+    idx = resolve_whole_model_device(cfg, gpus=gpus)
+    if idx is None:
+        return None
+    dev = {g.get("index"): g for g in gpus}.get(idx)
+    if dev is None or dev.get("free") is None:
+        return None
+    needed = need + _DEFAULT_HEADROOM
+    free = dev["free"]
+    if free >= needed:
+        return None
+    return {"index": idx, "needed": needed, "free": free}
+
+
+def media_split_notice(config: Optional[dict] = None) -> Optional[str]:
+    """A user-visible line for a box with a configured GPU split, saying media runs on
+    ONE card and why, or ``None`` when there is nothing to say.
+
+    The user explicitly configured a split and is NOT getting it for media, so this is
+    a capability shortfall they must be told about, not a debug detail. The house
+    precedent for exactly this shape is the partial-GPU-offload console notice in
+    ``inference/backends/llamacpp/_sizing.py``. Deliberately not ``logger.debug``: the
+    always-on ring buffer is INFO+, so a debug line is invisible without --debug and
+    would never reach a bug report.
+
+    Returns None on a single-GPU / unsplit box so a user who configured nothing is
+    never nagged about a shortfall that does not exist.
+    """
+    from localm.config import load_config
+    from localm.discover import resolve_whole_model_device, split_device_count
+    cfg = config if config is not None else load_config()
+    n = split_device_count(cfg)
+    if n < 2:
+        return None
+    idx = resolve_whole_model_device(cfg)
+    where = f"GPU {idx}" if idx is not None else "a single GPU"
+    return (f"Note: your GPU split spans {n} cards, but image/music/video generation "
+            f"runs on ONE card ({where}, the one with the most free VRAM). ComfyUI "
+            "selects a device rather than splitting a model across cards, so the split "
+            "cannot be used here. Chat and embeddings still use the full split.")
+
+
 def decide_embedder_swap(embedder_estimate_bytes: Optional[int], *,
                          policy: str = "auto",
                          read_free: Optional[Callable[[], Optional[int]]] = None) -> bool:

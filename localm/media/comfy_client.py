@@ -981,21 +981,62 @@ def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
 
 def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
     """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
-    launch env (or the inherited env) and, ONLY when the shim is enabled, PREPENDS the
-    localm-owned shim dir to PYTHONPATH (preserving any pre-existing PYTHONPATH). When
-    the shim is off this returns exactly what the launch used before (None to inherit,
-    or the AMD env), so a normal run is untouched. Never writes anything to disk."""
+    launch env (or the inherited env), and layers on two things when they apply:
+
+    - ONLY when the shim is enabled, PREPENDS the localm-owned shim dir to PYTHONPATH
+      (preserving any pre-existing PYTHONPATH).
+    - ONLY for a USER'S OWN ComfyUI, pins ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES``
+      to the one device a whole-model workload should land on (REG-532).
+
+    Why the device goes in the ENV here and on the ARGV for the managed instance: for a
+    managed ComfyUI localm builds the command itself, so it passes ``--cuda-device``
+    (see ``managed_comfy_launch_cmd``). A user's own ComfyUI is started by THEIR
+    launcher - often a .bat, possibly ZLUDA-wrapped - which localm must not rewrite, so
+    the child env is the only lever. Both routes end in the same place: ComfyUI's
+    ``main.py:78-81`` does nothing with ``--cuda-device`` except set exactly these two
+    variables. Setting both mirrors what ComfyUI itself does, which matters on this
+    ZLUDA/ROCm path where CUDA is emulated over HIP. Deliberately NOT set for the
+    managed instance, so there is exactly ONE source of truth for its device (the argv)
+    rather than two that could disagree.
+
+    Nothing is pinned when the user configured no split and no main GPU:
+    ``resolve_whole_model_device()`` returns None and a plain box spawns exactly as it
+    does today, rather than being masked to an invented card (which would also hide a
+    second GPU the user later adds). Never writes anything to disk."""
     base = _amd_rocm_launch_env()
-    if not func_shim_enabled(cfg):
-        return base
+
+    device = None
+    try:
+        from localm.media.managed_comfy import managed_comfy_active
+        if not managed_comfy_active(cfg):
+            from localm.discover import resolve_whole_model_device
+            device = resolve_whole_model_device(cfg)
+    except Exception as e:
+        # Do NOT silently spawn with no device: that is the REG-532 defect (the swap
+        # gate reads combined free VRAM while the model lands on one card). We cannot
+        # fail the launch over it - that would break a working single-GPU setup - so
+        # surface it and continue exactly as before (rule 5: a note, not silence, and
+        # not an escalation).
+        from localm.debuglog import logger
+        logger.warning("could not resolve a GPU device for the ComfyUI child env "
+                       "(%s); launching without pinning one. On a multi-GPU box the "
+                       "media VRAM check may not match the card ComfyUI uses.", e)
+
+    shim_on = func_shim_enabled(cfg)
+    if not shim_on and device is None:
+        return base          # unchanged: exactly what the launch used before
     env = base if base is not None else dict(os.environ)
-    shim = str(comfy_shim_dir())
-    prev = env.get("PYTHONPATH", "")
-    # Avoid a duplicate entry if we are re-spawning a ComfyUI that already had it.
-    if prev.split(os.pathsep)[:1] == [shim]:
-        env["PYTHONPATH"] = prev
-    else:
-        env["PYTHONPATH"] = shim + (os.pathsep + prev if prev else "")
+    if shim_on:
+        shim = str(comfy_shim_dir())
+        prev = env.get("PYTHONPATH", "")
+        # Avoid a duplicate entry if we are re-spawning a ComfyUI that already had it.
+        if prev.split(os.pathsep)[:1] == [shim]:
+            env["PYTHONPATH"] = prev
+        else:
+            env["PYTHONPATH"] = shim + (os.pathsep + prev if prev else "")
+    if device is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(device)
+        env["HIP_VISIBLE_DEVICES"] = str(device)
     return env
 
 
