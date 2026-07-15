@@ -39,7 +39,15 @@
 // needs repair" state (Repair button, POST /api/comfy/repair) distinguishing
 // an abandoned setup attempt from a clean "not set up" - a stale-cached
 // client would keep showing the old dead-end Set-up-button-that-just-409s.
-const CACHE = "localm-shell-v56";
+// v57: pages/plugins.js now drives the External plugins card off the engine API
+// (/api/plugins + /api/plugins/install-external + /api/plugins/{name}/uninstall)
+// instead of the deleted /v1/plugins, which 404'd the whole card (REG-585), and
+// app/models-sidebar.js publishes the active model as soon as a load lands so
+// chat is not falsely refused for up to 30s afterwards (REG-471), and
+// pages/models.js names the alias the server actually stored (REG-562). A
+// stale-cached client would keep calling routes that no longer exist, keep the
+// false "No model loaded" refusal, and keep naming an alias that does not exist.
+const CACHE = "localm-shell-v57";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

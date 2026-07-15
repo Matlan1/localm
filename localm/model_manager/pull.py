@@ -24,7 +24,7 @@ from ._shared import PROGRESS_SENTINEL
 from ._shared import console
 from .gguf import _safe_models_filename
 from .gguf import split_gguf_parts
-from .registry import _sanitize_name
+from .registry import _detect_local_model_type, _sanitize_name
 from .registry import alias_model
 
 
@@ -263,7 +263,13 @@ def pull_model(
             else:
                 detected_type = _hf_pipeline_tag_to_type(repo_id)
                 logger.info("Auto-detected model type for %s: %s", repo_id, detected_type)
-                if detected_type == "unknown":
+                # A bare owner/repo pull is a full snapshot, and _pull_hf_snapshot
+                # gets a second, HARDER look at the config.json it downloads, so it
+                # announces the outcome itself. Saying "registering it as 'unknown'"
+                # here would be a false statement whenever that resolves the type
+                # (REG-477). Every other spec in this branch registers the probe's
+                # answer as-is, so it is announced now.
+                if detected_type == "unknown" and ":" in spec:
                     # Surface the honest result (AGENTS.md rule 5): it won't be
                     # auto-loaded for chat, but it stays runnable by name.
                     console.print(
@@ -485,7 +491,15 @@ def _pull_gguf_file(
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
-    if verify_digest and not redownload:
+    # Only meaningful when the destination IS localm's own models dir, because
+    # find_by_sha256 answers "is it in localm's REGISTRY", not "is it at the
+    # destination". With an explicit dest_dir (a ComfyUI models folder) the file
+    # is wanted THERE: skipping the download because a copy is registered
+    # elsewhere reported success while nothing reached the ComfyUI folder, and the
+    # next generate still failed with the model missing - success claimed for work
+    # not done (REG-641, AGENTS.md rule 5). Aliasing is equally wrong here: a
+    # dest_dir pull is register=False by design, so it must not touch the registry.
+    if verify_digest and not redownload and dest_dir is None:
         dups = _mm.find_by_sha256(verify_digest)
         if dups:
             action = _mm._prompt_predownload_dup(dups, model_name)
@@ -572,6 +586,49 @@ def _pull_gguf_file(
 
 
 
+def _snapshot_bytes_on_disk(dest: Path) -> int:
+    """Bytes of *dest* that a snapshot resume would not re-fetch. Excludes
+    huggingface_hub's own .cache scratch, which is not part of the model."""
+    try:
+        return sum(f.stat().st_size for f in dest.rglob("*")
+                   if f.is_file() and ".cache" not in f.parts)
+    except OSError:
+        return 0
+
+
+def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
+    """The type to register a downloaded HF snapshot under.
+
+    The pipeline_tag probe runs BEFORE the download and answers 'unknown' for any
+    repo without an exact tag (common for base and older repos). The files now on
+    disk are a HARDER signal than that API record, so when the probe could not
+    resolve, classify the real config.json with the same deterministic reader
+    ``add_local`` uses. Registering a plainly-LlamaForCausalLM repo as 'unknown'
+    hid it from GUI auto-select, the MCP EngineCache and the jobs runner even
+    though it downloaded fine (REG-477).
+
+    A probe that DID resolve (lora/vae/embedding/...) is authoritative and is
+    never overridden here, and an unresolvable config.json stays 'unknown' - this
+    fills in a gap, it does not restore the old silent 'llm' fallback.
+    """
+    if model_type != "unknown":
+        return model_type
+    detected = _detect_local_model_type(dest, is_gguf=False, is_hf=True)
+    logger.info("Snapshot %s typed %r from its downloaded config.json (the HF "
+                "pipeline_tag probe could not resolve it)", dest.name, detected)
+    if detected != "unknown":
+        console.print(f"[green]Determined model type from config.json:[/green] "
+                      f"[bold]{detected}[/bold]")
+    else:
+        # Still no hard signal even from the real files: say so (AGENTS.md rule
+        # 5). It stays runnable by name, it just is not auto-loaded for chat.
+        console.print(
+            "[yellow]Could not determine this model's type[/yellow] - "
+            "registering it as 'unknown'. Run it by name, or set its type "
+            "later: [bold]localm set-type <name> <type>[/bold]")
+    return detected
+
+
 def _pull_hf_snapshot(
     repo_id: str,
     name: Optional[str],
@@ -637,7 +694,8 @@ def _pull_hf_snapshot(
 
     if dest.exists() and _snapshot_is_complete():
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
-        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}", model_type=model_type)
+        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
+                                 model_type=_resolve_snapshot_type(dest, model_type))
         return True
 
     # Same repo already pulled under a different name?
@@ -676,7 +734,17 @@ def _pull_hf_snapshot(
                 alias_model(same_source[0], model_name)
                 return True
 
-    if not _mm._check_disk_space(_mm.MODELS_DIR, total_size):
+    def _disk_bytes() -> int:
+        return _snapshot_bytes_on_disk(dest)
+
+    # Only the bytes still MISSING need room. snapshot_download resumes on top of
+    # whatever already landed in dest, so charging the retry for the FULL repo
+    # size made recovery from a disk-full impossible: free < total refused even
+    # with ample room for the remainder, defeating the resume this preflight
+    # exists to enable (REG-514). _pull_gguf_file sums only the `missing` parts
+    # and _pull_url uses (total - already_have); match them.
+    if not _mm._check_disk_space(_mm.MODELS_DIR,
+                                 max(0, total_size - _disk_bytes())):
         return False
 
     _mm.ensure_dirs()
@@ -685,13 +753,6 @@ def _pull_hf_snapshot(
         f"-> [bold]{dest}[/bold]"
     )
     console.print("[dim]This may take a while for large models...[/dim]")
-
-    def _disk_bytes() -> int:
-        try:
-            return sum(f.stat().st_size for f in dest.rglob("*")
-                       if f.is_file() and ".cache" not in f.parts)
-        except OSError:
-            return 0
 
     try:
         with _snapshot_progress(_disk_bytes, total_size):
@@ -703,7 +764,8 @@ def _pull_hf_snapshot(
         console.print(f"[red]Download failed:[/red] {e}")
         return False
 
-    _mm._register(model_name, dest, f"hf:{repo_id}", model_type=model_type)
+    _mm._register(model_name, dest, f"hf:{repo_id}",
+                  model_type=_resolve_snapshot_type(dest, model_type))
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")
     return True
 

@@ -138,7 +138,11 @@ export async function renderCatalogPlugins() {
     `${active}/${plugins.length} plugins active` + (failed ? ` · ${failed} failed` : "");
 
   if (data.errors) {
+    // First-party errors only: an external plugin's error belongs to the
+    // External plugins card, which renders the other half of this same dict.
+    const names = new Set(plugins.map((p) => p.name));
     for (const [name, err] of Object.entries(data.errors)) {
+      if (!names.has(name)) continue;
       box.appendChild(el("div", "sub", `⚠ ${name}: ${err}`));
     }
   }
@@ -287,13 +291,29 @@ export function pluginCatalogAction(action, name) {
   }
 }
 
+/* External (third-party) plugins, from the same engine API as the catalog above:
+   /api/plugins lists every INSTALLED plugin, and an external one is simply an
+   installed plugin that is not first-party (builtin = in the bundled store or
+   the static catalog). This page used to call a separate /v1/plugins API that
+   was removed with the second plugin mechanism (REG-585); the engine is the one
+   mechanism now, exactly as `localm plugin install/uninstall` uses it. */
 export async function refreshPluginsPage() {
   const box = $("plugins-table");
   box.replaceChildren();
   try {
-    const r = await fetch("/v1/plugins", { headers: authHeaders() });
+    const r = await fetch("/api/plugins", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
-    const data = await r.json();
+    const all = await r.json();
+    const builtins = new Set((all.plugins || []).filter((p) => p.builtin)
+      .map((p) => p.name));
+    const data = {
+      plugins: (all.plugins || []).filter((p) => p.installed && !p.builtin),
+      // errors is keyed by plugin name; a broken external plugin folder is keyed
+      // by its directory name, so anything not first-party belongs to this card
+      // (the catalog card above renders the first-party half).
+      errors: Object.entries(all.errors || {})
+        .filter(([name]) => !builtins.has(name)),
+    };
     if (!data.plugins.length) {
       box.appendChild(emptyState("plugins", "No external plugins installed",
         "Install one from the catalog above to add capabilities."));
@@ -315,7 +335,7 @@ export async function refreshPluginsPage() {
         tr.appendChild(el("td", "mono", p.version));
         tr.appendChild(el("td", "", p.description));
         tr.appendChild(el("td", "mono",
-          p.tool_exports.length ? p.tool_exports.join(", ") : ""));
+          (p.tool_exports || []).length ? p.tool_exports.join(", ") : ""));
         const actions = el("td");
         actions.style.textAlign = "right";
         const rm = el("button", "danger", "remove");
@@ -323,9 +343,10 @@ export async function refreshPluginsPage() {
           confirmDanger(`Remove plugin '${p.name}'?`,
             "Its folder in the data directory's plugins/ is deleted.",
             "Remove", async () => {
-              const rr = await fetch(`/v1/plugins/${encodeURIComponent(p.name)}`, {
-                method: "DELETE", headers: authHeaders() });
-              const dd = await rr.json();
+              const rr = await fetch(
+                `/api/plugins/${encodeURIComponent(p.name)}/uninstall`,
+                { method: "POST", headers: authHeaders() });
+              const dd = await rr.json().catch(() => ({}));
               if (rr.ok) { toast(`Removed '${p.name}'`); refreshPluginsPage(); }
               else toast(dd.detail || "Remove failed", true);
             });
@@ -337,8 +358,8 @@ export async function refreshPluginsPage() {
       table.appendChild(tbody);
       box.appendChild(table);
     }
-    for (const err of data.errors) {
-      box.appendChild(el("div", "sub", "⚠ " + err));
+    for (const [name, err] of data.errors) {
+      box.appendChild(el("div", "sub", `⚠ ${name}: ${err}`));
     }
   } catch (e) {
     box.appendChild(el("div", "sub", "Could not load plugins: " + e.message));
@@ -348,11 +369,11 @@ export async function refreshPluginsPage() {
 $("plugin-install").onclick = async () => {
   const source = $("plugin-source").value.trim();
   if (!source) { toast("Enter the plugin folder path", true); return; }
-  const r = await fetch("/v1/plugins/install", {
+  const r = await fetch("/api/plugins/install-external", {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ source }),
   });
-  const data = await r.json();
+  const data = await r.json().catch(() => ({}));
   if (r.ok) {
     toast(`Installed '${data.name}' ${data.version} - restart localm gui to load its command`);
     $("plugin-source").value = "";
