@@ -293,6 +293,17 @@ class IsolatedEmbedder(VramSizingMixin):
         self._pooling_type = pooling_type
         self.dim = 0
         self._runner = None
+        # Serializes embed() below. The worker protocol has NO request-id
+        # correlation (one req_q/resp_q pair, see _embedder_runner.py's module
+        # docstring: "one command processed at a time"), so two overlapping
+        # RPCs are two threads blocked in the same resp_q.get() and the queue
+        # hands each whichever response arrives first - a caller can silently
+        # receive vectors belonging to a DIFFERENT text. This restores the
+        # serialization the pre-#643 in-process GGUFEmbedder.embed() had via
+        # its own RLock (still above), which the move to an isolated worker
+        # dropped. Costs no throughput: the single child drains req_q FIFO, so
+        # concurrent embeds were never actually parallel.
+        self._rpc_lock = threading.RLock()
         # In-flight embed() calls, mirroring Engine.active_requests - checked by
         # http_server.py's unload/shutdown/restart paths (via active_requests()
         # below) before releasing this embedder, exactly like a pinned chat
@@ -354,20 +365,27 @@ class IsolatedEmbedder(VramSizingMixin):
 
         Pinned via ``active_requests`` for the whole call (including a
         respawn), not just the RPC itself - a ``reset_embedder()`` arriving
-        mid-respawn would free the very runner this call is about to use."""
+        mid-respawn would free the very runner this call is about to use.
+
+        Serialized on ``_rpc_lock`` (see __init__): the respawn check and the
+        RPC together, so concurrent callers can neither swap responses on the
+        correlation-free queue pair nor both respawn and orphan a worker. The
+        pin is taken BEFORE the lock, so a caller merely queued behind another
+        still counts as in-flight and keeps this embedder from being freed."""
         self.active_requests += 1
         try:
-            if self._runner is None or not self._runner.is_alive():
-                logger.warning("embedder worker is not running; reloading %s",
-                               self.model_path)
-                self._reload()
-            try:
-                return self._runner.embed(list(texts))
-            except RuntimeError:
-                logger.exception(
-                    "embedding worker fault; it will reload on the next call")
-                self._runner = None
-                raise
+            with self._rpc_lock:
+                if self._runner is None or not self._runner.is_alive():
+                    logger.warning("embedder worker is not running; reloading %s",
+                                   self.model_path)
+                    self._reload()
+                try:
+                    return self._runner.embed(list(texts))
+                except RuntimeError:
+                    logger.exception(
+                        "embedding worker fault; it will reload on the next call")
+                    self._runner = None
+                    raise
         finally:
             self.active_requests = max(0, self.active_requests - 1)
 
