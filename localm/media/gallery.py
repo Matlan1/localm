@@ -63,7 +63,20 @@ def _read_index(media_kind: str) -> dict:
             "closed - denying non-owner access to %s media until it is repaired, "
             "rather than treating every artifact as unowned", p, e, media_kind)
         raise GalleryIndexUnreadable(str(p)) from e
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        # Whether json.loads() SUCCEEDED is an implementation detail, not the
+        # security property. A file that parses to a list/null/scalar is still
+        # "exists but is not a usable owner map", so it fails closed exactly
+        # like a truncated one: returning {} here would make owner_of() report
+        # every artifact unowned -> job_owner_ok() -> unrestricted, which is
+        # the very fail-open this function exists to prevent.
+        from localm.debuglog import logger
+        logger.warning(
+            "gallery ownership index %s parsed as %s, not an object; failing "
+            "closed - denying non-owner access to %s media until it is repaired",
+            p, type(data).__name__, media_kind)
+        raise GalleryIndexUnreadable(str(p))
+    return data
 
 
 def _write_index(media_kind: str, data: dict) -> None:

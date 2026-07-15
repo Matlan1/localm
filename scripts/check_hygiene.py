@@ -309,6 +309,126 @@ _RAW_ACCESSOR_GUARDS = {
 }
 
 
+# A test may not allocate this much real disk in one call. 100 MB is far above
+# any legitimate fixture (the biggest honest one in the tree is a 2 MB split-part
+# pair) and far below the GB-scale sizes that caused the incident.
+_MAX_TEST_FILE_BYTES = 100_000_000
+
+
+def _const_bytes(node: ast.AST) -> "int | None":
+    r"""Byte size of a literal size expression, or None when not resolvable.
+
+    A deliberately tiny constant-folder rather than ast.literal_eval: it needs to
+    understand only the shapes a size argument actually takes - `9_000_000_000`,
+    `b"\0" * 4096`, `2 * 1024 ** 3` - and folding them explicitly keeps this
+    guard free of any eval-family call.
+    """
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool):
+            return None
+        if isinstance(node.value, int):
+            return node.value
+        if isinstance(node.value, (bytes, str)):
+            return len(node.value)
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Pow)):
+        left = _const_bytes(node.left)
+        right = _const_bytes(node.right)
+        if left is None or right is None:
+            return None
+        try:
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if right > 64 or left > 1 << 20:
+                return None          # refuse a silly exponent, never hang the gate
+            return left ** right
+        except (OverflowError, ValueError):
+            return None
+    return None
+
+
+def _big_test_write_violations(files: list[Path]) -> list[str]:
+    r"""Fail when a TEST allocates >= _MAX_TEST_FILE_BYTES of real disk.
+
+    Why this is a gate and not a comment: truncate() is NOT sparse on Windows/NTFS
+    (measured: one truncate(2GB) consumes 1.61 GB for real), and pytest gives each
+    test its own tmp_path, keeps the last 3 basetemps, and xdist multiplies that by
+    the worker count. Two test files doing this quietly allocated ~17.5 GB per pass
+    -> ~315 GB across a real -n 6 run, filled D: to 99.5% (9 GB free of 1863), and
+    crashed the box (2026-07-15). test_auto_gpu_layers.py had carried a "NEVER
+    truncate() to GB sizes here" comment since an earlier incident; the comment did
+    not stop two OTHER files from doing exactly that, which is the whole argument
+    for enforcing it mechanically (AGENTS.md "enforce, don't just document").
+
+    The fix a violation wants is never "write fewer bytes" - it is to stop writing
+    them at all: create a tiny real file and FAKE the size the code reads back
+    (`b._model_bytes = lambda: size_bytes`), the pattern test_auto_gpu_layers.py,
+    test_vram_preflight.py and test_kv_bytes_offload.py all use now.
+
+    Two shapes are caught:
+      1. a direct literal:            fh.truncate(9_000_000_000)
+      2. a helper truncating a NAME (`fh.truncate(size_bytes)`) that is CALLED
+         with a big literal anywhere in the same module - the exact shape that hid
+         both real offenders behind an innocent-looking helper.
+    """
+    problems = []
+    for path in files:
+        if path.suffix != ".py":
+            continue
+        rel = path.relative_to(REPO).as_posix()
+        if not (rel.startswith("tests/") or "/tests/" in rel):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (UnicodeDecodeError, OSError, SyntaxError) as e:
+            # Not silently skipped: an unscanned file must never read as clean.
+            problems.append(f"{rel}: could not parse for the big-write guard ({e})")
+            continue
+
+        truncates_a_name = False
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            fname = node.func.attr
+            if fname not in ("truncate", "write_bytes") or not node.args:
+                continue
+            size = _const_bytes(node.args[0])
+            if size is not None and size >= _MAX_TEST_FILE_BYTES:
+                problems.append(
+                    f"{rel}:{node.lineno}: {fname}() allocates {size/1e9:.2f} GB of "
+                    f"REAL disk (truncate/write is NOT sparse on NTFS). Write a tiny "
+                    f"real file and fake the size the code reads back instead - see "
+                    f"test_auto_gpu_layers.py's _model()."
+                )
+            elif size is None and fname == "truncate" and isinstance(node.args[0], ast.Name):
+                truncates_a_name = True
+
+        if not truncates_a_name:
+            continue
+        # A helper truncates a variable: any big literal handed to a size-ish
+        # kwarg or default in this module reaches real disk through it.
+        for node in ast.walk(tree):
+            for kw in getattr(node, "keywords", None) or []:
+                if kw.arg not in ("size", "size_bytes", "n_bytes"):
+                    continue
+                size = _const_bytes(kw.value)
+                if size is not None and size >= _MAX_TEST_FILE_BYTES:
+                    problems.append(
+                        f"{rel}:{kw.value.lineno}: {kw.arg}={size/1e9:.2f} GB is passed "
+                        f"to a helper that truncate()s it to real disk. Fake the size "
+                        f"instead of allocating it."
+                    )
+            if isinstance(node, ast.arguments):
+                for d in node.defaults:
+                    size = _const_bytes(d)
+                    if size is not None and size >= _MAX_TEST_FILE_BYTES:
+                        problems.append(
+                            f"{rel}:{d.lineno}: a default size of {size/1e9:.2f} GB is "
+                            f"truncate()d to real disk. Fake the size instead."
+                        )
+    return problems
+
+
 def _raw_accessor_violations(files: list[Path]) -> list[str]:
     problems = []
     for name, spec in _RAW_ACCESSOR_GUARDS.items():
@@ -482,6 +602,7 @@ def main(argv: list[str]) -> int:
         problems.extend(_scan(f))
     problems.extend(_changelog_append_only())
     problems.extend(_raw_accessor_violations(tracked))
+    problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_bump_violations())
     manifest = _manifest_problems()
     if problems or manifest:
