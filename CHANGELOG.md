@@ -97,6 +97,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   conversation you resumed later could be summarised again, leaving several
   overlapping partial memories of the same session. Each conversation now waits
   until it is finished and keeps a single summary, updated to cover the whole thing.
+- **The coder's episodic memory no longer occasionally drops a lesson on
+  Windows.** A GUI poll reading past lessons could race a session-close write
+  saving a new one, and on Windows a save or read could briefly fail with the
+  file busy. The retry that already handled this could still be exhausted by
+  real contention (a loaded machine, antivirus scanning the file), causing a
+  rare, hard-to-reproduce miss. It now retries for much longer with backoff, so
+  it survives realistic delays while still failing loudly if the file is
+  genuinely stuck.
 - **Picking a Main GPU no longer stops large transformers models from loading.**
   With a Main GPU selected, localm pinned the whole model onto that one card, so a
   transformers model bigger than its free memory failed with an out-of-memory error
