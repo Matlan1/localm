@@ -80,6 +80,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   including a real PPPoE internet link, or a network card with an unlucky name -
   was mistaken for a VPN, so its address was left out and browsers reaching localm
   there reported a certificate mismatch. Real VPN adapters are still excluded.
+- **Privacy mode no longer lets a remembered fact reach the debug log.** If you ran
+  in privacy mode with the debug log on for troubleshooting, and the embedding model
+  hiccuped while saving a memory, a snippet of that memory - a fact about you, or a
+  summary of your conversations - was written into the log file on disk. Privacy mode
+  now withholds it, as it already did everywhere else. The failure itself is still
+  reported, so the problem is not hidden, just the content.
+- **Chat no longer pauses on every turn that uses a memory.** Each reply that recalled
+  a fact re-read and rewrote the whole memory store, including its embedding file, on
+  the server's main thread - so with a large memory the entire server (every chat, every
+  progress update) stalled briefly on each turn. That work now happens off to the side.
+  It also means loading the embedding model can free up video memory properly instead of
+  squeezing in alongside the chat model.
 - **A long prompt on a slow setup is no longer killed as "stalled".** Replies that
   needed more than two minutes to read the prompt before writing their first word -
   common when running on CPU, with most layers off the GPU, or with a very long
