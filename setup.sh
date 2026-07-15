@@ -26,6 +26,20 @@ say() { printf '%s\n' "$*"; }
 ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes mode)
   local prompt="$1" def="$2" ans
   if [ "$YES" = 1 ]; then echo "$def"; return; fi
+  # Drop any TYPE-AHEAD before showing this question. Setup runs long steps
+  # between questions (a uv download, a Python download, a venv build, a model
+  # pull); anything typed while one of those runs sits in the terminal's input
+  # queue and is delivered to the NEXT read - answering a question the user never
+  # saw. One stray Enter silently accepts a default, and a double Enter accepts
+  # two questions in a row. Every answer must be one the user actually gave to the
+  # question in front of them.
+  #
+  # Only when stdin is a TERMINAL: piped input is deliberate (a script feeding
+  # answers), and draining it would eat the caller's real answers. --yes returns
+  # above and never reaches here.
+  if [ -t 0 ]; then
+    while read -r -t 0.05 -n 4096 _typeahead 2>/dev/null; do :; done
+  fi
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
