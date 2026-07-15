@@ -56,14 +56,19 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
 def test_do_restart_releases_embedder(monkeypatch):
     """The shared embedder (localm.inference.embedder) is a separate lifecycle
     from _engines - it was previously never released before a restart's
-    re-exec, leaking its native VRAM/RAM allocation across the restart."""
+    re-exec, leaking its native VRAM/RAM allocation across the restart.
+
+    Released via release_for_exit(), NOT reset_embedder(): the latter takes the
+    embedder's load lock, which get_embedder() holds for a whole model load, so
+    a restart issued mid-load blocked here and never reached the teardown at
+    all. See tests/test_embedder_worker_reaped_on_exit.py for that contract."""
     from localm.inference import embedder as emb
 
     def _fake_relaunch(exe, argv):
         raise SystemExit(0)
 
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+    monkeypatch.setattr(emb, "release_for_exit", lambda: (calls.append(1), True)[1])
     monkeypatch.setattr(http_server, "_engine", None)
     monkeypatch.setattr(os, "execv", _fake_relaunch)
 

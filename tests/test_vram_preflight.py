@@ -10,11 +10,27 @@ from localm.inference.backends.gguf import GgufBackend
 
 
 def _backend(tmp_path, size_bytes=80_000_000, n_gpu_layers=99, n_ctx=4096):
+    # A tiny REAL file (so is_file()/stat work) with the "on disk" size FAKED via
+    # _model_bytes, the same pattern test_auto_gpu_layers.py uses.
+    #
+    # This used to `truncate(size_bytes)` under the comment "Sparse-ish: just
+    # truncate to size without writing real bytes". That comment was WRONG:
+    # truncate() is NOT sparse on Windows/NTFS and allocates the full size for
+    # real (memory: windows-truncate-not-sparse). Measured on this box: one
+    # truncate(2GB) consumed 1.61 GB. This helper is called 17x per pass
+    # including two 9 GB models (~18.9 GB per pass), each in its own tmp_path,
+    # times the xdist workers, times pytest's retention of the last 3 basetemps.
+    # That is what filled D: to 99.5% and crashed the box (2026-07-15).
+    #
+    # Nothing here needs the bytes to exist: every caller only exercises the
+    # preflight DECISION, which reads the size back through _model_bytes().
+    # (test_model_bytes_sums_split_parts builds its own real files and is
+    # deliberately untouched - it tests the real stat-summing path at 1 MB.)
     f = tmp_path / "model.gguf"
-    # Sparse-ish: just truncate to size without writing real bytes
-    with open(f, "wb") as fh:
-        fh.truncate(size_bytes)
-    return GgufBackend(str(f), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    f.write_bytes(b"\0" * 4096)
+    b = GgufBackend(str(f), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    b._model_bytes = lambda: size_bytes
+    return b
 
 
 @pytest.fixture(autouse=True)

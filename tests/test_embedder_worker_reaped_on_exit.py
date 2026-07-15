@@ -29,6 +29,7 @@ real exit.
 from __future__ import annotations
 
 import os
+import threading
 
 import pytest
 
@@ -59,8 +60,8 @@ def _isolated_embedder_with(runner, *, active):
 # The real property: a REAL worker process is actually dead afterwards.
 # --------------------------------------------------------------------------- #
 
-def test_reap_worker_for_exit_kills_a_real_busy_worker_process():
-    """The reaper must terminate the real child. Uses a REAL spawned worker
+def test_release_for_exit_kills_a_real_busy_worker_process():
+    """The release must terminate the real child. Uses a REAL spawned worker
     (as the crash-containment tests do) and asserts on real process liveness,
     not on a call being recorded."""
     runner = EmbedderRunner()
@@ -72,23 +73,60 @@ def test_reap_worker_for_exit_kills_a_real_busy_worker_process():
         # skipped the release entirely and leaked this process.
         emb._EMBEDDER = _isolated_embedder_with(runner, active=1)
 
-        assert emb.reap_worker_for_exit() is True
+        assert emb.release_for_exit() is True
         proc.join(timeout=10)
         assert not proc.is_alive(), (
-            "the embedder worker survived the reap and would outlive an "
+            "the embedder worker survived the release and would outlive an "
             "os._exit/os.execv as a VRAM-resident zombie")
     finally:
         runner.shutdown(grace=0)
 
 
-def test_reap_worker_for_exit_is_safe_with_no_embedder():
+def test_release_for_exit_never_takes_the_load_lock():
+    """The whole point of this function (REG-650 follow-up): every other way to
+    make the release decision - active_requests(), reset_embedder() - takes
+    _LOCK, which get_embedder() holds for the FULL duration of an embedding-model
+    load. A stop or restart during a load must not block on it.
+
+    Holds _LOCK from another thread (exactly as an in-progress load does) and
+    requires the release to complete anyway."""
+    runner = _RecordingRunner()
+    emb._EMBEDDER = _isolated_embedder_with(runner, active=1)
+    released = []
+    holding = threading.Event()
+    finished = threading.Event()
+
+    def _hold_lock_like_a_load():
+        with emb._LOCK:
+            holding.set()
+            finished.wait(10)          # a real load holds this for its whole run
+
+    t = threading.Thread(target=_hold_lock_like_a_load, daemon=True)
+    t.start()
+    try:
+        assert holding.wait(5), "helper never took _LOCK"
+        caller = threading.Thread(target=lambda: released.append(emb.release_for_exit()))
+        caller.start()
+        caller.join(5)
+        assert not caller.is_alive(), (
+            "release_for_exit blocked on the embedder load lock: a stop or "
+            "restart issued during an embedding-model load would hang here and "
+            "never reach the worker teardown, leaking the worker (REG-650)")
+        assert released == [True]
+        assert runner.shutdown_calls == [0], "a busy worker must not be waited on"
+    finally:
+        finished.set()
+        t.join(5)
+
+
+def test_release_for_exit_is_safe_with_no_embedder():
     emb._EMBEDDER = None
-    assert emb.reap_worker_for_exit() is False
+    assert emb.release_for_exit() is False
 
 
-def test_reap_worker_for_exit_is_safe_with_no_runner():
+def test_release_for_exit_is_safe_with_no_runner():
     emb._EMBEDDER = _isolated_embedder_with(None, active=1)
-    assert emb.reap_worker_for_exit() is False
+    assert emb.release_for_exit() is False
 
 
 # --------------------------------------------------------------------------- #
@@ -108,11 +146,56 @@ def pinned(monkeypatch):
     """A pinned embedder (mid-embed) whose worker teardown is observable."""
     runner = _RecordingRunner()
     monkeypatch.setattr(emb, "_EMBEDDER", _isolated_embedder_with(runner, active=1))
-    monkeypatch.setattr(emb, "active_requests", lambda: 1)
     monkeypatch.setattr(hs, "_engine", None)
     reset_calls = []
     monkeypatch.setattr(emb, "reset_embedder", lambda: reset_calls.append(1))
     return runner, reset_calls
+
+
+def test_stop_during_an_embedder_load_does_not_hang(monkeypatch):
+    """The exit path must never block on the embedder's load lock.
+
+    get_embedder() holds _LOCK for a whole embedding-model load. The release
+    guard used to be `if active_requests() == 0`, and active_requests() takes
+    _LOCK - so a stop issued mid-load blocked on the guard, hung the shutdown the
+    user asked for, and never reached the worker teardown (leaking exactly the
+    VRAM-resident worker REG-650 fixed). Note _EMBEDDER is still None mid-load,
+    so the idle branch's reset_embedder() - which also takes _LOCK - was the one
+    taken.
+    """
+    monkeypatch.setattr(hs, "_engine", None)
+    monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    holding = threading.Event()
+    finished = threading.Event()
+
+    def _hold_lock_like_a_load():
+        with emb._LOCK:
+            holding.set()
+            finished.wait(10)
+
+    t = threading.Thread(target=_hold_lock_like_a_load, daemon=True)
+    t.start()
+    done = []
+
+    def _stop():
+        try:
+            hs._do_shutdown()
+        except SystemExit:
+            done.append("exited")
+
+    try:
+        assert holding.wait(5), "helper never took _LOCK"
+        s = threading.Thread(target=_stop, daemon=True)
+        s.start()
+        s.join(8)
+        assert not s.is_alive(), (
+            "_do_shutdown blocked while an embedding-model load held the "
+            "embedder lock: the stop hangs and never reaches the worker "
+            "teardown (REG-650)")
+        assert done == ["exited"]
+    finally:
+        finished.set()
+        t.join(5)
 
 
 def test_do_shutdown_reaps_the_pinned_embedder_worker(pinned, monkeypatch):
@@ -145,19 +228,20 @@ def test_do_restart_reaps_the_pinned_embedder_worker(pinned, monkeypatch):
         "restarted server then spawns a SECOND worker beside the orphan")
 
 
-def test_idle_embedder_still_uses_the_graceful_reset(monkeypatch):
-    """The unpinned path is unchanged: a clean reset_embedder(), which closes the
-    model in the child rather than hard-killing it."""
+def test_idle_embedder_is_closed_politely(monkeypatch):
+    """An IDLE worker still gets the polite shutdown command (so the child frees
+    the model cleanly), just without taking the load lock: the exiting process
+    has no use for reset_embedder()'s singleton clearing, and reaching for it is
+    what made this path able to hang (see test_stop_during_an_embedder_load_
+    does_not_hang)."""
     runner = _RecordingRunner()
     monkeypatch.setattr(emb, "_EMBEDDER", _isolated_embedder_with(runner, active=0))
-    monkeypatch.setattr(emb, "active_requests", lambda: 0)
     monkeypatch.setattr(hs, "_engine", None)
-    reset_calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: reset_calls.append(1))
     monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
     with pytest.raises(SystemExit):
         hs._do_shutdown()
 
-    assert reset_calls == [1]
-    assert runner.shutdown_calls == [], "no hard reap needed when nothing is in flight"
+    assert runner.shutdown_calls == [5.0], (
+        "an idle worker should be asked to close cleanly, not hard-killed: "
+        f"{runner.shutdown_calls}")

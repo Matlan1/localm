@@ -169,6 +169,51 @@ def test_peer_on_a_different_gpu_is_not_yanked(coordinated, monkeypatch):
     assert calls == [], f"a peer on another GPU was yanked: {calls}"
 
 
+def test_split_instance_still_asks_a_peer_on_its_other_split_device(
+        coordinated, monkeypatch):
+    """The same-GPU filter must offer EVERY device this load can actually use,
+    not one scalar index.
+
+    With gpu_split_indices=[0,1] and main_gpu_index unset, _current_gpu_index()
+    resolves to 0 (resolve_main_gpu_index(None) -> device 0, no detection). A
+    sibling pinned to GPU 1 advertises gpu_index=1. But the free figure this
+    decision weighs is vram_capacity()'s COMBINED split total, so part of the
+    shortfall IS on GPU 1 and freeing that peer is exactly what makes the load
+    fit. Comparing peers against a single index while comparing VRAM against the
+    combined total contradicts itself: the peer was dropped, holders went empty,
+    and the load 503'd where it used to succeed.
+    """
+    from localm.config import load_config as real_load_config
+    base = real_load_config()
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {**base, "gpu_split_indices": [0, 1]})
+    monkeypatch.setattr("localm.discover.list_gpus", lambda: [
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 1 * GB},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 1 * GB},
+    ])
+    peer = {"instance_id": "peer-1", "port": 8082, "model": "big",
+            "vram_estimate_bytes": 12 * GB, "gpu_index": 1,
+            "coordination_token": "x"}
+    freed = {"yes": False}
+
+    def _on_request(p):
+        freed["yes"] = True
+        return True
+
+    calls = _install_peers(monkeypatch, [peer], _on_request)
+    monkeypatch.setattr(
+        "localm.discover.vram_capacity",
+        lambda config=None: {"free": (14 * GB) if freed["yes"] else (2 * GB),
+                             "total": 32 * GB})
+
+    engines = {"incoming": FakeEngine("incoming")}
+    res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__))
+    assert calls == ["peer-1"], (
+        "a peer holding VRAM on one of THIS instance's own split devices was "
+        f"dropped by the same-GPU filter, so the split load never cooperated: {calls}")
+    assert res["status"] == "loaded", res
+
+
 def test_cooperation_still_happens_when_it_can_actually_free_enough(
         coordinated, monkeypatch):
     """The feature must still work: a peer holding enough IS asked, and once it

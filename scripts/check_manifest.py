@@ -311,6 +311,18 @@ def check_manifest(repo: Path = REPO, manifest: Path = MANIFEST) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    # This entry point PRINTS A VERDICT, so it must never report "passed"
+    # without having scanned anything. check_manifest() returns [] both when the
+    # repo is genuinely clean AND when git is unavailable (its documented library
+    # silence - the in-process callers in build_release.py translate that None
+    # into their own hard error, so [] can never green-light a build). Here there
+    # is no such caller: "Release manifest check passed." after classifying ZERO
+    # files is a false clean, exactly what AGENTS.md rule 5 forbids of a gate.
+    if tracked_files() is None:
+        print("Release manifest check could not run: 'git ls-files' failed (git "
+              "missing, or this is not a checkout) - NOTHING was scanned, so this "
+              "is not a pass.", file=sys.stderr)
+        return 1
     try:
         problems = check_manifest()
     except (FileNotFoundError, ValueError, RuntimeError) as e:

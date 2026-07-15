@@ -16,6 +16,7 @@ import json
 import time as _time
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -225,16 +226,23 @@ class TestGalleryIndexReadContract:
         with pytest.raises(gallery.GalleryIndexUnreadable):
             gallery.owner_of("image", "x.png")
 
-    def test_non_dict_json_is_treated_as_empty(self, tmp_path, monkeypatch):
-        # Valid JSON that is not an object (e.g. a list) is not "corrupt" in the
-        # security sense - it parses - so it stays the empty/open case, matching
-        # the pre-fix `isinstance(data, dict)` guard.
+    @pytest.mark.parametrize("body", ["[1, 2, 3]", "null", '"x"', "42"])
+    def test_non_dict_json_fails_closed(self, tmp_path, monkeypatch, body):
+        # An index that PARSES but is not an object is still "exists but is not
+        # a usable owner map", so it must fail closed like a truncated one.
+        # Whether json.loads() succeeded is an implementation detail, not the
+        # security property: returning {} here would make owner_of() report every
+        # artifact unowned -> job_owner_ok() -> UNRESTRICTED, reopening HON-01
+        # through a differently-shaped corruption.
         self._home(tmp_path, monkeypatch)
         from localm.media import gallery
         p = gallery._index_path("image")
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("[1, 2, 3]", encoding="utf-8")
-        assert gallery._read_index("image") == {}
+        p.write_text(body, encoding="utf-8")
+        with pytest.raises(gallery.GalleryIndexUnreadable):
+            gallery._read_index("image")
+        with pytest.raises(gallery.GalleryIndexUnreadable):
+            gallery.owner_of("image", "x.png")
 
     def test_atomic_write_roundtrip_leaves_no_temp(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)

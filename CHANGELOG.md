@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Choose how your embedding model is pooled.** Settings > Models has a new
+  Embedding pooling option. The default (`mean`) suits the bundled `bge-small`
+  and `nomic` choices and matches everything you have already indexed, so nothing
+  changes unless you want it to. If you point `embedding_model` at a
+  decoder-based embedder such as Qwen3-Embedding, which is built for `last`-token
+  pooling, localm now warns you that it is being pooled the wrong way and names
+  the setting that fixes it, instead of silently giving you weaker embeddings.
+  Changing the setting means re-indexing, since existing vectors were built the
+  old way.
 - **Offer to download a missing Flux model file.** When Image/Video/Music
   generation detects a missing ComfyUI model file that has a known-good source
   (currently the Flux UNET, text encoders, and VAE), it now offers to download
@@ -68,6 +77,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Picking a Main GPU no longer stops large transformers models from loading.**
+  With a Main GPU selected, localm pinned the whole model onto that one card, so a
+  transformers model bigger than its free memory failed with an out-of-memory error
+  even though it used to load (more slowly) by keeping part of it in system memory.
+  It now still uses only the card you picked, but falls back to system memory for
+  whatever does not fit, as it did before. The same fallback was restored for a
+  configured multi-GPU split.
 - **A failing command no longer reports success.** Certain real failures (reading a
   folder where a file was expected, an invalid path, some native calls) were
   mistaken for "the output pipe closed", so localm exited quietly with a success
@@ -80,6 +96,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   including a real PPPoE internet link, or a network card with an unlucky name -
   was mistaken for a VPN, so its address was left out and browsers reaching localm
   there reported a certificate mismatch. Real VPN adapters are still excluded.
+- **Privacy mode no longer lets a remembered fact reach the debug log.** If you ran
+  in privacy mode with the debug log on for troubleshooting, and the embedding model
+  hiccuped while saving a memory, a snippet of that memory - a fact about you, or a
+  summary of your conversations - was written into the log file on disk. Privacy mode
+  now withholds it, as it already did everywhere else. The failure itself is still
+  reported, so the problem is not hidden, just the content.
+- **Chat no longer pauses on every turn that uses a memory.** Each reply that recalled
+  a fact re-read and rewrote the whole memory store, including its embedding file, on
+  the server's main thread - so with a large memory the entire server (every chat, every
+  progress update) stalled briefly on each turn. That work now happens off to the side.
+  It also means loading the embedding model can free up video memory properly instead of
+  squeezing in alongside the chat model.
 - **A long prompt on a slow setup is no longer killed as "stalled".** Replies that
   needed more than two minutes to read the prompt before writing their first word -
   common when running on CPU, with most layers off the GPU, or with a very long
@@ -138,15 +166,33 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it exited with an error and repaired nothing, on exactly the stale indexes it
   exists to rebuild. It now keeps the embeddings and repairs, telling you it did.
   Pass `--yes` to drop them instead, or `--embed` to recompute them.
+- **Document search no longer embeds with the chat model itself.** If you ran a
+  HuggingFace-format model, localm quietly made embeddings out of the chat model
+  rather than the small dedicated embedding model, even when you had one
+  installed. Those vectors look perfectly healthy but barely tell related text
+  from unrelated (on one 0.5B chat model the *most unrelated* pair we tested
+  scored higher than the *least related* one), so document (Knowledge/RAG) search
+  and the `/v1/embeddings` API silently returned worse results with nothing to
+  indicate it. localm now uses your installed embedding model, and when none is
+  installed it says so and falls back to keyword search instead of handing back
+  unusable vectors. GGUF models, the default, were never affected, and neither
+  was chat memory.
 - **A model you switched away from mid-load can be used again.** If you picked a
   model and then quickly picked a different one, the first model could be left
   permanently unusable: every later message to it failed with "Model load was
   superseded by a newer request", even though nothing was loading any more, until
   you explicitly switched to it again. It now loads normally.
 - **Stopping or restarting while knowledge is indexing no longer leaves a model
-  stuck in GPU memory.** The embedding helper could survive the restart as an
-  orphan still holding its model in VRAM, so a restarted server ran a second copy
-  beside it and "Stop" did not actually free everything. Both now release it.
+  stuck in GPU memory, or hangs.** The embedding helper could survive the restart as
+  an orphan still holding its model in VRAM, so a restarted server ran a second copy
+  beside it and "Stop" did not actually free everything. Both now release it - and
+  stopping while an embedding model is still loading no longer waits on that load
+  before it can finish.
+- **An embedding error no longer strands a helper in GPU memory.** If embedding a
+  single piece of text failed, localm dropped its still-running embedding helper
+  instead of reusing it: the helper kept your embedding model in GPU memory with
+  nothing able to reach it, and the next request started a second one alongside. It
+  now keeps the working helper, and only replaces one that has actually gone.
 - **The app stays responsive while models load and unload.** On a multi-GPU setup
   with a specific main GPU selected, each load or unload could briefly freeze every
   other request (up to a few seconds) while it wrote coordination state and probed
@@ -155,7 +201,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instances share a GPU, one could ask the other to drop every model it had loaded
   even when that could not possibly free enough room, and could keep re-asking in a
   loop that never finished. It now only asks when it would actually help, and asks
-  each instance once.
+  each instance once. On a multi-GPU split it correctly counts every card the split
+  uses, so a model that needs both cards still gets the room it needs instead of
+  failing with "VRAM exhausted".
 - **An empty `auth.key` no longer locks you out of your own server.** If an
   `auth.key` file existed but held no key - you created it by hand to paste a key
   in later, an editor or PowerShell saved it empty, or a backup left it truncated

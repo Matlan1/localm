@@ -689,3 +689,36 @@ class TestRealBuild:
         assert (root / "VERSION").read_text(encoding="utf-8").strip()
         klass = updater.classify(root, REPO_ROOT)
         assert klass in updater._ORDER   # a valid update class, no exception
+
+
+# ---- HONESTY: the STANDALONE gate must FAIL when it classified nothing ----
+# check_manifest() returns [] both when the repo is genuinely clean AND when git
+# is unavailable (its documented library silence - build_release.py turns that
+# None into its own hard error, so [] can never green-light a build). main() has
+# no such caller: it PRINTS A VERDICT, so "Release manifest check passed." after
+# scanning ZERO files is a false clean. Twin of test_check_hygiene.py's
+# "HONESTY FIX #3" block, which covered the parent gate but not this entry point.
+
+class TestStandaloneGateDoesNotPassWithoutScanning:
+    def test_main_fails_loud_when_git_is_unavailable(self, monkeypatch, capsys):
+        """NEGATIVE: git unusable -> main() must be non-zero and must NOT print
+        'passed'. Before the fix this printed 'Release manifest check passed.'
+        and returned 0 having classified nothing."""
+        monkeypatch.setattr(cm, "tracked_files", lambda *a, **k: None)
+        rc = cm.main([])
+        out = capsys.readouterr()
+        assert rc == 1
+        assert "passed" not in out.out.lower()
+        assert "nothing was scanned" in out.err.lower()
+
+    def test_library_keeps_its_documented_silence(self, monkeypatch):
+        """POSITIVE (do not over-escalate): the LIBRARY contract is unchanged -
+        check_manifest() still returns [] when git is unavailable, because
+        build_release.py relies on that and fails loud on its own."""
+        monkeypatch.setattr(cm, "tracked_files", lambda *a, **k: None)
+        assert cm.check_manifest() == []
+
+    @pytest.mark.integration
+    def test_main_still_passes_on_the_real_checkout(self):
+        """The happy path must be untouched by the fail-loud guard."""
+        assert cm.main([]) == 0

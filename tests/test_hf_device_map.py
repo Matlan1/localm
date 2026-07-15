@@ -12,6 +12,8 @@ and tests/test_discover.py."""
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from localm.inference.backends.hf import _cuda_device_map
 
 _HEADROOM = int(0.5e9)   # must match the headroom baked into _cuda_device_map
@@ -60,27 +62,69 @@ class TestNoSplitNoMainGpu:
 
 
 class TestMainGpuIndexOnly:
-    """main_gpu_index configured, no split -> pin the whole model to that one
-    resolved device."""
+    """main_gpu_index configured, no split -> confine the model to that ONE
+    device, WITHOUT losing device_map="auto"'s CPU-offload fallback (REG-528).
 
-    def test_pins_whole_model_to_resolved_device(self, monkeypatch):
+    The regression: this branch returned device_map={"": idx}, a literal map that
+    puts the whole model on idx - accelerate infers nothing and offloads nothing,
+    so an HF model bigger than that card's free VRAM raises CUDA out-of-memory at
+    load where "auto" previously sharded and offloaded the overflow to CPU/disk.
+    The GGUF backend it claims to mirror does not regress this way (n_gpu_layers
+    is auto-sized to free VRAM and llama.cpp keeps the rest on CPU), so the
+    "parity fix" actually removed HF's graceful degradation.
+
+    Confining "auto" to a device subset via max_memory is the same technique the
+    split branch below already uses; a "cpu" entry is what keeps the overflow
+    landing on CPU. Verified against the real accelerate.infer_auto_device_map:
+    with {0: small} alone the overflow goes to "disk" (which then needs an
+    offload_folder); with {0: small, "cpu": N} it goes to CPU, exactly as plain
+    "auto" does (get_max_memory() populates a "cpu" entry itself, but ONLY when
+    the caller passes no max_memory at all).
+    """
+
+    def test_confines_to_resolved_device_but_keeps_cpu_offload(self, monkeypatch):
         monkeypatch.setattr(
             "localm.discover.list_gpus", lambda: [{"index": 0}, {"index": 1}])
-        result = _cuda_device_map(_fake_torch(), config={"main_gpu_index": 1})
-        assert result == {"device_map": {"": 1}}
+        mem = {1: (8_000_000_000, 16_000_000_000)}
+        result = _cuda_device_map(_fake_torch(mem), config={"main_gpu_index": 1})
+
+        assert result["device_map"] == "auto", (
+            "a literal {'': idx} map disables accelerate's sharding/offload "
+            "entirely, so an oversized model OOMs instead of loading")
+        # Only the chosen GPU is offered: every other card is absent from
+        # max_memory, which is what confines "auto" to it.
+        assert [k for k in result["max_memory"] if isinstance(k, int)] == [1]
+        assert result["max_memory"][1] == 8_000_000_000 - _HEADROOM
+        assert result["max_memory"].get("cpu", 0) > 0, (
+            "without a cpu budget accelerate sends the overflow to disk, which "
+            "needs an offload_folder - the CPU fallback 'auto' gave is gone")
 
     def test_invalid_main_gpu_index_falls_back_to_resolved_zero(self, monkeypatch, caplog):
         # resolve_main_gpu_index is the REAL function: index 7 isn't among the
         # detected devices, so it drops to 0 with a warning - _cuda_device_map
-        # must pin to whatever resolve_main_gpu_index actually RETURNS, not the
-        # raw configured value. Pin non-Vulkan so that membership validation
+        # must confine to whatever resolve_main_gpu_index actually RETURNS, not
+        # the raw configured value. Pin non-Vulkan so that membership validation
         # actually runs, regardless of what native backend is provisioned in
         # the ambient environment (see test_discover.py::TestResolveMainGpuIndex).
         monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
+        mem = {0: (8_000_000_000, 16_000_000_000)}
         with caplog.at_level("WARNING", logger="localm"):
-            result = _cuda_device_map(_fake_torch(), config={"main_gpu_index": 7})
-        assert result == {"device_map": {"": 0}}
+            result = _cuda_device_map(_fake_torch(mem), config={"main_gpu_index": 7})
+        assert result["device_map"] == "auto"
+        assert [k for k in result["max_memory"] if isinstance(k, int)] == [0]
+        assert any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_unreadable_free_vram_still_honors_the_selection(self, monkeypatch, caplog):
+        """If free VRAM cannot be read for the chosen device there is no budget
+        to build, so fall back to pinning it (the pre-existing behavior) rather
+        than silently ignoring the user's explicit GPU selection - and say why
+        (rule 5), since that fallback is the one case with no CPU offload."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}, {"index": 1}])
+        mem = {1: RuntimeError("no driver")}
+        with caplog.at_level("WARNING", logger="localm"):
+            result = _cuda_device_map(_fake_torch(mem), config={"main_gpu_index": 1})
+        assert result == {"device_map": {"": 1}}
         assert any("main_gpu_index" in r.message for r in caplog.records)
 
 
@@ -97,12 +141,24 @@ class TestGpuSplitSuccess:
             _fake_torch(mem), config={"gpu_split_indices": [0, 1]})
 
         assert result["device_map"] == "auto"
-        assert set(result["max_memory"]) == {0, 1}
+        assert {k for k in result["max_memory"] if isinstance(k, int)} == {0, 1}
         for idx, (free, _total) in mem.items():
             got = result["max_memory"][idx]
             assert isinstance(got, int)
             assert got == free - _HEADROOM
             assert got < free   # strictly less than the raw free bytes (headroom)
+
+    def test_split_also_keeps_the_cpu_offload_fallback(self, monkeypatch):
+        """The split path has the same gap as the pinned one (REG-528): a
+        GPU-only max_memory removes the "cpu" entry that plain "auto" gets from
+        get_max_memory(), so a model too big for the split lands on "disk" and
+        needs an offload_folder instead of spilling to CPU."""
+        monkeypatch.setattr(
+            "localm.discover.list_gpus", lambda: [{"index": 0}, {"index": 1}])
+        mem = {0: (8_000_000_000, 16_000_000_000), 1: (4_000_000_000, 8_000_000_000)}
+        result = _cuda_device_map(
+            _fake_torch(mem), config={"gpu_split_indices": [0, 1]})
+        assert result["max_memory"].get("cpu", 0) > 0
 
     def test_three_devices_all_readable(self, monkeypatch):
         monkeypatch.setattr(
@@ -113,10 +169,58 @@ class TestGpuSplitSuccess:
                2: (2_000_000_000, 4_000_000_000)}
         result = _cuda_device_map(
             _fake_torch(mem), config={"gpu_split_indices": [0, 1, 2]})
-        assert result == {
-            "device_map": "auto",
-            "max_memory": {0: 7_500_000_000, 1: 3_500_000_000, 2: 1_500_000_000},
-        }
+        assert result["device_map"] == "auto"
+        assert {k: v for k, v in result["max_memory"].items() if isinstance(k, int)} == {
+            0: 7_500_000_000, 1: 3_500_000_000, 2: 1_500_000_000}
+        assert result["max_memory"].get("cpu", 0) > 0
+
+
+class TestRealAccelerateHonoursTheMapping:
+    """The shape assertions above cannot see what accelerate DOES with the
+    mapping - which is exactly why the suite missed REG-528 (it validated
+    {'device_map': {'': 1}} as correct without ever observing that a literal map
+    offloads nothing). This drives the REAL accelerate.infer_auto_device_map -
+    the function transformers calls for device_map="auto" - against a real
+    module too big for the GPU budget, and asserts the overflow actually lands
+    on CPU. No GPU needed: max_memory is supplied, so nothing is probed.
+    """
+
+    def _model_and_budgets(self, torch, nn):
+        model = nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512),
+                              nn.Linear(512, 512), nn.Linear(512, 512))
+        total = sum(p.numel() * p.element_size() for p in model.parameters())
+        return model, int(total // 4 * 1.5)   # room for roughly one block
+
+    def test_our_max_memory_actually_offloads_overflow_to_cpu(self, monkeypatch):
+        torch = pytest.importorskip("torch")
+        nn = pytest.importorskip("torch.nn")
+        infer = pytest.importorskip("accelerate.utils").infer_auto_device_map
+
+        model, gpu_budget = self._model_and_budgets(torch, nn)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
+        # Free VRAM chosen so the resulting budget only fits part of the model.
+        mem = {0: (gpu_budget + _HEADROOM, 16_000_000_000)}
+        kwargs = _cuda_device_map(_fake_torch(mem), config={"main_gpu_index": 0})
+
+        device_map = infer(model, max_memory=kwargs["max_memory"])
+        placements = set(device_map.values())
+        assert "cpu" in placements, (
+            f"overflow did not reach CPU: {dict(device_map)}")
+        assert "disk" not in placements, (
+            "overflow went to disk, which needs an offload_folder; a cpu budget "
+            f"should absorb it first: {dict(device_map)}")
+
+    def test_a_cpu_less_budget_would_send_overflow_to_disk(self):
+        """The negative control proving the 'cpu' entry is what does the work
+        (and that this test could fail): the same budget WITHOUT it maps the
+        overflow to disk instead."""
+        torch = pytest.importorskip("torch")
+        nn = pytest.importorskip("torch.nn")
+        infer = pytest.importorskip("accelerate.utils").infer_auto_device_map
+
+        model, gpu_budget = self._model_and_budgets(torch, nn)
+        device_map = infer(model, max_memory={0: gpu_budget})   # no "cpu" key
+        assert "disk" in set(device_map.values()), dict(device_map)
 
 
 class TestGpuSplitMemGetInfoFailures:

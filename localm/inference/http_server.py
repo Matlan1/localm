@@ -186,6 +186,43 @@ def _gpu_registry_sync() -> None:
         _dbg.debug("gpu-registry sync failed (continuing): %s", e)
 
 
+def _load_gpu_indices() -> set:
+    """Every device whose free VRAM this instance's next model load can actually
+    USE - the whole configured split when one is active, else just the main
+    device.
+
+    NOT ``{_current_gpu_index()}``: that is an IDENTITY answer ("which one device
+    is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
+    main_gpu_index even on a box whose split spans 0 AND 1. Weighing peers
+    against that single index while weighing VRAM against vram_capacity()'s
+    COMBINED split total contradicts itself, and dropped a sibling holding VRAM
+    on this instance's own second split device - turning a cooperative unload
+    that used to succeed into a 503 (the capacity-vs-identity distinction the
+    raw-accessor guard in scripts/check_hygiene.py exists to enforce).
+
+    Known limitation, stated rather than hidden (rule 5): a registry entry
+    advertises ONE ``gpu_index`` per instance (see _gpu_registry_sync), so a
+    SPLIT peer is represented only by its main device. A split peer whose main
+    device is outside our set is therefore still skipped even though it may hold
+    VRAM on a device we do use. Widening the entry to a device LIST is a registry
+    schema change, out of scope here; the effect is a missed cooperation
+    opportunity (the pre-existing 503), never a wrong yank."""
+    try:
+        from localm.config import load_config
+        from localm.discover import resolve_gpu_split
+        cfg = load_config()
+        pairs = resolve_gpu_split(cfg.get("gpu_split_indices"),
+                                  cfg.get("gpu_split_ratios"))
+        if len(pairs) >= 2:
+            return {idx for idx, _ratio in pairs}
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("could not resolve the configured GPU split for the "
+                   "cooperative-unload peer filter (%s); using the main device "
+                   "only", e)
+    return {_current_gpu_index()}
+
+
 def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
                                 free_bytes: Optional[int] = None,
                                 asked: Optional[set] = None) -> bool:
@@ -216,8 +253,9 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
       pre-existing 503 is the honest answer; do not take the sibling down with
       us. An unknown estimate is not proof it cannot help, so it does not veto.
 
-    Only a peer on the SAME GPU is considered: freeing another card's VRAM
-    cannot make this load fit.
+    Only a peer on a device THIS load can use is considered (see
+    _load_gpu_indices - the whole configured split, not one index): freeing an
+    unrelated card's VRAM cannot make this load fit.
 
     Only runs when THIS instance itself is registered for coordination
     (``_gpu_coord`` set - never for a plain test app or an ``--isolated`` run,
@@ -246,9 +284,9 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
     holders = [p for p in peers if p.get("model")]
     if asked is not None:
         holders = [p for p in holders if p.get("instance_id") not in asked]
-    my_gpu = _current_gpu_index()
+    my_gpus = _load_gpu_indices()
     holders = [p for p in holders
-               if p.get("gpu_index") is None or p.get("gpu_index") == my_gpu]
+               if p.get("gpu_index") is None or p.get("gpu_index") in my_gpus]
     if not holders:
         return False
 
@@ -258,10 +296,10 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
             reclaimable = sum(estimates)
             if free_bytes + reclaimable < needed_bytes:
                 _dbg.info(
-                    "cooperative unload skipped: freeing all %d peer(s) on GPU %s "
-                    "would reclaim only ~%d MB on top of %d MB free, still short of "
-                    "the ~%d MB this load needs - leaving their models alone",
-                    len(holders), my_gpu, reclaimable // 1024 ** 2,
+                    "cooperative unload skipped: freeing all %d peer(s) on GPU(s) "
+                    "%s would reclaim only ~%d MB on top of %d MB free, still short "
+                    "of the ~%d MB this load needs - leaving their models alone",
+                    len(holders), sorted(my_gpus), reclaimable // 1024 ** 2,
                     free_bytes // 1024 ** 2, needed_bytes // 1024 ** 2)
                 return False
 
@@ -1808,20 +1846,21 @@ def _do_shutdown() -> None:
     # but a failure stays discoverable (rule 5).
     try:
         from localm.inference import embedder as _embedder_mod
-        # Honor the in-flight-request pin (AUDIT-CRIT-1) here too: an embed() is
-        # in flight, so do not run the graceful reset_embedder() (it takes the
-        # embedder's load lock and waits on the worker). But the worker must
-        # STILL be reaped: os._exit below bypasses atexit, and multiprocessing's
-        # daemon-child reclamation IS an atexit hook, so skipping outright left
-        # the worker orphaned with its model resident in VRAM - defeating this
-        # path's whole purpose of freeing ALL resident VRAM (REG-650). The
-        # pinned request cannot be served either way once we exit.
-        if _embedder_mod.active_requests() == 0:
-            _embedder_mod.reset_embedder()
-        else:
-            _embedder_mod.reap_worker_for_exit()
+        # One lock-free call, deliberately NOT active_requests()/reset_embedder():
+        # both take the embedder's load lock, which get_embedder() holds for the
+        # FULL duration of an embedding-model load - so a stop issued during a
+        # load blocked on the guard itself and hung this shutdown, never reaching
+        # the worker teardown. release_for_exit() makes the whole decision without
+        # that lock: it terminates a busy worker outright (the pinned request
+        # cannot be served either way once we exit) and closes an idle one
+        # politely. It must run: os._exit below bypasses atexit, and
+        # multiprocessing's daemon-child reclamation IS an atexit hook, so a
+        # skipped release leaves the worker orphaned with its model resident in
+        # VRAM - defeating this path's whole purpose of freeing ALL of it
+        # (REG-650).
+        _embedder_mod.release_for_exit()
     except Exception:
-        _dbg_swallow("embedder reset during shutdown failed (non-fatal)")
+        _dbg_swallow("embedder release during shutdown failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
@@ -1919,19 +1958,14 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # regardless, but a failure stays discoverable (rule 5).
     try:
         from localm.inference import embedder as _embedder_mod
-        # Honor the in-flight-request pin (AUDIT-CRIT-1) here too, and still reap
-        # the worker when pinned - see the matching comment in _do_shutdown above
-        # for the full rationale. os.execv is the same case as os._exit: it
-        # replaces this process image but does NOT touch the separate worker
-        # child, and bypasses atexit, so without this the old worker survives the
-        # restart holding VRAM while the restarted server spawns a second one
-        # (REG-650).
-        if _embedder_mod.active_requests() == 0:
-            _embedder_mod.reset_embedder()
-        else:
-            _embedder_mod.reap_worker_for_exit()
+        # Lock-free release - see the matching comment in _do_shutdown above for
+        # the full rationale. os.execv is the same case as os._exit: it replaces
+        # this process image but does NOT touch the separate worker child, and
+        # bypasses atexit, so without this the old worker survives the restart
+        # holding VRAM while the restarted server spawns a second one (REG-650).
+        _embedder_mod.release_for_exit()
     except Exception:
-        _dbg_swallow("embedder reset during restart failed (non-fatal)")
+        _dbg_swallow("embedder release during restart failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
