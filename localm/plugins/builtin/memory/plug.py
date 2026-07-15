@@ -1119,10 +1119,34 @@ def _memory_inlet(messages, ctx):
         return None
 
 
+async def _memory_inlet_hook(messages, ctx):
+    """The REGISTERED inlet hook: runs _memory_inlet OFF the event loop.
+
+    _memory_inlet's body is blocking, on the highest-frequency path there is (every
+    chat turn): it _load()s the records JSONL AND the .vec.json embedding sidecar,
+    re-_save()s both under the namespace lock when reinforcing (store.py's
+    recall(reinforce=True)), and resolves the shared embedder. chat.py awaits
+    run_inlet, which calls a hook INLINE (chat_pipeline.py), so a sync hook does all
+    of that ON the uvicorn event loop - multiple MB of JSON parsed and rewritten per
+    turn once embeddings are on, stalling every other request (REG-520).
+
+    It also fixes a real degradation, not just latency: _embed_fn -> get_embedder can
+    trigger a VRAM swap, and BUG #648 (vram.py) makes that swap SKIP the guarded
+    chat-model eviction when it detects it is running on the loop thread - because
+    completing it there would deadlock. So on-loop, the embedder loaded alongside the
+    resident chat model ("may be tight on VRAM") with a warning saying this call
+    "should be offloaded to an executor". Off-loop, the eviction can actually run.
+
+    Kept as a thin wrapper so _memory_inlet stays sync and directly unit-testable;
+    run_inlet awaits an awaitable hook, so nothing else changes.
+    """
+    return await _off_loop(lambda: _memory_inlet(messages, ctx))
+
+
 def register(host) -> None:
     global _ENGINE
     host.mount_router(_router)
-    host.register_chat_hook("inlet", _memory_inlet)
+    host.register_chat_hook("inlet", _memory_inlet_hook)
     # Outlet: after each turn, grow the memory unattended (debounced, background,
     # log/full mode only). Disabling this plugin removes both hooks.
     host.register_chat_hook("outlet", _memory_outlet)

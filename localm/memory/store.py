@@ -372,14 +372,33 @@ class MemoryStore:
         dropped, not stored, so cosine never mixes dims (best-effort, never
         raises - memory writes must not crash on an embedder hiccup, but a
         real failure is still surfaced at debug level, not swallowed silently -
-        rule 5; mirrors get_embedder()'s own load-failure logging)."""
+        rule 5).
+
+        The failure log is CONTENT-GATED: *text* is a memory record (chat-derived),
+        so the snippet is only written when debug_content_enabled() allows it. The
+        failure itself is always logged, in every mode."""
         if embed_fn is None:
             return None
         try:
             vec = embed_fn([text])[0]
         except Exception as e:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("memory embed_one failed for %r: %s", text[:80], e)
+            from localm.debuglog import debug_content_enabled, logger as _dbg
+            # The FAILURE is always reported - a real embedder fault (a worker
+            # restart, an OOM, a dim mismatch) must never be swallowed (rule 5).
+            # But *text* is a memory RECORD: a synthesized fact about the user, or
+            # an episodic summary of their chat sessions, i.e. chat-derived
+            # CONTENT. So the snippet is gated on debug_content_enabled(), the
+            # same gate every other content-logging site uses (llama.py:1342,
+            # jobs/webtool.py:294). It returns False in privacy mode even when the
+            # debug log is ON for operational diagnostics, so privacy mode never
+            # persists memory content to the log file (REG-612). Only the length
+            # (operational metadata, not content) is kept when the gate is closed,
+            # so an over-long record is still diagnosable.
+            if debug_content_enabled():
+                _dbg.debug("memory embed_one failed for %r: %s", text[:80], e)
+            else:
+                _dbg.debug("memory embed_one failed (content withheld: privacy "
+                           "mode, %d chars): %s", len(text), e)
             return None
         if not vec:
             return None
