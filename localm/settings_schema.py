@@ -171,6 +171,15 @@ CORE_FIELDS: list = [
                  "only if a genuinely huge model on slow storage needs longer "
                  "than the default.",
                  group="Engine", min=10, step=60),
+    SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
+                 "First-token timeout (s)",
+                 "How long a reply may take to produce its first token before "
+                 "the model is treated as hung. This covers reading your whole "
+                 "prompt, not one token, so it is generous by default: on CPU, "
+                 "with most layers off the GPU, or with a very long prompt, that "
+                 "can legitimately take minutes. Raise it only if a slow machine "
+                 "needs longer than the default.",
+                 group="Engine", min=10, step=60),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),
