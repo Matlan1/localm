@@ -305,6 +305,10 @@ class TestFreeVramBytesDeviceSelection:
         assert free == 1_000
 
     def test_invalid_configured_index_falls_back_to_device_zero(self, monkeypatch):
+        # Pin non-Vulkan so membership validation actually runs, regardless of
+        # what native backend is provisioned in the ambient environment (see
+        # test_discover.py::TestResolveMainGpuIndex).
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 9})
         monkeypatch.setattr("localm.discover.list_gpus",
