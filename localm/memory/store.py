@@ -116,6 +116,33 @@ def _content_tokens(text: str) -> set:
     empty when *text* is all stopwords/punctuation."""
     return {t for t in _tokenize(text or "") if t not in _STOPWORDS}
 
+
+# ---- self-reference discriminator (REG-590) -------------------------------- #
+# First-person pronouns. Deliberately read from the RAW query, BEFORE _STOPWORDS is
+# applied - every one of these IS a stopword (see _STOPWORDS above), which is exactly
+# why this signal was invisible to the lexical gate.
+#
+# Why this exists: with no embedder there is no relevance signal, so "what is my name"
+# (vs "User is called Sam") and "recommend a pasta recipe" (vs "User was born in 1990")
+# are the SAME input to the lexical gate - both zero content-word overlap against a
+# trusted fact. REG-590 needs the first recalled; the [10] precision gate needs the
+# second silenced (test_user_fact_is_gated_not_always_injected). Nothing in the token
+# overlap separates them. First-person reference does: TRUSTED_SOURCES records are
+# PROFILE facts (who the user is), so they are on-topic exactly when the user asks
+# about themselves, and a question about pasta or France is not about them.
+#
+# This is a HEURISTIC, not relevance: "is the metric system better?" is about the
+# user's stored preference but carries no pronoun, so it still misses. It is a cheap
+# discriminator that preserves BOTH contracts on the reproduced cases, not a
+# substitute for a working embedder.
+_SELF_REF = frozenset({"i", "me", "my", "mine", "myself"})
+
+
+def _is_self_referential(text: str) -> bool:
+    """True when *text* refers to the asker in the first person, i.e. the query is
+    plausibly ABOUT the user rather than about the world."""
+    return bool(_SELF_REF & set(_tokenize(text or "")))
+
 # ---- forgetting ----------------------------------------------------------- #
 PRUNE_FLOOR = 0.02         # decayed(importance*recency) below this is forgettable
 _FORGOTTEN_MAX = 1000      # cap on the recoverable-forgotten archive sidecar
@@ -126,6 +153,12 @@ _DAY = 86400.0
 # rewrite these (see corrections.py / consolidate.py). Grouped identically by
 # recall (recency pin) and prune (decay exemption).
 TRUSTED_SOURCES = ("user", "import")
+# REG-590: how many TRUSTED_SOURCES facts may be promoted past a LEXICAL MISS when the
+# semantic signal is degraded (no_embedder / no_vectors / low_coverage / dim_mismatch).
+# Deliberately tiny: the harm [10] fixed scales with the NUMBER of irrelevant facts
+# injected every turn (it measured a static MAX_INJECT=6 block distracting small local
+# models), so 2 user-authored facts is a different order of thing, not a partial revert.
+TRUST_FALLBACK_K = 2
 
 _AGENTS = ("chat", "coder")
 
@@ -742,7 +775,51 @@ class MemoryStore:
         # actually relate to the query (lexical content-word hit or cosine over
         # REL_COS_MIN); an off-topic turn injects nothing rather than the top-k.
         eligible = self._eligible(query, embed_fn)
+        # REG-590: with the semantic signal degraded the gate above is LEXICAL-ONLY,
+        # and exact content-word overlap misses every paraphrase ("what is my name"
+        # vs "User is called Sam" share nothing), so the user's OWN saved facts went
+        # silently un-injected in the default no-embedder install. Do NOT fall back to
+        # the ungated top-k: that is exactly the static block [10] removed, and it
+        # misfires worst here, since a box without an embedder tends to run the small
+        # model [10] measured as distracted. Instead promote at most TRUST_FALLBACK_K
+        # TRUSTED_SOURCES facts, in score order, and only when the semantic signal is
+        # NOT available (the healthy path keeps the strict gate untouched).
+        # Be precise about what this IS: a BOUNDED TRUSTED-FACT FALLBACK, not
+        # paraphrase recall. Degraded means there is no relevance signal at all - rel
+        # is 0 for a zero-overlap record (the bug itself) and rec is pinned to 1.0 for
+        # TRUSTED_SOURCES - so this promotion is effectively IMPORTANCE-ordered and can
+        # surface 2 unrelated user facts while still missing the one asked about. It is
+        # strictly better than injecting nothing; a working embedder is the only real
+        # answer for relevance.
+        # This extends a distinction the store already treats as load-bearing:
+        # user/import are stable profile facts, not chatter - recall exempts them from
+        # recency decay (below) and prune() exempts them from decay eviction.
+        # Note this is NOT closed by shipping an embedder: low_coverage alone degrades
+        # any store whose backfill (64/pass) has not caught up yet.
         hits = [(s, r) for s, i, r in scored if s > FLOOR and eligible[i]][:k]
+        usable, _reason = self._vector_status(embed_fn)
+        promoted = 0
+        # ONLY when the recall would otherwise be SILENT. An on-topic query that
+        # already found a lexical hit must not have unrelated trusted facts dragged in
+        # behind it (that would degrade a WORKING recall, and breaks
+        # test_ontopic_query_recalls_only_the_matching_fact). This keeps the fallback
+        # to the exact case REG-590 is about: the store had something, the gate
+        # returned nothing.
+        # ...and only for a SELF-REFERENTIAL query. Without this the fallback cannot
+        # tell REG-590's "what is my name" from [10]'s "recommend a pasta recipe" -
+        # identical zero-overlap inputs - and would re-inject unrelated profile facts
+        # on every off-topic turn, which is the exact harm [10] measured.
+        if not usable and not hits and _is_self_referential(query):
+            for _s, i, r in scored:                    # score order: best trusted first
+                if promoted >= TRUST_FALLBACK_K:
+                    break
+                if eligible[i] or _s <= FLOOR:
+                    continue                            # already in, or below the floor
+                if r.source in TRUSTED_SOURCES:
+                    eligible[i] = True
+                    promoted += 1
+            if promoted:
+                hits = [(s, r) for s, i, r in scored if s > FLOOR and eligible[i]][:k]
         results = [r for _s, r in hits]
         if reinforce and results:
             # CHK-MEM-LOCK: recall() is called with reinforce=True on every chat
@@ -777,6 +854,11 @@ class MemoryStore:
             diagnostics["n_records"] = len(self._records)
             diagnostics["n_vectors"] = len(self._vectors)
             diagnostics["n_recalled"] = len(results)
+            # REG-590 / rule 5: a degraded recall that leaned on the trust fallback is
+            # REPORTED, never applied invisibly - the caller already surfaces
+            # degrade_reason ("keyword-only matching"), and this says how many facts
+            # only made it in because the semantic signal was unavailable.
+            diagnostics["trust_fallback"] = promoted
         return results
 
     # --------------------------------------------------------- forgetting - #
