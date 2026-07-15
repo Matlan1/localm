@@ -20,7 +20,9 @@ import os
 import struct
 import subprocess
 import sys
+import types
 import wave
+from pathlib import Path
 
 import pytest
 
@@ -91,39 +93,74 @@ def test_status_checks_do_not_load_native_stack():
 
 
 def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path):
-    # R24: stt_model_cached reads the documented hub-cache layout directly. Point
-    # the cache at a tmp dir and lay down the snapshot file the resolver expects;
-    # it must report cached=True without importing huggingface_hub, and False
-    # when the snapshot is absent.
-    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
-    monkeypatch.delenv("HF_HOME", raising=False)
+    # R24: stt_model_cached reads the documented hub-cache layout directly (the same
+    # models--<org>--<repo>/snapshots/<rev>/ layout download_root produces, since
+    # faster-whisper passes it through as huggingface_hub's cache_dir). Lay down the
+    # snapshot file the resolver expects inside localm's OWN cache dir; it must report
+    # cached=True without importing huggingface_hub, and False when absent.
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     import localm.config as _cfg
     monkeypatch.setattr(_cfg, "load_config", lambda: {"voice_stt_model": "base"})
 
     cached, name = voice.stt_model_cached()
     assert (cached, name) == (False, "base")     # empty cache -> not cached
 
-    snap = tmp_path / "models--Systran--faster-whisper-base" / "snapshots" / "abc123"
+    snap = (voice.stt_cache_dir() / "models--Systran--faster-whisper-base"
+            / "snapshots" / "abc123")
     snap.mkdir(parents=True)
     (snap / "model.bin").write_bytes(b"\x00")
     cached, name = voice.stt_model_cached()
     assert (cached, name) == (True, "base")      # snapshot present -> cached
 
 
-def test_hf_hub_cache_dir_precedence(monkeypatch):
-    # R24: match huggingface_hub's own precedence so the probe is correct on
-    # every box (Linux XDG, legacy env), not just the dev machine.
-    from pathlib import Path
+def test_stt_cache_dir_is_contained_in_the_data_dir(monkeypatch, tmp_path):
+    """The Whisper model lands inside LOCALM_HOME, never the user's home profile.
+
+    The user consents to the DOWNLOAD, never to the location: left to itself
+    faster-whisper caches into the global HF hub cache (~/.cache/huggingface/hub, up
+    to ~1.5 GB) outside the data dir, which is the rule-4 containment leak this pins
+    shut. An ambient HF_* env var must NOT be able to pull it back out: containment
+    that any unrelated environment variable can silently switch off is not a
+    guarantee. LOCALM_HOME is the knob, so the cache follows the data dir."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg")
-    assert voice._hf_hub_cache_dir() == Path("/xdg") / "huggingface" / "hub"
-    monkeypatch.setenv("HF_HOME", "/hfhome")
-    assert voice._hf_hub_cache_dir() == Path("/hfhome") / "hub"       # HF_HOME > XDG
-    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", "/legacy")
-    assert voice._hf_hub_cache_dir() == Path("/legacy")              # legacy > HF_HOME
-    monkeypatch.setenv("HF_HUB_CACHE", "/direct")
-    assert voice._hf_hub_cache_dir() == Path("/direct")             # HF_HUB_CACHE wins
+        monkeypatch.setenv(k, str(tmp_path / "somewhere-else"))
+
+    root = voice.stt_cache_dir()
+    assert root == tmp_path / "cache" / "whisper"
+    assert tmp_path in root.parents                      # inside the data dir
+    assert Path.home() not in root.parents               # NOT the home profile
+
+
+def test_stt_request_carries_the_contained_download_root(monkeypatch, tmp_path):
+    """The parent sends the resolved cache dir WITH each request, and the worker
+    hands it to WhisperModel as download_root.
+
+    Pinned because these are two processes: if the worker recomputed the path
+    itself, the parent's stt_model_cached() probe and the actual download could
+    silently disagree (a consent prompt for a model already on disk, or a re-download
+    into a second location). Asserting the value crosses the queue proves they cannot.
+    Uses a fake queue - no worker spawn - so it stays fast and hermetic."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    sent = []
+
+    class _FakeQ:
+        def put(self, msg):
+            sent.append(msg)
+
+        def get(self, timeout=None):
+            return ("ok", "hello")
+
+    monkeypatch.setattr(voice, "_ensure_worker", lambda: None)
+    monkeypatch.setattr(voice, "_proc", types.SimpleNamespace(is_alive=lambda: True))
+    monkeypatch.setattr(voice, "_req_q", _FakeQ())
+    monkeypatch.setattr(voice, "_resp_q", _FakeQ())
+
+    assert voice._run_in_worker(b"audio", "base", None, 5.0) == "hello"
+    assert len(sent) == 1
+    data, name, language, download_root = sent[0]
+    assert (data, name, language) == (b"audio", "base", None)
+    assert download_root == str(tmp_path / "cache" / "whisper")
 
 
 @pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
