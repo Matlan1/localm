@@ -283,10 +283,18 @@ async def imagine_history(request: Request):
 async def imagine_comfy_models():
     """Model-file slots the active image workflow exposes (for the Workflow
     panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
-    about unreachability (rule 5) - never a silently-empty picker."""
+    about unreachability (rule 5) - never a silently-empty picker.
+
+    The slot resolution is a blocking urlopen of ComfyUI's /object_info (commonly
+    several MB, 10s timeout), so it runs OFF the event loop - inline it froze the
+    whole server, and every concurrent chat stream and job SSE with it, whenever
+    ComfyUI was slow or cold (REG-638), the same way the /comfy-launch route below
+    already offloads its own slow call."""
+    from fastapi.concurrency import run_in_threadpool
+
     from localm.config import load_config
     s = _backend.settings(load_config())
-    slots = _backend._comfy_model_slots(s)
+    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
     if slots is None:
         return {"reachable": False, "api_url": s["api_url"], "slots": [],
                 "message": "ComfyUI is not running - launch it to see available models."}

@@ -33,18 +33,35 @@ def atomic_write(path: Path, data: str) -> None:
     Indexer can transiently hold a handle to *path*, which would otherwise
     fail a good write (see PR #566 / the Windows os.replace-under-concurrent-
     open history this generalizes - previously only rag/store.py had it).
+
+    The temp file is always cleaned up, so a permanently-failing replace does not
+    leave one orphan behind per attempt (REG-631).
     """
     path = Path(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(data, encoding="utf-8")
-    for attempt in range(5):
+    try:
+        for attempt in range(5):
+            try:
+                tmp.replace(path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
+    finally:
+        # On success the replace consumed tmp, so this is a no-op. On a give-up
+        # (or any other error) it stops ONE ORPHAN ACCUMULATING PER FAILURE next
+        # to the target (REG-631) - the give-up itself still raises, because a
+        # write that did not happen must never look like one that did.
         try:
-            tmp.replace(path)
-            return
-        except PermissionError:
-            if attempt == 4:
-                raise
-            time.sleep(0.02)
+            tmp.unlink(missing_ok=True)
+        except OSError as e:
+            # Best-effort by design: the write's outcome is already decided, and
+            # raising here would turn a stray temp file into a broken write.
+            # Logged, not silenced (rule 5), so a persistent leak is discoverable.
+            from localm.debuglog import logger
+            logger.debug("storekit: could not remove temp file %s (%s)", tmp, e)
 
 
 class NamespaceLockRegistry:

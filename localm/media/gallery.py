@@ -17,13 +17,13 @@ file-serve route and never appears in a directory listing / history glob.
 from __future__ import annotations
 
 import json
-import os
 import threading
-import uuid
 from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException, Request
+
+from localm.storekit import atomic_write
 
 _LOCK = threading.Lock()
 
@@ -67,19 +67,28 @@ def _read_index(media_kind: str) -> dict:
 
 
 def _write_index(media_kind: str, data: dict) -> None:
-    """Persist the owner map ATOMICALLY (unique temp file + os.replace, the same
+    """Persist the owner map ATOMICALLY (unique temp file + replace, the same
     crash- and concurrency-safe pattern jobs' store and comfy_patches already
     use). A plain in-place write could leave a half-written index that the next
     read would have to reject; the atomic swap removes that routine corruption
-    trigger so the fail-closed read path stays a rare last resort."""
+    trigger so the fail-closed read path stays a rare last resort.
+
+    Delegates to ``storekit.atomic_write``, the shared kernel helper rag's and
+    memory's stores already use, rather than hand-rolling a third copy of the
+    same swap - storekit exists precisely because independent copies drifted
+    (CF-9/CF-10: one had the Windows retry, the other did not). This one had
+    drifted the same way: a bare os.replace with NO bounded retry, so an external
+    handle on the index at the swap instant (an AV mid-scan, the Search Indexer, a
+    backup agent, the user's file browser) raised PermissionError and 500'd the
+    request even though the media file was already on disk - leaving the caller
+    told that generation/delete failed and the new file un-stamped, hence
+    untracked. The prior in-place write needed only write access and so SUCCEEDED
+    in exactly those cases, making this a Windows-only regression on the happy
+    path (REG-631). storekit rides out the transient lock and cleans up its temp.
+    """
     p = _index_path(media_kind)
     p.parent.mkdir(parents=True, exist_ok=True)
-    # Unique temp name (pid + thread + uuid) so concurrent writers never share a
-    # temp path; os.replace is atomic, so the last writer wins cleanly.
-    tmp = p.with_name(
-        f"{p.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    os.replace(tmp, p)
+    atomic_write(p, json.dumps(data))
 
 
 def stamp_owner(media_kind: str, name: str, owner: Optional[str]) -> None:

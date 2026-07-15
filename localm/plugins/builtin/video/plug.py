@@ -271,10 +271,16 @@ async def video_history(request: Request):
 async def video_comfy_models():
     """Model-file slots the active video workflow exposes (for the Workflow
     panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
-    about unreachability (rule 5) - never a silently-empty picker."""
+    about unreachability (rule 5) - never a silently-empty picker.
+
+    Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
+    timeout), so it runs OFF the event loop: inline it stalled every concurrent
+    request server-wide while ComfyUI was slow (REG-638)."""
+    from fastapi.concurrency import run_in_threadpool
+
     from localm.config import load_config
     s = _backend.settings(load_config())
-    slots = _backend._comfy_model_slots(s)
+    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
     if slots is None:
         return {"reachable": False, "api_url": s["api_url"], "slots": [],
                 "message": "ComfyUI is not running - launch it to see available models."}
