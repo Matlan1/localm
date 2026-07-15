@@ -13,6 +13,7 @@ fixture).
 """
 
 import os
+import stat as _stat
 import tempfile
 import shutil
 
@@ -171,6 +172,113 @@ def _neutralise_backend_vram_query():
     _loader._gpu_mem_cache = False   # falsy, non-None -> gpu_memory() returns None
     yield
     _loader._gpu_mem_cache = saved
+
+
+# --------------------------------------------------------------------------- #
+#  No test may leave a giant file in tmp_path                                   #
+#                                                                              #
+#  truncate() is NOT sparse on Windows/NTFS: it allocates the blocks for real   #
+#  (verified - `fsutil file queryValidData` on a 200 MB truncated file reports  #
+#  Valid Data Length = the full 200,000,000; a sparse file reports 0). So a     #
+#  test that truncates a fake multi-GB GGUF to drive a size-reading code path   #
+#  writes those gigabytes for real, on every run, for every contributor.        #
+#                                                                              #
+#  This is ENFORCED rather than documented because documenting it demonstrably  #
+#  did not work. It was fixed once in test_vram_eviction_safety.py (with the    #
+#  reason written out in full) and warned about again in test_auto_gpu_layers   #
+#  ("NEVER truncate() to GB sizes here") - and two other modules kept doing it  #
+#  anyway, one commented "Sparse-ish: just truncate to size without writing     #
+#  real bytes", the exact belief the earlier review had already disproved. It   #
+#  ended up allocating ~315 GB per suite run and filling the disk to 99.5%      #
+#  (#672). A third comment would not have caught the fourth violation.          #
+# --------------------------------------------------------------------------- #
+
+_MAX_TMP_FILE_BYTES = 100 * 1024 ** 2      # 100 MB
+
+
+@pytest.fixture(autouse=True)
+def _no_giant_tmp_files(tmp_path, request):
+    """Fail a test that leaves a file over 100 MB in its tmp_path.
+
+    Checks the OUTCOME (real bytes on disk) rather than the mechanism, because the
+    mechanism cannot be intercepted: patching ``os.ftruncate`` does NOT catch
+    ``fh.truncate()`` (verified - the C FileIO.truncate calls the syscall directly),
+    and a static grep cannot see ``fh.truncate(size_bytes)`` where the size is a
+    variable.
+
+    Walks with ``os.walk`` + ``os.stat``, deliberately NOT ``Path.rglob`` /
+    ``Path.stat``: this must measure the REAL bytes. Several tests legitimately
+    monkeypatch ``Path.stat`` to report a huge st_size for a tiny file
+    (test_vram_eviction_safety.py's _fake_stat_size), and that patch can still be
+    live during this teardown - reading through it would fail exactly the tests
+    doing the right thing. os.stat is not patched by those fakes, so it sees the
+    truth.
+
+    Drive-agnostic on purpose: it looks only at file SIZE, never at a path prefix,
+    so it behaves identically wherever tmp_path lives (C:, D:, /tmp, CI).
+
+    Never descends a link/junction, and never revisits a real directory. That is
+    not paranoia: tests/test_rag_robustness_sweep.py deliberately builds BRANCHING
+    self-referential junctions in its tmp_path (mklink /J loop1 -> .), and a
+    Windows junction reports is_symlink() False, so a plain os.walk follows it and
+    spins forever - the exact B3 DoS that localm/rag/store.py's _walk_files exists
+    to avoid. A first draft of this guard used a naive os.walk and hung the suite
+    at 92% on precisely that fixture.
+
+    Opt out with ``@pytest.mark.allow_large_tmp_files`` when a test genuinely needs
+    real bytes on disk (rare - prefer faking the size). Integration tests, which
+    pull real models by design, are exempt automatically."""
+    yield
+    if request.node.get_closest_marker("allow_large_tmp_files"):
+        return
+    if request.node.get_closest_marker("integration"):
+        return
+    reparse = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    big: list = []
+    seen: set = set()
+    try:
+        for root, dirs, files in os.walk(tmp_path):
+            # Prune links/junctions and any real dir already walked, IN PLACE, so
+            # os.walk never recurses into a cycle (see the docstring).
+            keep = []
+            for d in dirs:
+                dp = os.path.join(root, d)
+                try:
+                    st = os.lstat(dp)
+                    if _stat.S_ISLNK(st.st_mode) or (
+                            getattr(st, "st_file_attributes", 0) & reparse):
+                        continue
+                    rp = os.path.realpath(dp)
+                    if rp in seen:
+                        continue
+                    seen.add(rp)
+                except OSError:
+                    continue
+                keep.append(d)
+            dirs[:] = keep
+            for name in files:
+                fp = os.path.join(root, name)
+                try:
+                    sz = os.stat(fp).st_size        # REAL size, never a faked one
+                except OSError:
+                    continue                        # vanished mid-walk; ignore
+                if sz > _MAX_TMP_FILE_BYTES:
+                    big.append((fp, sz))
+    except OSError:
+        return          # a test tearing its own tmp_path down; nothing to police
+    if big:
+        worst = "\n".join(f"    {sz / 1024**2:,.0f} MB  {os.path.relpath(p, tmp_path)}"
+                          for p, sz in sorted(big, key=lambda t: -t[1])[:5])
+        pytest.fail(
+            f"{len(big)} file(s) over {_MAX_TMP_FILE_BYTES / 1024**2:.0f} MB left in "
+            f"tmp_path:\n{worst}\n"
+            "  truncate() is NOT sparse here - it writes those bytes for real, every\n"
+            "  run, for every contributor (this once hit ~315 GB/run and filled the\n"
+            "  disk). To drive a size-reading path, fake the size instead:\n"
+            "      b._model_bytes = lambda: size_bytes\n"
+            "  (see tests/test_auto_gpu_layers.py). If real bytes are genuinely\n"
+            "  required, mark the test @pytest.mark.allow_large_tmp_files with a\n"
+            "  why-comment.")
 
 
 @pytest.fixture
