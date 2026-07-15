@@ -153,6 +153,85 @@ def test_concurrent_add_and_all_survive_a_racing_replace(home, tmp_path):
     assert errors == []
 
 
+def test_add_retries_through_transient_permission_errors_and_succeeds(home, tmp_path, monkeypatch):
+    """Fault-injects PermissionError on tmp.replace() a few times before letting
+    it through, directly exercising add()'s retry-with-backoff path (the fix for
+    the racing-replace flake above) without depending on real OS scheduling
+    luck to hit the window."""
+    from pathlib import Path
+
+    store = EpisodeStore(tmp_path)
+    real_replace = Path.replace
+    calls = {"n": 0}
+
+    def flaky_replace(self, target):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise PermissionError(13, "Access is denied")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    ep = store.add(Episode(task="t", lesson="L"))
+    assert calls["n"] == 4          # 3 denials, then the real replace succeeds
+    assert ep.lesson == "L"
+    assert [e.lesson for e in store.all()] == ["L"]
+
+
+def test_add_raises_once_the_retry_budget_is_exhausted(home, tmp_path, monkeypatch):
+    """A PermissionError that never clears must still surface as a real
+    failure, not be silently swallowed - the retry is bounded, not infinite."""
+    import localm.plugins.coder.episodes as ep_mod
+    from pathlib import Path
+
+    monkeypatch.setattr(ep_mod, "_PERMISSION_RETRY_DELAYS", (0.001, 0.001))  # keep the test fast
+
+    def always_denied(self, target):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, "replace", always_denied)
+    store = EpisodeStore(tmp_path)
+    with pytest.raises(PermissionError):
+        store.add(Episode(task="t", lesson="L"))
+
+
+def test_all_retries_through_transient_permission_errors_and_succeeds(home, tmp_path, monkeypatch):
+    """Same as above for all()'s read side: a concurrent add()'s replace can
+    momentarily deny the open, and all() must retry through it, not raise."""
+    from pathlib import Path
+
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="t", lesson="L"))       # seed the file for real first
+    real_read_text = Path.read_text
+    calls = {"n": 0}
+
+    def flaky_read_text(self, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise PermissionError(13, "Access is denied")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+    eps = store.all()
+    assert calls["n"] == 4
+    assert [e.lesson for e in eps] == ["L"]
+
+
+def test_all_raises_once_the_retry_budget_is_exhausted(home, tmp_path, monkeypatch):
+    import localm.plugins.coder.episodes as ep_mod
+    from pathlib import Path
+
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="t", lesson="L"))       # seed the file for real first
+    monkeypatch.setattr(ep_mod, "_PERMISSION_RETRY_DELAYS", (0.001, 0.001))
+
+    def always_denied(self, *a, **kw):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, "read_text", always_denied)
+    with pytest.raises(PermissionError):
+        store.all()
+
+
 # --------------------------------------------------------------------------- #
 #  Retrieval (BM25)                                                           #
 # --------------------------------------------------------------------------- #
