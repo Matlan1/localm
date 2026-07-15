@@ -116,7 +116,7 @@ localm search bartowski/Qwen2.5-7B-GGUF --files  # quants + sizes + VRAM fit
 ### Register existing models
 
 ```bash
-localm add C:\models\mymodel.gguf
+localm add D:\models\mymodel.gguf
 localm add D:\models\my-hf-model --name mymodel
 localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
 localm alias mymodel short                   # second name for the same file

@@ -683,13 +683,53 @@ def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]
 
 
 def _install_hook() -> int:
-    hook = REPO / ".git" / "hooks" / "pre-commit"
+    # Resolve the hooks dir through git rather than assuming REPO/.git is a
+    # directory: in a WORKTREE, .git is a FILE pointing at the main checkout, so
+    # REPO/".git"/"hooks" does not exist and installing from a worktree failed
+    # outright with "No .git/hooks directory found". --git-common-dir gives the
+    # shared .git for both a normal checkout and a worktree.
+    base = REPO / ".git"
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=REPO,
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode == 0 and out.stdout.strip():
+            base = Path(out.stdout.strip())
+            if not base.is_absolute():
+                base = (REPO / base).resolve()
+    except (OSError, subprocess.SubprocessError):
+        pass        # fall back to REPO/.git below; the is_dir() check reports it
+    hook = base / "hooks" / "pre-commit"
     if not hook.parent.is_dir():
-        print("No .git/hooks directory found.", file=sys.stderr)
+        print(f"No hooks directory found at {hook.parent}.", file=sys.stderr)
         return 1
+    # Run THIS project's own interpreter, never a bare PATH `python`. On Windows a
+    # bare `python` hits the Store app-execution alias, which happily resolves to an
+    # interpreter that has since been uninstalled and fails the hook with a cryptic
+    # "[ERROR] Failed to launch '...python.exe' (0x80070003)" - blocking every commit
+    # in the repo, with nothing pointing at the cause (seen live, 2026-07-15). The
+    # venv is also the interpreter that actually has this project's deps.
+    #
+    # Resolved from the git COMMON dir's parent, not --show-toplevel: in a worktree
+    # --show-toplevel is the worktree (which has no .venv of its own), while the venv
+    # lives beside the main checkout's .git. No absolute path is baked in (rule 1);
+    # every path is derived at hook run time.
     hook.write_text(
         "#!/bin/sh\n"
-        'exec python "$(git rev-parse --show-toplevel)/scripts/check_hygiene.py"\n',
+        'root=$(git rev-parse --show-toplevel)\n'
+        'main=$(cd "$(git rev-parse --git-common-dir)/.." 2>/dev/null && pwd) || main=$root\n'
+        'for py in "$main/.venv/Scripts/python.exe" "$main/.venv/bin/python" \\\n'
+        '          "$root/.venv/Scripts/python.exe" "$root/.venv/bin/python"; do\n'
+        '    [ -x "$py" ] && exec "$py" "$root/scripts/check_hygiene.py"\n'
+        'done\n'
+        '# No venv yet (a fresh clone before setup): fall back to PATH.\n'
+        'for py in python3 python; do\n'
+        '    command -v "$py" >/dev/null 2>&1 && exec "$py" "$root/scripts/check_hygiene.py"\n'
+        'done\n'
+        'echo "pre-commit: no usable Python found (tried this project\'s .venv, then'
+        ' python3/python on PATH)." >&2\n'
+        'echo "Run setup, or reinstall the hook with:'
+        '  <venv-python> scripts/check_hygiene.py --install-hook" >&2\n'
+        'exit 1\n',
         encoding="utf-8",
     )
     try:
