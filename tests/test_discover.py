@@ -13,6 +13,7 @@ from localm.discover import (
     DiscoverError, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
+    _native_backend_has_vulkan,
     _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
     resolve_gpu_split, resolve_main_gpu_index, split_device_count, vram_capacity,
@@ -569,6 +570,30 @@ class TestListGpusTimeoutStatus:
         assert _GPU_PROBE_CLI_DEADLINE >= 10.0
 
 
+@pytest.fixture
+def _non_vulkan_host(monkeypatch):
+    """Pin the active native backend to NON-vulkan (REG-596).
+
+    resolve_main_gpu_index/resolve_gpu_split only cross-check a configured index
+    against the detected device list when the active backend is NOT vulkan (on
+    vulkan, list_gpus() is structurally blind to the real device list, so the
+    index is trusted instead - see _native_backend_has_vulkan). That check reads
+    the REAL provisioned runtime dir off disk, so without this pin the classes
+    below assert the drop-the-unknown-index behaviour on a host that skips it:
+    green on an unprovisioned/HIP box, RED on a vulkan-provisioned one (the
+    RECOMMENDED universal build), for the same source.
+
+    The vulkan side of the branch is covered explicitly by
+    TestVulkanBackendIndexPassthrough, and the detector itself by
+    TestNativeBackendHasVulkan, so pinning here narrows these classes to the
+    branch they mean to test rather than hiding the other one. Mirrors the
+    has_max_devices pin in TestApplyGpuSplit, which fixes the same class of
+    host-state leak.
+    """
+    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestResolveMainGpuIndex:
     def test_none_returns_zero_without_querying_devices(self, monkeypatch):
         calls = []
@@ -641,6 +666,7 @@ class TestResolveMainGpuIndex:
             _MAX_GPU_SPLIT_INDEX
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestApplyMainGpu:
     def test_unset_leaves_native_default_untouched(self):
         mp = SimpleNamespace(main_gpu=0)
@@ -670,6 +696,7 @@ class TestApplyMainGpu:
         assert mp.main_gpu == 0
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestResolveGpuSplit:
     _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
 
@@ -757,6 +784,128 @@ class TestResolveGpuSplit:
         assert resolve_gpu_split([3, 7]) == [(3, 1.0), (7, 1.0)]
 
 
+def _ggml_lib_name(stem: str) -> str:
+    """A ggml backend library filename matching THIS platform's _ggml_glob(), so
+    the detector below is exercised through its real glob rather than a stubbed
+    one."""
+    if sys.platform == "win32":
+        return f"ggml-{stem}.dll"
+    if sys.platform == "darwin":
+        return f"libggml-{stem}.dylib"
+    return f"libggml-{stem}.so"
+
+
+class TestVulkanBackendIndexPassthrough:
+    """REG-596: the vulkan side of the index-validation branch had NO coverage.
+
+    On the vulkan build, list_gpus() cannot enumerate the real device list at
+    all (it only sees torch.cuda / nvidia-smi), so a non-empty but
+    vulkan-incomplete list must NOT veto an explicitly configured index -
+    GPU-SPLIT-VKINDEX was confirmed live to silently drop a VALID device.
+    These pin the backend to vulkan and assert the pass-through contract, so
+    the behaviour is tested on every host instead of only on whichever runtime
+    happens to be provisioned.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _vulkan_host(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: True)
+
+    def test_main_gpu_index_absent_from_detected_list_is_trusted(self, caplog):
+        # The exact inversion of TestResolveMainGpuIndex's drop test: index 5 is
+        # not in the (vulkan-blind) list, so it is trusted, not swapped for 0.
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(5, gpus=[{"index": 0}, {"index": 1}])
+        assert idx == 5
+        assert not any("does not match" in r.message for r in caplog.records)
+
+    def test_gpu_split_unknown_index_is_kept(self):
+        assert resolve_gpu_split([0, 9], gpus=[{"index": 0}]) == \
+            [(0, 1.0), (9, 1.0)]
+
+    def test_gpu_split_ratios_still_pair_with_their_own_index(self):
+        # Nothing is dropped on vulkan, so every configured ratio keeps its index.
+        assert resolve_gpu_split([0, 5, 1], [3.0, 9.0, 1.0],
+                                 gpus=[{"index": 0}, {"index": 1}]) == \
+            [(0, 3.0), (5, 9.0), (1, 1.0)]
+
+    def test_apply_main_gpu_trusts_configured_index(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
+        mp = SimpleNamespace(main_gpu=0)
+        apply_main_gpu(mp, config={"main_gpu_index": 7})
+        assert mp.main_gpu == 7
+
+    def test_sanity_ceiling_still_enforced_on_vulkan(self, caplog):
+        # The ceiling is checked BEFORE any device-membership branching, so
+        # being unable to validate against a device list must NOT wave an absurd
+        # index through to the native loader.
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(500_000, gpus=[{"index": 0}])
+        assert idx == 0
+        assert any("ceiling" in r.message for r in caplog.records)
+
+    def test_split_sanity_ceiling_still_enforced_on_vulkan(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([0, 500_000], gpus=[{"index": 0}])
+        assert result == []
+        assert any("ceiling" in r.message for r in caplog.records)
+
+    def test_negative_index_still_rejected_on_vulkan(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(-1, gpus=[{"index": 0}])
+        assert idx == 0
+        assert any("negative" in r.message for r in caplog.records)
+
+
+class TestNativeBackendHasVulkan:
+    """REG-596: the detector whose host-dependence made the suite host-dependent
+    had no tests of its own. It reads the real shipped library set, so pin the
+    runtime dir at a tmp_path and assert on the file set."""
+
+    @pytest.fixture
+    def _runtime_dir(self, tmp_path, monkeypatch):
+        # _native_backend_has_vulkan imports these INSIDE the function, so patch
+        # them on the SOURCE module, not on localm.discover.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: tmp_path)
+        return tmp_path
+
+    def test_true_when_vulkan_backend_is_shipped(self, _runtime_dir):
+        (_runtime_dir / _ggml_lib_name("base")).write_bytes(b"")
+        (_runtime_dir / _ggml_lib_name("vulkan")).write_bytes(b"")
+        assert _native_backend_has_vulkan() is True
+
+    def test_false_when_a_non_vulkan_backend_is_shipped(self, _runtime_dir):
+        # e.g. the HIP/ROCm build: present, but not vulkan.
+        (_runtime_dir / _ggml_lib_name("base")).write_bytes(b"")
+        (_runtime_dir / _ggml_lib_name("hip")).write_bytes(b"")
+        assert _native_backend_has_vulkan() is False
+
+    def test_false_when_no_backend_libraries_present(self, _runtime_dir):
+        assert _native_backend_has_vulkan() is False
+
+    def test_false_when_runtime_dir_unresolved(self, monkeypatch):
+        # No native runtime provisioned at all: not vulkan, and must not raise.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: None)
+        assert _native_backend_has_vulkan() is False
+
+    def test_false_and_no_raise_when_the_probe_itself_fails(self, monkeypatch):
+        # Detection is best-effort: a broken runtime resolution must degrade to
+        # "not vulkan" (the validating branch) rather than break model loading.
+        def _boom():
+            raise OSError("runtime dir exploded")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        assert _native_backend_has_vulkan() is False
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestApplyGpuSplit:
     _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
 
@@ -844,6 +993,7 @@ class TestApplyGpuSplit:
         assert floats[high_idx] == pytest.approx(1.0)
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramInfoRespectsConfiguredDevice:
     """vram_info() must reflect the CONFIGURED main GPU, not always device 0,
     once list_gpus() can see more than one device."""
@@ -874,6 +1024,7 @@ class TestVramInfoRespectsConfiguredDevice:
         assert info == {"total": 24_000_000_000, "free": 20_000_000_000}
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramCapacitySplitAware:
     """vram_capacity() must sum total/free across a CONFIGURED multi-GPU split
     (2+ valid resolve_gpu_split() devices) instead of vram_info()'s single main-
@@ -962,6 +1113,7 @@ class TestVramCapacitySplitAware:
         assert vram_capacity() == {"total": 16_000_000_000}
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestSplitDeviceCount:
     """split_device_count(): the DETECTED split size vram_capacity() uses to decide
     combined-vs-single, so a caption/message can name the VRAM basis honestly. Must
@@ -997,6 +1149,7 @@ class TestSplitDeviceCount:
         assert split_device_count({"gpu_split_indices": [0, 1]}) < 2
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestGpuSplitShortfall:
     """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not
     enough for a GGUF-backend load - apply_gpu_split() divides a model by a
