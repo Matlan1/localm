@@ -89,7 +89,15 @@ def key_set(key):
     from localm import auth
     if not key or not key.strip():
         raise click.ClickException("Key must be non-empty.")
-    auth.set_api_key(key)
+    try:
+        auth.set_api_key(key)
+    except ValueError as e:
+        # set_api_key rejects a key that is too short or uses characters an HTTP
+        # header cannot carry. That is the user mistyping an argument, so present it
+        # as a clean CLI error - letting the ValueError escape routes it to the
+        # crash/bug-report handler, which asks the user to report their own typo as
+        # a localm bug.
+        raise click.ClickException(str(e)) from e
     console.print(f"[green]✓[/green] API key set "
                   f"[dim]({_mask_key(key)})[/dim]")
 
