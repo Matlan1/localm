@@ -187,7 +187,7 @@ def managed_comfy_workdir() -> str:
     return str(managed_comfy_paths().root)
 
 
-def managed_comfy_launch_cmd() -> str:
+def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     """The command that starts the managed instance: its OWN venv interpreter
     running its OWN ``main.py``, on the managed port - never the user's
     ``comfy_launch_cmd``/auto-discovered launcher script, which only make sense
@@ -195,9 +195,32 @@ def managed_comfy_launch_cmd() -> str:
     fresh/copied managed install is a raw checkout with no bundled .bat/.sh
     launcher of its own, so discovery would always find nothing here. Quoted the
     same way a user's own launch command is expected to be (see ensure_comfy's
-    shlex/cmd handling). No-op-safe: a pure string, creates nothing."""
+    shlex/cmd handling).
+
+    Names ONE GPU via ``--cuda-device`` when the user configured a split or a main
+    GPU (REG-532). ComfyUI MASKS devices rather than sharding: it turns
+    ``--cuda-device`` into ``CUDA_VISIBLE_DEVICES`` and still loads the model onto a
+    single ``torch.cuda.current_device()``. Leaving the device unnamed let the swap
+    gate (which reads COMBINED free VRAM across the split) and the actual loader
+    disagree about which hardware they meant, so a media job that "fit" in 2x4 GB
+    combined would OOM on one 4 GB card. Naming one deliberately chosen card makes
+    them agree. A comma-separated set is deliberately NEVER emitted: it would only
+    mask visibility while placement stayed single-card, which would look like split
+    support without being it. See ``dev-notes/media-split-gpu/SPEC.md``.
+
+    Creates nothing on disk. No longer strictly pure, though: resolving the device
+    reads config and probes the GPU via ``discover.list_gpus()``. That probe is
+    deadline-bounded on a helper thread by construction (it is explicitly safe for
+    event-loop callers), so this stays safe to call from where it is called today.
+    """
     paths = managed_comfy_paths()
-    return f'"{paths.venv_python}" "{paths.main_py}" --listen 127.0.0.1 --port {MANAGED_COMFY_PORT}'
+    cmd = (f'"{paths.venv_python}" "{paths.main_py}" '
+           f'--listen 127.0.0.1 --port {MANAGED_COMFY_PORT}')
+    from localm.discover import resolve_whole_model_device
+    device = resolve_whole_model_device(config)
+    if device is not None:
+        cmd += f" --cuda-device {device}"
+    return cmd
 
 
 def managed_comfy_active(cfg: Optional[dict] = None) -> bool:
