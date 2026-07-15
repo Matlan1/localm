@@ -50,7 +50,7 @@ llama.dll
 The DLL directory is auto-detected. To use a custom location:
 
 ```bash
-set LLAMA_CPP_LIB=C:\path\to\llama.dll
+set LLAMA_CPP_LIB=D:\path\to\llama.dll
 localm run mymodel --prompt "hello"
 ```
 

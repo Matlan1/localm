@@ -89,7 +89,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
 
     \b
     In interactive mode, attach images with the /image command:
-      /image C:\\photos\\cat.jpg
+      /image D:\\photos\\cat.jpg
 
     \b
     Pipe a prompt from stdin:

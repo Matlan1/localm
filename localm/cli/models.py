@@ -374,7 +374,7 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
 
     \b
     Examples:
-      localm add C:\\models\\mymodel.gguf
+      localm add D:\\models\\mymodel.gguf
       localm add D:\\models\\gemma.gguf --name gemma4-12b
       localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
       localm add D:\\models\\bulk-dir --fast
