@@ -77,6 +77,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Picking a Main GPU no longer stops large transformers models from loading.**
+  With a Main GPU selected, localm pinned the whole model onto that one card, so a
+  transformers model bigger than its free memory failed with an out-of-memory error
+  even though it used to load (more slowly) by keeping part of it in system memory.
+  It now still uses only the card you picked, but falls back to system memory for
+  whatever does not fit, as it did before. The same fallback was restored for a
+  configured multi-GPU split.
 - **A failing command no longer reports success.** Certain real failures (reading a
   folder where a file was expected, an invalid path, some native calls) were
   mistaken for "the output pipe closed", so localm exited quietly with a success
