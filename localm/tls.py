@@ -22,6 +22,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,16 +40,39 @@ _RENEW_MARGIN_DAYS = 30
 # Tailscale hands out addresses in the 100.64.0.0/10 CGNAT range.
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
-# Adapter-NAME substrings that mark a VPN/tunnel virtual interface rather than
-# a real physical LAN NIC. Most VPN clients (WireGuard, OpenVPN, and virtually
-# every commercial VPN app) hand their tunnel adapter an ordinary RFC1918
-# address - e.g. 10.x.x.x - and install it as the default route, which would
-# otherwise be indistinguishable from a genuine LAN address by IP range alone.
-# Best-effort name match, not exhaustive; lowercased comparison.
-_VPN_ADAPTER_NAME_MARKERS = (
-    "tap", "tun", "vpn", "wireguard", "wintun", "ppp", "utun",
-    "nordlynx", "openvpn", "globalprotect", "anyconnect", "zscaler",
+# Adapter-NAME markers for a VPN/tunnel virtual interface rather than a real
+# physical LAN NIC. Most VPN clients (WireGuard, OpenVPN, and virtually every
+# commercial VPN app) hand their tunnel adapter an ordinary RFC1918 address -
+# e.g. 10.x.x.x - and install it as the default route, which would otherwise be
+# indistinguishable from a genuine LAN address by IP range alone.
+#
+# Matched on WORD BOUNDARIES, never as a bare substring (REG-533). The short
+# generic markers are interface *names* (tun0, tap5, utun3) or a leading word in
+# a Windows friendly name ("TAP-Windows Adapter V9"), so an unanchored substring
+# match also hit any real NIC whose name merely CONTAINS those three letters
+# ("Fortune", "Neptune", "Datapath"). A false positive here is not cosmetic:
+# _primary_lan_ip() discards the address and san_targets() then leaves it out of
+# the leaf certificate, so a device reaching that machine on its real address
+# gets a TLS SAN mismatch that used to validate.
+#
+# "ppp" is deliberately NOT a marker. It is ambiguous - a PPPoE/DSL link (ppp0,
+# often the default route and the machine's REAL address) and a legacy PPTP/L2TP
+# VPN both use it - and the two failure directions are not symmetric: wrongly
+# calling a real WAN a VPN breaks TLS for an address the user genuinely reaches,
+# while wrongly calling a VPN real only adds an extra SAN entry / a less useful
+# suggested address. Prefer the harmless error.
+#
+# Best-effort, not exhaustive; matched case-insensitively.
+_VPN_ADAPTER_NAME_RE = re.compile(
+    r"\b(?:tap|tun|utun|wintun|vpn|wireguard|nordlynx|openvpn|globalprotect"
+    r"|anyconnect|zscaler)\d*\b",
+    re.IGNORECASE,
 )
+
+
+def _is_vpn_adapter_name(name: str) -> bool:
+    """True when an adapter NAME looks like a VPN/tunnel virtual interface."""
+    return bool(_VPN_ADAPTER_NAME_RE.search(name or ""))
 
 
 # ------------------------------------------------------------------ #
@@ -99,7 +123,7 @@ def _vpn_adapter_ips() -> set[str]:
         return out
     try:
         for name, addrs in psutil.net_if_addrs().items():
-            if not any(marker in name.lower() for marker in _VPN_ADAPTER_NAME_MARKERS):
+            if not _is_vpn_adapter_name(name):
                 continue
             for a in addrs:
                 if getattr(a, "family", None) == socket.AF_INET:
