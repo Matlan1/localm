@@ -142,6 +142,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   already had the same file registered in localm, the "Missing model -> Download"
   offer reported success while nothing was written to the ComfyUI folder, and
   generation then failed with the model still missing.
+- **Rotating your API key no longer breaks your own scheduled jobs.** If you had a
+  scheduled coder job with shell access enabled and then rolled or cleared your API
+  key, the job silently kept running but lost its shell step, forever, with no
+  notice. Your own jobs now keep their shell access across a key change. A job whose
+  access genuinely was revoked still loses shell, as intended, but now says so in
+  the job's output instead of quietly doing less.
 - **Saving a memory no longer freezes the app.** On some setups, saving, editing,
   or adding a remembered fact could make the whole app stop responding for several
   minutes the first time an embedding model needed to load, because that load ran on

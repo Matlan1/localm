@@ -97,6 +97,33 @@ def _caller_can_allow_shell(request: Request) -> bool:
     return S.ADMIN in held or S.CODER_FULL in held
 
 
+def _caller_is_owner_key(request: Request) -> bool:
+    """True when the caller's credential is the OWNER KEY itself (or an owner
+    session), as opposed to a minted keystore key.
+
+    The test is KEYSTORE MEMBERSHIP, not scopes: the owner key is never a keystore
+    entry, while every minted key is. Deliberately NOT "does the caller hold
+    ADMIN" - ADMIN is in PRIVILEGED_SCOPES, so the owner may mint an ADMIN-scoped
+    keystore key, and that key IS revocable. Keying off ADMIN would exempt it from
+    the LM-DA-014 re-check and let a revoked key keep shell.
+
+    At creation the credential has already resolved (verify/session lookup passed),
+    so a keystore key is necessarily live here and ``key_hash_live`` is an exact
+    "is this a keystore entry" test. An owner session minted under a since-rotated
+    key also lands here correctly: its key_hash is the OLD owner key's, which is in
+    no keystore entry, so it still reads as the owner (REG-509).
+
+    Returns False in open mode / for a tokenless caller: ``owner`` is then None,
+    which the runner already treats as needing no re-check.
+    """
+    from localm.auth import key_hash_live
+    from localm.inference.http_server import principal_id
+    h = principal_id(request)
+    if h is None:
+        return False
+    return not key_hash_live(h)
+
+
 def _store() -> JobStore:
     return JobStore()
 
@@ -125,6 +152,7 @@ def _engine_resolver():
 def _job_dict(job: Job) -> dict:
     d = job.to_dict()
     d.pop("owner", None)        # internal principal binding; never sent to the client
+    d.pop("owner_is_owner_key", None)     # ditto: how that binding is re-validated
     return d
 
 
@@ -182,6 +210,12 @@ async def create_job(req: JobCreate, request: Request):
             allow_shell=req.allow_shell,
             enabled=req.enabled,
             owner=principal_id(request),    # bind the job to its creator
+            # Capture WHAT KIND of credential that creator was, while it is still
+            # resolvable: a rotated-away owner key is indistinguishable from a
+            # revoked scoped key at run time (REG-509). Stamped for every job, not
+            # just allow_shell ones, so a later PATCH that enables shell on an
+            # owner-created job inherits the right answer.
+            owner_is_owner_key=_caller_is_owner_key(request),
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
