@@ -123,6 +123,51 @@ def cache_dir() -> Path:
     return home_dir() / "cache"
 
 
+def pip_cache_dir() -> Path:
+    """localm's OWN pip cache, inside the data dir (rule 4: self-contained).
+
+    Shared by every pip subprocess localm drives itself - plugin-extra installs
+    (plugins/deps.py), the native runtime wheel (setup_llama.py), and managed-ComfyUI
+    provisioning (media/managed_comfy_provision.py delegates here) - so wheels are
+    cached once, contained, and removed with the data dir. Left unset, pip caches to a
+    per-user location OUTSIDE the data dir (``%LOCALAPPDATA%\\pip\\cache`` on Windows,
+    ``~/.cache/pip`` on POSIX); measured live, provisioning alone had put multi-GB
+    there. A cache (not ``--no-cache-dir``) because those wheels are multi-GB and a
+    re-run would otherwise re-download all of it; the cost is disk INSIDE the data dir,
+    where it is visible and reclaimed with it."""
+    return cache_dir() / "pip"
+
+
+def uv_cache_dir() -> Path:
+    """localm's OWN uv cache, inside the data dir (rule 4: self-contained).
+
+    uv keeps a SEPARATE cache from pip (its own ``UV_CACHE_DIR``, default
+    ``%LOCALAPPDATA%\\uv\\cache`` on Windows / ``~/.cache/uv`` on POSIX). localm's
+    installers try ``uv pip install`` BEFORE falling back to ``python -m pip``, so uv's
+    cache has to be pinned too or the uv path silently leaks GBs outside the data dir
+    exactly as pip would. Same location root as pip's (``cache_dir()``), a sibling
+    subdir since the two tools' cache formats differ."""
+    return cache_dir() / "uv"
+
+
+def contained_pip_env(base: Optional[dict] = None) -> dict:
+    """A subprocess environment with pip's AND uv's caches pinned inside the data dir.
+
+    *base* defaults to a copy of the current process environment. localm's package
+    installers (plugins/deps.py, setup_llama.py) shell out to ``uv pip install`` first
+    and ``python -m pip install`` second; BOTH tools cache to a per-user location
+    outside the data dir when left to their defaults, so BOTH ``PIP_CACHE_DIR`` and
+    ``UV_CACHE_DIR`` are set here - pinning only one still leaks via the other. This
+    OVERRIDES any ambient value on purpose (see ``cache_dir()``): containment a stray
+    environment variable can silently switch off is not a guarantee. Callers pass the
+    returned dict as ``subprocess``'s ``env=``; a subprocess that runs neither tool
+    simply ignores the two extra vars, so it is safe to use everywhere."""
+    env = dict(os.environ if base is None else base)
+    env["PIP_CACHE_DIR"] = str(pip_cache_dir())
+    env["UV_CACHE_DIR"] = str(uv_cache_dir())
+    return env
+
+
 HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
