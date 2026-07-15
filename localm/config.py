@@ -281,6 +281,14 @@ DEFAULT_CONFIG: dict = {
     # <home>/models/embeddings on first use (auto only under net_mode=allow, else
     # run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
     "embedding_model": "bge-small-en-v1.5",
+    # How the embedding model's token states are pooled into one vector.
+    # "mean" (default) suits the bundled bge/nomic choices and is what every
+    # existing index was built with. A DECODER-based embedder (Qwen3-Embedding,
+    # gte-Qwen2) is trained for last-token pooling and is degraded by mean: set
+    # "last", or "auto" to follow whatever the GGUF declares. Changing this
+    # invalidates already-embedded RAG collections and memory vectors (same
+    # dimensions, different meaning), so re-index after changing it.
+    "embedding_pooling": "mean",
     # Which host folders the document-indexing (RAG) API may READ. All three keys
     # are OWNER-ONLY: a non-owner config:write key can neither see nor set them
     # (enforced at PATCH /v1/config; see settings_schema.admin_only). The localm

@@ -180,6 +180,23 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         return None
 
 
+# transformers' naming convention for a GENERATIVE task head. A checkpoint whose
+# declared architecture ends in one of these generates text; anything else (the
+# bare ``*Model`` encoders: BertModel, XLMRobertaModel, NomicBertModel,
+# T5EncoderModel, DistilBertModel, MPNetModel) is an encoder that embeds. See
+# HFBackend._declared_generative for why this is matched by name rather than by
+# importing transformers, and tests/test_hf_embed_integration.py for the test that
+# pins this list against transformers' own GenerationMixin.
+_GENERATIVE_ARCH_SUFFIXES = (
+    "ForCausalLM",
+    "LMHeadModel",
+    "ForConditionalGeneration",
+    "ForSeq2SeqLM",
+    "ForImageTextToText",
+    "ForVision2Seq",
+)
+
+
 class HFBackend(BaseBackend):
     """
     Loads any HuggingFace-format model directory.
@@ -447,13 +464,102 @@ class HFBackend(BaseBackend):
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
+    def _declared_generative(self) -> Optional[bool]:
+        """Whether the CHECKPOINT declares a generative architecture, or None when
+        it declares none.
+
+        The checkpoint's own ``config.architectures`` is the reliable signal, NOT
+        the class ``load()`` happened to pick. ``load()`` tries
+        ``AutoModelForCausalLM`` BEFORE ``AutoModel``, and transformers registers
+        the pure-encoder families in ``MODEL_FOR_CAUSAL_LM_MAPPING_NAMES``
+        (verified on transformers 5.12.1: bert -> BertLMHeadModel, roberta ->
+        RobertaForCausalLM, xlm-roberta, electra). So a real embedding checkpoint
+        declaring ``["BertModel"]`` - bge-small, all-MiniLM, e5, bge-m3, i.e.
+        localm's OWN default embedding model - loads as ``BertLMHeadModel`` and
+        answers ``can_generate()`` True despite being an encoder that embeds
+        perfectly well. Asking the loaded class is therefore the wrong question.
+
+        Matched on transformers' task-head NAMING convention rather than by
+        resolving the class, deliberately: resolving would mean importing
+        transformers here, and that import pulls in torch, whose ROCm init
+        (``rocm_sdk.preload_libraries``) dies with ``OSError: [WinError 127]``
+        in any process that already loaded the bundled llama.dll (reproduced
+        2026-07-15). This property must not be the thing that triggers that, and
+        it never needs to: it only ever runs on an already-loaded model.
+        ``test_declared_arch_suffixes_match_transformers_own_generation_mixin``
+        pins the convention against ``GenerationMixin`` - transformers' own
+        definition of "this generates" - so a naming change upstream fails a test
+        instead of silently misrouting a model.
+        """
+        archs = getattr(getattr(self._model, "config", None), "architectures", None)
+        if not archs:
+            return None
+        return any(str(a).endswith(_GENERATIVE_ARCH_SUFFIXES) for a in archs)
+
+    @property
+    def can_embed(self) -> bool:
+        """True only when the LOADED model is a GENUINE embedding model.
+
+        Unlike GgufBackend's fixed ``can_embed = False``, an HF checkpoint may be
+        either: a sentence-transformer or a plain encoder (a real embedder, which
+        ``embed()`` below serves well), or a chat decoder (which it does not).
+
+        Mean-pooling a chat decoder's last hidden states returns healthy,
+        non-zero, plausible-looking vectors that nevertheless cannot separate
+        related from unrelated text. Measured 2026-07-15 against this repo's own
+        embedding path: Qwen2.5-0.5B's max UNRELATED cosine (0.7523) EXCEEDS its
+        min RELATED cosine (0.7518), so NO threshold splits the two, versus
+        bge-small's +0.29 margin. That is decoder anisotropy (no contrastive
+        training objective), not a pooling artifact: LAST-token pooling was
+        measured too and scored WORSE. Reporting a decoder as embedding-capable
+        is what let Engine.embed silently serve those vectors to /v1/embeddings
+        and RAG instead of the dedicated embedder.
+
+        Unloaded -> True ("unknown, load to find out"): the capability is only
+        knowable once the weights are in, and answering False here would stop
+        routes/chat.py from ever loading a genuine HF embedding model. Engine.embed
+        re-checks after the load, which is where a chat decoder is caught.
+        """
+        model = self._model
+        if model is None:
+            return True                      # unknown until loaded; the load decides
+        if hasattr(model, "encode"):
+            return True                      # sentence-transformer: purpose-built
+        declared = self._declared_generative()
+        if declared is not None:
+            return not declared              # the checkpoint's own word (see above)
+        # Nothing declared and nothing resolvable: fall back to what the loaded
+        # class says about itself. Weaker (it is the very signal the encoder
+        # families defeat above), but with no declared architecture it is the only
+        # evidence there is - and an undeclared checkpoint is not one of them.
+        can_generate = getattr(model, "can_generate", None)
+        if not callable(can_generate):
+            # Not a transformers PreTrainedModel (or a version without the API):
+            # absence of proof is not proof of an embedder. Prefer the dedicated
+            # embedder over silently pooling what may be a chat decoder (rule 5).
+            logger.debug(
+                "HF model %s declares no architecture and exposes no "
+                "can_generate(); treating it as NOT an embedding model",
+                type(model).__name__)
+            return False
+        try:
+            return not can_generate()
+        except Exception as e:
+            logger.debug(
+                "HF model %s: can_generate() raised (%s: %s); treating it as NOT "
+                "an embedding model", type(model).__name__, type(e).__name__, e)
+            return False
+
     def embed(self, texts: List[str]) -> List[List[float]]:
         """
         Return embedding vectors via mean-pooling of the last hidden states.
 
-        Works for any AutoModelForCausalLM or AutoModel that outputs hidden
-        states.  For dedicated sentence-transformer models that expose
-        `.encode()`, that method is preferred.
+        Works for any AutoModel-style ENCODER that outputs hidden states; for
+        dedicated sentence-transformer models that expose `.encode()`, that
+        method is preferred. Callers must gate on ``can_embed`` above: this is
+        NOT a valid embedding path for a chat decoder (see that docstring for
+        the measurements), and Engine.embed routes those to the dedicated
+        on-device embedder instead.
         """
         import torch
         tokenizer = self._tokenizer
