@@ -8,7 +8,8 @@ it works on the GGUF-only base install. It is still optional:
     pip install "localm[voice]"
 
 The model (config ``voice_stt_model``, default "base") is downloaded from
-HuggingFace into faster-whisper's cache on FIRST use - that one download is
+HuggingFace on FIRST use into localm's OWN data dir (``stt_cache_dir()``), not
+the global HuggingFace cache in the user's home profile - that one download is
 the only network access; transcription itself is fully local and offline.
 
 Text-to-speech needs no backend at all: the GUI uses Kokoro in the browser
@@ -89,29 +90,29 @@ def stt_available() -> tuple[bool, str]:
         "with: pip install \"localm[voice]\"  (then restart the server)")
 
 
-def _hf_hub_cache_dir():
-    """The HuggingFace hub cache directory, resolved WITHOUT importing
-    ``huggingface_hub`` (see ``stt_model_cached``). Mirrors the library's own
-    precedence so the probe matches on every box, not just the dev machine:
-    HF_HUB_CACHE > HUGGINGFACE_HUB_CACHE (legacy) > HF_HOME/hub >
-    XDG_CACHE_HOME/huggingface/hub (the Linux default) > ~/.cache/huggingface/hub."""
-    from pathlib import Path
-    direct = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if direct:
-        return Path(direct)
-    home = os.environ.get("HF_HOME")
-    if home:
-        return Path(home) / "hub"
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    if xdg:
-        return Path(xdg) / "huggingface" / "hub"
-    return Path.home() / ".cache" / "huggingface" / "hub"
+def stt_cache_dir():
+    """Where localm keeps the Whisper STT model: inside the data dir (rule 4).
+
+    THE single source of truth for the model's location, used by BOTH the
+    ``stt_model_cached`` probe below and the worker's actual download
+    (``WhisperModel(download_root=...)``). One function, so the probe cannot drift
+    from where the bytes really land - a disagreement would show as a consent prompt
+    for a model that is already there, or vice versa.
+
+    Left to itself, faster-whisper downloads into the GLOBAL HuggingFace hub cache
+    (``~/.cache/huggingface/hub``, i.e. the user's home profile - up to ~1.5 GB for the
+    larger models). The user consents to the DOWNLOAD; they never consented to that
+    LOCATION. faster-whisper passes ``download_root`` straight through as
+    huggingface_hub's ``cache_dir``, so the on-disk layout is the standard
+    ``models--<org>--<repo>/snapshots/<rev>/`` either way - only the root moves."""
+    from localm.config import cache_dir
+    return cache_dir() / "whisper"
 
 
 def stt_model_cached() -> tuple[bool, str]:
-    """(cached, model_name) - is the configured Whisper model already in the
-    local HuggingFace cache? First use otherwise downloads it; the GUI asks
-    for consent before triggering that one network access.
+    """(cached, model_name) - is the configured Whisper model already in localm's
+    own model cache (``stt_cache_dir()``)? First use otherwise downloads it; the GUI
+    asks for consent before triggering that one network access.
 
     Resolved WITHOUT importing huggingface_hub (or faster-whisper): we read the
     documented hub-cache layout directly. The earlier version imported
@@ -137,7 +138,7 @@ def stt_model_cached() -> tuple[bool, str]:
     # glob matches both). A false negative only costs one harmless consent
     # prompt; the worker downloads on demand regardless.
     try:
-        repo_dir = _hf_hub_cache_dir() / ("models--" + repo.replace("/", "--"))
+        repo_dir = stt_cache_dir() / ("models--" + repo.replace("/", "--"))
         snaps = repo_dir / "snapshots"
         cached = snaps.is_dir() and any(snaps.glob("*/model.bin"))
         return bool(cached), name
@@ -208,7 +209,7 @@ def _worker_main(req_q, resp_q) -> None:
         msg = req_q.get()
         if msg is None:                          # shutdown sentinel
             return
-        data, name, language = msg
+        data, name, language, download_root = msg
 
         fault = os.environ.get(_FAULT_ENV)
         if fault:
@@ -233,7 +234,13 @@ def _worker_main(req_q, resp_q) -> None:
 
         try:
             if model is None or model_name != name:
-                model = WhisperModel(name, device="cpu", compute_type="int8")
+                # download_root keeps the model inside localm's data dir instead of the
+                # global HF cache in the user's home profile (rule 4). Resolved by the
+                # PARENT and sent with the request, not recomputed here: the parent's
+                # stt_model_cached() probe and this download then read the same value by
+                # construction, with no dependence on env surviving the spawn.
+                model = WhisperModel(name, device="cpu", compute_type="int8",
+                                     download_root=download_root)
                 model_name = name
         except Exception as e:
             model = None
@@ -322,7 +329,7 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
                              code="spawn")
         proc, req_q, resp_q = _proc, _req_q, _resp_q
         try:
-            req_q.put((data, name, language))
+            req_q.put((data, name, language, str(stt_cache_dir())))
         except Exception as e:
             _kill_worker()
             raise VoiceError(f"Could not dispatch transcription to the STT worker: {e}",

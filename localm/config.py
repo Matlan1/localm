@@ -103,6 +103,26 @@ def home_dir() -> Path:
     return _detect_home()
 
 
+def cache_dir() -> Path:
+    """Root for caches localm's OWN subprocesses write (rule 4: self-contained).
+
+    Anything localm downloads on the way to installing something - pip's wheel/http
+    cache while provisioning the managed ComfyUI venv, the Whisper STT model - belongs
+    INSIDE the data dir, not in the user's home profile. Left to their defaults those
+    tools cache to a per-user location (under ``%LOCALAPPDATA%`` on Windows,
+    ``~/.cache`` on POSIX) that has nothing to do with localm: measured live, the
+    managed-ComfyUI provisioning path alone had put ~11 GB of pip cache there, outside
+    the data dir, without ever asking or telling the user.
+
+    Derived from ``home_dir()`` (never a hardcoded path, rule 1), so the cache follows
+    LOCALM_HOME: point the data dir somewhere and localm's caches go with it. This is
+    deliberately NOT conditional on an ambient ``PIP_CACHE_DIR`` / ``HF_HUB_CACHE``:
+    containment is a guarantee of where localm's own bytes land, and a guarantee that
+    any unrelated environment variable can silently switch off is not one. LOCALM_HOME
+    is the knob."""
+    return home_dir() / "cache"
+
+
 HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"

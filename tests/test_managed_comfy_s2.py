@@ -298,6 +298,41 @@ def test_isolated_env_strips_pythonpath(monkeypatch):
     assert env.get("SOME_OTHER_VAR") == "kept"
 
 
+def test_isolated_env_pins_the_pip_cache_into_the_data_dir(home, monkeypatch):
+    """Provisioning's pip subprocesses must cache INSIDE the data dir (rule 4).
+
+    Unset, pip caches to a per-user location outside the data dir; measured live, this
+    module alone had put ~11 GB there, never asking and never telling. An ambient
+    PIP_CACHE_DIR must NOT win: containment any stray environment variable can silently
+    switch off is not a guarantee. LOCALM_HOME is the knob (see config.cache_dir())."""
+    from localm.media import managed_comfy_provision as prov
+    monkeypatch.setenv("PIP_CACHE_DIR", str(home.parent / "ambient-cache"))
+
+    env = prov._isolated_env()
+    assert env["PIP_CACHE_DIR"] == str(prov.pip_cache_dir())
+    assert prov.pip_cache_dir() == home / "cache" / "pip"
+    assert home in prov.pip_cache_dir().parents            # inside the data dir
+    assert Path.home() not in prov.pip_cache_dir().parents  # NOT the home profile
+
+
+def test_pip_subprocess_really_honours_the_contained_cache_dir(home, fake_user_comfy):
+    """The EFFECT, not the setting: a REAL pip child, launched through the real
+    _run()/_isolated_env() path, must resolve its cache inside the data dir.
+
+    Setting an env var and asserting the env var proves nothing about the child - and
+    provisioning's pip runs in the MANAGED ComfyUI's own venv, a different interpreter
+    from localm's, so nothing about localm's own process env reaches it implicitly.
+    ``pip cache dir`` makes the child report the location it would actually write to,
+    so this asserts real resolved behaviour rather than our intent."""
+    from localm.media import managed_comfy_provision as prov
+    ok, out = prov._run([str(fake_user_comfy.venv_python), "-m", "pip",
+                         "cache", "dir", "--disable-pip-version-check"], timeout=120)
+    assert ok, out
+    reported = Path(out.strip().splitlines()[-1].strip())
+    assert reported == prov.pip_cache_dir(), out   # Windows Path eq is case-insensitive
+    assert home in reported.parents, out
+
+
 def test_read_user_freeze_ignores_leaked_pythonpath(home, fake_user_comfy, monkeypatch):
     """A PYTHONPATH set on the CALLING localm process must not contaminate pip freeze
     of the user's venv. Reproduced live: with a dev PYTHONPATH pointing at localm's own

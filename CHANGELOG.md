@@ -113,6 +113,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   rare, hard-to-reproduce miss. It now retries for much longer with backoff, so
   it survives realistic delays while still failing loudly if the file is
   genuinely stuck.
+- **Setting up the managed ComfyUI no longer fills up your system drive.** While
+  installing its own ComfyUI, localm let pip cache the packages it downloaded
+  (including the multi-GB PyTorch build) in your user profile instead of localm's
+  own data folder - many gigabytes landing outside localm, on a drive you may not
+  have picked, without being asked or told. That cache now lives inside your data
+  directory, so it moves with it and is removed with it. Speech-to-text is fixed
+  the same way: the Whisper model it downloads on first use now lands in your data
+  directory rather than the shared HuggingFace cache in your home folder. If you
+  already have a Whisper model in that shared cache, it is downloaded once more
+  into the data directory; the old copy is left alone and is safe to delete. The
+  previously cached packages are also still there - on Windows you can reclaim
+  that space with `pip cache purge`.
 - **Picking a Main GPU no longer stops large transformers models from loading.**
   With a Main GPU selected, localm pinned the whole model onto that one card, so a
   transformers model bigger than its free memory failed with an out-of-memory error

@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import config
 from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
@@ -112,9 +113,33 @@ def _tail(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
+def pip_cache_dir() -> Path:
+    """localm's OWN pip cache, inside the data dir (rule 4: self-contained).
+
+    A cache rather than ``--no-cache-dir``: the fresh path installs torch and the copy
+    path replicates the user's whole freeze (their exact torch build), so the bytes are
+    multi-GB. Without a cache, every re-provision (remove + setup again, a retry after a
+    failed install) re-downloads all of it. The cost of keeping it is disk INSIDE the
+    data dir, where it is visible, contained, and removed with the data dir - which is
+    the point."""
+    return config.cache_dir() / "pip"
+
+
 def _isolated_env() -> dict:
     """The environment for a subprocess that runs Python against the USER's venv or
-    the freshly-created managed venv - never localm's own ``PYTHONPATH``.
+    the freshly-created managed venv - never localm's own ``PYTHONPATH``, and never the
+    ambient pip cache.
+
+    PIP_CACHE_DIR: provisioning shells out to pip in the MANAGED ComfyUI's own venv, a
+    separate interpreter from localm's, so localm's own process environment does not
+    reach it - the setting has to be in the env handed to the child, which is this one.
+    Left unset, that child's pip caches to the per-user default OUTSIDE the data dir
+    (measured live: ``pip cache dir`` resolved to the user profile and held ~11 GB, all
+    of it put there by this module). This is THE choke point: every pip subprocess in
+    both provisioning paths (``_run`` here and in managed_comfy_fresh, which imports it,
+    plus ``read_user_freeze`` below) builds its env from this function, so containment
+    cannot be forgotten at a new call site. Harmless to the git/venv subprocesses that
+    also run through here - they simply ignore it.
 
     ``subprocess.run`` inherits the full parent environment by default, and
     ``PYTHONPATH`` is a per-process search path that Python's ``venv`` isolation
@@ -130,6 +155,7 @@ def _isolated_env() -> dict:
     downstream error (a missing offline build dependency)."""
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
+    env["PIP_CACHE_DIR"] = str(pip_cache_dir())
     return env
 
 
