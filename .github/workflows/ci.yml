@@ -31,7 +31,17 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
+      # fetch-depth: 0 (full history) is REQUIRED, not a nicety: the hygiene gates that
+      # diff against the published record - the changelog append-only check and the PWA
+      # cache-bump check - resolve their baseline via `git merge-base HEAD origin/master`.
+      # actions/checkout defaults to fetch-depth 1, which creates no origin/* ref at all,
+      # so merge-base fails, the baseline silently falls back to HEAD, and a clean CI
+      # checkout diffs against ITSELF: both gates then pass unconditionally, for every
+      # file, on every PR. Measured on real repos: shallow -> a shell asset changed with
+      # no CACHE bump exits 0 (silent pass); full -> the same commit correctly fails.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
