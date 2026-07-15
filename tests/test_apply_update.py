@@ -292,8 +292,22 @@ def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
     old_style_cmd = [str(launcher)] + au.post_swap_command("runtime", backend="vulkan")[3:]
     result = subprocess.run(old_style_cmd, capture_output=True, text=True)
 
+    # The bare copy must FAIL to do what was asked - that is the whole claim.
     assert result.returncode != 0, result.stdout
-    assert "setup-llama" in result.stderr or "pyvenv.cfg" in result.stderr, result.stderr
+    # Its SIGNATURE depends on what sys.executable is (see the docstring). A third
+    # real case joins the two described there: a STANDALONE interpreter that keeps
+    # python3xx.dll beside its exe (a uv-managed CPython, which is exactly what this
+    # repo's .venv names in pyvenv.cfg) is stranded from that DLL once copied
+    # elsewhere, so the Windows LOADER kills it with 0xC0000135 STATUS_DLL_NOT_FOUND
+    # BEFORE python starts - no stderr at all to match on. Assert on the exit code
+    # for that one; it is precise, so this stays a real check rather than degrading
+    # into "any nonzero". All three are the bare-copy approach breaking.
+    _STATUS_DLL_NOT_FOUND = 3221225781            # 0xC0000135, Windows loader
+    assert ("setup-llama" in result.stderr
+            or "pyvenv.cfg" in result.stderr
+            or (sys.platform == "win32"
+                and result.returncode == _STATUS_DLL_NOT_FOUND)), (
+        result.returncode, result.stderr)
 
 
 # ---------------------- safe extraction (zip slip) ----------------------
