@@ -550,9 +550,35 @@ class IsolatedEmbedder(VramSizingMixin):
                 try:
                     return self._runner.embed(list(texts))
                 except RuntimeError:
+                    # Discard the worker ONLY if it is actually gone. The child's
+                    # dispatch loop answers an ordinary embed failure with a
+                    # clean ("error", msg) envelope and keeps serving - embedding
+                    # is stateless per call, so one bad request is not supposed to
+                    # take down a worker that can still work (see
+                    # _embedder_runner's module docstring, and
+                    # test_embed_dispatch_catches_ordinary_exceptions_without_
+                    # crashing, which pins that the child stays alive). The parent
+                    # sees the SAME RuntimeError for that as for a crash, so
+                    # dropping the reference unconditionally orphaned a LIVE child:
+                    # EmbedderRunner has no __del__ and GC never terminates an
+                    # mp.Process, so it sat blocked on req_q.get() holding the
+                    # model in VRAM while the next call spawned a SECOND worker
+                    # beside it - one leak per clean embed error, invisible to
+                    # close()/reset_embedder()/release_for_exit(), which all only
+                    # reach the CURRENT runner.
+                    if self._runner is not None and self._runner.is_alive():
+                        logger.exception(
+                            "embedding failed; the worker is healthy and will "
+                            "serve the next call")
+                        raise
                     logger.exception(
                         "embedding worker fault; it will reload on the next call")
-                    self._runner = None
+                    runner, self._runner = self._runner, None
+                    if runner is not None:
+                        # Release its queues/handles. Safe and idempotent when the
+                        # child is already dead (ModelRunner.shutdown's contract),
+                        # and _wait's own timeout path has already done it.
+                        runner.shutdown(grace=0)
                     raise
         finally:
             self.active_requests = max(0, self.active_requests - 1)
@@ -765,9 +791,9 @@ def reset_embedder() -> None:
         _LAST_ERROR = None
 
 
-def reap_worker_for_exit() -> bool:
-    """Force-terminate the isolated embedder worker, for a caller that is about
-    to ``os._exit()`` / ``os.execv()``. Returns True if a worker was reaped.
+def release_for_exit() -> bool:
+    """Release the isolated embedder worker for a caller that is about to
+    ``os._exit()`` / ``os.execv()``. Returns True if a worker was released.
 
     Both of those bypass ``atexit`` - and multiprocessing's daemon-child
     reclamation IS an atexit hook (``multiprocessing.util._exit_function``) - so
@@ -777,26 +803,34 @@ def reap_worker_for_exit() -> bool:
     child is reclaimed on a normal interpreter exit, but survives BOTH os._exit
     and os.execv.
 
-    Use this INSTEAD of reset_embedder() when a request is mid-embed(): the
-    pinned request cannot be answered either way once the process exits, so
-    there is nothing left to protect, and skipping the release entirely (the
-    only alternative) is what leaks the worker.
+    This is the WHOLE exit-path decision on purpose, because every other way to
+    make it takes ``_LOCK``: ``active_requests()`` does, and ``reset_embedder()``
+    does. ``get_embedder()`` holds ``_LOCK`` for the FULL duration of an
+    embedding-model load (up to its load timeout), so a stop or restart issued
+    during a load would block on the guard itself and hang the very action the
+    user asked for - never reaching the teardown, and leaving exactly the orphan
+    this function exists to prevent. Nothing here touches ``_LOCK``: the
+    singleton is snapshotted directly, which is a best-effort read the exiting
+    caller can afford (a hard exit racing a load that has not yet published its
+    embedder is inherent to any hard exit).
 
-    Deliberately does NOT take ``_LOCK`` and does NOT wait for the in-flight
-    embed to finish: ``_LOCK`` can be held for the full duration of a model
-    load, so blocking on it here would hang the very stop/restart the user
-    asked for. Reading the singleton without it is a best-effort snapshot -
-    the caller is exiting, and a hard exit racing a load that has not yet
-    published its embedder is inherent to any hard exit."""
+    A BUSY worker (a request is mid-``embed()``) is terminated WITHOUT waiting:
+    the pinned request cannot be answered either way once the process exits, so
+    there is nothing left to protect, and the polite "shutdown" command would
+    only queue behind the in-flight embed and stall the exit for the grace
+    period. An IDLE worker gets the polite command first, so the child frees the
+    model cleanly before it goes.
+
+    The module singleton is deliberately NOT cleared (that is reset_embedder()'s
+    job, and it needs ``_LOCK``): the process is going away regardless."""
     emb = _EMBEDDER
     if emb is None:
         return False
     runner = getattr(emb, "_runner", None)
     if runner is None:
         return False
-    # grace=0: skip the polite "shutdown" command, which would otherwise queue
-    # behind the in-flight embed() and stall the exit for the grace period.
-    runner.shutdown(grace=0)
+    busy = getattr(emb, "active_requests", 0) > 0
+    runner.shutdown(grace=0 if busy else 5.0)
     return True
 
 

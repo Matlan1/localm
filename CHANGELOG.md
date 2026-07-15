@@ -183,9 +183,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   superseded by a newer request", even though nothing was loading any more, until
   you explicitly switched to it again. It now loads normally.
 - **Stopping or restarting while knowledge is indexing no longer leaves a model
-  stuck in GPU memory.** The embedding helper could survive the restart as an
-  orphan still holding its model in VRAM, so a restarted server ran a second copy
-  beside it and "Stop" did not actually free everything. Both now release it.
+  stuck in GPU memory, or hangs.** The embedding helper could survive the restart as
+  an orphan still holding its model in VRAM, so a restarted server ran a second copy
+  beside it and "Stop" did not actually free everything. Both now release it - and
+  stopping while an embedding model is still loading no longer waits on that load
+  before it can finish.
+- **An embedding error no longer strands a helper in GPU memory.** If embedding a
+  single piece of text failed, localm dropped its still-running embedding helper
+  instead of reusing it: the helper kept your embedding model in GPU memory with
+  nothing able to reach it, and the next request started a second one alongside. It
+  now keeps the working helper, and only replaces one that has actually gone.
 - **The app stays responsive while models load and unload.** On a multi-GPU setup
   with a specific main GPU selected, each load or unload could briefly freeze every
   other request (up to a few seconds) while it wrote coordination state and probed
@@ -194,7 +201,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instances share a GPU, one could ask the other to drop every model it had loaded
   even when that could not possibly free enough room, and could keep re-asking in a
   loop that never finished. It now only asks when it would actually help, and asks
-  each instance once.
+  each instance once. On a multi-GPU split it correctly counts every card the split
+  uses, so a model that needs both cards still gets the room it needs instead of
+  failing with "VRAM exhausted".
 - **An empty `auth.key` no longer locks you out of your own server.** If an
   `auth.key` file existed but held no key - you created it by hand to paste a key
   in later, an editor or PowerShell saved it empty, or a backup left it truncated
