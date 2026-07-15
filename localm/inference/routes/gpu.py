@@ -11,8 +11,6 @@ alone does not grant this without ALSO knowing the token."""
 
 from __future__ import annotations
 
-import hmac
-
 from fastapi import FastAPI, HTTPException, Request
 
 import localm.inference.http_server as _hs
@@ -46,10 +44,14 @@ def register(app: FastAPI, ctx) -> None:
         ONLY by this instance's own coordination_token; reuses
         ``unload_all_models()`` (the same VRAM-release-wait behavior as
         ``POST /v1/models/unload``) rather than duplicating it."""
+        from localm.auth import ct_equal
         presented = await _presented_token(request)
         coord = getattr(_hs, "_gpu_coord", None)
         expected = coord.get("token") if isinstance(coord, dict) else None
-        if not expected or not presented or not hmac.compare_digest(str(presented), str(expected)):
+        # ct_equal, not compare_digest: presented is a caller-supplied header or
+        # JSON body field, so a non-ASCII one would raise instead of 403. The
+        # str() coercion stays - a JSON body can carry a non-str token.
+        if not expected or not presented or not ct_equal(str(presented), str(expected)):
             # Deliberately identical 403 whether coordination is simply not
             # enabled on this instance (no _gpu_coord) or a token was
             # presented and did not match - never confirm/deny which case it

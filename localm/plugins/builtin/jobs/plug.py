@@ -134,9 +134,7 @@ def _caller_is_owner_key(request: Request) -> bool:
     Closing that needs the session to record at MINT time that the owner key
     minted it (sessions.create), which is outside this change's blast radius.
     """
-    import hmac
-
-    from localm.auth import _hash_key, get_api_key
+    from localm.auth import _hash_key, ct_equal, get_api_key
     from localm.inference.http_server import principal_id
     owner_key = get_api_key()
     if not owner_key:
@@ -144,7 +142,11 @@ def _caller_is_owner_key(request: Request) -> bool:
     h = principal_id(request)
     if h is None:
         return False
-    return hmac.compare_digest(h, _hash_key(owner_key))
+    # ct_equal is the house idiom for every secret compare (see auth.ct_equal).
+    # Both sides here are computed sha256 hexdigests, so bare compare_digest could
+    # not actually raise on them - this is for uniformity, so no compare_digest-on-
+    # str remains anywhere to be copied to a site where the operand IS a raw header.
+    return ct_equal(h, _hash_key(owner_key))
 
 
 def _store() -> JobStore:
