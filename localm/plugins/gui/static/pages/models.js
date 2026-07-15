@@ -175,7 +175,10 @@ export async function refreshModelsPage() {
           body: JSON.stringify({ model: m.name, alias: name.trim() }),
         });
         const data = await r.json().catch(() => ({}));
-        if (r.ok) { toast(`Aliased as '${name.trim()}'`); refreshModelsPage(); }
+        // Report the alias the SERVER stored, not the raw text: aliases are
+        // sanitized server-side ("daily driver" -> "daily-driver"), so echoing the
+        // input would name a key that does not exist in the registry (REG-562).
+        if (r.ok) { toast(`Aliased as '${data.alias || name.trim()}'`); refreshModelsPage(); }
         else toast(data.detail || "Alias failed", true);
       };
       actions.appendChild(aliasBtn);

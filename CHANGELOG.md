@@ -90,6 +90,40 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the one on the request-authentication path. A permission denial is now recognised
   as permanent and handled immediately, while the brief Windows retry (which rides
   out antivirus and indexer locks) is unchanged.
+- **The Plugins page's "External plugins" card works again.** Listing, installing,
+  and removing a third-party plugin from the GUI failed with "Could not load
+  plugins: Not Found" for everyone, because the page still called an API that had
+  been removed. The card now uses the same plugin engine the rest of the app (and
+  `localm plugin install`) uses, and it again shows each external plugin's version,
+  description, and the tools it exports to the coder.
+- **Chat no longer refuses right after you load a model.** Picking a model in the
+  sidebar and typing straight away could be rejected with "No model loaded - load a
+  model on the sidebar before chatting" for up to 30 seconds, even though the model
+  had loaded fine. The app now registers the model as active the moment the load
+  lands.
+- **Aliasing a model tells you the name it really created.** An alias containing a
+  space (or a slash or colon) is stored in a cleaned-up form, but the GUI reported
+  the name you typed, so "daily driver" was announced while only "daily-driver"
+  existed. It now shows the actual name. If that cleaned-up name is already taken,
+  the alias is refused with a clear message instead of reporting success without
+  creating anything.
+- **Moving a model onto the same drive no longer reports a false "not enough disk
+  space".** `localm add <path> --on-duplicate move` refused whenever the drive had
+  less free space than the model's size, even though moving within one drive needs
+  no extra room at all - exactly the case where you would choose move over copy.
+- **A downloaded HuggingFace model is no longer mislabelled "unknown".** Pulling a
+  full transformers model whose repository lacks a type tag registered it as
+  "unknown", so it was skipped by automatic chat selection and `localm gui` could
+  open with no model even though the download worked. The type is now read from the
+  model's own config file when the repository does not say.
+- **A HuggingFace download can resume after the disk fills up.** Retrying required
+  free space for the whole model again, ignoring the part already downloaded, so the
+  retry it was meant to enable could never start. It now only asks for the space the
+  remaining files need.
+- **A ComfyUI model download no longer reports success without downloading.** If you
+  already had the same file registered in localm, the "Missing model -> Download"
+  offer reported success while nothing was written to the ComfyUI folder, and
+  generation then failed with the model still missing.
 - **Saving a memory no longer freezes the app.** On some setups, saving, editing,
   or adding a remembered fact could make the whole app stop responding for several
   minutes the first time an embedding model needed to load, because that load ran on

@@ -445,3 +445,89 @@ class TestCliStoreOption:
         assert f.exists()
         assert not (_models_dir() / "mymodel.gguf").exists()
         assert load_registry()["mymodel"]["path"] == str(f.resolve())
+
+
+# --------------------------------------------------------------------------- #
+#  REG-450: a SAME-VOLUME move needs no free space (it is an os.rename)         #
+# --------------------------------------------------------------------------- #
+
+def _tiny_free(monkeypatch, free_bytes):
+    """Force the free-space reading _check_disk_space takes, without filling a
+    real disk. The model files stay real; only the free-space number is staged."""
+    import shutil as _sh
+    from localm.model_manager import pull as _pull
+    real = _sh.disk_usage
+
+    def _fake(p):
+        u = real(p)
+        return type(u)(u.total, u.total - free_bytes, free_bytes)
+
+    monkeypatch.setattr(_pull.shutil, "disk_usage", _fake)
+
+
+def test_same_volume_is_detected_for_real_paths(isolated_home, tmp_path):
+    """The volume check itself, against REAL paths (no mocks): a dir and its own
+    subdir are on one volume. If this ever stops holding, the move fast-path
+    below would silently start skipping a check it must not skip."""
+    from localm.model_manager.registry import _same_volume
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    assert _same_volume(tmp_path, sub) is True
+    # An unreadable/missing path must fail SAFE (unknown -> assume cross-volume,
+    # keep the strict space check) rather than claim "same volume, skip it".
+    assert _same_volume(tmp_path, tmp_path / "does-not-exist") is False
+
+
+def test_same_volume_move_does_not_demand_copy_sized_free_space(isolated_home, tmp_path):
+    """REG-450: `localm add <path> --on-duplicate move` on the SAME volume is an
+    os.rename needing ~0 extra bytes, but the preflight demanded the full model
+    size for move as well as copy - so moving a 40 GB model onto a drive with
+    30 GB free (exactly when a user picks move over copy) failed with a false
+    'Not enough disk space'. Pre-#450 the bare shutil.move succeeded here."""
+    import pytest as _pytest
+    src = _gguf(tmp_path / "ext", "big.gguf", b"G" * 4096)
+    with _pytest.MonkeyPatch.context() as mp:
+        _tiny_free(mp, free_bytes=1)          # 1 byte free, model is 4096 bytes
+        dest = mm._store_into_models_dir(src, "move")
+    assert dest == _models_dir() / "big.gguf"
+    assert dest.exists() and dest.read_bytes() == b"G" * 4096
+    assert not src.exists(), "a move must not leave the original behind"
+
+
+def test_copy_still_refuses_when_the_volume_is_actually_full(isolated_home, tmp_path):
+    """Negative case: a COPY really does need the bytes, so the preflight must
+    still refuse. If the fix disabled the check for both actions, this fails."""
+    import pytest as _pytest
+    src = _gguf(tmp_path / "ext", "big.gguf", b"G" * 4096)
+    with _pytest.MonkeyPatch.context() as mp:
+        _tiny_free(mp, free_bytes=1)
+        with _pytest.raises(RuntimeError, match="Not enough disk space"):
+            mm._store_into_models_dir(src, "copy")
+    assert src.exists(), "a refused copy must leave the source alone"
+    assert not (_models_dir() / "big.gguf").exists()
+
+
+def test_cross_volume_move_still_requires_space(isolated_home, tmp_path):
+    """Negative case: a CROSS-volume move is a real copy+delete, so it still needs
+    the bytes. The skip must be conditioned on the volume, not on the verb."""
+    import pytest as _pytest
+    from localm.model_manager import registry as _reg
+    src = _gguf(tmp_path / "ext", "big.gguf", b"G" * 4096)
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_reg, "_same_volume", lambda a, b: False)   # pretend another drive
+        _tiny_free(mp, free_bytes=1)
+        with _pytest.raises(RuntimeError, match="Not enough disk space"):
+            mm._store_into_models_dir(src, "move")
+    assert src.exists(), "a refused move must leave the source alone"
+
+
+def test_same_volume_move_of_a_directory_skips_the_space_check(isolated_home, tmp_path):
+    """The HF-directory branch carries the identical defect (registry.py:1026)."""
+    import pytest as _pytest
+    src = _hf_dir(tmp_path, "myhf")
+    with _pytest.MonkeyPatch.context() as mp:
+        _tiny_free(mp, free_bytes=1)
+        dest = mm._store_into_models_dir(src, "move")
+    assert dest == _models_dir() / "myhf"
+    assert (dest / "config.json").is_file()
+    assert not src.exists()

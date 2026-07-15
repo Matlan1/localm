@@ -622,3 +622,96 @@ def test_attach_engine_http_install_lifecycle(env, monkeypatch):
 
         assert c.post("/api/plugins/ghost/install").status_code == 404
         assert c.post("/api/plugins/ghost/uninstall").status_code == 404
+
+
+def _make_legacy_plugin(root, name, *, exports='["tool_hello"]'):
+    """A THIRD-PARTY legacy plugin source dir: the `entry = ` + `[tools] exports`
+    shape the GUI's External plugins card exists for (a CLI command plus coder
+    tool exports), as opposed to an engine `register = ` plugin."""
+    pdir = root / name
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "plugin.toml").write_text(
+        f'[plugin]\nname = "{name}"\nversion = "1.2.3"\n'
+        f'description = "an external one"\nentry = "{name}_cli:main"\n'
+        f'\n[tools]\nexports = {exports}\n', encoding="utf-8")
+    (pdir / f"{name}_cli.py").write_text("def main():\n    pass\n", encoding="utf-8")
+    return pdir
+
+
+def test_external_plugin_http_lifecycle(env):
+    """REG-585: the GUI's External plugins card must have a live API. Install a
+    third-party folder over HTTP, see it listed as an installed non-builtin with
+    its tool exports, then remove it. Before the fix the card called the deleted
+    /v1/plugins and every one of these was a 404."""
+    from localm.plugins.engine import attach_engine
+    src = _make_legacy_plugin(env / "src", "myext")
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        def _entry():
+            return next((p for p in c.get("/api/plugins").json()["plugins"]
+                         if p["name"] == "myext"), None)
+
+        assert _entry() is None                      # not installed yet
+
+        r = c.post("/api/plugins/install-external", json={"source": str(src)})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"status": "installed", "name": "myext", "version": "1.2.3"}
+
+        e = _entry()
+        assert e is not None, "an installed external plugin must be listed"
+        assert e["installed"] is True
+        assert e["builtin"] is False                  # this is what the card filters on
+        assert e["version"] == "1.2.3"
+        assert e["description"] == "an external one"
+        assert e["tool_exports"] == ["tool_hello"]    # the card's "Tools" column
+
+        assert c.post("/api/plugins/myext/uninstall").status_code == 200
+        assert _entry() is None
+
+
+def test_install_external_rejects_bad_input(env):
+    """Negative cases: the route must refuse rather than half-install."""
+    from localm.plugins.engine import attach_engine
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        assert c.post("/api/plugins/install-external", json={}).status_code == 400
+        assert c.post("/api/plugins/install-external",
+                      json={"source": ""}).status_code == 400
+        # a real directory with no plugin.toml
+        (env / "empty").mkdir()
+        r = c.post("/api/plugins/install-external", json={"source": str(env / "empty")})
+        assert r.status_code == 400
+        assert "plugin.toml" in r.json()["detail"]
+        # a path that does not exist at all
+        assert c.post("/api/plugins/install-external",
+                      json={"source": str(env / "nope")}).status_code == 400
+        # installing the same plugin twice without force is a 400, not a silent
+        # overwrite of whatever is already there.
+        src = _make_legacy_plugin(env / "src", "dupext")
+        assert c.post("/api/plugins/install-external",
+                      json={"source": str(src)}).status_code == 200
+        r = c.post("/api/plugins/install-external", json={"source": str(src)})
+        assert r.status_code == 400
+        assert "already installed" in r.json()["detail"]
+
+
+def test_parse_spec_reads_tool_exports(tmp_path):
+    """PluginSpec calls itself a superset of loader.PluginManifest, so it must
+    carry [tools] exports too - the GUI reads it straight off api_state now."""
+    from localm.plugins.engine import parse_spec
+    src = _make_legacy_plugin(tmp_path, "texp", exports='["a", "b"]')
+    assert parse_spec(src).tool_exports == ["a", "b"]
+
+    # absent [tools] -> empty, not an error
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "plugin.toml").write_text('[plugin]\nname = "plain"\n', encoding="utf-8")
+    assert parse_spec(plain).tool_exports == []
+
+    # malformed -> rejected with the same message shape the legacy loader uses,
+    # so the two parsers of this one key cannot drift.
+    bad = _make_legacy_plugin(tmp_path / "b", "badexp", exports='"not-a-list"')
+    with pytest.raises(ValueError, match="must be a list of strings"):
+        parse_spec(bad)
