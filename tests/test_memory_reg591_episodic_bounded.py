@@ -182,3 +182,129 @@ def test_existing_short_history_unaffected(memhome):
     complete, calls = _counting_complete()
     plug._store_episodes(plug._chat_store(), complete, embed_fn=None)
     assert calls["n"] == 3
+
+
+# --------------------------------------------------------------------------- #
+#  RESIDUAL of the MEDIUM: a RESUMED session must SUPERSEDE its own episode    #
+# --------------------------------------------------------------------------- #
+# The settle gate (above) only closed the "summarised WHILE INCOMPLETE" half. The
+# entry's other half - "re-summarised on every later run ... accumulating partial/
+# duplicate episodes" - survived: a session summarised at mtime M, then RESUMED (a
+# user continues the conversation the next day) has its mtime advance to M2 > M, so
+# it re-crosses the watermark and is summarised AGAIN. The pass already tags each
+# episode with meta={"session": stem} but never read it back, so the second summary
+# was stored as a SECOND record for the SAME conversation whenever it differed enough
+# to clear the 0.85 dedup - which a grown conversation does by construction.
+
+def _summaries(*texts):
+    """A stub returning a scripted, genuinely different summary per call."""
+    it = iter(texts)
+    calls = {"n": 0}
+
+    def complete(prompt):
+        calls["n"] += 1
+        return next(it)
+
+    return complete, calls
+
+
+def _episodes(store):
+    return [r for r in store.all() if r.kind == "episodic"]
+
+
+def test_resumed_session_supersedes_its_episode_instead_of_duplicating(memhome):
+    """One episode PER SESSION. A resumed session's later summary covers the WHOLE
+    conversation, so it must REPLACE that session's earlier partial episode, not add
+    a second record for the same stem."""
+    store = plug._chat_store()
+    _write_session(memhome, "mysession", _SETTLED, content="rust ownership please")
+    c1, k1 = _summaries("Worked through Rust ownership rules and lifetime errors")
+    plug._store_episodes(store, c1, embed_fn=None)
+    assert k1["n"] == 1 and len(_episodes(plug._chat_store())) == 1
+
+    # The user RESUMES the same session the next day: the file grows and its mtime
+    # advances past the watermark, then settles again.
+    _write_session(memhome, "mysession", _SETTLED + 200_000.0,
+                   content="rust ownership, then the whole budget and hiring plan")
+    c2, k2 = _summaries("Planned the quarterly budget cuts and the hiring freeze")
+    plug._store_episodes(store, c2, embed_fn=None)
+
+    eps = _episodes(plug._chat_store())
+    stems = [e.meta.get("session") for e in eps]
+    assert len(eps) == 1, (
+        f"a resumed session accumulated {len(eps)} episodes for one stem "
+        f"({stems}); it must supersede its own earlier episode")
+    assert "budget" in eps[0].text, "the superseding episode must be the NEWER summary"
+    assert eps[0].meta.get("session_mtime") == _SETTLED + 200_000.0, (
+        "the superseded episode must re-stamp the session mtime it now reflects")
+
+
+def test_resumed_session_with_same_story_does_not_duplicate(memhome):
+    """The near-duplicate path: a resumed session whose summary is substantively the
+    same must also stay at ONE episode (and must not add a second)."""
+    store = plug._chat_store()
+    _write_session(memhome, "steady", _SETTLED, content="rust ownership please")
+    c1, _ = _summaries("Worked through Rust ownership rules and lifetime errors")
+    plug._store_episodes(store, c1, embed_fn=None)
+
+    _write_session(memhome, "steady", _SETTLED + 200_000.0, content="rust ownership again")
+    c2, _ = _summaries("Worked through Rust ownership rules and lifetime errors again")
+    plug._store_episodes(store, c2, embed_fn=None)
+    assert len(_episodes(plug._chat_store())) == 1
+
+
+def test_preexisting_duplicates_for_one_stem_are_collapsed(memhome):
+    """A store written BEFORE this fix can already hold several overlapping partials
+    for one session (the pass then re-summarised a grown session every run). When that
+    session is next processed, they collapse to the single fullest record."""
+    from localm.memory import MemoryRecord
+    store = plug._chat_store()
+    for i, txt in enumerate(["Partial one about rust ownership",
+                             "Partial two about rust and cargo",
+                             "Partial three about rust, cargo and clippy"]):
+        store.add(MemoryRecord(text=txt, kind="episodic", source="synth",
+                               importance=0.4,
+                               meta={"session": "dupe", "session_mtime": 1000.0 + i}))
+    assert len(_episodes(plug._chat_store())) == 3       # the pre-fix mess
+
+    _write_session(memhome, "dupe", _SETTLED, content="rust, cargo, clippy, the lot")
+    c, _ = _summaries("Covered the whole Rust toolchain: ownership, cargo and clippy")
+    plug._store_episodes(store, c, embed_fn=None)
+
+    eps = _episodes(plug._chat_store())
+    assert len(eps) == 1, f"expected the duplicates to collapse to one, got {len(eps)}"
+    assert "toolchain" in eps[0].text, "the surviving record must be the fullest summary"
+
+
+def test_collapse_only_touches_the_processed_stem(memhome):
+    """The collapse must be bounded: another session's episodes are untouched."""
+    from localm.memory import MemoryRecord
+    store = plug._chat_store()
+    store.add(MemoryRecord(text="An unrelated episode about hiking the Alps",
+                           kind="episodic", source="synth", importance=0.4,
+                           meta={"session": "other", "session_mtime": 500.0}))
+    for i in range(2):
+        store.add(MemoryRecord(text=f"Partial {i} about rust ownership rules",
+                               kind="episodic", source="synth", importance=0.4,
+                               meta={"session": "dupe", "session_mtime": 1000.0 + i}))
+    _write_session(memhome, "dupe", _SETTLED, content="rust the lot")
+    c, _ = _summaries("Covered the whole Rust toolchain end to end")
+    plug._store_episodes(store, c, embed_fn=None)
+
+    eps = _episodes(plug._chat_store())
+    stems = sorted((e.meta or {}).get("session") for e in eps)
+    assert stems == ["dupe", "other"], f"expected one per stem, got {stems}"
+
+
+def test_distinct_sessions_still_get_their_own_episodes(memhome):
+    """The per-stem supersede must NOT collapse genuinely different sessions into one
+    (that would resurrect the pre-#591 'N sessions -> <=1 blob' bug, audit [14])."""
+    store = plug._chat_store()
+    _write_session(memhome, "s_rust", _SETTLED, content="rust ownership please")
+    _write_session(memhome, "s_hike", _SETTLED + 1, content="plan a hiking trip")
+    c, _ = _summaries("Worked through Rust ownership rules and lifetime errors",
+                      "Planned a hiking trip to the Alps for next month")
+    plug._store_episodes(store, c, embed_fn=None)
+    eps = _episodes(plug._chat_store())
+    assert len(eps) == 2, "two distinct sessions must yield two episodes"
+    assert {e.meta.get("session") for e in eps} == {"s_rust", "s_hike"}

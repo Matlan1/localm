@@ -77,6 +77,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Your saved memories are recalled again when an API key is set.** With a key
+  configured, everything you saved (and everything memory learned on its own) was
+  filed under one identity but looked up under a different one, so chat quietly
+  recalled none of it. The Memory page still listed every fact, which made it look
+  like the model was simply ignoring them. Both paths now use the same identity.
+- **The app no longer freezes while memory is distilling in the background.** After
+  a turn, memory quietly distils new facts, which takes one model call per candidate
+  fact. It held the memory lock for that whole stretch, so your next message - and
+  every other request, token stream, and health check - waited for it to finish:
+  seconds to minutes on a local model. It now does that thinking without holding the
+  lock, so chat stays responsive while memory grows.
+- **The first memory distil after an upgrade no longer monopolises the model.** With
+  a backlog of past conversations, the first background distil summarised every past
+  session, one model generation each, back to back - starving chat for as long as it
+  took. It now summarises a few per pass and works through the backlog over time.
+- **A conversation is remembered as one entry, even if you come back to it.** An
+  in-progress conversation could be summarised while it was still going, and a
+  conversation you resumed later could be summarised again, leaving several
+  overlapping partial memories of the same session. Each conversation now waits
+  until it is finished and keeps a single summary, updated to cover the whole thing.
 - **Picking a Main GPU no longer stops large transformers models from loading.**
   With a Main GPU selected, localm pinned the whole model onto that one card, so a
   transformers model bigger than its free memory failed with an out-of-memory error
