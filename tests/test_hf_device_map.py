@@ -103,7 +103,10 @@ class TestMainGpuIndexOnly:
         # resolve_main_gpu_index is the REAL function: index 7 isn't among the
         # detected devices, so it drops to 0 with a warning - _cuda_device_map
         # must confine to whatever resolve_main_gpu_index actually RETURNS, not
-        # the raw configured value.
+        # the raw configured value. Pin non-Vulkan so that membership validation
+        # actually runs, regardless of what native backend is provisioned in
+        # the ambient environment (see test_discover.py::TestResolveMainGpuIndex).
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
         mem = {0: (8_000_000_000, 16_000_000_000)}
         with caplog.at_level("WARNING", logger="localm"):
