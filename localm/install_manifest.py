@@ -58,13 +58,14 @@ def _abs(p) -> str:
 
 def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
            data_created=False, shortcut="", stamp="",
-           runtime_contained=False, python_dir="", cache_dir="",
+           runtime_contained=False, python_dir="", cache_dir="", uv_dir="",
            path_dir="", command_shim="", path_modified=False) -> Path:
     """Write the install manifest under *root*. Paths are stored absolute; the
     binary list is snapshotted from *lib_dir* at call time.
 
     Schema v2 also records:
-      * the Contained-install runtime (the in-clone Python + uv cache dirs) -
+      * the Contained-install runtime (the in-clone Python + uv cache dirs, and
+        uv's OWN binary dir when setup installed uv itself into this clone) -
         removed on uninstall ONLY when ``runtime_contained`` (a SHARED runtime
         lives in the user's global uv dir and is reused by other clones, so it is
         reported but never deleted); and
@@ -81,10 +82,11 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
         "data_dir": _abs(data_dir),
         "data_created": bool(data_created),
         "shortcut": _abs(shortcut),
-        # v2: Contained install runtime (in-clone Python + uv cache).
+        # v2: Contained install runtime (in-clone Python + uv cache + uv itself).
         "runtime_contained": bool(runtime_contained),
         "python_dir": _abs(python_dir),
         "cache_dir": _abs(cache_dir),
+        "uv_dir": _abs(uv_dir),
         # v2: optional global `localm` command.
         "path_dir": _abs(path_dir),
         "command_shim": _abs(command_shim),
@@ -195,12 +197,13 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
         elif data_dir:
             report["skipped"].append(
                 (data_dir, "data kept (pass --purge-data to remove)"))
-        # v2: the Contained-install runtime dirs (in-clone Python + uv cache).
+        # v2: the Contained-install runtime dirs (in-clone Python + uv cache +
+        # uv's own binary dir, when setup installed uv itself into this clone).
         # Removed ONLY when we pulled them into the clone; a SHARED runtime lives in
         # the user's global uv dir and is reused by other clones, so report but
         # NEVER delete it.
         if m.get("runtime_contained"):
-            for key in ("python_dir", "cache_dir"):
+            for key in ("python_dir", "cache_dir", "uv_dir"):
                 d = m.get(key, "")
                 if not d:
                     continue
@@ -208,7 +211,7 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
                 actions.append((d, "runtime", "refuse" if reason else "recorded",
                                 reason or ""))
         else:
-            for key in ("python_dir", "cache_dir"):
+            for key in ("python_dir", "cache_dir", "uv_dir"):
                 d = m.get(key, "")
                 if d:
                     report["skipped"].append(
@@ -321,6 +324,7 @@ def main(argv=None) -> int:
     r.add_argument("--runtime-contained", action="store_true")
     r.add_argument("--python-dir", default="")
     r.add_argument("--cache-dir", default="")
+    r.add_argument("--uv-dir", default="")
     r.add_argument("--path-dir", default="")
     r.add_argument("--command-shim", default="")
     r.add_argument("--path-modified", action="store_true")
@@ -341,6 +345,7 @@ def main(argv=None) -> int:
                    data_created=args.data_created, shortcut=args.shortcut,
                    stamp=args.stamp, runtime_contained=args.runtime_contained,
                    python_dir=args.python_dir, cache_dir=args.cache_dir,
+                   uv_dir=args.uv_dir,
                    path_dir=args.path_dir, command_shim=args.command_shim,
                    path_modified=args.path_modified)
         print(f"[install] recorded manifest at {p}")

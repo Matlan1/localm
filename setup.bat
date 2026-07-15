@@ -29,6 +29,39 @@ if /i "%~1"=="uninstall"   goto uninstall
 if /i "%~1"=="--uninstall" goto uninstall
 if /i "%~1"=="--rollback"  goto uninstall
 
+rem ---- portable vs shared: where localm's Python tooling lives ---------------
+rem  Portable pulls uv ITSELF (when we have to install it below), its managed
+rem  Python, and its wheel cache INTO this folder, so the clone is truly
+rem  self-contained (delete it and nothing is left behind) at the cost of a
+rem  per-clone re-download. Shared reuses (or installs) uv at its normal
+rem  per-user location and reuses its per-user Python + cache. Asked BEFORE the
+rem  uv bootstrap below so a Portable pick also confines uv's own binary to this
+rem  folder, not just the runtime it manages - silently installing a tool into
+rem  the user's profile without ever asking where is exactly the kind of
+rem  outside-the-root write AGENTS.md rule 4 forbids. The UV_* vars are set for
+rem  THIS setup process only (not setx / not global), so they never touch any
+rem  other uv project. --python-preference only-managed forces the contained
+rem  download instead of reusing a system Python.
+echo.
+echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
+echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
+echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
+set "STOREPICK="
+set /p "STOREPICK=  Pick 1 or 2 [1]: "
+if not defined STOREPICK set "STOREPICK=1"
+set "CONTAINED=0"
+set "PYPREF="
+set "UVDIR="
+if "%STOREPICK%"=="1" (
+    set "CONTAINED=1"
+    set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
+    set "UV_CACHE_DIR=%CD%\.cache"
+    set "PYPREF=--python-preference only-managed"
+    echo  Portable: uv, Python, and downloads all under this folder
+) else (
+    echo  Shared: reusing/installing uv and its Python + cache ^(outside this folder^).
+)
+
 rem ---- uv is required; bootstrap it ourselves if it is missing --------------
 rem  uv (Astral's fast Python package manager) drives the whole install: it builds
 rem  the venv and resolves the GPU wheels. Rather than dead-ending with "go install
@@ -48,6 +81,14 @@ if /i "!GETUV:~0,1!"=="N" goto uv_manual
 
 echo.
 echo  Installing uv ...
+if "%CONTAINED%"=="1" (
+    rem  Portable was picked: confine uv's OWN binary to this folder too, not just
+    rem  the Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
+    rem  override for the installer's target dir.
+    set "UV_INSTALL_DIR=%CD%\.uv"
+    set "UVDIR=%CD%\.uv"
+    echo  Portable: installing uv itself under .\.uv
+)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
 rem  Make the freshly installed uv callable for the rest of THIS run (the installer
 rem  updates the persistent USER PATH, not this already-running shell). Prepend every
@@ -91,33 +132,6 @@ pause
 exit /b 1
 
 :uv_ready
-
-rem ---- portable vs shared: where the Python runtime + downloads live --------
-rem  Portable pulls uv's managed Python AND its wheel cache INTO this folder, so
-rem  the clone is truly self-contained (delete it and nothing is left behind) at
-rem  the cost of a per-clone re-download. Shared reuses uv's per-user Python +
-rem  cache (one download, less disk) but lives in your user profile. The UV_* vars
-rem  are set for THIS setup process only (not setx / not global), so they never
-rem  touch any other uv project. --python-preference only-managed forces the
-rem  contained download instead of reusing a system Python.
-echo.
-echo  Keep localm's Python runtime + downloads inside this folder?
-echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
-echo    [2] Shared   - reuse uv's per-user Python + cache (faster; lives in your user profile)
-set "STOREPICK="
-set /p "STOREPICK=  Pick 1 or 2 [1]: "
-if not defined STOREPICK set "STOREPICK=1"
-set "CONTAINED=0"
-set "PYPREF="
-if "%STOREPICK%"=="1" (
-    set "CONTAINED=1"
-    set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
-    set "UV_CACHE_DIR=%CD%\.cache"
-    set "PYPREF=--python-preference only-managed"
-    echo  Portable: Python under .\.python and downloads under .\.cache
-) else (
-    echo  Shared: reusing uv's per-user Python + cache ^(outside this folder^).
-)
 
 rem ---- create the venv in the repo root -------------------------------------
 rem  An existing .venv is reused unless the user opts to replace it, so a
@@ -410,7 +424,7 @@ if "%CONTAINED%"=="1" (
     set "PYDIR=%CD%\.python"
     set "CACHEDIR=%CD%\.cache"
 )
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will be conservative).
 
 rem ---- done ------------------------------------------------------------------

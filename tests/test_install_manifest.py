@@ -203,6 +203,36 @@ def test_uninstall_keeps_shared_runtime(tmp_path):
     assert any("shared runtime kept" in why for _, why in rep["skipped"])
 
 
+def test_uv_dir_roundtrips_and_is_removed_when_contained(tmp_path):
+    # A Portable install that had to bootstrap uv itself confines uv's OWN binary
+    # dir to the clone too (not just the Python runtime it manages) - this is the
+    # v2 "uv_dir" field. Removed on uninstall exactly like python_dir/cache_dir.
+    lib = _v2_lib(tmp_path)
+    uvdir = tmp_path / ".uv"; uvdir.mkdir()
+    (uvdir / "uv.exe").write_text("x", encoding="utf-8")
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              runtime_contained=True, uv_dir=str(uvdir))
+    m = im.load(tmp_path)
+    assert Path(m["uv_dir"]) == uvdir.resolve()
+    rep = im.uninstall(tmp_path)
+    assert not uvdir.exists()
+    assert str(uvdir.resolve()) in rep["removed"]
+
+
+def test_uv_dir_kept_when_shared(tmp_path):
+    # uv was already on PATH (a pre-existing / Shared install) - setup never
+    # installed it into this clone, so uv_dir is blank and there is nothing to
+    # remove; a NON-blank uv_dir recorded without runtime_contained (e.g. a
+    # user-edited manifest) must still be reported, never deleted.
+    lib = _v2_lib(tmp_path)
+    shared_uv = tmp_path / "elsewhere" / "uv"; shared_uv.mkdir(parents=True)
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              runtime_contained=False, uv_dir=str(shared_uv))
+    rep = im.uninstall(tmp_path)
+    assert shared_uv.exists()
+    assert any("shared runtime kept" in why for _, why in rep["skipped"])
+
+
 def test_uninstall_reverses_global_command(tmp_path, monkeypatch):
     import localm.globalcmd as gc
     calls = {}
