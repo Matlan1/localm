@@ -30,6 +30,23 @@ def test_config_key_validates():
         validate_update({"idle_unload_seconds": -5})        # below min=0
 
 
+@pytest.fixture(autouse=True)
+def _isolate_engine_registry(monkeypatch):
+    """_idle_unload_once scans the _engines REGISTRY, not just _engine, and that
+    registry is module state that outlives a test: switch_engine/get_engine write it
+    and nothing clears it afterwards. So a LOADED engine left behind by any earlier
+    test in this xdist worker makes the helper unload THAT one and return True,
+    flipping every "should not unload" assertion here - a real failure with an
+    innocent-looking `assert True is False`, and one that only appears for whichever
+    worker happens to inherit the stray engine.
+
+    Autouse and module-wide, deliberately NOT folded into fake_engine: the tests that
+    take no engine fixture (test_noop_when_no_engine) read the same registry and need
+    the same isolation. Pinning it per-fixture instead would leave those exposed."""
+    monkeypatch.setattr(hs, "_engines", {})
+    monkeypatch.setattr(hs, "_engines_lru", [])
+
+
 class _FakeEngine:
     def __init__(self, loaded=True):
         self.loaded = loaded
