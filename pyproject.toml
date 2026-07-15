@@ -196,6 +196,7 @@ rocm-sdk-libraries-gfx103x-all = [
 testpaths = ["tests"]
 markers = [
     "integration: marks tests that require external tools (git, network) to be present",
+    "allow_large_tmp_files: this test genuinely needs >100MB of REAL bytes in tmp_path. Rare: prefer faking the size (b._model_bytes = lambda: n), since truncate() is not sparse on NTFS and writes those bytes for real on every run. Add a why-comment when using it.",
     "real_gguf: real end-to-end GGUF inference; needs the native llama runtime (localm setup-llama). Skipped unless available.",
     "real_comfy: real ComfyUI round-trip; set LOCALM_TEST_COMFY_URL to a running instance. Skipped unless set.",
     "real_browser: drives the GUI in a real browser; needs Playwright (pip install playwright && playwright install). Skipped unless available.",
