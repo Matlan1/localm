@@ -68,6 +68,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **Settings changes and model-list updates could stop working for a whole run.**
+  If a localm process was killed while saving settings or updating the model list,
+  the lock file it left behind could later be misread as "this same process is
+  already writing" - wedging every settings save and every model pull, remove, or
+  alias for the rest of that run, with no way out but a restart. A leftover lock is
+  now always reclaimed, and only a genuine re-entrant write is refused.
+- **Saving settings no longer freezes the whole app.** Saving settings in the GUI
+  while another localm process was also writing them (for example `localm config` in
+  a terminal) could freeze the entire server - chat, streaming, health checks - for
+  up to 10 seconds. That wait now happens off the request-handling path.
+- **An unreadable config no longer stalls every request on Linux and macOS.** When
+  config.json or registry.json could not be read because of file permissions, localm
+  retried for about a second before falling back, on every affected read - including
+  the one on the request-authentication path. A permission denial is now recognised
+  as permanent and handled immediately, while the brief Windows retry (which rides
+  out antivirus and indexer locks) is unchanged.
 - **Saving a memory no longer freezes the app.** On some setups, saving, editing,
   or adding a remembered fact could make the whole app stop responding for several
   minutes the first time an embedding model needed to load, because that load ran on
