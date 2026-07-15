@@ -275,6 +275,29 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                          "(%r); using the default %.0fs", raw, LOAD_TIMEOUT_DEFAULT)
             return LOAD_TIMEOUT_DEFAULT
 
+    @staticmethod
+    def _first_token_timeout_seconds() -> float:
+        """How long to wait for a reply's FIRST token, from config
+        (``gguf_first_token_timeout_s``) or the generous built-in default.
+        Configurable for the same reason as the load timeout above: it covers
+        prompt PREFILL, whose duration varies enormously by install (CPU vs GPU,
+        partial offload, prompt length) - far more than a fixed constant could
+        cover. See FIRST_TOKEN_TIMEOUT_DEFAULT for why this is not the per-token
+        ceiling."""
+        from localm.inference.backends.llamacpp._runner import FIRST_TOKEN_TIMEOUT_DEFAULT
+        from localm.config import load_config
+        raw = load_config().get("gguf_first_token_timeout_s")
+        try:
+            return float(raw or FIRST_TOKEN_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            # Same rule-5 reasoning as _load_timeout_seconds above: a typo'd
+            # value is a real misconfiguration, not a silent fall-through.
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("gguf_first_token_timeout_s is set but not a valid "
+                         "number (%r); using the default %.0fs",
+                         raw, FIRST_TOKEN_TIMEOUT_DEFAULT)
+            return FIRST_TOKEN_TIMEOUT_DEFAULT
+
     def unload(self) -> None:
         # Ask the isolated worker to close cleanly (native teardown + its
         # stderr suppression happen there), killing it if it does not exit
@@ -297,7 +320,25 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @property
     def loaded(self) -> bool:
-        return self._loaded
+        # A backend whose isolated worker is GONE is not loaded, whatever
+        # _loaded says. The worker can be killed out from under this object on
+        # paths that never run unload(): _cancel_stream_and_drain kills it when
+        # a mid-stream cancel is not confirmed within its drain timeout, and
+        # _simple_request kills it on its own timeout - both call
+        # ModelRunner.shutdown(), which nulls the runner's queues and process.
+        # Neither raises RuntimeError into chat_stream's handler below
+        # (GeneratorExit is not a RuntimeError), so _loaded stayed True next to
+        # a dead runner. Engine.chat_stream then skipped its auto-reload and
+        # called straight into the dead runner, whose first act is
+        # self._req_q.put(...) on None -> AttributeError, which is not caught or
+        # unloaded either, so EVERY later request to this model repeated it
+        # until the model was manually evicted or the server restarted.
+        # Reporting the truth here makes the next request reload cleanly instead
+        # (load() builds a fresh ModelRunner) - REG-606.
+        if not self._loaded:
+            return False
+        is_alive = getattr(self._runner, "is_alive", None)
+        return True if is_alive is None else bool(is_alive())
 
     def validate_grammar(self, grammar: Optional[str]) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
@@ -468,7 +509,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # instead of abandoning the runner's generator mid-flight.
         self.last_finish_reason = "stop"
         try:
-            yield from self._runner.chat_stream(**kwargs)
+            yield from self._runner.chat_stream(
+                first_chunk_timeout=self._first_token_timeout_seconds(), **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled (a real native abort, or
             # an unrecoverable fault GgufWorker.chat_stream deliberately left
