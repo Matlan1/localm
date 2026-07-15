@@ -68,6 +68,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **A failing command no longer reports success.** Certain real failures (reading a
+  folder where a file was expected, an invalid path, some native calls) were
+  mistaken for "the output pipe closed", so localm exited quietly with a success
+  code and filed no bug report - telling you, and any script checking the result,
+  that a command had worked when it had not. Those now fail properly and offer the
+  usual report. Piping into `head` or `findstr` still exits quietly, as it should.
+- **A machine on a DSL/PPPoE line gets a working certificate again.** localm leaves
+  a VPN's address out of the certificate it makes for itself, but the check matched
+  far too loosely: an adapter whose name merely contained "ppp", "tun" or "tap" -
+  including a real PPPoE internet link, or a network card with an unlucky name -
+  was mistaken for a VPN, so its address was left out and browsers reaching localm
+  there reported a certificate mismatch. Real VPN adapters are still excluded.
 - **A long prompt on a slow setup is no longer killed as "stalled".** Replies that
   needed more than two minutes to read the prompt before writing their first word -
   common when running on CPU, with most layers off the GPU, or with a very long

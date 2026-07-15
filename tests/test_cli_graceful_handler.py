@@ -74,10 +74,19 @@ def test_reporting_failure_does_not_recurse(tmp_path, monkeypatch):
 
 
 def test_broken_pipe_passes_through_without_reporting(tmp_path, monkeypatch):
-    # `localm ... | head` closes the pipe early; the OSError that surfaces
-    # (BrokenPipeError, or EPIPE/EINVAL from the stdout flush on Windows) must NOT be
-    # misclassified as a bug - no report, no traceback cascade, a clean SIGPIPE-style
-    # exit. Regression for the 3-traceback + report-path-re-crash on an early pipe close.
+    # `localm ... | head` closes the pipe early; the BrokenPipeError that surfaces
+    # must NOT be misclassified as a bug - no report, no traceback cascade, a clean
+    # SIGPIPE-style exit. Regression for the 3-traceback + report-path-re-crash on
+    # an early pipe close.
+    #
+    # This used to also assert that a BARE OSError(EINVAL) exits 0 unreported, as
+    # "the Windows shape" of a pipe close. That baked in a false premise: Windows
+    # raises EINVAL for a broad set of GENUINE I/O misuse too, so it made the
+    # handler swallow real failures and report SUCCESS (REG-555, rule 5). EINVAL is
+    # now a pipe close only when stdout ACTUALLY is a pipe - which CliRunner cannot
+    # present, since it replaces sys.stdout with a StringIO. Both halves of that
+    # split are covered for real in test_reg533_reg555_tls_san_and_broken_pipe.py
+    # (a genuine os.pipe() stdout stays silent; a genuine EINVAL gets reported).
     import errno as _errno
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     reported = []
@@ -92,13 +101,8 @@ def test_broken_pipe_passes_through_without_reporting(tmp_path, monkeypatch):
     def bpipe():
         raise BrokenPipeError(_errno.EPIPE, "broken pipe")
 
-    @g.command()
-    def winpipe():
-        raise OSError(_errno.EINVAL, "closed pipe")  # Windows shape
-
-    for cmd in ("bpipe", "winpipe"):
-        res = CliRunner().invoke(g, [cmd])
-        assert res.exit_code == 0, cmd          # clean exit, not a crash/exit 1
-        assert reported == [], cmd              # NOT reported as a bug
-        assert "Sorry -" not in res.output
-        assert "localm failed" not in res.output
+    res = CliRunner().invoke(g, ["bpipe"])
+    assert res.exit_code == 0               # clean exit, not a crash/exit 1
+    assert reported == []                   # NOT reported as a bug
+    assert "Sorry -" not in res.output
+    assert "localm failed" not in res.output
