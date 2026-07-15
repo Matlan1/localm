@@ -15,12 +15,16 @@ the LOCALM_EMBEDDER_FAULT_FOR_TEST hook - the same code path a real driver
 abort would take. Modeled directly on tests/test_gguf_runner_isolation.py.
 """
 
+import multiprocessing as mp
 import os
+import queue as _queue
+import threading
 
 import pytest
 
 from localm.inference import _embedder_runner as runner_mod
 from localm.inference._embedder_runner import EmbedderRunner
+from localm.inference.embedder import IsolatedEmbedder
 
 
 @pytest.fixture(autouse=True)
@@ -197,3 +201,138 @@ class TestEmbedCrashContainment:
             assert r.is_alive(), "an ordinary exception must not kill the worker"
         finally:
             r.shutdown(grace=0)
+
+
+# --------------------------------------------------------------------------- #
+# Concurrent callers must not receive each other's vectors (REG-643).
+# --------------------------------------------------------------------------- #
+
+def _vec_for(text: str):
+    """A deterministic, input-derived vector, so a response delivered to the
+    WRONG caller is detectable by both length and content."""
+    return [float(len(text)), float(ord(text[0])), 0.0, 0.0]
+
+
+class _AliveProc:
+    """Stands in for the worker process's liveness check ONLY. _wait() polls
+    proc.is_alive() whenever a resp_q poll times out (which the deliberate
+    overlap window below guarantees). The correlation-free transport that
+    REG-643 is about - the real mp.Queue pair and the real parent-side
+    put/get - is NOT substituted."""
+
+    def is_alive(self):
+        return True
+
+    exitcode = None
+
+
+class _CountingRunner(EmbedderRunner):
+    """A REAL EmbedderRunner (real queues, real embed()/_wait()) plus a probe
+    recording how many RPCs are in flight at once."""
+
+    def __init__(self):
+        super().__init__()
+        self._probe_lock = threading.Lock()
+        self.inflight = 0
+        self.max_inflight = 0
+
+    def embed(self, texts, timeout=runner_mod._EMBED_TIMEOUT_DEFAULT):
+        with self._probe_lock:
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            return super().embed(texts, timeout=timeout)
+        finally:
+            with self._probe_lock:
+                self.inflight -= 1
+
+
+def _fifo_child(req_q, resp_q, stop):
+    """Mimics _runner_main's observable protocol exactly: FIFO, one command at
+    a time, ("ok", vectors) per "embed". Substitutes only the llama.cpp math
+    (and the process boundary), never the parent-side code under test. The
+    delay holds each request long enough that an UNSERIALIZED second caller is
+    already blocked in resp_q.get() before the first response is posted - which
+    is precisely when the real transport misdelivers."""
+    while not stop.is_set():
+        try:
+            cmd = req_q.get(timeout=0.05)
+        except _queue.Empty:
+            continue
+        if cmd[0] != "embed":
+            continue
+        threading.Event().wait(0.3)
+        resp_q.put(("ok", [_vec_for(t) for t in cmd[1]]))
+
+
+class TestConcurrentEmbedSerialization:
+    """The worker protocol has NO request-id correlation: one req_q/resp_q pair
+    feeds one child, so two overlapping embed() calls are two threads blocked in
+    the same resp_q.get() and the queue hands each whichever response arrives
+    first - the caller can get vectors belonging to a DIFFERENT text (wrong
+    length, wrong content), silently corrupting what lands in the semantic-memory
+    and RAG vector stores. The pre-#643 in-process GGUFEmbedder.embed() held an
+    RLock that made this impossible; IsolatedEmbedder.embed() must restore it.
+
+    Concurrency here is not hypothetical: the singleton is shared by the memory
+    inlet (event-loop thread) and background consolidation (a daemon thread),
+    and by memory routes offloaded to the default multi-worker executor.
+    """
+
+    def _run_two_concurrent_embeds(self, monkeypatch):
+        ctx = mp.get_context("spawn")
+        req_q, resp_q = ctx.Queue(), ctx.Queue()
+        runner = _CountingRunner()
+        runner._req_q, runner._resp_q, runner._proc = req_q, resp_q, _AliveProc()
+
+        stop = threading.Event()
+        child = threading.Thread(
+            target=_fifo_child, args=(req_q, resp_q, stop), daemon=True)
+        child.start()
+
+        # Install the runner without a real model load or a real child spawn.
+        def fake_reload(self):
+            self._runner = runner
+            self.dim = 4
+
+        monkeypatch.setattr(IsolatedEmbedder, "_reload", fake_reload)
+        emb = IsolatedEmbedder("does-not-matter.gguf")
+
+        results, errors = {}, {}
+
+        def call(label, texts):
+            try:
+                results[label] = emb.embed(texts)
+            except BaseException as e:      # noqa: BLE001 - reported below
+                errors[label] = e
+
+        # "A" -> 1 vector, "B" -> 3 vectors: distinguishable by length AND value.
+        ta = threading.Thread(target=call, args=("A", ["A"]))
+        tb = threading.Thread(target=call, args=("B", ["B", "B", "B"]))
+        ta.start()
+        tb.start()
+        for t in (ta, tb):
+            t.join(30)
+        stop.set()
+        child.join(5)
+        for q in (req_q, resp_q):
+            q.close()
+        assert not errors, f"embed() raised: {errors}"
+        return runner, results
+
+    def test_concurrent_embed_callers_get_their_own_vectors(self, monkeypatch):
+        runner, results = self._run_two_concurrent_embeds(monkeypatch)
+        assert results["A"] == [_vec_for("A")], (
+            "caller A received vectors belonging to another caller's text "
+            f"(got {results['A']!r})")
+        assert results["B"] == [_vec_for("B")] * 3, (
+            "caller B received vectors belonging to another caller's text "
+            f"(got {results['B']!r})")
+
+    def test_concurrent_embed_never_overlaps_the_worker_rpc(self, monkeypatch):
+        """The invariant behind the fix: because the protocol cannot correlate a
+        response to its request, two RPCs must never be in flight at once."""
+        runner, _ = self._run_two_concurrent_embeds(monkeypatch)
+        assert runner.max_inflight == 1, (
+            "two embed() RPCs overlapped on one correlation-free req/resp queue "
+            f"pair (max in flight: {runner.max_inflight})")

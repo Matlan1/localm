@@ -38,7 +38,7 @@ import multiprocessing as mp
 import os
 import queue as _queue
 import time
-from typing import List, Optional
+from typing import List
 
 # Fault-injection hook, honoured by the child ONLY when this environment
 # variable is set. Exists exclusively so the test suite can prove the
@@ -173,7 +173,13 @@ class EmbedderRunner:
     def embed(self, texts: List[str], timeout: float = _EMBED_TIMEOUT_DEFAULT) -> List[List[float]]:
         """Embed *texts* via the isolated worker. Raises RuntimeError on a
         clean failure, a child crash, or a timeout - the caller (embedder.py's
-        IsolatedEmbedder) decides whether/how to recover."""
+        IsolatedEmbedder) decides whether/how to recover.
+
+        NOT safe to call concurrently on one runner, by design: the protocol
+        above carries no request id, so two overlapping RPCs would be two
+        threads blocked in the same resp_q.get(), each free to receive the
+        OTHER's response. The sole caller, IsolatedEmbedder.embed(), serializes
+        on its _rpc_lock to guarantee that (REG-643)."""
         self._req_q.put(("embed", texts))
         return self._wait(timeout, "embed")
 

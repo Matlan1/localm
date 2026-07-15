@@ -15,6 +15,7 @@ the four call sites now skip a pinned embedder instead of releasing it.
 
 import asyncio
 import os
+import threading
 
 import pytest
 
@@ -61,6 +62,7 @@ def test_embed_pins_and_unpins_around_the_call():
     the pin exactly while the call is in flight, never before or after."""
     e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
     e.active_requests = 0
+    e._rpc_lock = threading.RLock()   # normally __init__'s; see embed() (REG-643)
     seen = []
 
     class _FakeRunner:
@@ -86,6 +88,7 @@ def test_embed_unpins_even_on_failure():
     observing a mid-call value of 1 actually proves the pin was taken."""
     e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
     e.active_requests = 0
+    e._rpc_lock = threading.RLock()   # normally __init__'s; see embed() (REG-643)
     seen = []
 
     class _FakeRunner:
