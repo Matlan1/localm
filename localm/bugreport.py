@@ -465,23 +465,52 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
         return ""
 
 
-def _recent_hang_traces(home=None, max_chars: int = 8000) -> str:
-    """The most recent event-loop hang trace (``<logs>/hang_*.log``), if the
-    always-on stall watchdog captured one - every thread's stack at the moment the
-    server froze, which is exactly what diagnoses an intermittent "it hung" report.
-    Kept HEAD-first (the first snapshot names where the loop first stuck). Home
-    paths are scrubbed. Empty when no freeze was captured. Never raises."""
+# A hang trace older than this cannot plausibly belong to the run being reported,
+# whatever pid it carries (pids are reused - see REG-586). Generous on purpose: the
+# pid match below is the precise filter, and this only backstops a pid collision.
+_HANG_TRACE_MAX_AGE_S = 24 * 3600
+
+
+def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
+    """The event-loop hang trace captured by the run being reported
+    (``<logs>/hang_<date>_<pid>.log``), if the always-on stall watchdog captured
+    one - every thread's stack at the moment the server froze, which is exactly
+    what diagnoses an intermittent "it hung" report. Kept HEAD-first (the first
+    snapshot names where the loop first stuck). Home paths are scrubbed. Empty
+    when that run captured no freeze. Never raises.
+
+    Matched to *pid* - the run this report is about - the same way
+    _recent_log_tail already matches its log, and additionally bounded by
+    _HANG_TRACE_MAX_AGE_S. Both filters are needed and neither is enough alone:
+
+      * The watchdog is ON by default, so any transient >10s stall (a big index
+        build, VRAM pressure) writes a trace, and nothing ever prunes them. With
+        no filter, an ordinary report about something else entirely ("the model
+        gave a wrong answer") attached whatever freeze happened to be newest -
+        rendered under "## Server hang trace" asserting "the server froze",
+        i.e. a stale, unrelated trace presented as the diagnosis of the current
+        problem, sending triage down a false path (REG-542).
+      * A pid alone is not an identity (pids get reused), so an ancient trace
+        carrying this run's pid would still slip through; the age bound stops it.
+      * Age alone is not enough either: a recent freeze in a DIFFERENT localm
+        instance is not this report's problem; the pid match stops that.
+
+    A caller that cannot name the run (no pid) gets nothing rather than a guess:
+    attaching a trace we cannot tie to the report is the whole defect."""
     try:
+        import time as _time
         from pathlib import Path as _P
         if home is None:
             from localm.debuglog import logs_dir
             d = logs_dir()
         else:
             d = _P(home) / "logs"
-        if not d.is_dir():
+        if not d.is_dir() or pid is None:
             return ""
-        traces = sorted(d.glob("hang_*.log"),
-                        key=lambda p: p.stat().st_mtime, reverse=True)
+        cutoff = _time.time() - _HANG_TRACE_MAX_AGE_S
+        traces = sorted(
+            (p for p in d.glob(f"hang_*_{pid}.log") if p.stat().st_mtime >= cutoff),
+            key=lambda p: p.stat().st_mtime, reverse=True)
         if not traces:
             return ""
         text = traces[0].read_text(encoding="utf-8", errors="replace").strip()
@@ -742,10 +771,14 @@ def save_user_report(description: str, *, summary: str = "",
         tail = _recent_log_tail(pid=os.getpid())
         if tail:
             context["recent_log_tail"] = tail
-    # Always attach a captured hang trace when one exists (independent of
+    # Always attach a hang trace captured by THIS run (independent of
     # include_log): it only exists if the server actually froze, and it is the
-    # single most useful thing for diagnosing a "the app hung" report.
-    hang = _recent_hang_traces()
+    # single most useful thing for diagnosing a "the app hung" report. Scoped to
+    # our own pid like the log tail above: an old freeze from a previous run is
+    # not this report's problem, and presenting one as the diagnosis is worse
+    # than attaching nothing (REG-542).
+    import os as _os
+    hang = _recent_hang_traces(pid=_os.getpid())
     if hang:
         context["hang_traces"] = hang
     if isinstance(client, dict) and client:
@@ -1363,7 +1396,9 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
             ctx["recent_log_tail"] = tail
         # If the watchdog captured a freeze before the run was force-killed, attach
         # its stacks too: a hang the user force-quit is exactly this recovery path.
-        hang = _recent_hang_traces(home)
+        # The CRASHED run's freeze, matched by its pid like the log tail above -
+        # not this recovering process's, and not some unrelated older one.
+        hang = _recent_hang_traces(home, pid=info.get("pid"))
         if hang:
             ctx["hang_traces"] = hang
         return report_failure(
