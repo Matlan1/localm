@@ -68,6 +68,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **A long prompt on a slow setup is no longer killed as "stalled".** Replies that
+  needed more than two minutes to read the prompt before writing their first word -
+  common when running on CPU, with most layers off the GPU, or with a very long
+  prompt or document - were treated as a hung model and cancelled, and retrying hit
+  the same wall every time. Reading the prompt now gets its own generous allowance,
+  separate from the per-word one, and you can raise it in Settings > Engine
+  ("First-token timeout") if your machine needs longer. A genuinely hung model is
+  still detected.
+- **Stopping a reply can no longer break that model until you restart.** If you
+  stopped a reply while the model was busy in a step it could not interrupt, the
+  model was shut down but still looked loaded, so every later message to it failed
+  with an internal error, permanently. It now reloads itself on the next message.
 - **A model you switched away from mid-load can be used again.** If you picked a
   model and then quickly picked a different one, the first model could be left
   permanently unusable: every later message to it failed with "Model load was

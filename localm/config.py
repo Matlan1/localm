@@ -133,6 +133,13 @@ DEFAULT_CONFIG: dict = {
     # so raise this only if a genuinely huge model on slow storage needs
     # longer than the generous default.
     "gguf_load_timeout_s": 900.0,
+    # How long a reply may take to produce its FIRST token before the worker is
+    # treated as hung. This covers prompt PREFILL, not one token's decode, so it
+    # is sized like the load timeout rather than the per-token ceiling: on CPU,
+    # under heavy partial offload, or with a very long prompt, prefill can
+    # legitimately take minutes. Raise this only if a genuinely slow box needs
+    # longer than the generous default.
+    "gguf_first_token_timeout_s": 900.0,
     # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
     # explicit selection (device 0). A stale index falls back to device 0 with
     # a logged warning, not a wrong/out-of-range GPU (see
