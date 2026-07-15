@@ -444,16 +444,31 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/models/alias", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_alias(req: AliasRequest):
         registry = _require_registered(req.model)
-        if req.alias in registry:
-            raise HTTPException(409, f"Name already taken: {req.alias}")
-        from localm.model_manager import alias_model
+        # alias_model stores under the SANITIZED name (a space/slash/colon can
+        # never become a raw registry key), so precheck against that same name and
+        # report it back: prechecking the raw name let a collision through, and
+        # answering with the raw name told the user an alias that does not exist
+        # (REG-562).
+        from localm.model_manager import _sanitize_name, alias_model
+        alias = _sanitize_name(req.alias)
+        if alias in registry:
+            raise HTTPException(409, f"Name already taken: {alias}")
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(
+            created = await loop.run_in_executor(
                 get_plugin_executor(), alias_model, req.model, req.alias)
         except Exception as e:
             raise HTTPException(400, f"Alias failed: {e}")
-        return {"status": "aliased", "model": req.model, "alias": req.alias}
+        if not created:
+            # alias_model returns False for "model vanished" and "name taken"
+            # alike, and both were prechecked above, so reaching here means a
+            # concurrent writer won the race. Never answer "aliased" for an alias
+            # that was not created (AGENTS.md rule 5); say which race it lost.
+            from localm.config import load_registry
+            if req.model not in load_registry():
+                raise HTTPException(404, f"Model not registered: {req.model}")
+            raise HTTPException(409, f"Name already taken: {alias}")
+        return {"status": "aliased", "model": req.model, "alias": alias}
 
     @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_set_type(req: SetTypeRequest):

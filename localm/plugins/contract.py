@@ -93,6 +93,12 @@ class PluginSpec:
     surface: Surface = field(default_factory=Surface)
     cli_entry: str = ""                      # legacy "module:attr" Click command
     register_entry: str = ""                 # "module:attr" -> register(host)
+    tool_exports: list = field(default_factory=list)      # [tools] exports: coder
+                                             # agent tools a third-party plugin
+                                             # exports (loader.PluginManifest's
+                                             # key; carried here so this really
+                                             # is its superset, and so the GUI
+                                             # can show it without the loader)
     path: Optional[str] = None               # plugin directory (third-party)
 
     def __post_init__(self) -> None:

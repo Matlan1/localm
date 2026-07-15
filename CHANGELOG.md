@@ -68,6 +68,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **A model you switched away from mid-load can be used again.** If you picked a
+  model and then quickly picked a different one, the first model could be left
+  permanently unusable: every later message to it failed with "Model load was
+  superseded by a newer request", even though nothing was loading any more, until
+  you explicitly switched to it again. It now loads normally.
+- **Stopping or restarting while knowledge is indexing no longer leaves a model
+  stuck in GPU memory.** The embedding helper could survive the restart as an
+  orphan still holding its model in VRAM, so a restarted server ran a second copy
+  beside it and "Stop" did not actually free everything. Both now release it.
+- **The app stays responsive while models load and unload.** On a multi-GPU setup
+  with a specific main GPU selected, each load or unload could briefly freeze every
+  other request (up to a few seconds) while it wrote coordination state and probed
+  the GPU. That work now happens off the request-handling path.
+- **A second localm no longer loses its models for nothing.** When two localm
+  instances share a GPU, one could ask the other to drop every model it had loaded
+  even when that could not possibly free enough room, and could keep re-asking in a
+  loop that never finished. It now only asks when it would actually help, and asks
+  each instance once.
 - **An empty `auth.key` no longer locks you out of your own server.** If an
   `auth.key` file existed but held no key - you created it by hand to paste a key
   in later, an editor or PowerShell saved it empty, or a backup left it truncated
@@ -102,6 +120,40 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the one on the request-authentication path. A permission denial is now recognised
   as permanent and handled immediately, while the brief Windows retry (which rides
   out antivirus and indexer locks) is unchanged.
+- **The Plugins page's "External plugins" card works again.** Listing, installing,
+  and removing a third-party plugin from the GUI failed with "Could not load
+  plugins: Not Found" for everyone, because the page still called an API that had
+  been removed. The card now uses the same plugin engine the rest of the app (and
+  `localm plugin install`) uses, and it again shows each external plugin's version,
+  description, and the tools it exports to the coder.
+- **Chat no longer refuses right after you load a model.** Picking a model in the
+  sidebar and typing straight away could be rejected with "No model loaded - load a
+  model on the sidebar before chatting" for up to 30 seconds, even though the model
+  had loaded fine. The app now registers the model as active the moment the load
+  lands.
+- **Aliasing a model tells you the name it really created.** An alias containing a
+  space (or a slash or colon) is stored in a cleaned-up form, but the GUI reported
+  the name you typed, so "daily driver" was announced while only "daily-driver"
+  existed. It now shows the actual name. If that cleaned-up name is already taken,
+  the alias is refused with a clear message instead of reporting success without
+  creating anything.
+- **Moving a model onto the same drive no longer reports a false "not enough disk
+  space".** `localm add <path> --on-duplicate move` refused whenever the drive had
+  less free space than the model's size, even though moving within one drive needs
+  no extra room at all - exactly the case where you would choose move over copy.
+- **A downloaded HuggingFace model is no longer mislabelled "unknown".** Pulling a
+  full transformers model whose repository lacks a type tag registered it as
+  "unknown", so it was skipped by automatic chat selection and `localm gui` could
+  open with no model even though the download worked. The type is now read from the
+  model's own config file when the repository does not say.
+- **A HuggingFace download can resume after the disk fills up.** Retrying required
+  free space for the whole model again, ignoring the part already downloaded, so the
+  retry it was meant to enable could never start. It now only asks for the space the
+  remaining files need.
+- **A ComfyUI model download no longer reports success without downloading.** If you
+  already had the same file registered in localm, the "Missing model -> Download"
+  offer reported success while nothing was written to the ComfyUI folder, and
+  generation then failed with the model still missing.
 - **Saving a memory no longer freezes the app.** On some setups, saving, editing,
   or adding a remembered fact could make the whole app stop responding for several
   minutes the first time an embedding model needed to load, because that load ran on
