@@ -476,6 +476,23 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
             job.push({"type": "line", "text":
                       "No chat model was loaded - VRAM already free."})
             return True
+        if data.get("status") == "in_use":
+            # unload_all_models() never races the in-flight-request pin
+            # (AUDIT-CRIT-1): a chat engine mid-generation is reported "in_use"
+            # and left resident rather than freed out from under that request,
+            # exactly like unload_one_model()'s own pinned-engine check. Without
+            # this branch that status fell through to the generic "Chat model
+            # unloaded." below - a false success (rule 5) that told the media
+            # backend VRAM was free when the chat model was still fully
+            # resident, which is the exact driver-hang hazard this module
+            # exists to prevent. Treat it like the resp.ok/exception failures
+            # above: report it honestly and let the caller fall back to its own
+            # conservative swap handling.
+            job.push({"type": "line", "text":
+                      "Chat model is busy (still generating a reply) and could "
+                      f"not be unloaded - the {media_label} backend may run low "
+                      "on VRAM."})
+            return False
         before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
         uncertain = bool(data.get("vram_reading_uncertain"))
         if uncertain:
