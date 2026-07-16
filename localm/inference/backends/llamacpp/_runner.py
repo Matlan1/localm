@@ -128,6 +128,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                               # _quiet_stderr/_capture_stderr land in the shared
                               # debug log from this process too, not just stdout.
 
+    from localm._mp_spawn import install_parent_death_watchdog
+    install_parent_death_watchdog()   # die with the server even on a hard kill
+                                       # (End Task / force-close) - daemon=True does
+                                       # not, it is atexit-gated; else this worker
+                                       # outlives the server holding its model in VRAM.
+
     from localm.inference.backends.base import InvalidGrammarError, ModelLoadCancelled
     from localm.inference.backends.llamacpp._worker import GgufWorker
 
