@@ -294,5 +294,98 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
         self.assertIn("has not dropped", " ".join(lines))
 
 
+class TestMcpModelSwitchHonesty(unittest.TestCase):
+    """The MCP server's model switch runs the same before/after cycle, and made
+    the same false "VRAM free did not rise" claim.
+
+    It also guards the GPU driver against a TDR: it must WAIT for the previous
+    model's native free to land before loading the next one. Those two duties pull
+    in opposite directions on a stale probe, which is exactly what these pin down -
+    seeding the wait from the live-only reader silently turned the wait into a
+    0-second no-op (caught in review, measured 5.06s -> 0.00s)."""
+
+    def _switch(self, status):
+        from localm.plugins.mcpserver.server import EngineCache
+        waits = []
+        real_wait = wait_for_vram_release
+
+        def _spy_wait(read_free, **kw):
+            waits.append(kw.get("before_bytes"))
+            kw["timeout_s"] = 0.05
+            kw["sleep"] = lambda _s: None
+            return real_wait(read_free, **kw)
+
+        logs = []
+        cache = EngineCache(default_model="a",
+                            engine_factory=lambda n: MagicMock(display_name=n))
+        cache.get("a")                      # load the first model
+        with patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_IDLE], status)), \
+             patch("localm.vram.wait_for_vram_release", _spy_wait), \
+             patch("localm.plugins.mcpserver.server._log",
+                   side_effect=lambda m: logs.append(m)):
+            cache.get("b")                  # switch -> triggers the unload + wait
+        return waits, " ".join(logs)
+
+    def test_stale_probe_still_waits_for_the_native_free(self):
+        """THE SAFETY GUARD. A probe that merely ran slow must not disable the
+        driver-hang wait: before_bytes must still be seeded with a number, because
+        wait_for_vram_release short-circuits to a no-op on before_bytes=None."""
+        waits, _logs = self._switch(GPU_PROBE_TIMEOUT)
+        self.assertEqual(len(waits), 1, "the release wait did not run at all")
+        self.assertIsNotNone(
+            waits[0],
+            "seeded the wait with None on a merely-stale probe, which makes "
+            "wait_for_vram_release a 0-second no-op and drops the GPU "
+            "driver-hang (TDR) guard")
+
+    def test_stale_probe_does_not_claim_vram_did_not_rise(self):
+        _waits, logs = self._switch(GPU_PROBE_TIMEOUT)
+        self.assertNotIn("did not rise", logs,
+                         f"claimed VRAM did not rise from a stale reading: {logs}")
+        self.assertIn("could not confirm", logs,
+                      f"a wedged probe must still be surfaced, not silently "
+                      f"dropped (rule 5): {logs}")
+
+    def test_live_probe_with_no_rise_still_says_it_did_not_rise(self):
+        """The honest negative survives: both ends live, genuinely no rise."""
+        _waits, logs = self._switch(GPU_PROBE_OK)
+        self.assertIn("did not rise", logs)
+
+    def test_stale_before_with_a_recovered_after_still_cannot_claim_no_rise(self):
+        """The INVERSE shape, and just as ordinary: the before-read times out on a
+        cold driver init - which is itself what WARMS the driver - so the
+        after-polls answer. Now 'after' is live but 'before' is a frozen value
+        from who-knows-when, so their delta means nothing: it can hide a real rise
+        or invent one. 'did not rise' is unsupportable here even though both
+        released is False and the after-reading is genuine."""
+        from localm.plugins.mcpserver.server import EngineCache
+        calls = {"n": 0}
+
+        def _cold_then_warm(*, deadline=None, return_status=False):
+            calls["n"] += 1
+            served = [dict(_IDLE, free=10 * GB)]
+            # #1 = the before-read: cold init overruns -> serves last-known-good.
+            # #2+ = the after-polls: the driver is warm now and answers.
+            status = GPU_PROBE_TIMEOUT if calls["n"] == 1 else GPU_PROBE_OK
+            return (served, status) if return_status else served
+
+        logs = []
+        cache = EngineCache(default_model="a",
+                            engine_factory=lambda n: MagicMock(display_name=n))
+        cache.get("a")
+        with patch("localm.discover.list_gpus", side_effect=_cold_then_warm), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait), \
+             patch("localm.plugins.mcpserver.server._log",
+                   side_effect=lambda m: logs.append(m)):
+            cache.get("b")
+        joined = " ".join(logs)
+        self.assertGreater(calls["n"], 1, "the after-poll never ran")
+        self.assertNotIn("did not rise", joined,
+                         f"compared a live 'after' against a frozen 'before' and "
+                         f"called the difference a fact: {joined}")
+        self.assertIn("could not confirm", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

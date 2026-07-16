@@ -351,7 +351,26 @@ def _live_free_vram_bytes():
     reproduced over real HTTP against the previous fix. Returning None here makes
     that unmeasurable rather than falsely equal (AGENTS.md rule 5).
 
-    None means "could not measure now", never a fabricated 0."""
+    None means "could not measure now", never a fabricated 0.
+
+    NOT every free-VRAM caller is migrated to this, deliberately. Ones weighing
+    CAPACITY rather than reporting a completed action (the fit badges, the swap
+    gates, the eviction ceiling) still call vram_capacity() directly: a stale
+    ceiling costs an over- or under-swap, while refusing to decide at all would
+    break a working box every time the probe merely ran slow. What "unknown"
+    should MEAN for a decision gate is a real design question, and it is not
+    answered here.
+
+    Known gaps that ARE this same defect and are recorded rather than quietly
+    half-fixed - each one QUOTES a free figure that can come from a timed-out
+    probe, so each needs that design answer first:
+      - http_server.switch_engine's 503 refusals ("Not enough VRAM to load 'x'
+        (need ~N MB, M MB free)", and the split-shortfall variant beside it);
+      - sysstats.vram_capacity() -> GET /api/stats -> the GUI status bar;
+      - gui/routes/models.py's /api/vram-estimate -> the Settings free-VRAM line.
+    None of these is self-correcting: once a probe overruns,
+    discover._gpu_probe_inflight stays True until the abandoned thread returns,
+    so every later call keeps serving the same frozen value."""
     free, fresh = _vram_free_reading()
     return free if fresh else None
 
