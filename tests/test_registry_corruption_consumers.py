@@ -97,9 +97,17 @@ def test_gui_vram_estimate_survives_malformed_named_entry(bad_key, bad_val):
     own try/except only catches OSError, so the crash escaped it)."""
     app = _gui_app()
     reg = {"good": _GOOD, bad_key: bad_val}
+    # vram_capacity(return_status=True) returns (info, status), not a bare
+    # dict - a plain return_value ignores the kwarg and hands back the dict
+    # itself, which the route's `info, status = ...` then unpacks by KEY
+    # instead of raising. side_effect mirrors the real two-shape contract
+    # (see tests/test_vram_reading_honesty.py's _list_gpus_double).
+    from localm.discover import GPU_PROBE_OK
+    vram = {"free": 8 * 1024 ** 3, "total": 16 * 1024 ** 3}
     with patch("localm.config.load_registry", return_value=reg), \
          patch("localm.discover.vram_capacity",
-               return_value={"free": 8 * 1024 ** 3, "total": 16 * 1024 ** 3}):
+               side_effect=lambda *a, return_status=False, **kw:
+                   (vram, GPU_PROBE_OK) if return_status else vram):
         with TestClient(app) as client:
             r = client.get(f"/api/vram-estimate?model={bad_key}")
     assert r.status_code == 200, r.text
