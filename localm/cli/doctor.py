@@ -283,10 +283,19 @@ def _check_vram_torch() -> bool:
                         free_b, scope = g["free"], g.get("free_scope")
                         break
                 # Say so rather than quietly present a figure we know counts only our
-                # own allocations (the platform has no device-global source we can read).
+                # own allocations. This fires for a PROCESS-tagged reading AND for an
+                # untagged one (scope=None) on a known-blind platform - the latter is
+                # the GPU_PROBE_TIMEOUT / registry-fallback case, where no corrected
+                # entry exists so free_b is the raw, blind mem_get_info value and must
+                # not be printed as fact (rule 5). On a device-global platform
+                # (Linux / NVIDIA) raw_reading_is_process_scoped() is False, so an
+                # uncorrected reading there prints without a spurious caveat.
+                from localm import gpu_usage
+                blind = (scope == discover.FREE_SCOPE_PROCESS
+                         or (scope != discover.FREE_SCOPE_DEVICE
+                             and gpu_usage.raw_reading_is_process_scoped()))
                 note = ("  [dim](free counts only this process; other apps' VRAM "
-                        "is not visible on this driver)[/dim]"
-                        if scope == discover.FREE_SCOPE_PROCESS else "")
+                        "is not visible on this driver)[/dim]" if blind else "")
                 console.print(
                     f"  {_OK_SYM}  GPU {i}: {props.name}  "
                     f"{free_b / 1024**3:.1f} GB free / {total_b / 1024**3:.1f} GB total"

@@ -246,23 +246,62 @@ def _pdh_adapter_used() -> list:
             totals[key] = int(val)
         return [v for v in totals.values()]
     except Exception as e:
-        logger.debug("gpu_usage: PDH query failed: %s", e)
-        _pdh_state = {}
+        # A RUNTIME query failure (a momentary CollectQueryData/GetFormattedCounterValue
+        # hiccup, a transient driver state) - NOT proof the source is permanently
+        # unusable. Leave _pdh_state as the open query so the NEXT call retries, rather
+        # than poisoning it to {} and silently losing the correction for the whole
+        # process lifetime (the missing-vs-corrupt collapse AGENTS.md rule 5 warns
+        # against). Only the win32pdh ImportError above - a genuinely permanent
+        # condition - sets the sticky {}.
+        logger.debug("gpu_usage: PDH query failed (will retry next call): %s", e)
         return []
 
 
 def source_is_warm() -> bool:
-    """True once a source has been opened (or proven unusable) in this process, so a
-    further reading is effectively free.
+    """True once the source that would actually answer is open, so a further reading
+    is effectively free.
 
-    Exists because the FIRST call is ~1000x the cost of every later one: opening ADL
-    is a driver init, MEASURED at ~750 ms, while a warm read is ~0.02 ms. That
-    matters only in one place - the caller's probe runs under a hard deadline, and a
-    cold 750 ms is enough to push an otherwise-comfortable probe over it (measured:
-    cold probes went from 2.9-3.5s to 3.6-4.0s against a 4.0s cap, timing out). So
-    the caller skips a COLD correction when its remaining budget is too thin, and
-    never needs to skip a warm one. See discover._apply_device_global_free."""
-    return _adl_state is not None
+    Exists because the FIRST open of a source is ~1000x the cost of every later read:
+    opening ADL is a driver init MEASURED at ~750 ms, a cold PDH query is ~887 ms,
+    against a ~0.02 ms warm read. That matters in one place - the caller's probe runs
+    under a hard deadline, and a cold open is enough to push an otherwise-comfortable
+    probe over it (measured: cold probes went from 2.9-3.5s to 3.6-4.0s against a
+    4.0s cap, timing out). So the caller skips a COLD correction when its remaining
+    budget is too thin, and never needs to skip a warm one.
+
+    Gates on EITHER usable source being open, not ADL alone: on a non-AMD box ADL is
+    proven-unusable ({}, falsy) after the first try but PDH is the source that will
+    answer, and it may still be cold - so keying on ADL alone would call the source
+    warm while a ~887 ms cold PDH open still lies ahead of the deadline. A truthy
+    _adl_state (ADL open + usable) OR a truthy _pdh_state (PDH query open) means the
+    next device_global_used_bytes() is cheap; both None/falsy means a cold open is
+    still pending. See discover._apply_device_global_free."""
+    return bool(_adl_state) or bool(_pdh_state)
+
+
+def raw_reading_is_process_scoped() -> bool:
+    """True when this platform's RAW driver free-VRAM query (torch.cuda.mem_get_info)
+    is KNOWN to count only the calling process's own allocations - blind to every
+    other process - so an uncorrected reading here must be tagged FREE_SCOPE_PROCESS
+    rather than trusted or silently passed off as device-global.
+
+    Measured only on Windows + an AMD ROCm/HIP torch build (see
+    dev-notes/vram-cross-process-blindness.md). On Windows + a CUDA (NVIDIA) build,
+    and on every non-Windows platform, cudaMemGetInfo is device-global BY
+    DOCUMENTATION, so an uncorrected reading there is NOT known-blind: tagging it
+    process-scoped would assert a blindness never measured and raise a spurious
+    uncertainty flag on a number that is actually fine. Detected via
+    ``torch.version.hip`` (set on ROCm builds, None on CUDA builds). torch absence
+    (a GGUF-only install) reaches here only via nvidia-smi, which is device-global
+    and already tagged as such upstream, so False is the safe answer there too."""
+    import sys
+    if sys.platform != "win32":
+        return False
+    try:
+        import torch
+        return bool(getattr(torch.version, "hip", None))
+    except Exception:
+        return False
 
 
 def device_global_used_bytes(gpus: list) -> Dict[int, int]:

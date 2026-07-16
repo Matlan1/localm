@@ -597,6 +597,24 @@ def _apply_device_global_free(gpus: list) -> None:
         for g in gpus:
             g["free_scope"] = FREE_SCOPE_DEVICE
         return
+
+    # The scope to use when a device-global correction is NOT available for an entry
+    # (source cold-skipped, unmappable, or failed). Tag PROCESS only where the raw
+    # reading is KNOWN blind (Windows + an AMD ROCm/HIP torch build); elsewhere on
+    # Windows the raw cudaMemGetInfo is device-global by documentation (NVIDIA), so
+    # tagging it PROCESS would assert a blindness never measured and raise a spurious
+    # uncertainty flag on a number that is actually fine. Computed defensively up
+    # front so it is defined on every path below, including the import-failure except.
+    try:
+        from localm.gpu_usage import raw_reading_is_process_scoped
+        uncorrected_scope = (FREE_SCOPE_PROCESS if raw_reading_is_process_scoped()
+                             else FREE_SCOPE_DEVICE)
+    except Exception:
+        # gpu_usage unimportable is a real bug, not an environment condition, but it
+        # must not crash a probe. Conservative default: DEVICE - never assert a
+        # blindness we cannot confirm.
+        uncorrected_scope = FREE_SCOPE_DEVICE
+
     try:
         from localm.gpu_usage import device_global_used_bytes, source_is_warm
         # This runs INSIDE the deadline-bounded probe, so it spends the SAME budget
@@ -608,10 +626,10 @@ def _apply_device_global_free(gpus: list) -> None:
         # vram_info falls to the registry tier, which has no "free" at all). A
         # correct number is not worth trading for no number, so a COLD source is
         # skipped when the remaining budget is too thin to absorb it; the reading is
-        # then tagged process-scoped (honest) instead of silently uncorrected. A warm
-        # source is free and always runs, so a long-lived server pays this at most
-        # once, and a CLI caller passing the longer _GPU_PROBE_CLI_DEADLINE has room
-        # for it on the first go.
+        # then tagged with the uncorrected scope instead of silently uncorrected. A
+        # warm source is free and always runs, so a long-lived server pays this at
+        # most once, and a CLI caller passing the longer _GPU_PROBE_CLI_DEADLINE has
+        # room for it on the first go.
         if not source_is_warm():
             remaining = None
             if _probe_deadline_at is not None:
@@ -620,21 +638,22 @@ def _apply_device_global_free(gpus: list) -> None:
                 logger.debug(
                     "list_gpus: %.2fs left of the probe budget is too thin for a "
                     "cold device-global source (~%.1fs); leaving this reading "
-                    "process-scoped rather than risking a timeout that would return "
-                    "no free VRAM at all", remaining, _CORRECTION_COLD_BUDGET_S)
+                    "%s rather than risking a timeout that would return no free VRAM "
+                    "at all", remaining, _CORRECTION_COLD_BUDGET_S, uncorrected_scope)
                 for g in gpus:
-                    g["free_scope"] = FREE_SCOPE_PROCESS
+                    g["free_scope"] = uncorrected_scope
                 return
         used = device_global_used_bytes(gpus)
     except Exception as e:
-        # Surfaced, not silenced: the entries below are then tagged process-scoped,
-        # so the wrongness is reported rather than hidden.
+        # Surfaced, not silenced: the entries below are then tagged with the
+        # uncorrected scope (PROCESS only where the raw reading is known blind), so a
+        # real blindness is reported without over-claiming one where it is not.
         logger.debug("list_gpus: device-global VRAM source failed: %s", e)
         used = {}
     for g in gpus:
         u = used.get(g.get("index"))
         if u is None:
-            g["free_scope"] = FREE_SCOPE_PROCESS
+            g["free_scope"] = uncorrected_scope
             continue
         total = int(g["total"])
         # Clamp: the used figure and `total` come from different sources (the driver's
