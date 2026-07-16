@@ -72,3 +72,102 @@ def test_gguf_with_mmproj_advertises_can_be_multimodal():
     be = GgufBackend("/fake/model.gguf", mmproj_path="/fake/mmproj.gguf")
     assert be.can_be_multimodal is True           # worth loading to check vision
     assert be.supports_images is False            # not loaded yet -> not confirmed
+
+
+class _FakeMtmdLib:
+    """A stand-in for the loaded mtmd.dll's bound functions, controllable per
+    test - real enough to drive MtmdContext.eval_into()'s Python-side logic
+    (n_batch derivation, the new_n_past sanity check) without a real native
+    library or GPU."""
+
+    def __init__(self, new_n_past: int, rc_tokenize: int = 0, rc_eval: int = 0):
+        self._new_n_past = new_n_past
+        self._rc_tokenize = rc_tokenize
+        self._rc_eval = rc_eval
+        self.last_eval_n_batch = None
+
+    def mtmd_bitmap_init(self, w, h, rgb):
+        return 1  # any truthy "pointer"
+
+    def mtmd_bitmap_free(self, bmp):
+        pass
+
+    def mtmd_input_chunks_init(self):
+        return 1
+
+    def mtmd_input_chunks_free(self, chunks):
+        pass
+
+    def mtmd_tokenize(self, ctx, chunks, itext, arr, n_bitmaps):
+        return self._rc_tokenize
+
+    def mtmd_helper_eval_chunks(self, ctx, llama_ctx, chunks, a, b, n_batch, c, out_ptr):
+        self.last_eval_n_batch = n_batch
+        out_ptr._obj.value = self._new_n_past
+        return self._rc_eval
+
+
+def _fake_mtmd_context(new_n_past: int, **kwargs):
+    """A real MtmdContext instance with its native-loading __init__ bypassed
+    (no DLL/GPU needed), _m swapped for a controllable fake."""
+    from localm.inference.backends.llamacpp.mtmd import MtmdContext
+    ctx = MtmdContext.__new__(MtmdContext)
+    ctx._m = _FakeMtmdLib(new_n_past, **kwargs)
+    ctx._ctx = 1
+    return ctx
+
+
+class TestMtmdEvalIntoSanity:
+    """RAG-VISION-1: eval_into() must derive n_batch from the LIVE context
+    (not a hardcoded 512) and must refuse an implausible new_n_past rather
+    than silently handing a likely-corrupted KV position to the generation
+    loop - both gaps found during a RELEASE.md verification pass while
+    diagnosing RAG image-description producing garbage/hallucinated output."""
+
+    def test_default_n_batch_derives_from_real_context_size(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 4096)
+        ctx = _fake_mtmd_context(new_n_past=10)
+        ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
+        assert ctx._m.last_eval_n_batch == 2048   # min(4096, 2048), not the old fixed 512
+
+    def test_default_n_batch_capped_at_2048_for_a_larger_context(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 8192)
+        ctx = _fake_mtmd_context(new_n_past=10)
+        ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
+        assert ctx._m.last_eval_n_batch == 2048
+
+    def test_explicit_n_batch_overrides_the_derived_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 4096)
+        ctx = _fake_mtmd_context(new_n_past=10)
+        ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True, n_batch=128)
+        assert ctx._m.last_eval_n_batch == 128
+
+    def test_a_zero_or_negative_new_n_past_is_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 4096)
+        ctx = _fake_mtmd_context(new_n_past=0)
+        with pytest.raises(RuntimeError, match="implausible position"):
+            ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
+
+    def test_a_new_n_past_beyond_the_context_size_is_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 4096)
+        ctx = _fake_mtmd_context(new_n_past=999_999)   # far beyond a 4096 context
+        with pytest.raises(RuntimeError, match="implausible position"):
+            ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
+
+    def test_a_plausible_new_n_past_is_accepted(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
+            lambda llama_ctx: 4096)
+        ctx = _fake_mtmd_context(new_n_past=120)
+        pos = ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
+        assert pos == 120
