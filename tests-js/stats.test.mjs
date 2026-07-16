@@ -65,6 +65,35 @@ test("renderHwStats shows VRAM total-only when free is unknown", () => {
   assert.doesNotMatch(el.textContent, /\//, "no used/total slash when free unknown");
 });
 
+test("renderHwStats tints the VRAM figure by fullness when used is known", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  // 2/16 GiB = 12.5% -> low band. The tint rides on its own span so ONLY the VRAM
+  // figure is coloured, not the whole CPU/RAM/GPU row.
+  window.renderHwStats({ vram: { used: 2 * GIB, total: 16 * GIB } });
+  const span = el.querySelector(".vram-usage");
+  assert.ok(span, "the VRAM figure is a .vram-usage span when used is known");
+  assert.match(span.textContent, /VRAM 2\.0\/16\.0 GB/);
+  assert.ok(span.classList.contains("vram-ok"), "low usage -> vram-ok band");
+});
+
+test("renderHwStats uses the high band when VRAM is nearly full", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  window.renderHwStats({ vram: { used: 15 * GIB, total: 16 * GIB } });   // 93.75%
+  assert.ok(el.querySelector(".vram-usage.vram-full"), "over 90% full -> vram-full band");
+});
+
+test("renderHwStats gives the VRAM figure NO colour when only total is known", () => {
+  // A stale or process-blind reading arrives as total-only (no used): there is
+  // nothing to be "full" of, so no tint - and never a wrong number shown as live.
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  window.renderHwStats({ vram: { total: 16 * GIB } });
+  assert.equal(el.querySelector(".vram-usage"), null, "no .vram-usage span when free is unknown");
+  assert.match(el.textContent, /VRAM 16\.0 GB/);
+});
+
 test("pollHwStats fetches /api/stats and renders the result", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: goodFetch(calls) });
