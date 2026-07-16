@@ -295,6 +295,34 @@ def test_inject_skips_missing_component_without_crashing():
     assert notes, "a skipped component must be surfaced in the returned notes (rule 5)"
 
 
+def test_inject_skips_gguf_clip_loader_with_specific_reason():
+    """A CUSTOM workflow whose CLIP comes from a GGUF loader must NOT be cross-device-moved:
+    GGUF loaders do not register the cached_patcher_init factory that deepclone_multigpu
+    needs (the deferred patch), so wrapping one would trip a ComfyUI RuntimeError. localm
+    skips it here with a SPECIFIC reason (rule 5 - surface WHY, not a generic 'no loader'),
+    matching the deferral's justification that only CORE-loaded components are relocated.
+    This is the low-severity gap the fresh-context grade of #709 flagged.
+
+    MUTATION TEST: remove the _GGUF_LOADERS guard in inject_device_placement and this goes
+    red (a SelectCLIPDevice gets injected onto the GGUF loader)."""
+    from localm.media.comfy_client import inject_device_placement
+    wf = {
+        "1": {"class_type": "DualCLIPLoaderGGUF",
+              "inputs": {"clip_name1": "a.gguf", "clip_name2": "b.safetensors"}},
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 0], "text": "hi"}},
+    }
+    notes = inject_device_placement(wf, {"model": None, "clip": "gpu:1"})
+    # No SelectCLIPDevice was injected (the GGUF CLIP was NOT moved).
+    assert not any(n.get("class_type") == "SelectCLIPDevice" for n in wf.values()), (
+        "a GGUF CLIP loader must not be wrapped for cross-device placement yet")
+    # The CLIPTextEncode still reads straight from the loader (untouched).
+    assert wf["2"]["inputs"]["clip"] == ["1", 0]
+    # The skip is surfaced with the SPECIFIC GGUF reason, not the generic no-loader one.
+    joined = " ".join(notes).lower()
+    assert "gguf" in joined and "clip" in joined, (
+        "the skip note must name the GGUF loader as the reason (rule 5), got: " + joined)
+
+
 # --------------------------------------------------------------------------- #
 #  P4: the notice that becomes a lie the moment placement works                #
 # --------------------------------------------------------------------------- #
