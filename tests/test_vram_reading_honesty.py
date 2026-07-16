@@ -468,6 +468,28 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
                          f"still pinned: {lines}")
         self.assertIn("busy", joined)
 
+    def test_partial_unload_with_pinned_chat_is_not_reported_as_unloaded(self):
+        """Regression: unload_all_models() reports {"status": "unloaded"} whenever
+        ANYTHING was freed (an idle embedding model is enough - released_anything
+        wins the status), even when the chat model itself was skipped as in-use.
+        The consumer matched only status == "in_use", so this partial shape fell
+        through to "Chat model unloaded - freed X GB" + True and the media model
+        loaded on top of the still-resident chat model: the same driver-hang
+        hazard as the fully-pinned case, hidden behind a freed bystander."""
+        ok, lines = self._push_lines({
+            "status": "unloaded", "model": "none", "unloaded_models": [],
+            "vram_freed": True,
+            "vram_before_bytes": 10 * GB, "vram_after_bytes": 11 * GB,
+            "skipped_in_use": ["chat-model"]})
+        self.assertFalse(ok, "must report failure so the caller falls back to "
+                             "its own conservative swap handling")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed the chat model was unloaded while it was "
+                         f"still pinned behind a freed bystander: {lines}")
+        self.assertIn("chat-model", joined,
+                      "the still-resident model must be named honestly")
+
 
 class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
     """The regression test above hand-crafts the {"status": "in_use", ...} body -
@@ -512,6 +534,35 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
                          f"claimed success while the real endpoint reported the "
                          f"engine still pinned: {lines}")
         self.assertIn("busy", joined)
+
+    def test_partial_unload_pinned_chat_plus_freed_embedder_end_to_end(self):
+        """The partial shape driven through the REAL route: the chat engine is
+        pinned (active_requests set like an in-flight request) while a resident
+        embedding model frees successfully, so unload_all_models() genuinely
+        returns status "unloaded" + skipped_in_use=[engine]. The consumer must
+        not read that as chat-model success."""
+        self.engine.active_requests = 1          # a request is mid-generation
+
+        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None):
+            return self._Adapter(self.client.post(f"/v1{path}"))
+
+        from localm import vram as vram_mod
+        job = MagicMock()
+        lines = []
+        job.push.side_effect = lambda d: lines.append(d.get("text", ""))
+        with patch("localm.inference.embedder.loaded_dim", return_value=384), \
+             patch("localm.inference.embedder.active_requests", return_value=0), \
+             patch("localm.inference.embedder.release_for_exit", return_value=True), \
+             patch("localm.selfclient.self_request", fake_self_request):
+            ok = vram_mod.unload_chat_for_media(job, "http://x", "image")
+
+        self.assertFalse(ok, "the chat model was NOT freed; the embedder was")
+        self.assertTrue(self.engine.loaded,
+                        "the pinned engine must survive the media handover's unload")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed chat-model success off an embedder-only "
+                         f"partial unload: {lines}")
 
 
 class TestMcpModelSwitchHonesty(unittest.TestCase):
