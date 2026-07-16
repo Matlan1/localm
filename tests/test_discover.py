@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.discover import (
-    DiscoverError, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
+    DiscoverError, GPU_PROBE_BUSY, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _native_backend_has_vulkan,
@@ -609,6 +609,227 @@ class TestListGpusTimeoutStatus:
         relax - otherwise `localm gpus` inherits the same premature timeout."""
         assert _GPU_PROBE_CLI_DEADLINE > _GPU_PROBE_DEADLINE
         assert _GPU_PROBE_CLI_DEADLINE >= 10.0
+
+
+class TestListGpusJoinInflight:
+    """A patient off-loop caller must be able to JOIN a probe already in flight
+    (opt-in wait_for_inflight), not just get an instant BUSY.
+
+    WHY this is the real fix, and a longer deadline alone is not: on a cold box the
+    FIRST probe (typically the GUI's 4s /api/stats heartbeat, off-loaded but at the
+    4s cap) holds _gpu_probe_inflight for the entire ~4.6s cold ROCm/CUDA init. A
+    model-load probe arriving in that window hits the in-flight guard and returns
+    BUSY + last-known-good in ~0.000s WITHOUT probing - the identical short-circuit
+    a deadline-15 RETRY hits (measured 0.0000s). So switch_engine's VRAM-fit gate
+    saw free=None -> measurable=False -> loaded unchecked, EVEN with a long
+    deadline, because it never got to run its own probe. Joining the in-flight
+    probe is what actually lets the long deadline pay off in the concurrent case.
+    The mutation test below (flag OFF -> still BUSY) proves these are not
+    tautological: the join, not the deadline, is what changes the outcome."""
+
+    _GOOD = [{"index": 0, "name": "GPU0", "total": 8, "free": 4}]
+
+    @pytest.fixture(autouse=True)
+    def _reset_probe_state(self):
+        """These tests deliberately leave an abandoned probe thread in flight
+        (the whole point: a caller that overran its deadline). Reset before and
+        after each so a straggler's late write to _gpu_last_good cannot bleed into
+        a sibling test - the epoch fence in _reset_gpu_probe_cache is what makes
+        that late write a no-op."""
+        from localm import discover
+        discover._reset_gpu_probe_cache()
+        yield
+        discover._reset_gpu_probe_cache()
+
+    def test_patient_caller_joins_and_gets_a_real_reading(self, monkeypatch):
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow():
+            started.set()
+            release.wait(10)          # a cold init still running when the joiner arrives
+            return list(self._GOOD)
+
+        # Kick off the in-flight probe via a starter that times out at 0.15s.
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        starter = {}
+
+        def _starter():
+            starter["res"] = list_gpus(deadline=0.15, return_status=True)
+
+        st = threading.Thread(target=_starter)
+        st.start()
+        assert started.wait(2), "probe thread never started"
+        st.join()
+        assert starter["res"][1] == GPU_PROBE_TIMEOUT
+
+        # Joiner: patient, opts in -> joins the still-running probe.
+        joiner = {}
+
+        def _joiner():
+            t0 = time.monotonic()
+            g, s = list_gpus(deadline=5.0, return_status=True,
+                             wait_for_inflight=True)
+            joiner["res"] = (g, s, time.monotonic() - t0)
+
+        jt = threading.Thread(target=_joiner)
+        jt.start()
+        time.sleep(0.2)               # joiner is now blocked on the in-flight probe
+        release.set()                 # probe completes -> joiner must wake with it
+        jt.join()
+        gpus, status, elapsed = joiner["res"]
+        assert status == GPU_PROBE_OK, "a joined, completed probe is a fresh OK reading"
+        assert gpus == self._GOOD, "the joiner must get the probe's REAL value"
+        assert elapsed < 4.0, (
+            f"joiner waited {elapsed:.1f}s - it should have woken when the probe "
+            f"landed, not waited out its 5s deadline")
+
+    def test_without_opt_in_a_concurrent_caller_still_gets_busy(self, monkeypatch):
+        """MUTATION guard: the SAME concurrent scenario, but the second caller does
+        NOT opt in -> it must still short-circuit on BUSY in ~0s. This is the bug
+        the join fixes; if this ever returns OK, wait_for_inflight has been made
+        the unconditional default and the event-loop protection is gone."""
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow():
+            started.set()
+            release.wait(10)
+            return list(self._GOOD)
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+
+        def _starter():
+            list_gpus(deadline=0.15, return_status=True)
+
+        st = threading.Thread(target=_starter)
+        st.start()
+        assert started.wait(2)
+        st.join()
+
+        t0 = time.monotonic()
+        gpus, status = list_gpus(deadline=5.0, return_status=True)  # no opt-in
+        elapsed = time.monotonic() - t0
+        release.set()
+        assert status == GPU_PROBE_BUSY, (
+            "a concurrent caller that did NOT opt in must still get BUSY")
+        assert elapsed < 1.0, (
+            f"BUSY must be instant ({elapsed:.2f}s) - it never waited on the probe")
+
+    def test_joiner_on_a_permanent_wedge_times_out_at_its_own_deadline(self, monkeypatch):
+        """A join must be BOUNDED by the joiner's own deadline and must never spawn
+        a second probe: on a truly wedged driver the joiner returns TIMEOUT at its
+        deadline (not a hang, not a pile-on)."""
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()   # never set within the test -> permanent wedge
+
+        def _wedged():
+            started.set()
+            release.wait(30)
+            return list(self._GOOD)
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _wedged)
+
+        def _starter():
+            list_gpus(deadline=0.15, return_status=True)
+
+        st = threading.Thread(target=_starter)
+        st.start()
+        assert started.wait(2)
+        st.join()
+
+        t0 = time.monotonic()
+        gpus, status = list_gpus(deadline=0.5, return_status=True,
+                                 wait_for_inflight=True)
+        elapsed = time.monotonic() - t0
+        release.set()                 # let the abandoned probe finish now
+        assert status == GPU_PROBE_TIMEOUT
+        assert 0.4 < elapsed < 2.0, (
+            f"joiner should time out at ~0.5s, not hang or return early ({elapsed:.2f}s)")
+
+    def test_wait_for_inflight_with_no_probe_running_starts_its_own(self, monkeypatch):
+        """When nothing is in flight, wait_for_inflight is a no-op: the caller just
+        runs its own probe (the headless/first-caller path), so the flag is safe to
+        pass unconditionally from an off-loop caller."""
+        import time
+
+        def _slow():
+            time.sleep(0.3)
+            return list(self._GOOD)
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        gpus, status = list_gpus(deadline=3.0, return_status=True,
+                                 wait_for_inflight=True)
+        assert status == GPU_PROBE_OK
+        assert gpus == self._GOOD
+
+    def test_spawn_failure_wakes_a_joiner_instead_of_hanging(self, monkeypatch):
+        """If the STARTER publishes its join handles and THEN fails to spawn the
+        probe thread, a caller that joined in that window must be woken (BUSY), not
+        left waiting out its whole deadline on a probe that will never run. Guards
+        the done.set() in the spawn-failure path."""
+        import threading
+        import time
+
+        real_thread = threading.Thread
+        at_spawn = threading.Event()
+        let_fail = threading.Event()
+
+        class _BlockingThenFail:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                # We are now PAST publishing the join handles, at the spawn point.
+                at_spawn.set()
+                let_fail.wait(5)
+                raise RuntimeError("cannot start new thread (simulated)")
+
+        # Only discover's probe spawn is redirected; the test spawns its own
+        # threads via `real_thread` captured above.
+        monkeypatch.setattr("localm.discover.threading.Thread", _BlockingThenFail)
+        monkeypatch.setattr("localm.discover._list_gpus_probe",
+                            lambda: list(self._GOOD))
+
+        starter = {}
+
+        def _starter():
+            starter["res"] = list_gpus(deadline=5.0, return_status=True)
+
+        joiner = {}
+
+        def _joiner():
+            t0 = time.monotonic()
+            g, s = list_gpus(deadline=5.0, return_status=True,
+                             wait_for_inflight=True)
+            joiner["res"] = (s, time.monotonic() - t0)
+
+        st = real_thread(target=_starter)
+        st.start()
+        assert at_spawn.wait(2), "starter never reached the spawn point"
+        # Starter has published inflight + join handles and is now blocked in
+        # start(); a joiner arriving here joins and waits on the starter's `done`.
+        jt = real_thread(target=_joiner)
+        jt.start()
+        time.sleep(0.2)               # joiner is now blocked on the join handle
+        let_fail.set()                # starter's spawn now raises
+        st.join()
+        jt.join()
+        assert starter["res"][1] == GPU_PROBE_BUSY
+        joiner_status, joiner_elapsed = joiner["res"]
+        assert joiner_status == GPU_PROBE_BUSY, (
+            "a spawn failure must wake the joiner as BUSY, not leave it hanging")
+        assert joiner_elapsed < 3.0, (
+            f"joiner hung {joiner_elapsed:.1f}s waiting on a probe that never ran")
 
 
 @pytest.fixture
