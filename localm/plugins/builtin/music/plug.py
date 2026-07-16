@@ -80,7 +80,8 @@ async def music(req: MusicRequest, request: Request):
     out_path = music_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
 
     from localm.config import load_config
-    s = _backend.settings(load_config())
+    _cfg = load_config()
+    s = _backend.settings(_cfg)
     owner = principal_id(request)
 
     def _generate(job):
@@ -97,16 +98,21 @@ async def music(req: MusicRequest, request: Request):
         if not ok:
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
-                                 media_split_notice, unload_chat_for_media)
-        notice = media_split_notice()
+                                 unload_chat_for_media)
+        from localm.media.comfy_client import resolve_media_placement
+        # Per-component GPU placement (opt-in) plus the user-facing notice, in one shared
+        # helper (image/music/video share this preamble). placement is applied inside
+        # generate_music; notice is what to tell the user.
+        placement, notice = resolve_media_placement(_cfg, s["api_url"])
         if notice:
             job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
-        # REG-532: the gate reads COMBINED free VRAM across a configured GPU split,
-        # but ComfyUI masks devices and loads the WHOLE model onto ONE card, so a job
-        # that "fits" in 2x4 GB combined can still OOM on one 4 GB card. When the
-        # chosen card cannot hold it, swap anyway: unloading the chat model frees
-        # VRAM on every split card, including that one.
+        # REG-532: the gate reads COMBINED free VRAM across a configured GPU split, but
+        # each media model component loads WHOLE onto ONE card (localm ORDERS the cards
+        # via --default-device, never masks - the model still lands on one), so a job that
+        # "fits" in 2x4 GB combined can still OOM on one 4 GB card. When the chosen card
+        # cannot hold it, swap anyway: unloading the chat model frees VRAM on every split
+        # card, including that one.
         shortfall = media_single_device_shortfall(s)
         if shortfall and not swap:
             swap = True
@@ -149,6 +155,7 @@ async def music(req: MusicRequest, request: Request):
             duration_seconds=req.duration_seconds,
             swap=gen_swap,
             cancel_check=lambda: job.cancel_requested,
+            placement=placement,
             **kwargs,
         )
         job.push({"type": "line", "text": message})

@@ -106,7 +106,9 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     model_overrides: Optional[dict] = None,
                     swap: bool = True,
                     delete_outputs: Optional[bool] = None,
-                    cancel_check=None) -> tuple[bool, str]:
+                    cancel_check=None,
+                    placement: Optional[dict] = None,
+                    on_progress=None) -> tuple[bool, str]:
     if delete_outputs is None:
         delete_outputs = bool(s.get("delete_outputs", False))
     return _comfy.generate_image(
@@ -127,6 +129,8 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
         fast_dequant=s.get("fast_dequant", True),
         delete_outputs=delete_outputs,
         cancel_check=cancel_check,
+        placement=placement,
+        on_progress=on_progress,
     )
 
 
