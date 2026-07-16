@@ -171,6 +171,21 @@ _COMPONENT_LOADERS = {
 _SELECT_NODE = {"model": "SelectModelDevice", "clip": "SelectCLIPDevice",
                 "vae": "SelectVAEDevice"}
 
+# Loaders that do NOT register ComfyUI's ``cached_patcher_init`` factory (ComfyUI-GGUF
+# calls ``load_diffusion_model_state_dict`` / ``load_text_encoder_state_dicts`` directly,
+# bypassing the path-based wrappers that set it - custom_nodes/ComfyUI-GGUF, pin 6ea2651).
+# Cross-device placement of such a component needs that factory (``deepclone_multigpu``
+# re-invokes it), so moving one would trip a ComfyUI RuntimeError that degrades back to a
+# single card. Registering it is a deliberate follow-up (see SPEC-placement.md, out-of-
+# scope #2). Until it lands we SKIP a GGUF-loaded component with a SPECIFIC reason rather
+# than emit a node ComfyUI cannot honor - matching the deferral's own justification (only
+# CORE-loaded components are relocated) and surfacing WHY at localm's level (rule 5). The
+# shipped image workflow's UNet is GGUF, but the size-free plan keeps the model on its
+# card (never moved), so this only ever fires for a user's CUSTOM GGUF CLIP/VAE graph.
+_GGUF_LOADERS = frozenset({
+    "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced", "DualCLIPLoaderGGUF", "CLIPLoaderGGUF",
+})
+
 
 def find_component_producer(workflow: dict, component: str):
     """The ``(node_id, output_slot)`` producing *component*'s output, located BY CLASS
@@ -219,6 +234,16 @@ def inject_device_placement(workflow: dict, plan: Optional[dict]) -> list:
                          "in this workflow (left on the default card)")
             continue
         pid, slot = producer
+        producer_class = workflow.get(pid, {}).get("class_type", "")
+        if producer_class in _GGUF_LOADERS:
+            # A GGUF loader has no cross-device factory yet (see _GGUF_LOADERS): moving it
+            # would trip a ComfyUI RuntimeError and degrade back to one card anyway. Skip
+            # it here with the specific reason instead of emitting a node that cannot work.
+            notes.append(f"could not place {component} on {target}: this workflow's "
+                         f"{component} uses a GGUF loader ({producer_class}), which cannot "
+                         "yet be moved across cards (a pending follow-up); left on the "
+                         "default card")
+            continue
         new_id = next_node_id(workflow)  # reserved; not yet in workflow, so reroute skips it
         _reroute_output(workflow, pid, slot, new_id)
         workflow[new_id] = {
