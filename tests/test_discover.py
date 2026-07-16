@@ -2401,6 +2401,9 @@ class TestUncorrectedScopeIsNotAlwaysProcess:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="patches ctypes.WinDLL, which exists only on Windows; "
+                           "monkeypatch.setattr raises AttributeError elsewhere")
 class TestAdlLatchRobustness:
     """#697/#700 follow-up: _adl_open() must distinguish a PERMANENT unusability
     (no atiadlxx.dll -> not an AMD box) from a TRANSIENT one (driver momentarily not
