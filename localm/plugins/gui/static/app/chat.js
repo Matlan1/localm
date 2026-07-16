@@ -34,6 +34,14 @@ export const chat = {
   // returning false) flips this to false. See initServerConversations, which
   // gates re-uploading a not-yet-synced local conversation on this flag.
   instanceMatch: true,
+  // True once the in-memory privacy-mode wipe below has run for this page
+  // load. refreshCtxLimit() also runs on a 30s poll for the tab's whole
+  // lifetime (init.js), and the wipe must fire only the FIRST time privacy
+  // mode is confirmed - never again while a conversation is live, or a slow
+  // enough reply (or just enough elapsed time) makes the poll erase the
+  // user's own in-flight or just-landed message, misreporting a real answer
+  // as if nothing was said.
+  privacyWiped: false,
 };
 
 // Conversation compaction mirrors localm/inference/compact.py: once the estimate
@@ -196,23 +204,34 @@ export async function refreshCtxLimit() {
       chat.privacy = cfg.effective_mode === "privacy";
       if (chat.privacy) {
         for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
-        // The localStorage wipe above used to leave the already-populated
-        // in-memory chat.conversations (and the sidebar list already painted
-        // from it) untouched, so the stale list stayed on screen for the
-        // whole session even though the on-disk wipe "succeeded" (AUD-PRIV-2).
-        chat.conversations = [];
-        chat.activeId = null;
-        convUI.collapsed = new Set();
-        setWebAskSession(null);                        // R27: forget the session choice
-        renderConvList();
-        renderChat();
-        // AUD-INSTANCEID/AUD-PRIV-2: same DOM-field gap as the mismatch branch
-        // above - the Coder tab's "Project directory" input was already
-        // populated from "localm.coderCwd" at boot before this could run, and
-        // nothing else re-reads that key into the field, so the wipe above
-        // needs a matching correction here too.
-        const cwdInputPriv = $("setup-cwd");
-        if (cwdInputPriv) cwdInputPriv.value = "";
+        // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
+        // the FIRST time privacy mode is confirmed for this page load, not on
+        // every refreshCtxLimit() call - this function is also polled every
+        // 30s for the tab's whole lifetime (init.js). Re-running it against a
+        // LIVE conversation (the user's own current chat, not a leftover from
+        // a previous non-privacy session) wipes an in-flight or just-answered
+        // message out of the transcript with no error, before the user ever
+        // gets to read the reply.
+        if (!chat.privacyWiped) {
+          chat.privacyWiped = true;
+          // The localStorage wipe above used to leave the already-populated
+          // in-memory chat.conversations (and the sidebar list already painted
+          // from it) untouched, so the stale list stayed on screen for the
+          // whole session even though the on-disk wipe "succeeded" (AUD-PRIV-2).
+          chat.conversations = [];
+          chat.activeId = null;
+          convUI.collapsed = new Set();
+          setWebAskSession(null);                        // R27: forget the session choice
+          renderConvList();
+          renderChat();
+          // AUD-INSTANCEID/AUD-PRIV-2: same DOM-field gap as the mismatch branch
+          // above - the Coder tab's "Project directory" input was already
+          // populated from "localm.coderCwd" at boot before this could run, and
+          // nothing else re-reads that key into the field, so the wipe above
+          // needs a matching correction here too.
+          const cwdInputPriv = $("setup-cwd");
+          if (cwdInputPriv) cwdInputPriv.value = "";
+        }
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
