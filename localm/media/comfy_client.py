@@ -431,9 +431,15 @@ def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
     ``urllib`` would reject the self-signed cert and silently skip the unload.
 
     Silent no-op when the URL is unset. Returns the server's JSON result
-    (``status`` / ``vram_freed`` / ``vram_before_bytes`` / ``vram_after_bytes``)
-    on success, or None on any failure - never blocks generation if localm is
-    not in the picture.
+    (``status``, plus ``vram_freed`` / ``vram_before_bytes`` /
+    ``vram_after_bytes`` when VRAM is measurable at all) on success, or None on
+    any failure - never blocks generation if localm is not in the picture.
+
+    Do not read the VRAM numbers without checking ``vram_reading_uncertain``:
+    when set, the GPU probe behind them timed out or was busy, so they may be a
+    stale cached reading and ``vram_freed`` may be null (unverifiable) rather
+    than a real True/False - see http_server._add_vram_fields. A box with no VRAM
+    telemetry at all simply omits the three fields, as before.
     """
     url = (localm_url or os.environ.get("LOCALM_URL", "")).rstrip("/")
     if not url:

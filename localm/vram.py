@@ -299,6 +299,82 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
     return res.get("status", "unloaded") if isinstance(res, dict) else "unloaded"
 
 
+def _vram_free_reading() -> tuple:
+    """``(free_bytes, fresh)``: a free-VRAM reading, plus whether the probe behind
+    it was fresh (list_gpus() completed inside its deadline) rather than a
+    timed-out/busy fallback to a stale last-known-good value.
+
+    Used for BOTH ends of the before/after delta (hence the name: it was
+    _vram_before_reading when only the 'before' end checked freshness). The
+    'after' end needs it just as much - see _live_free_vram_bytes below.
+
+    A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to
+    the user must know this: presenting a stale fallback as the CURRENT state
+    is exactly the rule-5 gap a release-verify pass caught - /v1/models/unload
+    reported byte-identical before/after readings, and vram_freed: false,
+    across two calls made minutes apart with genuinely different real GPU
+    states (confirmed stale via an OS-level VRAM counter showing the actual
+    free/use cycle worked correctly the whole time).
+
+    Defensive against a test double that patches vram_capacity()/vram_info()/
+    list_gpus() with a plain no-kwarg callable or a fixed dict return_value
+    (neither accepts/implements return_status): such a double is treated as
+    "status unknown, assume fresh" (permissive, matching this reading's
+    behavior before return_status existed) rather than raising on a rejected
+    kwarg or an unexpected shape - only a REAL probe chain needs to prove
+    itself stale."""
+    from localm.discover import GPU_PROBE_OK, vram_capacity
+    try:
+        result = vram_capacity(return_status=True)
+    except TypeError:
+        result = vram_capacity()
+    if isinstance(result, tuple) and len(result) == 2:
+        info, probe_status = result
+        fresh = probe_status == GPU_PROBE_OK
+    else:
+        info, fresh = result, True
+    return info.get("free"), fresh
+
+
+def _live_free_vram_bytes():
+    """Free VRAM in bytes from a FRESH probe, or None when the reading is not
+    live - the reader wait_for_vram_release() polls for the 'after' end.
+
+    Checking freshness on the 'before' end alone is not enough, and the gap is
+    not theoretical: the before-probe is itself what WARMS the driver, and the
+    native unload running between the two reads is exactly the kind of work that
+    wedges it. Once any probe overruns, discover._gpu_probe_inflight stays True
+    until the abandoned thread returns, so every subsequent poll is served the
+    frozen last-known-good value - which the before-read just refreshed. So
+    after == before, no rise, and the endpoint concluded "vram_freed": false with
+    before_fresh=True and therefore NO uncertainty flag at all: the original lie,
+    reproduced over real HTTP against the previous fix. Returning None here makes
+    that unmeasurable rather than falsely equal (AGENTS.md rule 5).
+
+    None means "could not measure now", never a fabricated 0.
+
+    NOT every free-VRAM caller is migrated to this, deliberately. Ones weighing
+    CAPACITY rather than reporting a completed action (the fit badges, the swap
+    gates, the eviction ceiling) still call vram_capacity() directly: a stale
+    ceiling costs an over- or under-swap, while refusing to decide at all would
+    break a working box every time the probe merely ran slow. What "unknown"
+    should MEAN for a decision gate is a real design question, and it is not
+    answered here.
+
+    Known gaps that ARE this same defect and are recorded rather than quietly
+    half-fixed - each one QUOTES a free figure that can come from a timed-out
+    probe, so each needs that design answer first:
+      - http_server.switch_engine's 503 refusals ("Not enough VRAM to load 'x'
+        (need ~N MB, M MB free)", and the split-shortfall variant beside it);
+      - sysstats.vram_capacity() -> GET /api/stats -> the GUI status bar;
+      - gui/routes/models.py's /api/vram-estimate -> the Settings free-VRAM line.
+    None of these is self-correcting: once a probe overruns,
+    discover._gpu_probe_inflight stays True until the abandoned thread returns,
+    so every later call keeps serving the same frozen value."""
+    free, fresh = _vram_free_reading()
+    return free if fresh else None
+
+
 def wait_for_vram_release(
     read_free: Callable[[], Optional[int]],
     *,
@@ -314,8 +390,19 @@ def wait_for_vram_release(
     ``timeout_s`` elapses.
 
     Returns ``(released, final_free)``: ``True`` once the rise is observed,
-    ``False`` on timeout, and ``None`` (released) when ``before_bytes`` is None
-    (VRAM unmeasurable - cannot verify, so behave as before and do not block).
+    ``False`` on timeout, and ``None`` (released) when the outcome CANNOT BE
+    VERIFIED - either because ``before_bytes`` is None, or because the reading was
+    still unmeasurable when the timeout expired.
+
+    That second None case is the honesty guard. ``False`` is a positive claim -
+    "VRAM did not drop" - and a poll that could not take a reading does not support
+    it. It matters because ``read_free`` is normally backed by the deadline-bounded
+    GPU probe (``discover.list_gpus``), whose status-aware callers pass None here
+    the moment a probe stops answering and starts serving a FROZEN last-known-good
+    value. Without this branch that frozen value equals ``before_bytes``, shows no
+    rise, and reports a confident "no VRAM was freed" while VRAM was in fact freed
+    (AGENTS.md rule 5). None reuses this function's already-documented "cannot
+    verify" meaning rather than inventing a fourth outcome.
 
     The ``/v1/models/unload`` endpoint uses this so it does NOT return until VRAM
     is actually reclaimed; otherwise a media model can load on top of a
@@ -330,7 +417,10 @@ def wait_for_vram_release(
         if final is not None and final - before_bytes >= min_rise_bytes:
             return (True, final)
         if monotonic() >= deadline:
-            return (False, final)
+            # Poll to the deadline first (a slow probe may recover and still show
+            # the rise); only the reading we actually END on decides. An
+            # unmeasurable one proves nothing either way.
+            return ((False, final) if final is not None else (None, final))
         sleep(poll_s)
         final = read_free()
 
@@ -378,7 +468,17 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
                       "No chat model was loaded - VRAM already free."})
             return True
         before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
-        if data.get("vram_freed") and before is not None and after is not None:
+        uncertain = bool(data.get("vram_reading_uncertain"))
+        if uncertain:
+            # The server flagged its own reading as possibly stale, so neither a
+            # GB figure nor "has not dropped yet" is a claim we may pass on to the
+            # user as fact - both would be arithmetic on a number the server just
+            # said it could not stand behind. This branch is checked BEFORE them
+            # for exactly that reason (rule 5).
+            job.push({"type": "line", "text":
+                      "Chat model unloaded - could not confirm how much VRAM was "
+                      "freed (no live GPU reading) - continuing."})
+        elif data.get("vram_freed") and before is not None and after is not None:
             gb = max(0.0, (after - before) / 1024 ** 3)
             job.push({"type": "line", "text":
                       f"Chat model unloaded - freed {gb:.1f} GB of VRAM."})
