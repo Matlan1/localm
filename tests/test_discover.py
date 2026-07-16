@@ -1616,6 +1616,110 @@ class TestGpuSplitShortfall:
             8_000_000_000, config={"gpu_split_indices": [0, 1]})
         assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]
 
+    # --- Probe-freshness contract (AGENTS.md rule 5) ----------------------------
+    # A refusal gate must never compute a shortfall (and quote its stale "free" MB)
+    # from a reading list_gpus served frozen after a probe TIMEOUT/BUSY. These pin
+    # both halves: a non-OK probe admits without fabricating a figure, and a fresh
+    # (GPU_PROBE_OK) probe still bites on a genuine per-device shortfall.
+
+    @staticmethod
+    def _probe(gpus, status):
+        """A faithful list_gpus double: honours return_status like the real probe, so
+        the tolerant reader sees a status-capable callable and consumes ``status``
+        rather than defaulting a bare stub to GPU_PROBE_OK."""
+        def fake(*a, return_status=False, **k):
+            return (gpus, status) if return_status else gpus
+        return fake
+
+    def test_stale_timeout_probe_does_not_manufacture_a_shortfall(self, monkeypatch):
+        """THE regression. On TIMEOUT list_gpus serves a FROZEN reading; both devices
+        here read far too small for the 20 GB ask, so the OLD code (bare list_gpus +
+        always-run loop) flagged BOTH and quoted their stale free. The fix returns []
+        and, opt-in, the non-OK status - no figure it never measured reaches a user."""
+        gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
+                {"index": 1, "name": "B", "total": 8_000_000_000, "free": 100_000_000}]
+        cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(gpus, GPU_PROBE_TIMEOUT))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == []
+        assert gpu_split_shortfall(20_000_000_000, cfg, return_status=True) == (
+            [], GPU_PROBE_TIMEOUT)
+
+    def test_busy_probe_also_admits_without_fabricating(self, monkeypatch):
+        """BUSY (a concurrent or wedged probe served the last-known-good value) is
+        inconclusive exactly like TIMEOUT: admit, no fabricated figure."""
+        gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
+                {"index": 1, "name": "B", "total": 8_000_000_000, "free": 100_000_000}]
+        cfg = {"gpu_split_indices": [0, 1]}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(gpus, GPU_PROBE_BUSY))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == []
+        assert gpu_split_shortfall(20_000_000_000, cfg, return_status=True) == (
+            [], GPU_PROBE_BUSY)
+
+    def test_fresh_probe_still_reports_a_real_per_device_shortfall(self, monkeypatch):
+        """Guards against an over-abstain 'fix' (always return []): a FRESH
+        (GPU_PROBE_OK) probe that genuinely cannot cover one device's share must still
+        flag it, and every returned free is a live figure a caller may quote."""
+        gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
+                {"index": 1, "name": "B", "total": 64_000_000_000, "free": 50_000_000_000}]
+        cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(gpus, GPU_PROBE_OK))
+        expected = [{"index": 0, "needed": 10_000_000_000, "free": 100_000_000}]
+        assert gpu_split_shortfall(20_000_000_000, cfg) == expected
+        assert gpu_split_shortfall(20_000_000_000, cfg, return_status=True) == (
+            expected, GPU_PROBE_OK)
+
+    def test_fresh_all_clear_returns_empty_with_ok_status(self, monkeypatch):
+        """A fresh probe where every device covers its share: [] AND GPU_PROBE_OK, so
+        a status-aware caller can tell this 'verified clear' from a 'could not check'
+        (both return [] bare)."""
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(self._GPUS, GPU_PROBE_OK))
+        assert gpu_split_shortfall(
+            4_000_000_000, {"gpu_split_indices": [0, 1]}, return_status=True) == (
+            [], GPU_PROBE_OK)
+
+    def test_no_split_configured_is_conclusive_ok_without_probing(self, monkeypatch):
+        """No split configured -> a conclusive ([], OK) that needs no hardware probe:
+        list_gpus must not be called at all."""
+        def _boom(*a, **k):
+            raise AssertionError("list_gpus must not be probed when no split configured")
+        monkeypatch.setattr("localm.discover.list_gpus", _boom)
+        assert gpu_split_shortfall(
+            10_000_000_000, config={"gpu_split_indices": None},
+            return_status=True) == ([], GPU_PROBE_OK)
+
+    def test_deadline_is_forwarded_to_the_probe(self, monkeypatch):
+        """An off-loop caller passes a longer deadline so a cold driver init that
+        overruns the short server cap still yields a FRESH first-load reading rather
+        than timing out into the best-effort admit. The value must reach list_gpus."""
+        seen = {}
+
+        def fake(*a, return_status=False, deadline=None, **k):
+            seen["deadline"] = deadline
+            return (self._GPUS, GPU_PROBE_OK) if return_status else self._GPUS
+
+        monkeypatch.setattr("localm.discover.list_gpus", fake)
+        gpu_split_shortfall(4_000_000_000, {"gpu_split_indices": [0, 1]},
+                            deadline=_GPU_PROBE_CLI_DEADLINE)
+        assert seen["deadline"] == _GPU_PROBE_CLI_DEADLINE
+
+    def test_default_deadline_is_not_forced_onto_the_probe(self, monkeypatch):
+        """No deadline given -> the kwarg must NOT be passed at all, leaving list_gpus'
+        own default cap intact. Forwarding a literal None would override that real
+        default and cap the probe at None."""
+        seen = {}
+
+        def fake(*a, return_status=False, **k):
+            seen["deadline"] = k.get("deadline", "absent")
+            return (self._GPUS, GPU_PROBE_OK) if return_status else self._GPUS
+
+        monkeypatch.setattr("localm.discover.list_gpus", fake)
+        gpu_split_shortfall(4_000_000_000, {"gpu_split_indices": [0, 1]})
+        assert seen["deadline"] == "absent"
+
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestFreeScope:

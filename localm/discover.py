@@ -17,6 +17,7 @@ preflight: weights + ~1.5 GB overhead for KV cache and compute buffers.
 from __future__ import annotations
 
 import ctypes
+import inspect
 import re
 import threading
 import time
@@ -1252,62 +1253,158 @@ def split_device_count(config: Optional[dict] = None) -> int:
     return len([idx for idx, _ in pairs if idx in by_index])
 
 
-def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> list:
+def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
+    """``(gpus, status)`` from :func:`list_gpus`, tolerant of a test double patched
+    in as a plain no-kwarg callable - the historical bare-list contract that the
+    ~28 test modules stubbing ``list_gpus`` rely on. A double whose signature does
+    not accept ``return_status`` is called bare and its reading treated as
+    :data:`GPU_PROBE_OK`: it models a completed probe, exactly as a bare stub did
+    before the status channel existed, so only a REAL status-capable probe can ever
+    report itself stale/busy here. Signature-inspected rather than a blanket
+    ``except TypeError`` so a genuine ``TypeError`` raised INSIDE ``list_gpus`` is
+    never mistaken for a rejected kwarg and swallowed (the refinement over
+    ``vram._vram_free_reading``'s try/except that its own author flagged). In
+    production ``list_gpus`` always accepts ``return_status``, so the bare branch is
+    a test-only affordance, never taken by the real probe.
+
+    *deadline* is forwarded to ``list_gpus`` only when given (None leaves its
+    default cap untouched), so an OFF-event-loop caller can spend a longer budget on
+    a cold driver init that overruns the short server cap - the only way to get a
+    FRESH first-load reading (a timed-out probe cannot be retried: it is abandoned,
+    not cancelled, and a retry short-circuits to the frozen last-known-good)."""
+    try:
+        accepts = "return_status" in inspect.signature(list_gpus).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        kw = {"return_status": True}
+        if deadline is not None:
+            kw["deadline"] = deadline
+        return list_gpus(**kw)
+    return list_gpus(), GPU_PROBE_OK
+
+
+def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
+                        *, return_status: bool = False,
+                        deadline: Optional[float] = None):
     """``[{"index", "needed", "free"}, ...]`` for every configured split device
-    whose live free VRAM cannot cover its proportional share of
-    *vram_required* - empty when no split is configured/resolvable, every
-    device has enough, or per-device free is unmeasurable (nothing to check).
+    whose free VRAM, read from a FRESH probe this call (:data:`GPU_PROBE_OK`),
+    cannot cover its proportional share of *vram_required*. Empty when no split is
+    configured, fewer than two split devices resolve, every device has live
+    headroom, OR the live per-device check could not run this call (see the probe
+    freshness contract below). A shortfall entry is emitted ONLY under a fresh
+    ``GPU_PROBE_OK`` reading, so every ``free`` in the result is a current
+    measurement a caller may quote to the user as fact.
 
-    ``vram_capacity()`` is an AGGREGATE check: it proves total combined free
-    VRAM across the split is enough, but ``apply_gpu_split()`` (the GGUF/
-    llama.cpp backend's tensor_split writer) divides a model by a STATIC
-    per-config ratio with NO live per-device capacity awareness of its own -
-    unlike the HF/transformers backend, whose ``device_map="auto"`` is built
-    from live per-device ``torch.cuda.mem_get_info()`` free VRAM instead (see
-    ``backends/hf.py``'s ``_cuda_device_map``), so it already self-corrects.
-    Without this check, a model too big for one device's actual share could
-    still pass the aggregate check (e.g. another already-loaded model sits
-    asymmetrically on one split device more than another) and reach
-    llama.cpp's native loader with too little room on that device - not
-    always a catchable Python exception, since the native loader can hard-
-    abort the process rather than return NULL. Callers should treat any
-    non-empty result as a hard refusal for a GGUF-backend load (see
-    ``http_server.switch_engine``), not merely a warning.
+    ``vram_capacity()`` is an AGGREGATE check: it proves total combined free VRAM
+    across the split is enough, but ``apply_gpu_split()`` (the GGUF/llama.cpp
+    backend's tensor_split writer) divides a model by a STATIC per-config ratio with
+    NO live per-device capacity awareness of its own - unlike the HF/transformers
+    backend, whose ``device_map="auto"`` is built from live per-device
+    ``torch.cuda.mem_get_info()`` free VRAM instead (see ``backends/hf.py``'s
+    ``_cuda_device_map``), so it already self-corrects. Without this check, a model
+    too big for one device's actual share could still pass the aggregate check (e.g.
+    another already-loaded model sits asymmetrically on one split device more than
+    another) and reach llama.cpp's native loader with too little room on that device
+    - not always a catchable Python exception, since the native loader can hard-abort
+    the WORKER process rather than return NULL (that abort is contained to the
+    isolated load worker, never the server - PR #606, see
+    ``backends/llamacpp/_runner.py``). Callers should treat any non-empty result as a
+    hard refusal for a GGUF-backend load (see ``http_server.switch_engine``), not
+    merely a warning.
 
-    Only meaningful for the GGUF/llama.cpp load path - callers should gate on
-    that themselves (e.g. via ``inference.engine._is_gguf``); this function
-    has no way to know which backend a given load will use.
+    Probe freshness (AGENTS.md rule 5). ``list_gpus()`` is deadline-bounded: on a
+    TIMEOUT/BUSY it serves a FROZEN last-known-good reading, and a cold driver init
+    overruns that cap on a healthy box (~6.5s vs the 4s cap, see
+    ``_GPU_PROBE_DEADLINE``), so an overrun is normal, not a fault. This gate
+    therefore does NOT compute a shortfall from a stale reading and does NOT refuse
+    on one (refusing would break every working box's first load); on a non-OK probe
+    it returns ``[]`` (best-effort admit, logged at debug), relying on the isolated
+    worker's contained abort above as the backstop. An empty bare-list result thus
+    cannot, on its own, be told apart from "verified all-clear": a caller that must
+    distinguish "checked, clear" from "could not check" MUST pass
+    ``return_status=True`` to receive ``(shortfall, status)`` carrying the underlying
+    :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY`.
 
-    Deliberately takes no headroom margin of its own (a device with EXACTLY
-    enough free for its proportional share passes) - if a caller wants the
-    same safety margin the aggregate ``vram_capacity()`` check demands, add
-    it to *vram_required* before calling (e.g. ``vram_required + headroom``),
-    so a per-device share is not held to a thinner margin than the aggregate
-    ceiling it composes with.
+    This proves the reading is LIVE, not COMPLETE. On a backend/OS where ``free``
+    counts only this process's own allocations (blind to other processes' VRAM), a
+    fresh reading can still under-state usage; that completeness axis is orthogonal
+    and is carried per-device elsewhere, not by this probe status.
+
+    Only meaningful for the GGUF/llama.cpp load path - callers should gate on that
+    themselves (e.g. via ``inference.engine._is_gguf``); this function has no way to
+    know which backend a given load will use.
+
+    Deliberately takes no headroom margin of its own (a device with EXACTLY enough
+    free for its proportional share passes) - if a caller wants the same safety
+    margin the aggregate ``vram_capacity()`` check demands, add it to *vram_required*
+    before calling (e.g. ``vram_required + headroom``), so a per-device share is not
+    held to a thinner margin than the aggregate ceiling it composes with.
+
+    With ``return_status=True`` returns ``(shortfall, status)``; otherwise the bare
+    ``shortfall`` list (the historical shape every existing caller relies on).
+
+    *deadline* is forwarded to the underlying ``list_gpus`` probe (None leaves its
+    default cap). It is a KNOB an OFF-event-loop caller that runs this via
+    ``run_in_executor`` (e.g. ``switch_engine``) can opt into by passing
+    :data:`_GPU_PROBE_CLI_DEADLINE`, so a cold driver init that overruns the short
+    server cap still completes and yields a FRESH per-device reading instead of
+    timing out into the best-effort admit above. Passing nothing keeps the short cap
+    (the current caller behaviour): such a caller simply falls into that admit on a
+    cold first load. An on-loop caller must NOT pass a long deadline (a long block
+    would freeze the loop, PR #541).
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
+
+    def _ret(shortfall, status):
+        return (shortfall, status) if return_status else shortfall
+
     if not cfg.get("gpu_split_indices"):
-        return []
-    gpus = list_gpus()
+        # No split configured: a conclusive answer that needs no hardware probe.
+        return _ret([], GPU_PROBE_OK)
+
+    gpus, status = _list_gpus_reading(deadline)
+    if status != GPU_PROBE_OK:
+        # No FRESH reading this call: list_gpus served a frozen last-known-good value
+        # (or []) after a probe TIMEOUT/BUSY. This gate's whole contract is a LIVE
+        # per-device check, so it neither quotes that stale "free" as a current figure
+        # (AGENTS.md rule 5) NOR refuses on it: a cold ROCm/CUDA driver init overruns
+        # the 4s probe cap on a HEALTHY box (~6.5s, see _GPU_PROBE_DEADLINE), so
+        # refusing would break working setups on every first load. The check could not
+        # run this call -> admit best-effort, surfaced via debug + the returned status,
+        # never a silent success. The GGUF/embedder load runs in an isolated worker
+        # whose native abort is contained to that child (PR #606) - the backstop a
+        # best-effort admit relies on.
+        logger.debug("gpu_split_shortfall: probe status=%s (no fresh per-device VRAM "
+                     "reading); admitting split load best-effort, per-device fit "
+                     "unverified this call", status)
+        return _ret([], status)
+
     pairs = resolve_gpu_split(
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
     if len(pairs) < 2:
-        return []
+        return _ret([], status)
     by_index = {g.get("index"): g for g in gpus}
     total_ratio = sum(ratio for _, ratio in pairs)
     if total_ratio <= 0:
-        return []
+        return _ret([], status)
     shortfall = []
     for idx, ratio in pairs:
         g = by_index.get(idx)
         if g is None or g.get("free") is None:
-            continue   # unmeasurable for this device - cannot check, do not block
+            # Structural guard for a malformed/absent device dict ONLY - NOT the
+            # "probe could not run" handler (that is the status != OK branch above).
+            # Under GPU_PROBE_OK, list_gpus emits an int "free" for every device and
+            # DROPS a non-reporting one (see :493/:525), so this branch is dead in
+            # production; it only stops a None-free entry (e.g. test-injected) from
+            # crashing the loop.
+            continue
         needed = int(vram_required * (ratio / total_ratio))
         free = g["free"]
         if free < needed:
             shortfall.append({"index": idx, "needed": needed, "free": free})
-    return shortfall
+    return _ret(shortfall, status)
 
 
 def resolve_preferred_device(config: Optional[dict] = None, *,
