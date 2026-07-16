@@ -1763,6 +1763,10 @@ class TestFreeScope:
         is what makes /v1/models/unload report the reading as uncertain instead of
         asserting a wrong number as fact."""
         monkeypatch.setattr(sys, "platform", "win32")
+        # Pin the known-blind condition rather than depend on the real import torch:
+        # a sibling test that mocks sys.modules['torch'] can otherwise flip this by
+        # collection order (raw_reading_is_process_scoped reads torch.version.hip).
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
                             lambda gpus: {})
         gpus = self._gpus()
@@ -1790,6 +1794,7 @@ class TestFreeScope:
         """A driver/ctypes failure in the correction must degrade to "we cannot vouch
         for this number", never take down the caller that only wanted a probe."""
         monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
 
         def _boom(gpus):
             raise OSError("atiadlxx exploded")
@@ -1814,6 +1819,7 @@ class TestFreeScope:
         """A multi-GPU box where the source can map only one device: the mapped one
         gets truth, the unmapped one is honestly tagged rather than guessed at."""
         monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
                             lambda gpus: {1: 2_000_000_000})
@@ -1974,6 +1980,11 @@ class TestFreeScopeColdBudget:
 
     def test_cold_source_is_skipped_when_the_budget_is_thin(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
+        # Pin the known-blind condition: the cold-skip tags with the platform's
+        # uncorrected scope, which is PROCESS only where raw_reading_is_process_scoped
+        # is True. Without pinning it, a sibling test's sys.modules['torch'] mock can
+        # flip it by collection order.
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
         # 0.4s left of the probe's budget: not enough to absorb a ~750ms cold open.
         monkeypatch.setattr(discover, "_probe_deadline_at",
@@ -2197,3 +2208,48 @@ class TestUncorrectedScopeIsNotAlwaysProcess:
         gpus = self._gpus()
         discover._apply_device_global_free(gpus)
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+
+class TestAdlLatchRobustness:
+    """#697/#700 follow-up: _adl_open() must distinguish a PERMANENT unusability
+    (no atiadlxx.dll -> not an AMD box) from a TRANSIENT one (driver momentarily not
+    answering ADL2_Main_Control_Create). Latching the transient case off for the
+    process lifetime is the same missing-vs-corrupt collapse the PDH path had."""
+
+    def test_missing_dll_is_latched_permanently(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+
+        def _no_dll(_name):
+            raise OSError("atiadlxx.dll not found")
+
+        monkeypatch.setattr(gu.ctypes, "WinDLL", _no_dll)
+        assert gu._adl_open() == {}
+        assert gu._adl_state == {}, "a missing DLL (permanent) must latch off"
+
+    def test_create_failure_is_retryable_not_latched(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+
+        class _FakeDLL:
+            def ADL2_Main_Control_Create(self, *a):
+                return 1  # non-OK: Create failed (driver busy) - transient
+
+        monkeypatch.setattr(gu.ctypes, "WinDLL", lambda _name: _FakeDLL())
+        assert gu._adl_open() == {}
+        assert gu._adl_state is None, (
+            "a transient ADL2_Main_Control_Create failure must NOT latch ADL off for "
+            "the process lifetime - _adl_state must stay None so the next call retries")
+
+    def test_successful_open_is_cached(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+
+        class _FakeDLL:
+            def ADL2_Main_Control_Create(self, *a):
+                return 0  # OK
+
+        monkeypatch.setattr(gu.ctypes, "WinDLL", lambda _name: _FakeDLL())
+        state = gu._adl_open()
+        assert state and state.get("dll") is not None
+        assert gu._adl_state is state, "a successful open must be cached"
