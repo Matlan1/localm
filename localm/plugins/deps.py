@@ -20,6 +20,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
+from localm import config
 from localm.debuglog import logger
 
 #: Progress sink: called with one human-readable line at a time (a pip output
@@ -137,7 +138,14 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     """Install *reqs* into the CURRENT interpreter's environment. Tries ``uv pip
     install`` first, then ``pip``, streaming output to *on_progress*. Returns
     ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
-    regardless of the ambient VIRTUAL_ENV."""
+    regardless of the ambient VIRTUAL_ENV.
+
+    ``env`` pins uv's AND pip's caches inside the data dir (rule 4: self-contained).
+    Both are set because the uv attempt runs first and pip second, and each caches to
+    a per-user location OUTSIDE the data dir when left to its default - so without this
+    a plugin-extra install silently leaks wheels to ``%LOCALAPPDATA%`` / ``~/.cache``.
+    See ``config.contained_pip_env``."""
+    env = config.contained_pip_env()
     attempts = (
         ["uv", "pip", "install", "--python", sys.executable, *reqs],
         [sys.executable, "-m", "pip", "install", *reqs],
@@ -148,7 +156,7 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                text=True, bufsize=1, env=env)
         except FileNotFoundError:
             _emit(on_progress, f"{cmd[0]} not found, trying next installer...")
             continue

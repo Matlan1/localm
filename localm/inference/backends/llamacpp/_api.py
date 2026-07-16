@@ -142,6 +142,33 @@ def llama_model_n_layer(model: ctypes.c_void_p) -> int:
     return _bind("llama_model_n_layer", ctypes.c_int32, LlamaModel)(model)
 
 
+def has_model_meta_api() -> bool:
+    """True when this llama.dll exports the GGUF metadata reader, so a caller can
+    ask what a model DECLARES about itself (e.g. its trained pooling type) before
+    creating a context. Every current build exports it (probed on the shipped
+    runtime); the guard lets an exotic stripped build degrade instead of raising
+    AttributeError - same pattern as has_kv_head_api()/has_memory_api()."""
+    lib = load_lib()
+    return hasattr(lib, "llama_model_meta_val_str")
+
+
+def llama_model_meta_val_str(model: ctypes.c_void_p, key: str) -> Optional[str]:
+    """Value of GGUF metadata *key* as a string, or None when the key is absent
+    or unreadable. Only call after has_model_meta_api().
+
+    A missing key is a NORMAL answer, not a failure: most GGUFs declare only a
+    subset of keys (verified 2026-07-15 - bge-small declares bert.pooling_type,
+    a Qwen2.5 chat GGUF declares no pooling key at all), so the caller must
+    distinguish "not declared" (None) from a declared value."""
+    fn = _bind("llama_model_meta_val_str", ctypes.c_int32, LlamaModel,
+               ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t)
+    buf = ctypes.create_string_buffer(256)
+    n = fn(model, key.encode("utf-8"), buf, len(buf))
+    if n < 0:                      # llama.cpp returns -1 for an absent key
+        return None
+    return buf.value.decode("utf-8", "replace")
+
+
 def has_kv_head_api() -> bool:
     """True when this llama.dll exports llama_model_n_head + llama_model_n_head_kv,
     so the KV-cache size per token can be computed EXACTLY from the model's

@@ -41,3 +41,62 @@ def test_do_shutdown_unloads_before_exit(monkeypatch):
     # The model must be unloaded BEFORE the process exits (clean native teardown).
     assert order and order[0] == "unload"
     assert order[-1] == ("exit", 0)
+
+
+def test_do_shutdown_releases_embedder(monkeypatch):
+    """The shared embedder (localm.inference.embedder) is a separate lifecycle
+    from _engines - it was previously never released on shutdown, leaking its
+    native VRAM/RAM allocation past process teardown of the chat engine.
+
+    Released via release_for_exit(), NOT reset_embedder(): the latter takes the
+    embedder's load lock, which get_embedder() holds for a whole model load, so
+    a stop issued mid-load blocked here and never reached the teardown at all.
+    See tests/test_embedder_worker_reaped_on_exit.py for that full contract."""
+    from localm.inference import embedder as emb
+
+    def _fake_exit(code):
+        raise SystemExit(code)
+
+    calls = []
+    monkeypatch.setattr(emb, "release_for_exit", lambda: (calls.append(1), True)[1])
+    monkeypatch.setattr(http_server, "_engine", None)
+    monkeypatch.setattr(os, "_exit", _fake_exit)
+
+    try:
+        http_server._do_shutdown()
+    except SystemExit:
+        pass
+
+    assert calls == [1]
+
+
+def test_do_shutdown_survives_embedder_release_failure(monkeypatch):
+    """A failing embedder release must not block shutdown (best-effort, same
+    as the existing engine.unload() try/except in this exact function)."""
+    from localm.inference import embedder as emb
+
+    order = []
+
+    def _boom():
+        order.append("release_attempted")
+        raise RuntimeError("native free failed")
+
+    def _fake_exit(code):
+        order.append(("exit", code))
+        raise SystemExit(code)
+
+    # Patch the function the exit path ACTUALLY calls. Recording the attempt is
+    # what keeps this honest: patching a function the path no longer calls would
+    # leave the raise unfired and the test passing vacuously.
+    monkeypatch.setattr(emb, "release_for_exit", _boom)
+    monkeypatch.setattr(http_server, "_engine", None)
+    monkeypatch.setattr(os, "_exit", _fake_exit)
+
+    try:
+        http_server._do_shutdown()
+    except SystemExit:
+        pass
+
+    assert order == ["release_attempted", ("exit", 0)], (
+        "shutdown must actually ATTEMPT the embedder release and still complete "
+        f"when it raises: {order}")

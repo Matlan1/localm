@@ -280,12 +280,85 @@ def test_provision_copy_end_to_end(home, fake_user_comfy, monkeypatch):
     assert str(fake_user_comfy.workdir / "models") in bases
     # 6) Installed -> S1 routing targets the managed instance when comfy_target=own.
     assert mc.is_managed_comfy_installed() is True
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
     target = mc.resolve_comfy_target()
     assert target.managed is True
     assert target.api_url == mc.MANAGED_COMFY_API_URL
     assert target.workdir == str(paths.root)
+
+
+def test_isolated_env_strips_pythonpath(monkeypatch):
+    """_isolated_env() must never leak localm's own PYTHONPATH into a subprocess that
+    drives the user's or the managed venv - see its docstring for why."""
+    from localm.media import managed_comfy_provision as prov
+    monkeypatch.setenv("PYTHONPATH", "some/leaked/path")
+    monkeypatch.setenv("SOME_OTHER_VAR", "kept")
+    env = prov._isolated_env()
+    assert "PYTHONPATH" not in env
+    assert env.get("SOME_OTHER_VAR") == "kept"
+
+
+def test_isolated_env_pins_the_pip_cache_into_the_data_dir(home, monkeypatch):
+    """Provisioning's pip subprocesses must cache INSIDE the data dir (rule 4).
+
+    Unset, pip caches to a per-user location outside the data dir; measured live, this
+    module alone had put ~11 GB there, never asking and never telling. An ambient
+    PIP_CACHE_DIR must NOT win: containment any stray environment variable can silently
+    switch off is not a guarantee. LOCALM_HOME is the knob (see config.cache_dir())."""
+    from localm.media import managed_comfy_provision as prov
+    monkeypatch.setenv("PIP_CACHE_DIR", str(home.parent / "ambient-cache"))
+
+    env = prov._isolated_env()
+    assert env["PIP_CACHE_DIR"] == str(prov.pip_cache_dir())
+    assert prov.pip_cache_dir() == home / "cache" / "pip"
+    assert home in prov.pip_cache_dir().parents            # inside the data dir
+    assert Path.home() not in prov.pip_cache_dir().parents  # NOT the home profile
+
+
+def test_pip_subprocess_really_honours_the_contained_cache_dir(home, fake_user_comfy):
+    """The EFFECT, not the setting: a REAL pip child, launched through the real
+    _run()/_isolated_env() path, must resolve its cache inside the data dir.
+
+    Setting an env var and asserting the env var proves nothing about the child - and
+    provisioning's pip runs in the MANAGED ComfyUI's own venv, a different interpreter
+    from localm's, so nothing about localm's own process env reaches it implicitly.
+    ``pip cache dir`` makes the child report the location it would actually write to,
+    so this asserts real resolved behaviour rather than our intent."""
+    from localm.media import managed_comfy_provision as prov
+    ok, out = prov._run([str(fake_user_comfy.venv_python), "-m", "pip",
+                         "cache", "dir", "--disable-pip-version-check"], timeout=120)
+    assert ok, out
+    reported = Path(out.strip().splitlines()[-1].strip())
+    assert reported == prov.pip_cache_dir(), out   # Windows Path eq is case-insensitive
+    assert home in reported.parents, out
+
+
+def test_read_user_freeze_ignores_leaked_pythonpath(home, fake_user_comfy, monkeypatch):
+    """A PYTHONPATH set on the CALLING localm process must not contaminate pip freeze
+    of the user's venv. Reproduced live: with a dev PYTHONPATH pointing at localm's own
+    venv, `pip freeze` on a 1-package venv reported 91 packages - one of which needed a
+    source build this feature never intended to trigger, which surfaced downstream as a
+    confusing "offline pip cache is missing a build backend" failure with no hint that
+    the actual cause was environment leakage (see managed_comfy_provision._isolated_env()
+    and its module import of ``os``).
+
+    ``pip freeze`` enumerates installed DISTRIBUTIONS via their ``.dist-info``
+    metadata (not just importable modules), so the "leaked" directory here must be
+    dist-info-shaped - a bare importable package would not be picked up either way
+    and this test would pass even on the unfixed code, proving nothing."""
+    from localm.media import managed_comfy_provision as prov
+    leaked = home.parent / "leaked-site-packages"
+    dist_info = leaked / "unrelatedpkg-1.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: unrelatedpkg\nVersion: 1.0.0\n", encoding="utf-8")
+    (dist_info / "RECORD").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(leaked))
+
+    freeze = prov.read_user_freeze(fake_user_comfy.venv_python)
+    assert freeze is not None
+    assert len(freeze) == 1, freeze
+    assert fake_user_comfy.pkg_name in freeze[0]
 
 
 def test_provision_copy_leaves_out_custom_nodes_when_declined(home, fake_user_comfy,
@@ -332,6 +405,58 @@ def test_provision_fails_and_rolls_back_when_freeze_unreadable(home, fake_user_c
     assert "freeze" in result.message.lower() or "package set" in result.message.lower()
     assert mc.is_managed_comfy_installed() is False
     assert not mc.managed_comfy_paths().root.exists()   # rolled back, nothing lingers
+
+
+def test_copy_custom_nodes_returns_warnings_not_silent(tmp_path, monkeypatch):
+    """A node that fails to copy is RETURNED as a warning (so the caller can route it
+    into the run log), not only streamed and forgotten (rule 5, the #622 vanished-log
+    class). Both the dir-copy and the .py-file-copy failure paths are covered."""
+    from localm.media import managed_comfy_provision as prov
+    user = tmp_path / "user"
+    (user / "custom_nodes" / "NodeDir").mkdir(parents=True)
+    (user / "custom_nodes" / "NodeDir" / "__init__.py").write_text("", encoding="utf-8")
+    (user / "custom_nodes" / "node_file.py").write_text("# a node\n", encoding="utf-8")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(prov.shutil, "copytree", _boom)
+    monkeypatch.setattr(prov.shutil, "copy2", _boom)
+
+    count, warnings = prov._copy_custom_nodes(user, managed)
+    assert count == 0
+    assert len(warnings) == 2
+    joined = " ".join(warnings)
+    assert "NodeDir" in joined and "node_file.py" in joined
+    assert "disk full" in joined
+
+
+def test_provision_copy_node_failures_land_in_result(home, fake_user_comfy, monkeypatch):
+    """End to end: a non-fatal custom-node copy failure must SURVIVE into the result,
+    not only the live progress stream. It lands in ProvisionResult.log and its count is
+    folded into the success message (rule 5). Provisioning still succeeds - a failed
+    node only breaks the workflow needing it, not the whole install."""
+    from localm.media import managed_comfy_provision as prov
+
+    # Skip the real pip replicate (empty freeze) to keep this fast; the fresh venv is
+    # still really created so the result reads as installed. The copy path is what we
+    # exercise. Only the user's ComfyUI git clone (not copytree) provides the source.
+    monkeypatch.setattr(prov, "read_user_freeze", lambda venv_python: [])
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+
+    def _boom(*a, **k):
+        raise OSError("simulated copy failure")
+    monkeypatch.setattr(prov.shutil, "copytree", _boom)  # NodeAlpha + NodeBeta are dirs
+
+    stack = prov.discover_user_comfy()
+    result = prov.provision_by_copy(stack, copy_custom_nodes=True)
+
+    assert result.ok, result.message                     # non-fatal
+    assert mc.is_managed_comfy_installed() is True
+    assert "could not copy custom node" in result.log     # survived into the log ...
+    assert "NodeAlpha" in result.log and "NodeBeta" in result.log
+    assert "2 custom node(s) could not be copied" in result.message  # ... and the message
 
 
 def test_read_user_freeze_none_on_failure(tmp_path):

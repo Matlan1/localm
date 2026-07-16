@@ -31,6 +31,7 @@ managed_comfy_fresh.py; the S5 doctor hint already shipped).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -38,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm import config
 from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
@@ -48,8 +50,11 @@ from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 ProgressCb = Optional[Callable[[str], None]]
 
 # Provenance marker localm drops in the managed dir recording what was replicated.
-# NOT load-bearing for is_managed_comfy_installed() (S1 checks main.py + venv), so a
-# missing/edited marker never fakes an install - it is documentation for S4.
+# ALSO load-bearing for is_managed_comfy_installed() (checked there IN ADDITION to
+# main.py + venv): checking only main.py/venv existing let a still-installing
+# instance (torch/requirements/nodes not done yet) read as fully "installed" for
+# the whole remaining pipeline duration - reproduced live and fixed by requiring
+# this marker too. Written only once every earlier step has succeeded.
 MARKER_FILENAME = ".localm-comfy.json"
 
 # Dirs that are the user's DATA / ENV, never part of the ComfyUI source to replicate.
@@ -108,16 +113,65 @@ def _tail(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
+def pip_cache_dir() -> Path:
+    """localm's OWN pip cache, inside the data dir (rule 4: self-contained).
+
+    A cache rather than ``--no-cache-dir``: the fresh path installs torch and the copy
+    path replicates the user's whole freeze (their exact torch build), so the bytes are
+    multi-GB. Without a cache, every re-provision (remove + setup again, a retry after a
+    failed install) re-downloads all of it. The cost of keeping it is disk INSIDE the
+    data dir, where it is visible, contained, and removed with the data dir - which is
+    the point. Delegates to ``config.pip_cache_dir()`` so the pip-cache location has ONE
+    definition shared with the other localm-driven pip subprocesses (plugins/deps.py,
+    setup_llama.py)."""
+    return config.pip_cache_dir()
+
+
+def _isolated_env() -> dict:
+    """The environment for a subprocess that runs Python against the USER's venv or
+    the freshly-created managed venv - never localm's own ``PYTHONPATH``, and never the
+    ambient pip cache.
+
+    PIP_CACHE_DIR: provisioning shells out to pip in the MANAGED ComfyUI's own venv, a
+    separate interpreter from localm's, so localm's own process environment does not
+    reach it - the setting has to be in the env handed to the child, which is this one.
+    Left unset, that child's pip caches to the per-user default OUTSIDE the data dir
+    (measured live: ``pip cache dir`` resolved to the user profile and held ~11 GB, all
+    of it put there by this module). This is THE choke point: every pip subprocess in
+    both provisioning paths (``_run`` here and in managed_comfy_fresh, which imports it,
+    plus ``read_user_freeze`` below) builds its env from this function, so containment
+    cannot be forgotten at a new call site. Harmless to the git/venv subprocesses that
+    also run through here - they simply ignore it.
+
+    ``subprocess.run`` inherits the full parent environment by default, and
+    ``PYTHONPATH`` is a per-process search path that Python's ``venv`` isolation
+    does NOT filter out - so if the calling localm process happens to have
+    ``PYTHONPATH`` set (e.g. a dev/CI invocation, or any future wrapper), a fresh
+    "isolated" venv silently sees whatever localm's OWN ``site-packages`` holds on
+    top of its actual package set. Reproduced live: with a dev ``PYTHONPATH`` set,
+    ``pip freeze`` on a venv holding exactly one package reported 91, one of which
+    needed a source build localm never intended to trigger. That defeats this
+    module's entire point (an exact, uncontaminated replica of the user's package
+    set - see the module docstring) silently, which is exactly the AGENTS.md rule 5
+    failure mode: a real fault (a corrupted freeze) masquerading as an unrelated
+    downstream error (a missing offline build dependency)."""
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env["PIP_CACHE_DIR"] = str(pip_cache_dir())
+    return env
+
+
 def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = None,
          timeout: Optional[int] = None) -> tuple[bool, str]:
     """Run *cmd*, stream its combined output to *on_progress*, return (ok, output).
     A missing executable or a timeout is a clean (False, reason), never a raise -
-    the caller turns it into an honest ProvisionResult."""
+    the caller turns it into an honest ProvisionResult. Runs with ``_isolated_env()``
+    since every caller of this helper drives the user's or the managed venv."""
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
         proc = subprocess.run(
             cmd, cwd=(str(cwd) if cwd else None), capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace")
+            timeout=timeout, encoding="utf-8", errors="replace", env=_isolated_env())
     except FileNotFoundError as e:
         return False, f"{cmd[0]} not found: {e}"
     except subprocess.TimeoutExpired:
@@ -240,7 +294,7 @@ def read_user_freeze(venv_python: Path) -> Optional[list]:
         proc = subprocess.run(
             [str(venv_python), "-m", "pip", "freeze", "--disable-pip-version-check"],
             capture_output=True, text=True, timeout=180,
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace", env=_isolated_env())
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
@@ -322,16 +376,19 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
     return _run(cmd, on_progress=on_progress, timeout=3600)
 
 
-def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
-                       on_progress: ProgressCb) -> int:
-    """Copy the user's custom_nodes into the managed ComfyUI and return the count.
-    Only when the user opted in. Skips __pycache__ / compiled files and *.example."""
+def _copy_custom_nodes(user_workdir: Path, managed_root: Path) -> tuple[int, list]:
+    """Copy the user's custom_nodes into the managed ComfyUI, returning (copied_count,
+    warnings). Only when the user opted in. Skips __pycache__ / compiled files and
+    *.example. A node that fails to copy is not silently dropped: its warning is RETURNED
+    so the caller routes it through the run log (ProvisionResult.log), not only the live
+    progress stream (rule 5: a surfaced problem must survive into the result)."""
     src = user_workdir / "custom_nodes"
     if not src.is_dir():
-        return 0
+        return 0, []
     dst = managed_root / "custom_nodes"
     dst.mkdir(parents=True, exist_ok=True)
     count = 0
+    warnings: list = []
     for entry in sorted(src.iterdir()):
         name = entry.name
         if name == "__pycache__" or name.endswith(".example"):
@@ -347,9 +404,8 @@ def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
                 shutil.copy2(str(entry), str(target))
                 count += 1
         except Exception as e:
-            # Do not silently drop a node the user asked for - surface it (rule 5).
-            _emit(on_progress, f"WARNING: could not copy custom node {name}: {e}")
-    return count
+            warnings.append(f"could not copy custom node {name}: {e}")
+    return count, warnings
 
 
 def _write_marker(managed_root: Path, stack: UserComfyStack,
@@ -455,11 +511,16 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         else:
             _say("Your ComfyUI venv reported no packages - replicating it empty.")
 
-        # 4) Custom nodes - only if the user opted in (decision 3).
+        # 4) Custom nodes - only if the user opted in (decision 3). A per-node copy
+        #    failure is non-fatal but is routed through _say so it lands in the run log
+        #    (ProvisionResult.log), not only the live stream (rule 5, the #622 class).
         n_nodes = 0
+        node_warnings: list = []
         if copy_custom_nodes:
-            n_nodes = _copy_custom_nodes(stack.workdir, root, on_progress)
+            n_nodes, node_warnings = _copy_custom_nodes(stack.workdir, root)
             _say(f"Copied {n_nodes} custom node(s) from your ComfyUI.")
+            for w in node_warnings:
+                _say(f"WARNING: {w}")
         else:
             _say("Starting with a clean custom_nodes (your nodes were not copied).")
 
@@ -478,7 +539,8 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (your models + localm's managed models).")
 
-        # 6) Provenance marker (documentation for S4; not load-bearing).
+        # 6) Provenance marker (documentation for S4 AND now load-bearing for
+        #    step 7 below - is_managed_comfy_installed() requires this file too).
         _write_marker(root, stack, n_nodes, n_pkgs, patch_outcomes)
 
         # 7) Prove it actually installed (S1's contract), or roll back and say it did not.
@@ -487,10 +549,24 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
                          "Provisioning finished but the managed ComfyUI does not read "
                          "as installed (main.py or venv missing).")
 
+        # Fold any non-fatal shortfalls into the success message so a caller that only
+        # reads the result (not the live stream) still learns of them (the #622
+        # vanished-log class): custom nodes that failed to copy, and localm patches that
+        # did not apply. Both are non-fatal - each only breaks the workflow that needs it
+        # - but must not be reported as a clean, complete success (rule 5). This mirrors
+        # the fresh path's node-failure fold (managed_comfy_fresh.provision_fresh).
+        msg = f"localm's managed ComfyUI is ready at {root}."
+        if node_warnings:
+            msg += (f" {len(node_warnings)} custom node(s) could not be copied; "
+                    "workflows needing them will not work until fixed.")
+        patch_failures = [o for o in patch_outcomes if not o.ok]
+        if patch_failures:
+            msg += (f" {len(patch_failures)} localm patch(es) did not apply; the "
+                    "workflow they fix (e.g. ACE-Step music) may not work.")
         return ProvisionResult(
             ok=True, status="copied", managed_root=root, commit=stack.commit,
             installed_packages=n_pkgs, custom_nodes_copied=n_nodes, log="\n".join(log),
-            message=f"localm's managed ComfyUI is ready at {root}.")
+            message=msg)
     except Exception as e:  # last-resort: roll back, never a half-claimed success
         logger.debug("provision_by_copy failed", exc_info=True)
         return _fail("error", f"Provisioning failed: {e}")
@@ -509,6 +585,10 @@ def resolve_copy_custom_nodes(flag: Optional[bool], n_nodes: int, interactive: b
     if interactive and confirm is not None:
         try:
             return bool(confirm())
-        except Exception:
+        except Exception as e:
+            # A raising confirm callback (a broken prompt) must not abort setup; default
+            # to the safe clean start (do not copy), but record WHY (rule 5).
+            logger.debug("custom-nodes confirm callback raised; defaulting to not "
+                         "copying the user's custom nodes: %s", e)
             return False
     return False

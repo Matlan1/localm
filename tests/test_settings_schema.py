@@ -18,6 +18,15 @@ def test_schema_matches_config_keys_exactly():
         f"only-in-schema={field_keys - cfg_keys}")
 
 
+def test_embedding_pooling_options_match_the_embedder():
+    """The schema spells its pooling choices out rather than importing the
+    inference stack, so pin them to the one source of truth or they drift."""
+    from localm.inference.embedder import POOLING_CHOICES
+
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    assert set(by_key["embedding_pooling"].options) == set(POOLING_CHOICES)
+
+
 def test_no_duplicate_field_keys():
     keys = [f.key for f in ss.CORE_FIELDS]
     assert len(keys) == len(set(keys))

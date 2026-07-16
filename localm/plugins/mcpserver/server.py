@@ -63,9 +63,17 @@ def _redirect_consoles_to_stderr() -> None:
     import localm.inference.engine as _engine_mod
     import localm.inference.backends.gguf as _gguf_mod
     import localm.model_manager as _mm_mod
+    import localm.inference.backends.llamacpp._sizing as _sizing_mod
     _engine_mod.console = err
     _gguf_mod.console = err
     _mm_mod.console = err
+    # BUG-11: _sizing's own module-level console (the "ctx auto" sizing note
+    # printed during GgufBackend's preflight, BEFORE the model process is even
+    # spawned - i.e. still in THIS process) was missing from this list, which
+    # is how chat/embed's first-load leak got past this redirect in the first
+    # place. The per-call _quiet_stdout() guards added at each risky call site
+    # are the belt; this is the suspenders.
+    _sizing_mod.console = err
     try:
         import localm.inference.backends.llamacpp.llama as _llama_mod
         if hasattr(_llama_mod, "console"):
@@ -124,8 +132,21 @@ class EngineCache:
             return self._engine
         if self._engine is not None:
             _log(f"switching model {self._loaded_name} -> {name}")
-            from localm.discover import vram_capacity
-            before_free = vram_capacity().get("free")
+            from localm.vram import _live_free_vram_bytes, _vram_free_reading
+            # SEED the wait with the reading even when the probe was not fresh,
+            # and poll with the live-only reader - exactly as the three
+            # http_server unload paths do, and NOT the other way round. The two
+            # ends need opposite things from a stale probe: for the 'before'
+            # SEED, None means "do not wait at all" (wait_for_vram_release
+            # short-circuits on before_bytes=None), so seeding it from the
+            # live-only reader would silently drop the driver-hang guard below to
+            # a 0-second no-op on any box whose probe merely ran slow. For the
+            # 'after' POLL, None correctly means "cannot verify". Freshness is
+            # carried separately, for the REPORT, not the wait.
+            # scope unused here: this path only LOGS whether the free could be
+            # confirmed, it does not surface a before/after figure a process-scoped
+            # reading would mislead (that is the /v1/models/unload report's concern).
+            before_free, before_fresh, _scope = _vram_free_reading()
             try:
                 self._engine.unload()
             except Exception as e:
@@ -135,15 +156,24 @@ class EngineCache:
             # The native unload's VRAM free is asynchronous - loading the next
             # model before it lands can exceed total VRAM and hang the GPU
             # driver (the same TDR risk the /v1/models/unload endpoint guards
-            # against; see vram.wait_for_vram_release). before_free is None
-            # when VRAM is not measurable at all, in which case this is a
-            # no-op and behaves as before.
+            # against; see vram.wait_for_vram_release). before_free is None only
+            # when VRAM is not measurable AT ALL (a CPU-only box), in which case
+            # there is nothing to wait for and this is a no-op, as before.
             from localm.vram import wait_for_vram_release
             released, _final = wait_for_vram_release(
-                lambda: vram_capacity().get("free"), before_bytes=before_free)
-            if released is False:
+                _live_free_vram_bytes, before_bytes=before_free)
+            if released is False and before_fresh:
+                # Both ends read live: "did not rise" is a claim we can back.
                 _log(f"warning: VRAM free did not rise after unloading "
                      f"{self._loaded_name} within the timeout - loading {name} anyway")
+            elif before_free is not None and (released is None or not before_fresh):
+                # Either end came off a timed-out/busy probe, so whether the free
+                # landed is unknown. Say that rather than the "did not rise" claim
+                # above, which a reading we never took cannot support (rule 5).
+                # The wait still ran; only the verdict is withheld.
+                _log(f"warning: could not confirm the VRAM free after unloading "
+                     f"{self._loaded_name} (no live GPU reading) - loading "
+                     f"{name} anyway")
         _log(f"loading model {name}")
         self._engine = self._factory(name)
         self._loaded_name = name
@@ -184,9 +214,20 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     if the engine object is not yet instantiated/cached."""
     if getattr(engines, "_factory", None) != getattr(engines, "_build_engine", None):
         try:
-            backend = getattr(engines.get(None), "_backend", None)
+            # BUG-11: a custom factory can be a real engine builder (tests
+            # normally inject a stub, but nothing enforces that), so guard the
+            # same as chat()/embed()/pull_model() below.
+            with _quiet_stdout():
+                backend = getattr(engines.get(None), "_backend", None)
             return getattr(backend, "can_embed", True) is not False
-        except Exception:
+        except Exception as e:
+            # Probe failed: assume embeddable (do not hide the embed tool on a
+            # transient error), but log so a real capability bug is traceable
+            # (AGENTS.md rule 5). Logger writes to the debug file/stderr, never
+            # stdout, so the JSON-RPC frame stream stays clean.
+            from localm.debuglog import logger
+            logger.debug("mcp: embed-capability probe (custom factory) failed, "
+                         "assuming embeddable: %s", e)
             return True
 
     if engines._engine is not None:
@@ -201,8 +242,12 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
             path, _hint = info
             if str(path).lower().endswith(".gguf"):
                 return False
-    except Exception:
-        pass
+    except Exception as e:
+        # Registry probe failed: assume embeddable rather than hide the tool, but
+        # log the cause (AGENTS.md rule 5). Debug logger stays off stdout.
+        from localm.debuglog import logger
+        logger.debug("mcp: embed-capability probe (registry) failed, assuming "
+                     "embeddable: %s", e)
     return True
 
 
@@ -214,7 +259,14 @@ def _coder_available() -> bool:
     try:
         from localm.plugins.engine import PluginManager
         return PluginManager(None).is_active("coder")
-    except Exception:
+    except Exception as e:
+        # Fails CLOSED (hide the coder tool) so a call that could not work is not
+        # advertised - but that means an installed+enabled coder VANISHES from the
+        # tool list if this probe raises (e.g. unreadable plugin config). Log the
+        # cause so that is diagnosable, not a silent disappearance (AGENTS.md rule
+        # 5). Debug logger writes to file/stderr, never the JSON-RPC stdout.
+        from localm.debuglog import logger
+        logger.debug("mcp: coder-availability probe failed, hiding coder tool: %s", e)
         return False
 
 
@@ -226,7 +278,13 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
-        engine = engines.get(args.get("model"))
+        # BUG-11: engines.get() can trigger a fresh model load, and a GGUF load
+        # prints native sizing/context diagnostics (e.g. the "ctx auto" note)
+        # straight to stdout - the same stream the JSON-RPC frames travel on.
+        # Every other handler that can load a model already guards this; chat
+        # and embed (below) were the two that did not.
+        with _quiet_stdout():
+            engine = engines.get(args.get("model"))
         messages = []
         if args.get("system"):
             messages.append({"role": "system", "content": args["system"]})
@@ -322,7 +380,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(f"pulled and registered as {name!r} (not loaded)")
 
         try:
-            engines.get(name)
+            # BUG-11: this load, like chat()/embed()'s, can print native sizing
+            # diagnostics straight to stdout - the download above was already
+            # guarded, but this post-download load step was not.
+            with _quiet_stdout():
+                engines.get(name)
         except Exception as e:
             return _text_result(
                 f"pulled and registered as {name!r}, but loading it failed: {e}",
@@ -335,7 +397,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
-        engine = engines.get(args.get("model"))
+        # BUG-11: see chat() above - a fresh embedder load can print to stdout too.
+        with _quiet_stdout():
+            engine = engines.get(args.get("model"))
         try:
             vecs = engine.embed(texts)
         except NotImplementedError as e:

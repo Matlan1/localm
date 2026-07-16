@@ -78,6 +78,25 @@ from typing import Optional
 
 from localm.inference.backends.base import InvalidGrammarError, ModelLoadCancelled
 
+
+class RunnerBusy(Exception):
+    """A best-effort, non-blocking command (a token count) declined to run
+    because the runner's single response queue is already being driven by
+    another command on this process (typically a live ``chat_stream``).
+
+    This is NOT a failure: the caller has a documented fallback and should use
+    it rather than block a request behind a whole generation - or, worse, queue
+    an RPC whose reply would race the live stream's envelopes on the shared queue
+    (HON-02). ``count_tokens``/``count_messages_tokens`` opt into this (they fall
+    back to a chars/4 heuristic), and so does ``check_grammar``:
+    ``validate_grammar`` is called SYNCHRONOUSLY on the server's async event
+    loop, so a blocking wait there would freeze the whole loop for the length of
+    a concurrent same-model stream - a busy check is instead DEFERRED to
+    generation time, which rejects a malformed grammar with the same clean
+    ``InvalidGrammarError``. ``load`` and ``chat_stream`` never raise this: they
+    own their own queue drive."""
+
+
 # Fault-injection hook, honoured by the child ONLY when this environment
 # variable is set. Exists exclusively so the test suite can prove the
 # crash-containment property with a REAL uncatchable fault (the same code
@@ -241,8 +260,24 @@ LOAD_TIMEOUT_DEFAULT = 900.0
 
 # Per-token wait during generation. Generous (real per-token latency is
 # sub-second even on CPU) but still bounded, so a genuinely wedged child is
-# detected rather than blocking a request forever.
+# detected rather than blocking a request forever. Applies from the FIRST token
+# onward - NOT to the first token itself, see below.
 _STREAM_CHUNK_TIMEOUT = 120.0
+
+# Wait for the FIRST envelope of a stream, which is a different quantity from
+# the per-token ceiling above: nothing can be emitted until the whole prompt has
+# been PREFILLED. On CPU (`-g 0`), under heavy partial offload (#549), or with a
+# multi-thousand-token prompt (RAG, a long document, a cold mmap cache), prefill
+# can legitimately run far longer than any per-token latency - and holding it to
+# the per-token ceiling killed the worker and reported a false "stalled", on a
+# prompt that would simply never fit under that ceiling no matter how often it
+# was retried (REG-606). Sized like LOAD_TIMEOUT_DEFAULT rather than a token
+# budget, for the same reason: generous enough to never punish slow-but-working
+# hardware, still bounded so a genuinely wedged child is caught. Overridable per
+# install via the ``gguf_first_token_timeout_s`` config key (see gguf.py),
+# exactly like ``gguf_load_timeout_s``, since this varies far more by install
+# than a fixed constant could cover.
+FIRST_TOKEN_TIMEOUT_DEFAULT = 900.0
 
 # Bounded wait for a "done" envelope after requesting a mid-stream cancel.
 _CANCEL_DRAIN_TIMEOUT = 5.0
@@ -261,6 +296,21 @@ class ModelRunner:
         self._req_q = None
         self._resp_q = None
         self._ctrl_q = None
+        # Serialises PARENT-side use of the single response queue. The worker
+        # process is already serial (it reads req_q one command at a time), but
+        # nothing stopped two PARENT threads - a live chat_stream drive on the
+        # stream's producer thread and a token-count RPC on an executor thread -
+        # from both calling self._resp_q.get() and STEALING each other's
+        # envelopes (HON-02: a stolen chunk drops a token; a stolen "done"
+        # spins the stream to its timeout; a delayed reply trips a simple
+        # command's timeout and kills the worker mid-generation). Every command
+        # that drives the queue holds this for its whole request/response cycle,
+        # so envelopes can never interleave across threads. One lock per runner;
+        # it is acquired and released on the SAME thread for each command
+        # (the stream's whole drive + close runs on one producer thread), so a
+        # plain non-reentrant Lock is correct. shutdown() deliberately does NOT
+        # take it, so teardown still works while a command holds it.
+        self._q_lock = threading.Lock()
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
@@ -326,7 +376,7 @@ class ModelRunner:
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 
-    def chat_stream(self, **kwargs):
+    def chat_stream(self, *, first_chunk_timeout: Optional[float] = None, **kwargs):
         """Yield text tokens. On the caller's ``GeneratorExit`` (mirroring how
         ``http_server.py`` cancels a stream today - a plain generator
         ``.close()``), relays a ``cancel_stream`` signal to the child and
@@ -337,50 +387,78 @@ class ModelRunner:
         crashed child is detected promptly - within one poll interval, not
         after the full per-token ceiling - while still allowing up to
         ``_STREAM_CHUNK_TIMEOUT`` of genuine native decode time per token
-        before treating it as stalled."""
-        self._req_q.put(("chat_stream", kwargs))
-        try:
-            while True:
-                deadline = time.monotonic() + _STREAM_CHUNK_TIMEOUT
-                result = None
-                while result is None:
-                    try:
-                        result = self._resp_q.get(timeout=_LOAD_POLL_INTERVAL)
-                    except _queue.Empty:
-                        if not self.is_alive():
-                            raise RuntimeError(
-                                f"Native inference fault (worker exit "
-                                f"{self._proc.exitcode}). The model has been "
-                                "unloaded and will reload on the next request. "
-                                "See the debug log for the native stack trace."
-                            )
-                        if time.monotonic() > deadline:
-                            self.shutdown(grace=0)
-                            raise RuntimeError(
-                                "Generation stalled: the model process stopped "
-                                "responding. It has been unloaded and will "
-                                "reload on the next request."
-                            )
-                kind = result[0]
-                if kind == "chunk":
-                    yield result[1]
-                elif kind == "done":
-                    self.last_done = result[1]
-                    return
-                elif kind == "error":
-                    # A clean, expected failure the worker deliberately did
-                    # NOT let crash the process (e.g. a malformed grammar) -
-                    # the model is unharmed and the worker keeps running.
-                    msg = result[1]
-                    tag = result[2] if len(result) > 2 else ""
-                    if tag == "InvalidGrammarError":
-                        raise InvalidGrammarError(msg)
-                    raise RuntimeError(msg)
-                else:
-                    raise RuntimeError(f"Unexpected response during generation: {result!r}")
-        except GeneratorExit:
-            self._cancel_stream_and_drain()
-            raise
+        before treating it as stalled.
+
+        The FIRST envelope gets its own, much larger budget
+        (*first_chunk_timeout*, default ``FIRST_TOKEN_TIMEOUT_DEFAULT``): it
+        waits for the whole prompt prefill, not for one token's decode. Keyword-
+        only and popped here, so it is never mistaken for a generation
+        parameter forwarded to the child in *kwargs*.
+
+        Holds ``_q_lock`` for the whole drive so no concurrent token-count RPC
+        can consume this stream's envelopes off the shared response queue
+        (HON-02). The lock is acquired here and released when this generator is
+        exhausted, errors, or is closed - all of which happen on the single
+        producer thread that drives it, so the non-reentrant Lock is always
+        released on the thread that took it."""
+        first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
+        awaiting_first = True
+        with self._q_lock:
+            self._req_q.put(("chat_stream", kwargs))
+            try:
+                while True:
+                    deadline = time.monotonic() + (
+                        first_budget if awaiting_first else _STREAM_CHUNK_TIMEOUT)
+                    result = None
+                    while result is None:
+                        try:
+                            result = self._resp_q.get(timeout=_LOAD_POLL_INTERVAL)
+                        except _queue.Empty:
+                            if not self.is_alive():
+                                raise RuntimeError(
+                                    f"Native inference fault (worker exit "
+                                    f"{self._proc.exitcode}). The model has been "
+                                    "unloaded and will reload on the next request. "
+                                    "See the debug log for the native stack trace."
+                                )
+                            if time.monotonic() > deadline:
+                                self.shutdown(grace=0)
+                                if awaiting_first:
+                                    raise RuntimeError(
+                                        f"Generation stalled: the model process "
+                                        f"produced no output within "
+                                        f"{first_budget:.0f}s of prompt processing. "
+                                        "It has been unloaded and will reload on the "
+                                        "next request. Raise gguf_first_token_timeout_s "
+                                        "if this prompt genuinely needs longer on this "
+                                        "hardware."
+                                    )
+                                raise RuntimeError(
+                                    "Generation stalled: the model process stopped "
+                                    "responding. It has been unloaded and will "
+                                    "reload on the next request."
+                                )
+                    awaiting_first = False
+                    kind = result[0]
+                    if kind == "chunk":
+                        yield result[1]
+                    elif kind == "done":
+                        self.last_done = result[1]
+                        return
+                    elif kind == "error":
+                        # A clean, expected failure the worker deliberately did
+                        # NOT let crash the process (e.g. a malformed grammar) -
+                        # the model is unharmed and the worker keeps running.
+                        msg = result[1]
+                        tag = result[2] if len(result) > 2 else ""
+                        if tag == "InvalidGrammarError":
+                            raise InvalidGrammarError(msg)
+                        raise RuntimeError(msg)
+                    else:
+                        raise RuntimeError(f"Unexpected response during generation: {result!r}")
+            except GeneratorExit:
+                self._cancel_stream_and_drain()
+                raise
 
     def _cancel_stream_and_drain(self) -> None:
         if not self.is_alive():
@@ -411,41 +489,69 @@ class ModelRunner:
                      "killing the worker process", _CANCEL_DRAIN_TIMEOUT)
         self.shutdown(grace=0)
 
-    def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT):
-        self._req_q.put((name, payload))
-        deadline = time.monotonic() + timeout
-        result = None
-        while result is None:
-            wait = max(0.01, min(0.5, deadline - time.monotonic()))
-            try:
-                result = self._resp_q.get(timeout=wait)
-            except _queue.Empty:
-                if not self.is_alive():
-                    raise RuntimeError(
-                        f"The model process crashed (exit code {self._proc.exitcode}) "
-                        f"while handling '{name}'.")
-                if time.monotonic() > deadline:
-                    self.shutdown(grace=0)
-                    raise RuntimeError(f"'{name}' timed out waiting for the model process.")
-        kind = result[0]
-        if kind == "ok":
-            return result[1]
-        if kind == "error":
-            msg = result[1]
-            tag = result[2] if len(result) > 2 else ""
-            if tag == "InvalidGrammarError":
-                raise InvalidGrammarError(msg)
-            raise RuntimeError(msg)
-        raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
+    def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,
+                        *, try_lock: bool = False):
+        """Send one request/response command and return its value.
+
+        Holds ``_q_lock`` for the whole exchange so its reply can never be
+        stolen by (or steal from) a concurrent stream on the shared response
+        queue (HON-02). ``try_lock=True`` acquires the lock NON-blocking and
+        raises :class:`RunnerBusy` immediately if it is held (a live stream, or
+        another simple command) - used by the token counters, which have a
+        documented heuristic fallback and must not queue a 30s-timeout RPC
+        behind a whole generation. The default blocking acquire is for commands
+        that genuinely need the real answer (e.g. check_grammar)."""
+        if try_lock:
+            if not self._q_lock.acquire(blocking=False):
+                raise RunnerBusy(name)
+        else:
+            self._q_lock.acquire()
+        try:
+            self._req_q.put((name, payload))
+            deadline = time.monotonic() + timeout
+            result = None
+            while result is None:
+                wait = max(0.01, min(0.5, deadline - time.monotonic()))
+                try:
+                    result = self._resp_q.get(timeout=wait)
+                except _queue.Empty:
+                    if not self.is_alive():
+                        raise RuntimeError(
+                            f"The model process crashed (exit code {self._proc.exitcode}) "
+                            f"while handling '{name}'.")
+                    if time.monotonic() > deadline:
+                        self.shutdown(grace=0)
+                        raise RuntimeError(f"'{name}' timed out waiting for the model process.")
+            kind = result[0]
+            if kind == "ok":
+                return result[1]
+            if kind == "error":
+                msg = result[1]
+                tag = result[2] if len(result) > 2 else ""
+                if tag == "InvalidGrammarError":
+                    raise InvalidGrammarError(msg)
+                raise RuntimeError(msg)
+            raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
+        finally:
+            self._q_lock.release()
 
     def count_tokens(self, text: str) -> int:
-        return self._simple_request("count_tokens", text)
+        # try_lock: never block a token count behind a live generation; the
+        # caller (GgufBackend) has a chars/4 fallback for RunnerBusy.
+        return self._simple_request("count_tokens", text, try_lock=True)
 
     def count_messages_tokens(self, messages: list) -> int:
-        return self._simple_request("count_messages_tokens", messages)
+        return self._simple_request("count_messages_tokens", messages, try_lock=True)
 
     def check_grammar(self, grammar: str) -> None:
-        self._simple_request("check_grammar", grammar)
+        # try_lock: validate_grammar (the only caller) runs SYNCHRONOUSLY on the
+        # server's async event loop, so a blocking wait here would freeze the
+        # whole loop for the full duration of a concurrent same-model stream that
+        # holds the queue. Raise RunnerBusy instead; GgufBackend.validate_grammar
+        # defers the check to generation time, which still rejects a malformed
+        # grammar with the same clean InvalidGrammarError (llama.py raises it on
+        # the native NULL return, before any token) - never a native fault.
+        self._simple_request("check_grammar", grammar, try_lock=True)
 
     def shutdown(self, grace: float = 5.0) -> None:
         """Best-effort teardown: ask the worker to close cleanly, then kill it

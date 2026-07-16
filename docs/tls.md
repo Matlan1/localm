@@ -92,7 +92,7 @@ all - this only applies to a network (phone/LAN) bind over HTTPS.
 
 ```powershell
 localm gui -H 0.0.0.0 --no-tls          # plain HTTP (key crosses the LAN in cleartext)
-localm gui -H 0.0.0.0 --tls-cert C:\certs\localm.crt --tls-key C:\certs\localm.key
+localm gui -H 0.0.0.0 --tls-cert D:\certs\localm.crt --tls-key D:\certs\localm.key
 ```
 
 `--no-tls` serves plain HTTP and is an escape hatch for a trusted, isolated

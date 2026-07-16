@@ -29,3 +29,15 @@ packages = ["localm_llama_runtime"]
 # Ship whatever binaries have been placed in lib/ when a real wheel is built.
 [tool.hatch.build.targets.wheel.force-include]
 "localm_llama_runtime/lib" = "localm_llama_runtime/lib"
+
+# Note on the editable install (`uv pip install -e .`, run from this dir): hatchling
+# force-includes lib/ literally into the venv's site-packages/localm_llama_runtime/
+# even in editable mode (force-included files are not part of the editable redirect),
+# while __init__.py resolves only via the separate .pth-based redirect to this source
+# tree. That leaves a real-but-incomplete "localm_llama_runtime" directory (lib/ only,
+# no __init__.py) sitting in site-packages alongside the .pth file. It is harmless
+# under normal venv startup: Python's PEP 420 namespace-package resolution keeps
+# scanning sys.path past that incomplete directory and finds the real package (with
+# __init__.py) via the .pth-added path instead. It only bites a caller that builds its
+# own sys.path by hand (e.g. a manual PYTHONPATH) and omits this project's own
+# directory - that caller must include it, not just the venv's site-packages.

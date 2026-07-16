@@ -19,6 +19,7 @@ from __future__ import annotations
 import ctypes
 import re
 import threading
+import time
 from collections.abc import Sequence
 from typing import Optional
 
@@ -324,15 +325,32 @@ GPU_PROBE_BUSY = "busy"        # another probe is inflight, or the probe thread 
 _gpu_probe_lock = threading.Lock()
 _gpu_last_good: Optional[list] = None    # last SUCCESSFUL probe; served on a wedge
 _gpu_probe_inflight = False
+# Bumped by _reset_gpu_probe_cache() to ORPHAN any probe thread still in flight.
+# An abandoned probe (see the DEADLINE note above) is by definition still running
+# and will write its reading whenever the native call finally returns - which can
+# be long after the reset. Clearing the globals alone cannot prevent that write,
+# so a stale thread's result is fenced out by epoch instead of raced against.
+_gpu_probe_epoch = 0
 
 
 def _reset_gpu_probe_cache() -> None:
-    """Test hook: drop the last-known-good GPU reading + in-flight flag so a test
-    that exercised the wedge fallback cannot bleed into the next test."""
-    global _gpu_last_good, _gpu_probe_inflight
+    """Test hook: drop the last-known-good GPU reading + in-flight flag, and
+    INVALIDATE any probe still in flight so it cannot bleed into the next test.
+
+    Clearing the globals is not enough on its own: an overrunning probe is
+    abandoned, not cancelled (a wedged native call cannot be interrupted from
+    Python), so that thread outlives this reset and would otherwise write its
+    reading into _gpu_last_good AFTERWARDS. Measured: a cold ROCm/CUDA init takes
+    ~6.5s and overruns _GPU_PROBE_DEADLINE, so the abandoned thread lands its
+    write several seconds later, inside whichever test is running by then - which
+    made the GPU tests fail intermittently with THIS machine's real card where
+    they assert a fake or empty reading. Bumping the epoch makes that late write
+    a no-op (see _run), which the clears alone provably could not do."""
+    global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
+        _gpu_probe_epoch += 1
 
 
 def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False):
@@ -392,21 +410,52 @@ def _list_gpus_with_status(deadline: float) -> tuple:
             served = list(_gpu_last_good) if _gpu_last_good is not None else []
             return served, GPU_PROBE_BUSY
         _gpu_probe_inflight = True
+        # Published under the SAME lock that claims the in-flight slot (only one
+        # probe is ever in flight, so there is only one deadline to describe): the
+        # probe body reads it to decide whether it can afford a cold device-global
+        # source without overrunning this deadline. See _apply_device_global_free.
+        global _probe_deadline_at
+        _probe_deadline_at = time.monotonic() + deadline
+        # Captured under the SAME lock that claims the in-flight slot: an unlocked
+        # read here could pair this probe with an epoch a concurrent reset has
+        # already retired, which is the exact race the epoch exists to close.
+        my_epoch = _gpu_probe_epoch
 
     result: dict = {}
     done = threading.Event()
 
     def _run() -> None:
-        global _gpu_last_good, _gpu_probe_inflight
+        global _gpu_last_good, _gpu_probe_inflight, _probe_deadline_at
         value = None
         try:
             value = _list_gpus_probe()
         except Exception as e:   # the probe swallows its own errors; belt-and-braces
             logger.debug("list_gpus: probe raised unexpectedly: %s", e)
         with _gpu_probe_lock:
-            if value is not None:
-                _gpu_last_good = value
-            _gpu_probe_inflight = False
+            if _gpu_probe_epoch != my_epoch:
+                # A reset retired this probe while it ran: its reading describes a
+                # state the owner has explicitly dropped, and the in-flight slot is
+                # no longer ours to clear (a later probe may already own it). Drop
+                # BOTH writes rather than corrupt the current epoch's state.
+                # Surfaced, not silenced (AGENTS.md rule 5): debug is the right
+                # altitude because this is the deliberate consequence of a reset,
+                # not a fault.
+                logger.debug("list_gpus: discarding probe result from retired "
+                             "epoch %s (current %s)", my_epoch, _gpu_probe_epoch)
+            else:
+                if value is not None:
+                    _gpu_last_good = value
+                _gpu_probe_inflight = False
+                # Cleared with the in-flight slot: the budget describes THIS probe
+                # and nothing else. Leaving it set would hand a later reader an
+                # expired deadline, which reads as "no budget left" and would skip a
+                # cold source that in fact had all the time in the world.
+                _probe_deadline_at = None
+        # Deliberately OUTSIDE the epoch gate and unconditional: a caller still
+        # inside its deadline is waiting on `done`, and withholding it would make
+        # it wait out the full deadline and report a COMPLETED probe as a TIMEOUT -
+        # manufacturing the very "no GPU"/inconclusive lie the status contract
+        # above exists to prevent.
         result["value"] = value
         done.set()
 
@@ -417,9 +466,12 @@ def _list_gpus_with_status(deadline: float) -> tuple:
         # in-flight guard so a LATER call can retry (never leave it stuck True with
         # no thread to clear it), surface it at debug (rule 5), and degrade to the
         # last-known-good reading rather than propagating a 500 to the caller. No
-        # fresh reading was taken -> BUSY.
+        # fresh reading was taken -> BUSY. Epoch-gated for the same reason as the
+        # clear in _run: if a reset retired us, the slot is no longer ours and may
+        # already belong to a newer probe we must not clear.
         with _gpu_probe_lock:
-            _gpu_probe_inflight = False
+            if _gpu_probe_epoch == my_epoch:
+                _gpu_probe_inflight = False
         logger.debug("list_gpus: could not start probe thread: %s", e)
         served = list(_gpu_last_good) if _gpu_last_good is not None else []
         return served, GPU_PROBE_BUSY
@@ -458,6 +510,7 @@ def _list_gpus_probe() -> list:
                 out.append({"index": i, "name": name,
                             "total": int(total), "free": int(free)})
             if out:
+                _apply_device_global_free(out)
                 return out
     except Exception:
         pass
@@ -480,6 +533,10 @@ def _list_gpus_probe() -> list:
                         "index": int(idx_s), "name": name,
                         "total": int(total_mb) * 1024 ** 2,
                         "free": int(free_mb) * 1024 ** 2,
+                        # nvidia-smi's memory.free is the whole board's, across
+                        # every process (that is what it exists to report), so
+                        # unlike the torch path above it needs no correction.
+                        "free_scope": FREE_SCOPE_DEVICE,
                     })
                 except ValueError:
                     continue   # a malformed line never hides the rest
@@ -488,6 +545,103 @@ def _list_gpus_probe() -> list:
     except Exception:
         pass
     return []
+
+
+# How much of the world a GPU entry's "free" actually accounts for. A caller that
+# presents free VRAM as CURRENT FACT (a "will it fit" refusal, a freed-bytes report)
+# must know the difference; a caller that only wants a fit CEILING ("total") does not.
+FREE_SCOPE_DEVICE = "device"    # every process's VRAM is counted - the number is the board's
+FREE_SCOPE_PROCESS = "process"  # ONLY this process's own allocations are counted (see below)
+
+# Probe budget below which a COLD (not-yet-opened) device-global source is skipped
+# rather than risk overrunning the probe deadline. The cold open is MEASURED at
+# ~750ms; this is that with margin, since overrunning costs the caller its free
+# reading entirely. See _apply_device_global_free.
+_CORRECTION_COLD_BUDGET_S = 1.5
+
+# When the in-flight probe's deadline expires (monotonic), or None outside a probe.
+# Set by _list_gpus_with_status under the same lock that claims the in-flight slot,
+# so the probe body can tell how much of its budget is left before spending ~750ms
+# on a cold source. Safe as a module global precisely because _gpu_probe_inflight
+# serialises probes: only ever one in flight to describe.
+_probe_deadline_at = None
+
+
+def _apply_device_global_free(gpus: list) -> None:
+    """Correct each entry's ``free`` to a DEVICE-GLOBAL figure where this platform's
+    driver query is not one already, and tag every entry with ``free_scope`` so a
+    caller can tell a whole-board number from a process-local one. Mutates *gpus*.
+
+    WHY (measured, see dev-notes/vram-cross-process-blindness.md): on Windows with an
+    AMD ROCm/HIP torch build, ``torch.cuda.mem_get_info`` reports
+    ``total - the calling process's own allocations`` and is blind to every other
+    process. Measured live: 0.14 GB reported "in use" while 10.53 GB genuinely was.
+    That is not a staleness bug (PR #693's domain - the probe here is FRESH and still
+    wrong), and it is not llama.cpp-specific: a plain torch tensor in a child process
+    is equally invisible. It bites localm hard because every GGUF load is
+    out-of-process (backends/gguf.py, since #606), so the model's own VRAM is ALWAYS
+    in another process from the server measuring it - as is a game or a ComfyUI.
+
+    On Linux, and on NVIDIA, the driver query is device-global BY DOCUMENTATION (CUDA
+    specifies *free as "free according to the OS" and warns that another process can
+    move it), so nothing is corrected there and the reading is tagged
+    :data:`FREE_SCOPE_DEVICE` unchanged.
+
+    When no better source can answer on Windows, the entry keeps the driver's number
+    but is tagged :data:`FREE_SCOPE_PROCESS` rather than silently passing a
+    known-process-local figure off as the board's (AGENTS.md rule 5). That tag is
+    what makes /v1/models/unload say its reading is uncertain instead of asserting a
+    wrong one as fact."""
+    import sys
+    if sys.platform != "win32":
+        for g in gpus:
+            g["free_scope"] = FREE_SCOPE_DEVICE
+        return
+    try:
+        from localm.gpu_usage import device_global_used_bytes, source_is_warm
+        # This runs INSIDE the deadline-bounded probe, so it spends the SAME budget
+        # the driver call already spent. Opening the source costs ~750ms ONCE per
+        # process (a driver init); a warm read costs ~0.02ms. Measured, that cold
+        # 750ms was enough to push cold probes from a comfortable 2.9-3.5s to
+        # 3.6-4.0s against the 4.0s cap and start timing them out - and a timeout
+        # costs the caller its free reading ENTIRELY (list_gpus serves [] and
+        # vram_info falls to the registry tier, which has no "free" at all). A
+        # correct number is not worth trading for no number, so a COLD source is
+        # skipped when the remaining budget is too thin to absorb it; the reading is
+        # then tagged process-scoped (honest) instead of silently uncorrected. A warm
+        # source is free and always runs, so a long-lived server pays this at most
+        # once, and a CLI caller passing the longer _GPU_PROBE_CLI_DEADLINE has room
+        # for it on the first go.
+        if not source_is_warm():
+            remaining = None
+            if _probe_deadline_at is not None:
+                remaining = _probe_deadline_at - time.monotonic()
+            if remaining is not None and remaining < _CORRECTION_COLD_BUDGET_S:
+                logger.debug(
+                    "list_gpus: %.2fs left of the probe budget is too thin for a "
+                    "cold device-global source (~%.1fs); leaving this reading "
+                    "process-scoped rather than risking a timeout that would return "
+                    "no free VRAM at all", remaining, _CORRECTION_COLD_BUDGET_S)
+                for g in gpus:
+                    g["free_scope"] = FREE_SCOPE_PROCESS
+                return
+        used = device_global_used_bytes(gpus)
+    except Exception as e:
+        # Surfaced, not silenced: the entries below are then tagged process-scoped,
+        # so the wrongness is reported rather than hidden.
+        logger.debug("list_gpus: device-global VRAM source failed: %s", e)
+        used = {}
+    for g in gpus:
+        u = used.get(g.get("index"))
+        if u is None:
+            g["free_scope"] = FREE_SCOPE_PROCESS
+            continue
+        total = int(g["total"])
+        # Clamp: the used figure and `total` come from different sources (the driver's
+        # total vs the adapter's dedicated usage), so their difference can land just
+        # outside [0, total] without either being wrong enough to matter.
+        g["free"] = max(0, min(total, total - int(u)))
+        g["free_scope"] = FREE_SCOPE_DEVICE
 
 
 def _native_backend_has_vulkan() -> bool:
@@ -797,15 +951,34 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None):
     return arr
 
 
-def vram_info() -> dict:
+def vram_info(*, return_status: bool = False):
     """{"total": bytes, "free"?: bytes} for the CONFIGURED main GPU device (see
     main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is
     configured, or {} when not measurable. Tries torch (CUDA/ROCm) then
     nvidia-smi (both via list_gpus()), then the Windows display-adapter
     registry - the GGUF-only install has no torch, and the fit badges must
-    still work there (total is all fit_label needs)."""
+    still work there (total is all fit_label needs).
+
+    When ``return_status`` is True, returns ``(info, status)`` where ``status``
+    is list_gpus()'s own GPU_PROBE_OK/GPU_PROBE_TIMEOUT/GPU_PROBE_BUSY - a
+    caller that will present a specific number as CURRENT FACT (not just a fit
+    ceiling) must check this rather than trust a timed-out probe's stale
+    last-known-good fallback (AGENTS.md rule 5; see the vram_before/after
+    bytes this fed into /v1/models/unload, which is exactly that case).
+    ``return_status`` defaults to False, preserving the plain-dict contract
+    (AND the plain, no-kwarg list_gpus() call) every existing caller and test
+    double relies on - the status-aware call is made ONLY when a caller opts
+    in, never unconditionally."""
     from localm.config import load_config
-    gpus = list_gpus()
+    if return_status:
+        gpus, status = list_gpus(return_status=True)
+    else:
+        gpus = list_gpus()
+        status = None   # unused: _ret() never reads it when return_status=False
+
+    def _ret(info: dict):
+        return (info, status) if return_status else info
+
     if gpus:
         configured = load_config().get("main_gpu_index")
         idx = resolve_main_gpu_index(configured, gpus=gpus)
@@ -817,7 +990,12 @@ def vram_info() -> dict:
         out = {"total": g["total"]}
         if g.get("free") is not None:
             out["free"] = g["free"]
-        return out
+            # Travels WITH the number it describes: a caller presenting free VRAM as
+            # current fact must be able to tell a whole-board figure from a
+            # process-local one (see _apply_device_global_free). Absent when free is.
+            if g.get("free_scope") is not None:
+                out["free_scope"] = g["free_scope"]
+        return _ret(out)
 
     import sys
     if sys.platform == "win32":
@@ -851,13 +1029,13 @@ def vram_info() -> dict:
                                      sub, e)
                         continue
             if best:
-                return {"total": int(best)}
+                return _ret({"total": int(best)})
         except Exception:
             pass
-    return {}
+    return _ret({})
 
 
-def vram_capacity(config: Optional[dict] = None) -> dict:
+def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False):
     """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
     right ceiling for any "will this model fit" decision (a pre-load refusal
     gate, a fit badge, a VRAM-estimate readout).
@@ -880,6 +1058,14 @@ def vram_capacity(config: Optional[dict] = None) -> dict:
     resolve_gpu_split already warns and degrades a stale/invalid split to
     single-GPU (rule 5, do-not-hide-problems); this reuses that same
     validation rather than duplicating it.
+
+    ``return_status``: see :func:`vram_info` - propagated through both the
+    single-GPU short-circuit and the split-summed path, so a caller weighing
+    whether to trust a specific number as CURRENT fact (not just a fit
+    ceiling) can tell a fresh reading from a timed-out/stale one. Made ONLY
+    when a caller opts in (never unconditionally), so every existing caller
+    and test double that patches vram_info()/list_gpus() with a plain, no-kwarg
+    stand-in keeps working exactly as before.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -888,21 +1074,41 @@ def vram_capacity(config: Optional[dict] = None) -> dict:
     # (list_gpus() -> torch/nvidia-smi) on every request for the vast majority
     # of single-GPU installs that never configured a split.
     if not cfg.get("gpu_split_indices"):
-        return vram_info()
+        return vram_info(return_status=True) if return_status else vram_info()
 
-    gpus = list_gpus()
+    if return_status:
+        gpus, status = list_gpus(return_status=True)
+    else:
+        gpus = list_gpus()
+        status = None
+
+    def _ret(info: dict):
+        return (info, status) if return_status else info
+
     pairs = resolve_gpu_split(
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
     by_index = {g.get("index"): g for g in gpus}
     split_gpus = [by_index[idx] for idx, _ in pairs if idx in by_index]
     if len(split_gpus) < 2:
-        return vram_info()
+        return vram_info(return_status=True) if return_status else vram_info()
 
     out = {"total": sum(g["total"] for g in split_gpus)}
     frees = [g.get("free") for g in split_gpus]
     if all(f is not None for f in frees):
         out["free"] = sum(frees)
-    return out
+        # All-or-nothing, mirroring the "free" key above: a sum is only a whole-board
+        # figure if EVERY device in it is. One process-scoped device makes the whole
+        # sum process-scoped, because that device's other-process VRAM is missing
+        # from it. Absent entirely when NO device reported a scope: that means
+        # UNKNOWN, and labelling it "process" would assert a blindness we have not
+        # measured (as wrong as asserting the number is fact) while also breaking the
+        # plain-dict contract every existing caller and test double relies on.
+        scopes = [g.get("free_scope") for g in split_gpus if g.get("free_scope")]
+        if scopes:
+            out["free_scope"] = (FREE_SCOPE_DEVICE
+                                 if all(s == FREE_SCOPE_DEVICE for s in scopes)
+                                 else FREE_SCOPE_PROCESS)
+    return _ret(out)
 
 
 def split_device_count(config: Optional[dict] = None) -> int:
@@ -986,6 +1192,120 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> li
         if free < needed:
             shortfall.append({"index": idx, "needed": needed, "free": free})
     return shortfall
+
+
+def resolve_preferred_device(config: Optional[dict] = None, *,
+                            gpus: Optional[list] = None) -> Optional[int]:
+    """The device a media workload should DEFAULT to, with every OTHER card left
+    VISIBLE. ``None`` when nothing is configured, or when no torch-visible device can
+    be named honestly.
+
+    NEVER use this to MASK the other cards away. That was a real, shipped bug (see the
+    rename from ``resolve_whole_model_device``): ComfyUI core ships per-component GPU
+    PLACEMENT - ``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``
+    (``comfy_extras/nodes_multigpu.py``, registered at ``nodes.py:2440``), which call
+    ``deepclone_multigpu`` to rehome a component onto another card with independent
+    weights. Masking to one device (ComfyUI's ``--cuda-device``, or a bare
+    ``CUDA_VISIBLE_DEVICES=N``) deletes the other cards from torch's view and turns
+    every one of those nodes into a silent no-op. Prefer ComfyUI's ``--default-device``,
+    which reorders rather than masks (``main.py:69-76``), or :func:`visible_device_order`
+    for an install we cannot pass argv to.
+
+    The predicate here is PREFERENCE, not exclusivity: "which card should lead", not
+    "which card is the only one". It is deliberately NOT :func:`resolve_main_gpu_index`,
+    which answers IDENTITY ("which device is primary") and resolves an unset value to
+    device 0 - using that here would silently pick card 0 and ignore the split, the
+    shape of the #661 regression. On a configured split this is a CAPACITY-informed
+    choice: the split device with the MOST live free VRAM.
+
+    INDEX SPACE (this is load-bearing): the answer is always a TORCH device index,
+    because media runs on torch (ComfyUI), and :func:`list_gpus` enumerates via
+    torch.cuda. It must never leak :func:`resolve_gpu_split`'s Vulkan pass-through
+    (GPU-SPLIT-VKINDEX): on the ``vulkan`` llama.cpp build that function returns
+    indices UNVALIDATED, in ggml-vulkan's own index space, which torch does not share.
+    Handing one of those to ComfyUI as a CUDA/HIP id would name the wrong card. So a
+    device is returned only when it is genuinely torch-visible; otherwise ``None``, and
+    ComfyUI keeps its own default.
+    """
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    split = cfg.get("gpu_split_indices")
+    main = cfg.get("main_gpu_index")
+    if not split and main is None:
+        return None                 # nothing configured: do not invent a device
+    devices = gpus if gpus is not None else list_gpus()
+    by_index = {g.get("index"): g for g in devices}
+    if not by_index:
+        # No torch-visible device at all, so any index we named would be a guess in an
+        # index space we cannot check. Let ComfyUI choose; do not pretend to know.
+        return None
+    if split:
+        pairs = resolve_gpu_split(split, cfg.get("gpu_split_ratios"), gpus=devices)
+        if len(pairs) >= 2:
+            visible = [idx for idx, _ in pairs if idx in by_index]
+            measured = [(idx, by_index[idx]["free"]) for idx in visible
+                        if by_index[idx].get("free") is not None]
+            if measured:
+                return max(measured, key=lambda t: t[1])[0]
+            if visible:
+                # Split devices ARE torch-visible but none reports free VRAM, so the
+                # capacity-informed choice cannot be made. Lead with the first visible
+                # one and SAY SO (rule 5): it may not be the emptiest card. Warned, not
+                # raised - refusing would break a working setup over a probe that is
+                # allowed to be unmeasurable.
+                logger.warning(
+                    "gpu_split is configured but no split device reports free VRAM, so "
+                    "the best card cannot be chosen for media; defaulting to device %d, "
+                    "which may have less free VRAM than its peers.", visible[0])
+                return visible[0]
+            # NOT ONE configured split device is torch-visible. resolve_gpu_split()
+            # passes indices through UNVALIDATED on the vulkan llama.cpp build
+            # (GPU-SPLIT-VKINDEX), so these are very likely ggml-vulkan indices, which
+            # mean something else entirely to torch. Naming one would point ComfyUI at
+            # the wrong card. Say so and let ComfyUI default.
+            logger.warning(
+                "gpu_split %r resolves to no torch-visible device, so media cannot name "
+                "one: those indices are not in torch's index space (a Vulkan-only "
+                "llama.cpp split does this). Leaving the device to ComfyUI's default.",
+                split)
+            return None
+        # A split was configured but did not resolve to 2+ detected devices.
+        # resolve_gpu_split() has already WARNED about the dropped indices; fall
+        # through to the main-index answer below rather than guess a device.
+    if main is None:
+        return None
+    idx = resolve_main_gpu_index(main, gpus=devices)
+    return idx if idx in by_index else None
+
+
+def visible_device_order(config: Optional[dict] = None, *,
+                         gpus: Optional[list] = None) -> Optional[list]:
+    """Every torch-visible device index with the PREFERRED one FIRST, or ``None`` when
+    no device should be named.
+
+    For a ComfyUI localm cannot pass argv to: the user's OWN install, started by their
+    own launcher (possibly ZLUDA-wrapped), where the child env is the only lever. This
+    mirrors exactly what ComfyUI's own ``--default-device`` does at ``main.py:69-76`` -
+    it REORDERS ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES`` so the chosen device
+    leads, leaving the rest visible - rather than what ``--cuda-device`` does at
+    ``main.py:78-81``, which masks them away and silently disables core's
+    ``Select*Device`` placement nodes.
+
+    Every index is torch-visible by construction (:func:`resolve_preferred_device` and
+    :func:`list_gpus` share torch's index space), so this never emits a Vulkan-space id.
+
+    NOTE the consequence, which callers must respect: after this reorder the preferred
+    card becomes torch index 0, so a workflow's ``gpu:N`` refers to the REORDERED
+    position, not to localm's own ``list_gpus`` index. Anything emitting ``gpu:N`` into
+    a workflow has to map through this order, not around it.
+    """
+    devices = gpus if gpus is not None else list_gpus()
+    chosen = resolve_preferred_device(config, gpus=devices)
+    if chosen is None:
+        return None
+    rest = sorted(g.get("index") for g in devices
+                  if g.get("index") is not None and g.get("index") != chosen)
+    return [chosen] + rest
 
 
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:

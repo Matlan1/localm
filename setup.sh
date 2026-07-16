@@ -26,6 +26,20 @@ say() { printf '%s\n' "$*"; }
 ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes mode)
   local prompt="$1" def="$2" ans
   if [ "$YES" = 1 ]; then echo "$def"; return; fi
+  # Drop any TYPE-AHEAD before showing this question. Setup runs long steps
+  # between questions (a uv download, a Python download, a venv build, a model
+  # pull); anything typed while one of those runs sits in the terminal's input
+  # queue and is delivered to the NEXT read - answering a question the user never
+  # saw. One stray Enter silently accepts a default, and a double Enter accepts
+  # two questions in a row. Every answer must be one the user actually gave to the
+  # question in front of them.
+  #
+  # Only when stdin is a TERMINAL: piped input is deliberate (a script feeding
+  # answers), and draining it would eat the caller's real answers. --yes returns
+  # above and never reaches here.
+  if [ -t 0 ]; then
+    while read -r -t 0.05 -n 4096 _typeahead 2>/dev/null; do :; done
+  fi
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
@@ -95,6 +109,34 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
+# ---- portable vs shared: where localm's Python tooling lives ----------------
+# Portable pulls uv ITSELF (when we have to install it below), its managed Python,
+# and its wheel cache INTO this folder, so the clone is truly self-contained
+# (delete it and nothing is left behind) at the cost of a per-clone re-download.
+# Shared reuses (or installs) uv at its normal per-user location and reuses its
+# per-user Python + cache. Asked BEFORE the uv bootstrap below so a Portable pick
+# also confines uv's own binary to this folder, not just the runtime it manages -
+# silently installing a tool into the user's home directory without ever asking
+# where is exactly the kind of outside-the-root write AGENTS.md rule 4 forbids.
+# The UV_* vars are exported for THIS setup process only (not persisted / not
+# global), so they never touch any other uv project. --python-preference
+# only-managed forces the contained download instead of reusing a system Python.
+say ""
+say "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
+say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
+say "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+spick="$(ask "  Pick 1 or 2 [1]: " 1)"
+CONTAINED=0; PYPREF=""; UVDIR=""
+if [ "$spick" = 1 ]; then
+  CONTAINED=1
+  export UV_PYTHON_INSTALL_DIR="$(pwd)/.python"
+  export UV_CACHE_DIR="$(pwd)/.cache"
+  PYPREF="--python-preference only-managed"
+  say "  Portable: uv, Python, and downloads all under this folder"
+else
+  say "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
+fi
+
 # ---- uv is required; bootstrap it ourselves if it is missing ----------------
 # uv (Astral's fast Python package manager) builds the venv and resolves the GPU
 # wheels. Instead of dead-ending with "install it yourself", fetch it via Astral's
@@ -114,12 +156,27 @@ if ! command -v uv >/dev/null 2>&1; then
       ;;
   esac
   say "  Installing uv ..."
+  if [ "$CONTAINED" = 1 ]; then
+    # Portable was picked: confine uv's OWN binary to this folder too, not just the
+    # Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
+    # override for the installer's target dir.
+    export UV_INSTALL_DIR="$(pwd)/.uv"
+    UVDIR="$(pwd)/.uv"
+    say "  Portable: installing uv itself under ./.uv"
+  fi
   # || true so a curl/install failure does not trip set -e before our own check;
   # the re-check below decides honestly whether the bootstrap actually worked.
   curl -LsSf https://astral.sh/uv/install.sh | sh || true
-  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin); the installer edits a
-  # shell profile, not this running shell, so add both to PATH for the rest of setup.
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
+  # was set above; the installer edits a shell profile, not this running shell, so
+  # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
+  # an unset UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells
+  # treat that as the current directory).
+  if [ -n "${UV_INSTALL_DIR:-}" ]; then
+    export PATH="$UV_INSTALL_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  else
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  fi
   if ! command -v uv >/dev/null 2>&1; then
     say ""
     say "  [!] uv still is not callable after the install attempt."
@@ -148,29 +205,6 @@ say "  Detected acceleration: $GPU"
 if [ "$YES" != 1 ] && [ "$GPU" != cpu ]; then
   pick="$(ask "  Use $GPU acceleration? [Y/n] (n = CPU only): " Y)"
   case "$pick" in [Nn]*) GPU=cpu ;; esac
-fi
-
-# ---- portable vs shared: where the Python runtime + downloads live ----------
-# Portable pulls uv's managed Python AND its wheel cache INTO this folder, so the
-# clone is truly self-contained (delete it and nothing is left behind) at the cost
-# of a per-clone re-download. Shared reuses uv's per-user Python + cache. The UV_*
-# vars are exported for THIS setup process only (not persisted / not global), so
-# they never touch any other uv project. --python-preference only-managed forces
-# the contained download instead of reusing a system Python.
-say ""
-say "  Keep localm's Python runtime + downloads inside this folder?"
-say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-say "    [2] Shared   - reuse uv's per-user Python + cache (faster; lives in ~/.local)"
-spick="$(ask "  Pick 1 or 2 [1]: " 1)"
-CONTAINED=0; PYPREF=""
-if [ "$spick" = 1 ]; then
-  CONTAINED=1
-  export UV_PYTHON_INSTALL_DIR="$(pwd)/.python"
-  export UV_CACHE_DIR="$(pwd)/.cache"
-  PYPREF="--python-preference only-managed"
-  say "  Portable: Python under ./.python and downloads under ./.cache"
-else
-  say "  Shared: reusing uv's per-user Python + cache (outside this folder)."
 fi
 
 # ---- create the venv --------------------------------------------------------
@@ -466,7 +500,7 @@ fi
   --lib-dir "$(pwd)/runtime/localm_llama_runtime/lib" \
   --data-dir "${DATA_DIR:-}" $crd \
   --shortcut "${SHORTCUT:-}" \
-  $rcflag --python-dir "$pydir" --cache-dir "$cachedir" \
+  $rcflag --python-dir "$pydir" --cache-dir "$cachedir" --uv-dir "${UVDIR:-}" \
   --path-dir "${PATH_DIR:-}" --command-shim "${CMD_SHIM:-}" ${PATH_MOD:-} \
   --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")" \
   >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."

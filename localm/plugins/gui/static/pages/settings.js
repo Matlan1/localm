@@ -958,17 +958,6 @@ export function syncRagIndexingModeHint() {
 // Media plugins, in display order, that the Media section configures.
 export const MEDIA_PLUGIN_ORDER = ["image", "music", "video"];
 
-// Reliable per-box accent assignment: cycle through this palette BY POSITION
-// (not by plugin name), so each installed media plugin gets a visually
-// distinct identity color even when only a few are installed - three boxes in
-// the same neutral border would otherwise all read as "the same colour".
-// Reuses the app's existing cat-* nav-category tokens (so it matches the rest
-// of the design system instead of inventing new colors); cat-green and
-// cat-slate are left out here since --green already carries the semantic
-// "ComfyUI: Running" meaning on the status badge below - reusing it as a
-// decorative per-box accent too would blur that signal.
-export const MEDIA_ACCENT_CATS = ["cat-blue", "cat-amber", "cat-cyan", "cat-teal", "cat-violet"];
-
 /** Did a media control's value change from what was displayed? Treats
  *  null/undefined/"" as the same "empty", so saving an untouched inherited field
  *  does not pin it as an override. */
@@ -1025,13 +1014,12 @@ export async function buildMediaSection(form, fields) {
     + "independently. A blank field uses the shared default."));
 
   // S5: localm's OWN managed ComfyUI (set up / status / remove), plus the S1
-  // coexistence fields (comfy_target / managed_comfy_enabled) it needs to be
-  // useful - a compact box of its own, ahead of the three per-plugin boxes.
-  const enabledField = (fields || []).find(f => f.key === "managed_comfy_enabled");
+  // coexistence field (comfy_target) it needs to be useful - a compact box of
+  // its own, ahead of the three per-plugin boxes.
   const targetField = (fields || []).find(f => f.key === "comfy_target");
   const managed = el("div", "media-comfy-box");
   panel.appendChild(managed);
-  renderManagedComfyPanel(managed, { enabledField, targetField });
+  renderManagedComfyPanel(managed, { targetField });
 
   // R11/R12: register every subsection's node + label first (empty), so that when
   // we render each, its "Copy from <other>" buttons can see the other subsections,
@@ -1040,16 +1028,13 @@ export async function buildMediaSection(form, fields) {
   _mediaControls = {};
   const grid = el("div", "media-grid");
   panel.appendChild(grid);
-  let visiblePos = 0;   // counts only boxes actually shown, so the accent cycle
-                        // has no gaps if a plugin is ever absent from byName
   for (const name of MEDIA_PLUGIN_ORDER) {
     const p = byName[name];
     if (!p) continue;
-    const sub = el("div", "media-subsection " + MEDIA_ACCENT_CATS[visiblePos % MEDIA_ACCENT_CATS.length]);
+    const sub = el("div", "media-subsection");
     sub.dataset.plugin = name;
     _mediaSubs[name] = { sub, label: p.label, fields: p.fields || [] };
     grid.appendChild(sub);
-    visiblePos++;
   }
   for (const name of MEDIA_PLUGIN_ORDER) {
     if (_mediaSubs[name]) renderMediaSubsection(name);
@@ -1060,10 +1045,10 @@ export async function buildMediaSection(form, fields) {
 
 /** (Re)render the compact "localm's own ComfyUI" box in *host*: read
  *  /api/comfy/managed-status, then show either a Set-up button (not installed
- *  yet, so the coexistence fields below would be inert - progressive
+ *  yet, so the coexistence field below would be inert - progressive
  *  disclosure keeps the box small) or, once installed, the install path plus
- *  the two coexistence controls (managed_comfy_enabled / comfy_target, from
- *  *toggleFields*) with their own small Save, and a Remove button. Set-up
+ *  the coexistence control (comfy_target, from *toggleFields*) with its own
+ *  small Save, and a Remove button. Set-up
  *  POSTs /api/comfy/setup and streams the install job; Remove POSTs
  *  /api/comfy/remove. Re-renders itself in place after either finishes, so the
  *  view always matches what is on disk. Off by default: nothing here runs
@@ -1091,22 +1076,30 @@ export async function renderManagedComfyPanel(host, toggleFields) {
   }
 
   if (st.installed) {
-    pill.textContent = "installed";
-    pill.classList.add("ok");
+    // Durable disclosure of whether media generation ACTUALLY routes here
+    // right now (matches `localm comfy status`'s "Target now" line) - not
+    // just a one-time setup toast, so it stays visible on every later visit
+    // to this page too, whichever way comfy_target is currently set.
+    pill.textContent = st.managed_active ? "installed - in use" : "installed - not in use";
+    if (st.managed_active) pill.classList.add("ok");
     const info = el("div", "sub");
     info.append("Installed at ");
     info.appendChild(el("code", null, st.path || ""));
+    if (!st.managed_active) {
+      info.append(" - image/music/video generation is using your OWN ComfyUI "
+        + "instead (set \"ComfyUI to use\" to \"own\" below to switch).");
+    }
     host.appendChild(info);
 
-    // The S1 coexistence controls only matter once an instance exists; render
-    // them here (rather than earlier as inert fields) and save them with the
-    // Media section's own generic save path (they are ordinary core fields).
+    // The S1 coexistence control only matters once an instance exists; render
+    // it here (rather than earlier as an inert field) and save it with the
+    // Media section's own generic save path (it is an ordinary core field).
     // Built independently of the actions row below: Remove must always be
-    // offered once installed, even if the schema fetch is missing these two
-    // fields for some reason (rule 5 - a partial schema must not hide Remove).
+    // offered once installed, even if the schema fetch is missing this field
+    // for some reason (rule 5 - a partial schema must not hide Remove).
     const row = el("div", "media-comfy-row");
     const ctrls = [];
-    for (const field of [toggleFields.enabledField, toggleFields.targetField]) {
+    for (const field of [toggleFields.targetField]) {
       if (!field) continue;
       const ctrl = buildSettingControl(field);
       if (!ctrl) continue;
@@ -1155,11 +1148,89 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     return;
   }
 
-  pill.textContent = "not set up";
+  if (st.state === "corrupt") {
+    // An earlier setup attempt was abandoned (a crashed process, a closed
+    // browser tab mid-setup) before the completion marker was written - the
+    // checkout dir exists but is_managed_comfy_installed() correctly says no.
+    // Offer Repair instead of a dead end: Set up would just hit the route's
+    // own "already exists" 409, and there is no Remove button in THIS branch
+    // (that only appears once genuinely installed) - a user would otherwise
+    // have no way out short of the CLI.
+    pill.textContent = "incomplete - needs repair";
+    host.appendChild(el("div", "sub",
+      "A previous setup attempt did not finish (the folder exists at "
+      + (st.path || "the data folder") + " but the install is incomplete) - your "
+      + "downloaded models and settings are untouched either way."));
+    const actions = el("div", "actions");
+    const repair = el("button", "btn-primary comfy-managed-repair-btn", "Repair");
+    repair.type = "button";
+    actions.appendChild(repair);
+    host.appendChild(actions);
+    const log = el("pre", "comfy-managed-log");
+    log.style.display = "none";
+    host.appendChild(log);
+    repair.onclick = () => confirmDanger(
+      "Repair localm's ComfyUI?",
+      "This clears the incomplete install folder and sets it up again from "
+      + "scratch. Your downloaded models and localm settings live outside it "
+      + "and are not touched.",
+      "Repair",
+      async () => {
+        repair.disabled = true;
+        repair.textContent = "Repairing...";
+        log.style.display = "";
+        log.textContent = "";
+        let jobId;
+        try {
+          const r = await fetch("/api/comfy/repair",
+                                { method: "POST", headers: authHeaders() });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            toast(d.detail || "Repair failed", true);
+            repair.disabled = false;
+            repair.textContent = "Repair";
+            log.style.display = "none";
+            return;
+          }
+          jobId = d.job_id;
+        } catch (e) {
+          toast("Repair failed", true);
+          repair.disabled = false;
+          repair.textContent = "Repair";
+          return;
+        }
+        const end = await streamJob(jobId, (line) => {
+          log.textContent += line + "\n";
+          log.scrollTop = log.scrollHeight;
+        });
+        const ok = !!(end && end.status === "done");
+        toast(ok ? "localm's ComfyUI is ready" : "Repair did not finish (see the log)", !ok);
+        if (ok) {
+          renderManagedComfyPanel(host, toggleFields);
+        } else {
+          // Same reasoning as the Set-up flow below: do not re-render over a
+          // failure log the toast just pointed the user at.
+          repair.disabled = false;
+          repair.textContent = "Repair";
+        }
+      });
+    return;
+  }
+
+  // "installing": a setup job is genuinely running right now (checked by
+  // reading the actual job registry, not inferred) - most likely another
+  // browser tab/session started it, or this page was reloaded mid-setup, so
+  // there is no local job id to re-attach a live log to here. Say so plainly
+  // rather than offering a Set-up button that would just 409.
+  pill.textContent = st.state === "installing" ? "installing..." : "not set up";
   host.appendChild(el("div", "sub",
-    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
-    + "can pin a known-good version and carry fixes. Off by default; your own "
-    + "ComfyUI is never modified."));
+    st.state === "installing"
+      ? "A setup is currently running (started from another tab or session) - "
+        + "this will update once it finishes."
+      : "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
+        + "can pin a known-good version and carry fixes. Off by default; your own "
+        + "ComfyUI is never modified."));
+  if (st.state === "installing") return;
 
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.

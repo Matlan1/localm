@@ -18,7 +18,6 @@ CLOSED (verifies no session) rather than silently authorising nothing-or-everyth
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import secrets
@@ -27,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from localm.auth import ct_equal
 from localm.debuglog import logger
 
 # Absolute lifetime: matches the browser cookie cap (~400 days) so a session that
@@ -62,7 +62,9 @@ def sessions_file() -> Path:
 
 
 def _hash(sid: str) -> str:
-    return hashlib.sha256(sid.encode("utf-8")).hexdigest()
+    # surrogatepass: see auth.ct_equal - a plain utf-8 encode raises on a lone
+    # surrogate. Byte-identical for every sid that encodes at all.
+    return hashlib.sha256(sid.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _load() -> list:
@@ -184,8 +186,11 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
                        "until it is repaired", e)
         return None
     for r in records:
+        # ct_equal, not compare_digest: both sides are normally hexdigests, but a
+        # hand-edited or corrupted store row could hold a non-ASCII "id_hash" and
+        # must simply fail to match, not 500 every cookie lookup that reaches it.
         rh = r.get("id_hash", "")
-        if rh and hmac.compare_digest(rh, h):
+        if ct_equal(rh, h):
             if _expired(r, now):
                 return None
             _touch_last_used(h)

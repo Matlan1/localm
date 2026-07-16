@@ -63,6 +63,11 @@ class Applies:
 
 _PRIVACY = ["privacy", "log", "full"]
 _PRIVACY_INHERIT = ["", "privacy", "log", "full"]   # "" = inherit the global mode
+# Embedding pooling choices, default first (see config.py embedding_pooling).
+# Spelled out here rather than imported so this module stays free of the
+# inference stack; tests/test_settings_schema.py asserts it against the one
+# source of truth (embedder.POOLING_CHOICES) so the two cannot drift apart.
+_EMBEDDING_POOLING = ["mean", "auto", "cls", "last", "none"]
 # Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
 # logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
 LOGO_STYLE_IDS = ["local-m", "loca-lm", "localm"]
@@ -170,6 +175,15 @@ CORE_FIELDS: list = [
                  "process before it is treated as hung and cancelled. Raise this "
                  "only if a genuinely huge model on slow storage needs longer "
                  "than the default.",
+                 group="Engine", min=10, step=60),
+    SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
+                 "First-token timeout (s)",
+                 "How long a reply may take to produce its first token before "
+                 "the model is treated as hung. This covers reading your whole "
+                 "prompt, not one token, so it is generous by default: on CPU, "
+                 "with most layers off the GPU, or with a very long prompt, that "
+                 "can legitimately take minutes. Raise it only if a slow machine "
+                 "needs longer than the default.",
                  group="Engine", min=10, step=60),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
@@ -295,6 +309,16 @@ CORE_FIELDS: list = [
                  "name, or a path to a GGUF. Run 'localm setup-embeddings' to fetch "
                  "it; until then, memory/RAG use lexical search.",
                  group="Models", applies=Applies.NEXT_LOAD),
+    SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
+                 "How the embedding model's token states become one vector. "
+                 "mean suits bge/nomic (the default) and matches everything you "
+                 "have already indexed. A decoder-based embedder (Qwen3-Embedding, "
+                 "gte-Qwen2) is trained for last-token pooling and is degraded by "
+                 "mean: choose last, or auto to follow whatever the model "
+                 "declares. Changing this invalidates existing document "
+                 "collections and memory vectors - re-index after you change it.",
+                 group="Models", applies=Applies.NEXT_LOAD,
+                 options=_EMBEDDING_POOLING),
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
                  "Ask for confirmation before `localm rm` deletes a model's "
@@ -496,18 +520,14 @@ CORE_FIELDS: list = [
                  "always = always unload chat; never = keep chat hot.",
                  group="Media", owner="image",
                  options=["auto", "always", "never"]),
-    SettingField("managed_comfy_enabled", Widget.TOGGLE,
-                 "Use localm's own managed ComfyUI",
-                 "Let localm run its OWN ComfyUI (installed under the localm data "
-                 "folder) instead of your install. Off by default and inert until "
-                 "one is set up - your own ComfyUI is never modified. Set one up "
-                 "with 'localm comfy setup', then turn this on to route media to it "
-                 "(comfy_target must be 'own').",
-                 group="Media", owner="image", applies=Applies.RESTART),
     SettingField("comfy_target", Widget.SELECT, "ComfyUI to use",
-                 "When a managed ComfyUI is installed: own = use localm's managed "
-                 "instance; user = always use your own ComfyUI. With no managed "
-                 "instance, both use your own ComfyUI.",
+                 "own = use localm's OWN managed ComfyUI (installed under the "
+                 "localm data folder) once you set one up with 'localm comfy "
+                 "setup' - inert until then, so this is safe to leave on "
+                 "'own'. user = always use your own ComfyUI install, even if "
+                 "a managed one exists. Your own ComfyUI is never modified "
+                 "either way, and switching back and forth never loses either "
+                 "one's settings below.",
                  group="Media", owner="image", options=["own", "user"],
                  applies=Applies.RESTART),
     # ---- Network (web plugin) ----

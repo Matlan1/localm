@@ -12,12 +12,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Choose how your embedding model is pooled.** Settings > Models has a new
+  Embedding pooling option. The default (`mean`) suits the bundled `bge-small`
+  and `nomic` choices and matches everything you have already indexed, so nothing
+  changes unless you want it to. If you point `embedding_model` at a
+  decoder-based embedder such as Qwen3-Embedding, which is built for `last`-token
+  pooling, localm now warns you that it is being pooled the wrong way and names
+  the setting that fixes it, instead of silently giving you weaker embeddings.
+  Changing the setting means re-indexing, since existing vectors were built the
+  old way.
+- **Offer to download a missing Flux model file.** When Image/Video/Music
+  generation detects a missing ComfyUI model file that has a known-good source
+  (currently the Flux UNET, text encoders, and VAE), it now offers to download
+  it for you - showing the exact repository, file, and size, with a real
+  confirm click before anything is fetched. It lands directly in the right
+  ComfyUI models folder, whether you use the managed ComfyUI or your own
+  install. A model without a known source still shows the same clear message
+  as before, telling you to install it yourself.
 - **See which memories a reply used.** When chat memory is on, each reply that drew
   on remembered facts now shows a small "🧠 N" chip; hovering lists the facts used,
   and clicking opens the memory panel so a wrong or stale fact is easy to correct.
   The chip's tooltip also says when recall fell back to keyword-only matching (for
   example, before an embedding model is installed), so semantic recall being off is
   no longer invisible.
+- **Launch ComfyUI and pick its models from the Images/Music/Video pages.** The
+  Workflow panel now has a "Launch ComfyUI" button (starts or confirms it, then
+  opens it in a new tab) and, once it's reachable, a dropdown for every model-file
+  slot (UNet/checkpoint, CLIP, VAE, ...) the active workflow exposes - no more
+  needing to hand-edit the workflow JSON to pick a different model. Picks are sent
+  along with the next generation and are remembered while you stay on that workflow.
 
 ### Changed
 - **Memory recall is now relevant-only.** Chat memory used to inject the same handful
@@ -32,8 +55,380 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ones every time it ran). It now records one summary per conversation, tagged to that
   conversation, and never re-processes a session it has already summarised - so past
   topics are recalled distinctly instead of collapsing into one vague note.
+- **One control for which ComfyUI localm uses, not two.** Settings > Media used to
+  have both a "Use localm's own managed ComfyUI" checkbox and a separate "ComfyUI to
+  use: own/user" dropdown - two controls for one decision, and confusing when they
+  disagreed (checkbox on, dropdown set to "user"). There is now just the dropdown:
+  "own" routes to localm's managed ComfyUI once you set one up (`localm comfy
+  setup`), "user" always uses your own install. Your own ComfyUI's settings and
+  localm's managed instance both keep their state regardless of which one is
+  currently selected, so switching back and forth never loses either. One real
+  behavior change worth knowing: the old design needed a separate explicit "enable"
+  step after setup; that step is gone. If you ran `comfy setup` on an earlier
+  version but never flipped that switch, generation will now start using the
+  managed instance automatically next time - `localm comfy status` shows what is
+  currently targeted, and `localm config comfy_target user` (or the same dropdown
+  in Settings > Media) opts back out if you'd rather it stay off.
+- **The ComfyUI re-scan is easier to find.** The button that re-scans your configured
+  `comfy_workdir` used to live in a spot that only appeared after switching to the
+  Diffusion/Encoders/VAEs/LoRAs/Other tab - invisible by default and on the LLMs tab,
+  with nothing hinting it existed. It's now a labelled **Re-scan ComfyUI folder**
+  option in the "Add a model" card, next to **Import from ComfyUI…**, and it stays
+  visible no matter which tab is active.
 
 ### Fixed
+- **Unloading a model no longer presents a VRAM reading it never took as fact.**
+  localm reads free VRAM from the GPU driver with a time limit, and a slow or busy
+  driver could not always answer in time. When that happened it quietly reused the
+  last reading it had - which on a server that had been running a while was taken
+  before your model ever loaded. The before and after figures then came back
+  identical, and unloading reported that no VRAM was freed even though your VRAM
+  had been freed. localm now tells a reading it actually took apart from a reused
+  one: anything it could not measure is reported as unknown and marked as such,
+  and it will never claim VRAM went unfreed on the strength of a measurement it
+  never took. This covers the per-model Unload button, the embedding model, and
+  the VRAM handover that image, music, and video generation do before they run -
+  which previously told you "VRAM has not dropped yet" on the strength of a
+  reading it could not stand behind. A machine with no GPU telemetry at all is
+  unaffected and stays quiet, as before.
+- **Your own saved facts come back when you ask about yourself.** Without an
+  embedding model installed, memory could only match facts that shared an exact
+  word with your question, so asking "what is my name" never surfaced "User is
+  called Sam" - it silently answered as if you had saved nothing. When you ask
+  about yourself, memory now falls back to a couple of your own saved facts
+  instead of staying silent. Questions that are not about you still stay silent,
+  and installing an embedding model (`localm setup-embeddings`) is still what
+  gives you full meaning-based recall.
+- **Your saved memories are recalled again when an API key is set.** With a key
+  configured, everything you saved (and everything memory learned on its own) was
+  filed under one identity but looked up under a different one, so chat quietly
+  recalled none of it. The Memory page still listed every fact, which made it look
+  like the model was simply ignoring them. Both paths now use the same identity.
+- **The app no longer freezes while memory is distilling in the background.** After
+  a turn, memory quietly distils new facts, which takes one model call per candidate
+  fact. It held the memory lock for that whole stretch, so your next message - and
+  every other request, token stream, and health check - waited for it to finish:
+  seconds to minutes on a local model. It now does that thinking without holding the
+  lock, so chat stays responsive while memory grows.
+- **The first memory distil after an upgrade no longer monopolises the model.** With
+  a backlog of past conversations, the first background distil summarised every past
+  session, one model generation each, back to back - starving chat for as long as it
+  took. It now summarises a few per pass and works through the backlog over time.
+- **A conversation is remembered as one entry, even if you come back to it.** An
+  in-progress conversation could be summarised while it was still going, and a
+  conversation you resumed later could be summarised again, leaving several
+  overlapping partial memories of the same session. Each conversation now waits
+  until it is finished and keeps a single summary, updated to cover the whole thing.
+- **The coder's episodic memory no longer occasionally drops a lesson on
+  Windows.** A GUI poll reading past lessons could race a session-close write
+  saving a new one, and on Windows a save or read could briefly fail with the
+  file busy. The retry that already handled this could still be exhausted by
+  real contention (a loaded machine, antivirus scanning the file), causing a
+  rare, hard-to-reproduce miss. It now retries for much longer with backoff, so
+  it survives realistic delays while still failing loudly if the file is
+  genuinely stuck.
+- **Installing packages no longer fills up your system drive.** Whenever localm
+  installs things for you - setting up its own ComfyUI (including the multi-GB
+  PyTorch build), pulling in a plugin's dependencies (such as the voice extra), or
+  fetching its own native runtime - it let the installer cache what it downloaded
+  in your user profile instead of localm's own data folder: gigabytes landing
+  outside localm, on a drive you may not have picked, without being asked or told.
+  Those caches now live inside your data directory, so they move with it and are
+  removed with it. This covers both installers localm uses, `pip` and `uv`.
+  Speech-to-text is fixed the same way: the Whisper model it downloads on first use
+  now lands in your data directory rather than the shared HuggingFace cache in your
+  home folder. If you already have a Whisper model in that shared cache, it is
+  downloaded once more into the data directory; the old copy is left alone and is
+  safe to delete. Anything previously cached in your profile is still there - on
+  Windows you can reclaim that space with `pip cache purge` (and `uv cache clean`
+  if you use uv).
+- **Picking a Main GPU no longer stops large transformers models from loading.**
+  With a Main GPU selected, localm pinned the whole model onto that one card, so a
+  transformers model bigger than its free memory failed with an out-of-memory error
+  even though it used to load (more slowly) by keeping part of it in system memory.
+  It now still uses only the card you picked, but falls back to system memory for
+  whatever does not fit, as it did before. The same fallback was restored for a
+  configured multi-GPU split.
+- **Image, music and video generation no longer run out of memory on a multi-GPU
+  box.** With a GPU split configured, localm added up the free memory across every
+  card in the split and concluded a generation would fit, so it kept the chat model
+  loaded. But an image, music or video model loads onto a single card, so the
+  generation could still fail with an out-of-memory error, quietly fall back to
+  system memory and run many times slower, or lock up the display driver. localm now
+  picks the card with the most free memory, tells ComfyUI to use that one, and checks
+  that card on its own has room before starting - unloading the chat model first if
+  it does not. If you have a split configured, generation also now tells you plainly
+  that it runs on one card and which one: a single image, music or video model cannot
+  be divided across cards the way a chat model can, so your split ratios do not apply
+  there. Chat and embeddings still use the full split. Nothing changes on a
+  single-GPU machine, or if you have not configured a split or a Main GPU.
+- **A failing command no longer reports success.** Certain real failures (reading a
+  folder where a file was expected, an invalid path, some native calls) were
+  mistaken for "the output pipe closed", so localm exited quietly with a success
+  code and filed no bug report - telling you, and any script checking the result,
+  that a command had worked when it had not. Those now fail properly and offer the
+  usual report. Piping into `head` or `findstr` still exits quietly, as it should.
+- **A machine on a DSL/PPPoE line gets a working certificate again.** localm leaves
+  a VPN's address out of the certificate it makes for itself, but the check matched
+  far too loosely: an adapter whose name merely contained "ppp", "tun" or "tap" -
+  including a real PPPoE internet link, or a network card with an unlucky name -
+  was mistaken for a VPN, so its address was left out and browsers reaching localm
+  there reported a certificate mismatch. Real VPN adapters are still excluded.
+- **Privacy mode no longer lets a remembered fact reach the debug log.** If you ran
+  in privacy mode with the debug log on for troubleshooting, and the embedding model
+  hiccuped while saving a memory, a snippet of that memory - a fact about you, or a
+  summary of your conversations - was written into the log file on disk. Privacy mode
+  now withholds it, as it already did everywhere else. The failure itself is still
+  reported, so the problem is not hidden, just the content.
+- **Chat no longer pauses on every turn that uses a memory.** Each reply that recalled
+  a fact re-read and rewrote the whole memory store, including its embedding file, on
+  the server's main thread - so with a large memory the entire server (every chat, every
+  progress update) stalled briefly on each turn. That work now happens off to the side.
+  It also means loading the embedding model can free up video memory properly instead of
+  squeezing in alongside the chat model.
+- **A long prompt on a slow setup is no longer killed as "stalled".** Replies that
+  needed more than two minutes to read the prompt before writing their first word -
+  common when running on CPU, with most layers off the GPU, or with a very long
+  prompt or document - were treated as a hung model and cancelled, and retrying hit
+  the same wall every time. Reading the prompt now gets its own generous allowance,
+  separate from the per-word one, and you can raise it in Settings > Engine
+  ("First-token timeout") if your machine needs longer. A genuinely hung model is
+  still detected.
+- **Stopping a reply can no longer break that model until you restart.** If you
+  stopped a reply while the model was busy in a step it could not interrupt, the
+  model was shut down but still looked loaded, so every later message to it failed
+  with an internal error, permanently. It now reloads itself on the next message,
+  and the same applies to the token counts and grammar checks that run alongside
+  chat - they fall back to their normal estimate instead of failing.
+- **An update no longer undoes itself.** After "Update now", localm checks that the
+  new version comes back up healthy and rolls back if it does not. That check looked
+  for the server on the port it had *before* restarting, which is not always the port
+  it comes back on - so a perfectly good update could be silently reverted a minute
+  or two later. Restarting now keeps the server on the port it was already using,
+  which also means a plain "Restart" no longer moves it out from under an open tab.
+- **Bug reports no longer blame an old freeze for a new problem.** localm attaches a
+  freeze snapshot when it has one, but it attached the newest one it could find,
+  however old and whatever it was from - so a report about something else entirely
+  (a wrong answer, a failed download) could arrive captioned with an unrelated freeze
+  from weeks ago, pointing at the wrong cause. Only a freeze from the run you are
+  reporting on is attached now.
+- **A crash report no longer arrives with the crash missing.** When the error was
+  large (a deep native model-load failure, which is exactly when localm asks you to
+  file a report), it did not fit the report's size limit and was dropped whole,
+  leaving a report that said an error had been left out but not what it was. The
+  error is now included, trimmed to fit and marked as trimmed, keeping the part that
+  names the failure.
+- **Knowledge folders no longer silently skip symlinked files.** If a folder you
+  added contained a symlink to a document stored elsewhere (a very common way to
+  collect docs from several projects), that document was quietly left out: you
+  saw "indexed N chunks" with no hint anything was missing, and searching for its
+  content found nothing. Linked files are indexed again. Linked folders are still
+  not followed, so a looping shortcut cannot hang indexing.
+- **One damaged archive no longer aborts a whole folder index.** A truncated or
+  corrupt `.gz`/`.tar.gz` (a half-finished download, say) crashed the entire
+  indexing run, so every other file in the folder went unindexed, and uploading
+  one to chat returned a server error. The bad file is now reported on its own
+  and everything around it indexes normally.
+- **A video or database in a multi-select no longer blocks the whole add.**
+  Picking several files where one happened to be a `.mp4`, `.db`, `.7z`, or model
+  weights file rejected the entire request and indexed nothing. The files that do
+  contain text are now indexed, and the one that doesn't is listed as a single
+  skipped file with the reason. Key and credential files are still refused
+  outright.
+- **`.env.example` files are indexed again.** The template files that document
+  which settings a project needs (`.env.example`, `.env.template`, `.env.sample`)
+  were being dropped from knowledge folders as if they were secrets. They are
+  documentation and are indexed again. Real `.env` files, including `.env.local`,
+  are still skipped.
+- **`localm rag repair` works again from scripts and scheduled jobs.** On a
+  collection with semantic search, repair asked before dropping its embeddings -
+  but run without a terminal (cron, CI, a script) there was nothing to answer, so
+  it exited with an error and repaired nothing, on exactly the stale indexes it
+  exists to rebuild. It now keeps the embeddings and repairs, telling you it did.
+  Pass `--yes` to drop them instead, or `--embed` to recompute them.
+- **An API key with an accented or non-English character no longer locks you out.**
+  Setting a key like `pässwort-key` left the server unable to answer any
+  authenticated request: your own correct key and a wrong one both failed with
+  "Internal server error" rather than letting you in or cleanly refusing. The same
+  fault let any caller trigger that error without a key at all, just by sending a
+  bearer token containing a non-English character, which filled the log with
+  tracebacks. Keys are now compared safely whatever characters they contain, so a
+  wrong key is refused cleanly and the right one works.
+- **`localm key set` now says which characters a key may use.** An API key travels
+  in an HTTP request header, which cannot carry spaces, punctuation, or non-English
+  letters reliably, so a key using them left you unable to sign in from most
+  clients. Such a key is now refused with a message naming what is allowed: letters,
+  numbers, `-` and `_`, the same characters `localm key generate` produces.
+- **Document search no longer embeds with the chat model itself.** If you ran a
+  HuggingFace-format model, localm quietly made embeddings out of the chat model
+  rather than the small dedicated embedding model, even when you had one
+  installed. Those vectors look perfectly healthy but barely tell related text
+  from unrelated (on one 0.5B chat model the *most unrelated* pair we tested
+  scored higher than the *least related* one), so document (Knowledge/RAG) search
+  and the `/v1/embeddings` API silently returned worse results with nothing to
+  indicate it. localm now uses your installed embedding model, and when none is
+  installed it says so and falls back to keyword search instead of handing back
+  unusable vectors. GGUF models, the default, were never affected, and neither
+  was chat memory.
+- **A model you switched away from mid-load can be used again.** If you picked a
+  model and then quickly picked a different one, the first model could be left
+  permanently unusable: every later message to it failed with "Model load was
+  superseded by a newer request", even though nothing was loading any more, until
+  you explicitly switched to it again. It now loads normally.
+- **Stopping or restarting while knowledge is indexing no longer leaves a model
+  stuck in GPU memory, or hangs.** The embedding helper could survive the restart as
+  an orphan still holding its model in VRAM, so a restarted server ran a second copy
+  beside it and "Stop" did not actually free everything. Both now release it - and
+  stopping while an embedding model is still loading no longer waits on that load
+  before it can finish.
+- **An embedding error no longer strands a helper in GPU memory.** If embedding a
+  single piece of text failed, localm dropped its still-running embedding helper
+  instead of reusing it: the helper kept your embedding model in GPU memory with
+  nothing able to reach it, and the next request started a second one alongside. It
+  now keeps the working helper, and only replaces one that has actually gone.
+- **The app stays responsive while models load and unload.** On a multi-GPU setup
+  with a specific main GPU selected, each load or unload could briefly freeze every
+  other request (up to a few seconds) while it wrote coordination state and probed
+  the GPU. That work now happens off the request-handling path.
+- **A second localm no longer loses its models for nothing.** When two localm
+  instances share a GPU, one could ask the other to drop every model it had loaded
+  even when that could not possibly free enough room, and could keep re-asking in a
+  loop that never finished. It now only asks when it would actually help, and asks
+  each instance once. On a multi-GPU split it correctly counts every card the split
+  uses, so a model that needs both cards still gets the room it needs instead of
+  failing with "VRAM exhausted".
+- **An empty `auth.key` no longer locks you out of your own server.** If an
+  `auth.key` file existed but held no key - you created it by hand to paste a key
+  in later, an editor or PowerShell saved it empty, or a backup left it truncated
+  - localm treated it as "a key is set" while having no key to check against, so
+  every request was rejected with 401 and there was no way back in short of
+  deleting the file by hand. A key file that holds no key now means exactly what
+  it says (no key, so the server runs open, as it did before), and localm says so
+  in the log rather than changing your server's security posture silently. A key
+  file that cannot be READ still locks the server, as it should - that is the case
+  where localm genuinely cannot tell whether you have a key. A key saved with a
+  byte-order mark (what Windows editors and PowerShell add) now also works
+  instead of silently never matching.
+- **Knowledge and memory no longer mix up results when two things are indexed at
+  once.** If a background knowledge re-index overlapped with a chat memory lookup,
+  the two could receive each other's results, storing or matching against the wrong
+  text with no error shown - which could quietly leave wrong entries in your
+  knowledge and memory stores and make recall return unrelated results. Overlapping
+  requests are now kept apart, so each one always gets its own.
+- **Settings changes and model-list updates could stop working for a whole run.**
+  If a localm process was killed while saving settings or updating the model list,
+  the lock file it left behind could later be misread as "this same process is
+  already writing" - wedging every settings save and every model pull, remove, or
+  alias for the rest of that run, with no way out but a restart. A leftover lock is
+  now always reclaimed, and only a genuine re-entrant write is refused.
+- **Saving settings no longer freezes the whole app.** Saving settings in the GUI
+  while another localm process was also writing them (for example `localm config` in
+  a terminal) could freeze the entire server - chat, streaming, health checks - for
+  up to 10 seconds. That wait now happens off the request-handling path.
+- **An unreadable config no longer stalls every request on Linux and macOS.** When
+  config.json or registry.json could not be read because of file permissions, localm
+  retried for about a second before falling back, on every affected read - including
+  the one on the request-authentication path. A permission denial is now recognised
+  as permanent and handled immediately, while the brief Windows retry (which rides
+  out antivirus and indexer locks) is unchanged.
+- **The Plugins page's "External plugins" card works again.** Listing, installing,
+  and removing a third-party plugin from the GUI failed with "Could not load
+  plugins: Not Found" for everyone, because the page still called an API that had
+  been removed. The card now uses the same plugin engine the rest of the app (and
+  `localm plugin install`) uses, and it again shows each external plugin's version,
+  description, and the tools it exports to the coder.
+- **Chat no longer refuses right after you load a model.** Picking a model in the
+  sidebar and typing straight away could be rejected with "No model loaded - load a
+  model on the sidebar before chatting" for up to 30 seconds, even though the model
+  had loaded fine. The app now registers the model as active the moment the load
+  lands.
+- **Aliasing a model tells you the name it really created.** An alias containing a
+  space (or a slash or colon) is stored in a cleaned-up form, but the GUI reported
+  the name you typed, so "daily driver" was announced while only "daily-driver"
+  existed. It now shows the actual name. If that cleaned-up name is already taken,
+  the alias is refused with a clear message instead of reporting success without
+  creating anything.
+- **Moving a model onto the same drive no longer reports a false "not enough disk
+  space".** `localm add <path> --on-duplicate move` refused whenever the drive had
+  less free space than the model's size, even though moving within one drive needs
+  no extra room at all - exactly the case where you would choose move over copy.
+- **A downloaded HuggingFace model is no longer mislabelled "unknown".** Pulling a
+  full transformers model whose repository lacks a type tag registered it as
+  "unknown", so it was skipped by automatic chat selection and `localm gui` could
+  open with no model even though the download worked. The type is now read from the
+  model's own config file when the repository does not say.
+- **A HuggingFace download can resume after the disk fills up.** Retrying required
+  free space for the whole model again, ignoring the part already downloaded, so the
+  retry it was meant to enable could never start. It now only asks for the space the
+  remaining files need.
+- **A ComfyUI model download no longer reports success without downloading.** If you
+  already had the same file registered in localm, the "Missing model -> Download"
+  offer reported success while nothing was written to the ComfyUI folder, and
+  generation then failed with the model still missing.
+- **Rotating your API key no longer breaks your own scheduled jobs.** If you had a
+  scheduled coder job with shell access enabled and then rolled or cleared your API
+  key, the job silently kept running but lost its shell step, forever, with no
+  notice. Your own jobs now keep their shell access across a key change. A job whose
+  access genuinely was revoked still loses shell, as intended, but now says so in
+  the job's output instead of quietly doing less.
+- **The coder can delegate real work again in the terminal.** When running
+  `localm coder` without `--yes`, any task the assistant handed to a sub-agent had
+  every file edit and command blocked outright, so the delegated work just failed.
+  Sub-agents now ask you to approve their changes at the same prompt the main
+  session already uses, so you can say yes and the work happens.
+- **Quitting the coder is instant again.** Ending an ordinary look-around session
+  could hang for many seconds while it ran a full model reflection you never asked
+  for - triggered by nothing more than a couple of incidental errors, or by your own
+  Ctrl-C. Sessions that changed no files now exit immediately; a run that genuinely
+  failed still records what it learned.
+- **The app stays responsive while a coder session closes, and while the model
+  picker loads.** Closing a coder session from the web UI, and opening the Workflow
+  panel on the Images/Music/Video pages, each ran slow work on the server's request
+  path - freezing every other request, including chat streaming, until it finished.
+- **A crashed ComfyUI is noticed instead of being reported as running.** If ComfyUI
+  died mid-session (an out-of-memory on a big render, a crash, or you closed its
+  window), localm kept believing it was up, so every later generation failed with a
+  confusing error and it would not restart it for you. It now re-checks, and starts
+  ComfyUI again or tells you exactly what to do.
+- **Generating or deleting media no longer fails when antivirus is mid-scan.** On
+  Windows, if a background process (an antivirus scan, the search indexer, a backup
+  tool) happened to have the gallery's index file open at the wrong moment, the
+  request failed with an error even though the file itself was fine, and left a
+  stray temp file behind each time. It now waits briefly for the file to free up.
+- **Saving a memory no longer freezes the app.** On some setups, saving, editing,
+  or adding a remembered fact could make the whole app stop responding for several
+  minutes the first time an embedding model needed to load, because that load ran on
+  the request-handling path. Memory writes now load the embedder off that path, so
+  the app stays responsive.
+- **Clearer errors when indexing an image fails.** If the image-description step
+  fails (a timeout, a connection error, or an error returned by the model), knowledge
+  indexing now reports the real reason, instead of a misleading "returned an empty
+  description" message that hid the actual failure.
+- **The Models page shows the real error instead of "No models yet".** When the
+  Models page could not load your model list because the session had expired or the
+  API key lacked permission, it used to fall back to the empty "No models yet" state,
+  as if you had none. It now opens the key prompt on an expired session and otherwise
+  shows the actual status ("Could not load models (HTTP 403)"), so a sign-in or
+  permission problem is no longer mistaken for an empty model library.
+- **"Keep diagnostics" now warns when it cannot write its log.** If you turned on
+  keeping a diagnostic log for bug reports but the log file could not be created (for
+  example an unwritable or full data folder), localm used to start silently as though
+  it had, leaving your bug reports quietly without one. It now prints a warning at
+  startup that the diagnostic log could not be enabled, instead of appearing to
+  succeed; startup itself is unaffected.
+- **Adding documents to a knowledge collection reports the server's real error.**
+  When a document add was refused with a conflict, the GUI could show an internal
+  "body stream already read" message instead of the server's actual reason. It now
+  surfaces the real error detail.
+- **A damaged media-ownership record no longer exposes everyone's generated media.**
+  On a multi-user server, the image, music, and video galleries record which key
+  generated each file so a scoped key only ever sees its own. If that on-disk
+  ownership record became unreadable (corrupt, truncated, or momentarily locked),
+  localm used to treat every file as unowned and let any key view, download, delete,
+  move, or rename all of them. It now fails closed: a scoped key is denied until the
+  record is repaired, while the owner/admin key (and single-user open mode) keeps full
+  access so the gallery stays usable. The record is also written atomically now, so an
+  interrupted save can no longer leave it half-written in the first place.
 - **Semantic knowledge search now works on password-protected servers.** When localm
   is started with an API key saved to disk (`localm key generate`, or the launcher),
   indexing a document used to silently fall back to keyword-only search: the server
@@ -41,6 +436,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   retrieval while the embedding model sat ready. Keyed servers now embed correctly -
   whether the key comes from the environment or the saved key file - so semantic
   (hybrid) search works again, including `localm rag add/query --embed`.
+- **A collection stuck on BM25 now says so where you can act on it.** The Knowledge
+  page's "Ready ... semantic search is on" banner used to read as a blanket
+  all-clear, even though it only covers indexing from that point forward - a
+  collection indexed before the embedding model was set up (or whose vector index
+  went stale) silently stayed lexical-only, with the only hint a small warning
+  buried in that collection's info modal. A BM25 row now gets a visible "reindex
+  needed" badge and a highlighted reindex button when the embedding model is ready,
+  and the banner itself now says existing collections may need reindexing.
 - **You can index documents on a headless `localm serve`.** A bare API server (no GUI)
   could not index into a knowledge collection at all - `POST /api/rag/collections/
   {name}/add` and `/upload` refused with a "run localm gui" error. They now index the
@@ -105,20 +508,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is itself a launcher that re-spawns the real one as a further child, one hop too
   many for Windows to hand the worker its synchronization handles correctly).
   Model loads and voice transcription now spawn correctly under LocaLM.exe.
-- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
-  longer fails when run from LocaLM.exe itself.** `localm make-launcher
-  --force` - used to refresh the branded launcher after upgrading Python -
-  failed outright ("could not locate the base interpreter to copy") when
-  invoked from the already-built LocaLM.exe, since Python could no longer
-  find itself under its own renamed identity. It now resolves correctly and
-  replaces the running launcher's file in place.
-- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
-  section used to be a blind cut of the last ~120 log lines, so a session that
-  kept running afterward (even routine polling) could push the real error out
-  before the report was filed. It now keeps every warning/error from the whole
-  run and collapses long runs of near-identical routine lines (e.g. repeated
-  status polling) into one line with a repeat count, so the actual failure is
-  never buried or pushed out - no matter how long the session ran after it.
 - **`localm doctor` now actually verifies model loads will work.** Its native
   runtime and GPU checks run their probes in a plain subprocess, a different
   mechanism from the isolated worker process every real GGUF model load and
@@ -126,12 +515,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   while every model load still failed (the exact LocaLM.exe launcher bug
   above). Doctor now spawns a worker the same way a real model load does and
   reports it as a failed check if that does not work.
-- **A failed automatic model preload is no longer silent in the log.** When
-  `localm gui` warms up the last-used model in the background at startup and
-  that load fails, the failure now reaches the debug log (with its full
-  traceback) in addition to the console notice - previously it was
-  console-only, so a report filed afterward showed no sign anything had gone
-  wrong.
+- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
+  longer fails when run from LocaLM.exe itself.** `localm make-launcher
+  --force` - used to refresh the branded launcher after upgrading Python -
+  failed outright ("could not locate the base interpreter to copy") when
+  invoked from the already-built LocaLM.exe, since Python could no longer
+  find itself under its own renamed identity. It now resolves correctly and
+  replaces the running launcher's file in place.
 - **A failed setup job (ComfyUI, a model pull, image generation) no longer
   hides its own error.** Two separate problems compounded: the job's live
   progress log in Settings disappeared the instant it failed - right as a
@@ -146,8 +536,77 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a cloned repo's internal file paths past Windows' legacy 260-character
   limit, failing with a cryptic "Filename too long" / "invalid index-pack
   output" git error.
+- **The managed-ComfyUI setup no longer fails creating its own venv under the
+  LocaLM.exe launcher (Windows).** After cloning ComfyUI, the "Creating a
+  fresh localm venv" step could fail with the same misleading "[WinError 2]
+  The system cannot find the file specified" as the model-loading bug above,
+  for a related but distinct reason: Python's own venv module matches file
+  names against the running interpreter's own name to decide what to copy
+  into the new venv, and a renamed launcher's name never exists in the base
+  install, so the new venv silently ended up with no interpreter of its own
+  and the mandatory pip bootstrap then failed. Setup now creates the venv
+  using the real base interpreter directly, so it succeeds under the branded
+  launcher too.
+- **`localm doctor` now also verifies venv creation will work.** Alongside
+  the worker-spawn check above, doctor now also creates (and immediately
+  discards) a throwaway venv the same way the managed-ComfyUI installer
+  does, so a machine that cannot create nested venvs is flagged up front
+  instead of failing silently mid-setup.
+- **Selecting localm's own managed ComfyUI now actually uses it for
+  generation.** Two separate bugs meant a correctly installed, correctly
+  selected managed instance could still go unused: (1) nothing knew how to
+  *start* it - image/music/video generation could only discover a launcher
+  script for a user-provided ComfyUI install, so it failed with "ComfyUI is
+  not reachable... point localm at your ComfyUI install" even though the
+  managed instance was right there; (2) if you had ever set a ComfyUI folder
+  for your own install - even long before setting up the managed one - that
+  old value silently kept overriding the managed instance forever, for the
+  same underlying reason. Generation now correctly launches and targets the
+  managed instance in both cases; a genuine per-plugin ComfyUI override
+  (Settings > Media's Image/Music/Video panels) still always wins, as before.
+- **The managed-ComfyUI status no longer reports "installed" while it is
+  still installing.** Whether a managed instance is considered ready (the
+  Settings pill, `localm comfy status`, and the actual routing that decides
+  where Generate sends a request) used to be based only on the ComfyUI
+  checkout and its venv existing - which happens within the first few
+  seconds of a fresh install, well before the much longer torch/requirements/
+  custom-nodes steps that follow. For the entire rest of that install
+  (several minutes on a normal connection), the status looked fully ready and
+  a Generate click would try to use a ComfyUI with no PyTorch installed yet.
+  Readiness now also requires the install's own completion marker, so the
+  status - and Generate - correctly wait for the whole setup to actually
+  finish.
+- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
+  section used to be a blind cut of the last ~120 log lines, so a session that
+  kept running afterward (even routine polling) could push the real error out
+  before the report was filed. It now keeps every warning/error from the whole
+  run and collapses long runs of near-identical routine lines (e.g. repeated
+  status polling) into one line with a repeat count, so the actual failure is
+  never buried or pushed out - no matter how long the session ran after it.
+- **A failed automatic model preload is no longer silent in the log.** When
+  `localm gui` warms up the last-used model in the background at startup and
+  that load fails, the failure now reaches the debug log (with its full
+  traceback) in addition to the console notice - previously it was
+  console-only, so a report filed afterward showed no sign anything had gone
+  wrong.
+- A couple of status messages no longer claim success when the step was actually
+  refused or skipped. A chat-model reload after image, music, or video generation
+  now says the reload was deferred to your next message (instead of a false "Chat
+  model ready.") when the server declined it, and installing the global `localm`
+  command tells you to add its folder to your PATH by hand when it could not do so
+  itself, instead of claiming the folder "was already on PATH".
 
 ### Security
+- **Bug reports no longer leak your username in the fields you type or the issue
+  title.** When you file a bug (through the app's "Report a bug", `localm bug-report`,
+  or the standalone reporter used when localm will not start), the automatically
+  collected diagnostics were already stripped of your home-folder path - which
+  contains your account name - and of any pasted credential. The one-line summary, the
+  description, and the extra "reason" you type were not, and neither was the public
+  issue title built from them, so a home path or a key pasted into those fields could
+  reach the public tracking issue even though the preview claims it shows exactly what
+  will be sent. Those fields are now scrubbed at the point of upload too, so what is
+  filed matches the redacted preview.
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
   "Allow private/loopback targets" setting (`net_allow_private`) turns off the
   guard that blocks model-initiated requests to localhost, your LAN, and
@@ -172,6 +631,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   read it back through search. Such files are now refused (HTTP 400) whenever
   indexing goes through the API, for every caller. Indexing your own key material
   on your own machine still works from the `localm rag add` command line.
+- **The embedding model now shares VRAM management with your chat model.**
+  Loading an embedding model (for memory/knowledge search) while a chat model was
+  already resident used to just pile both into VRAM/RAM at once instead of
+  swapping the chat model out first, the way image/music/video generation already
+  does - on a tight card this could push system memory uncomfortably high. And
+  "Unload all" on the Models page only ever freed the chat model: the embedding
+  model stayed loaded and unaccounted for, so the button under-reported how much
+  VRAM was actually released. Both are fixed: loading a large embedding model now
+  swaps the chat model out first when needed, and "Unload all" (and the Models
+  page's per-row Unload) now release the embedding model too and show it as
+  loaded when it's the one resident.
 
 ## [0.1.2] - 2026-07-10
 

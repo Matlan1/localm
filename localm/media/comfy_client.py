@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -193,13 +195,36 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
     return None
 
 
-def _looks_like_model_files(options: list) -> bool:
+def _looks_like_model_files(options: list, current: Optional[str] = None) -> bool:
     """True when a combo's options look like model files (a mismatch is then a
-    missing-model error we can name), not an enum like sampler_name / scheduler."""
-    if not options:
-        return False
-    hits = sum(1 for o in options if o.lower().endswith(_MODEL_FILE_EXTS))
-    return hits >= max(1, len(options) // 2)
+    missing-model error we can name), not an enum like sampler_name / scheduler.
+
+    With 2+ live options this is decided from *options* ALONE, exactly as
+    before *current* existed as a parameter: a real enum (sampler_name,
+    scheduler, ...) always has several live choices, and none of them can
+    ever look like a filename, so blending an unrelated *current* value into
+    that vote could only ever wrongly flip a genuine enum - it never helps.
+
+    With 0 or 1 live options there is not enough of a sample to judge alone:
+    that is exactly what "ComfyUI has NOTHING of this file type installed"
+    (an empty list) or "this loader's only live choice is a non-file
+    sentinel" (e.g. a VAE loader offering just its built-in pixel-space
+    passthrough when no external VAE is installed) looks like. There *current*
+    - the node's value already in the workflow JSON, a concrete filename
+    regardless of whether ComfyUI has it installed - is the fallback signal,
+    so the slot still surfaces as "install this" instead of silently
+    vanishing from the picker (and from preflight_models(), which walks the
+    same slots). A single-option enum whose lone value is itself a stray
+    extension-like string is the residual false-positive this cannot rule
+    out, but that requires a hand-crafted/corrupted workflow - implausible
+    from ComfyUI's own UI - and this validation is best-effort by design."""
+    opts = options or []
+    if len(opts) > 1:
+        hits = sum(1 for o in opts if o.lower().endswith(_MODEL_FILE_EXTS))
+        return hits >= max(1, len(opts) // 2)
+    if opts and opts[0].lower().endswith(_MODEL_FILE_EXTS):
+        return True
+    return bool(current) and current.lower().endswith(_MODEL_FILE_EXTS)
 
 
 def _normalize_model_base(name: str) -> str:
@@ -238,6 +263,16 @@ def _pick_variant(missing_name: str, options: list) -> Optional[str]:
     return cands[0] if len(cands) == 1 else None
 
 
+@dataclass(frozen=True)
+class MissingModelSlot:
+    """One workflow input whose model file ComfyUI's /object_info reports as not
+    installed, and no unambiguous precision/quant variant was found to sub in."""
+    class_type: str
+    input_name: str
+    filename: str
+    available_options: list
+
+
 def _format_missing(missing: list) -> str:
     lines = ["ComfyUI is missing model files this workflow needs:"]
     for cls, field, name, options in missing:
@@ -252,6 +287,70 @@ def _format_missing(missing: list) -> str:
     return "\n".join(lines)
 
 
+def workflow_model_slots(workflow: dict, api_url: str) -> Optional[list]:
+    """Every model-file combo slot in *workflow*, resolved against ComfyUI's live
+    ``/object_info``: ``[{"node_id", "class_type", "input_name", "current",
+    "options"}, ...]``. This is the node/input walk ``preflight_models()`` uses to
+    validate a workflow's model choices, exposed here for a model-picker UI too -
+    one shared walk, not two independently-maintained ones.
+
+    None when ``/object_info`` cannot be fetched (ComfyUI unreachable) - distinct
+    from ``[]`` (reachable, but this workflow genuinely has no model-file inputs),
+    so a caller can tell "cannot determine" from "determined: none"."""
+    info = comfy_object_info(api_url)
+    if not info:
+        return None
+    slots = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        spec = info.get(node.get("class_type"))
+        inputs = node.get("inputs")
+        if not isinstance(spec, dict) or not isinstance(inputs, dict):
+            continue
+        for input_name, value in inputs.items():
+            if not isinstance(value, str):
+                continue
+            options = _combo_options(spec, input_name)
+            if options is None or not _looks_like_model_files(options, current=value):
+                continue
+            slots.append({
+                "node_id": str(node_id),
+                "class_type": node.get("class_type"),
+                "input_name": input_name,
+                "current": value,
+                "options": options,
+            })
+    return slots
+
+
+def apply_model_overrides(workflow: dict, overrides: dict) -> int:
+    """Apply per-node model-slot overrides to *workflow* in place.
+
+    *overrides* is ``{node_id: {input_name: value}}`` (the shape a client builds
+    from ``workflow_model_slots()``'s ``node_id``/``input_name``). Only writes a
+    field that ALREADY exists as a plain string input on that node - never creates
+    a new key, never touches a link/number input - so a malformed or stale
+    override can at worst no-op, never corrupt the graph. Returns how many fields
+    were actually changed."""
+    changed = 0
+    if not isinstance(overrides, dict):
+        return 0
+    for node_id, fields in overrides.items():
+        node = workflow.get(str(node_id))
+        if not isinstance(node, dict) or not isinstance(fields, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_name, value in fields.items():
+            if (input_name in inputs and isinstance(inputs[input_name], str)
+                    and isinstance(value, str) and inputs[input_name] != value):
+                inputs[input_name] = value
+                changed += 1
+    return changed
+
+
 def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple[bool, str]:
     """Validate every loader's model file against ComfyUI ``/object_info`` BEFORE the
     caller unloads the chat model.
@@ -261,32 +360,21 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     specific, Workflow-panel-pointing error when a required model is missing and no
     one variant fits; ``ok=True`` (empty message) otherwise. Best-effort: returns
     ``(True, "")`` when /object_info is unavailable (defer to submit-time validation)."""
-    info = comfy_object_info(api_url)
-    if not info:
+    slots = workflow_model_slots(workflow, api_url)
+    if slots is None:
         return True, ""        # cannot validate -> defer to submit-time validation
     missing: list = []
     subs: list = []
-    for node in workflow.values():
-        if not isinstance(node, dict):
-            continue
-        spec = info.get(node.get("class_type"))
-        inputs = node.get("inputs")
-        if not isinstance(spec, dict) or not isinstance(inputs, dict):
-            continue           # unknown class / no inputs here -> can't validate; skip
-        for input_name, value in list(inputs.items()):
-            if not isinstance(value, str):
-                continue       # links and numbers are not model-file names
-            options = _combo_options(spec, input_name)
-            if options is None or not _looks_like_model_files(options):
-                continue
-            if value in options:
-                continue       # the file is present - good
-            variant = _pick_variant(value, options)
-            if variant is not None:
-                inputs[input_name] = variant
-                subs.append((node.get("class_type"), input_name, value, variant))
-            else:
-                missing.append((node.get("class_type"), input_name, value, options))
+    for slot in slots:
+        value, options = slot["current"], slot["options"]
+        if value in options:
+            continue            # the file is present - good
+        variant = _pick_variant(value, options)
+        if variant is not None:
+            workflow[slot["node_id"]]["inputs"][slot["input_name"]] = variant
+            subs.append((slot["class_type"], slot["input_name"], value, variant))
+        else:
+            missing.append((slot["class_type"], slot["input_name"], value, options))
     if on_progress:
         for cls, field, old, new in subs:
             try:
@@ -298,6 +386,30 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
     if missing:
         return False, _format_missing(missing)
     return True, ""
+
+
+def describe_missing_models(workflow: dict, api_url: str) -> list:
+    """Read-only variant of the ``preflight_models`` check: reports missing model
+    slots as ``MissingModelSlot`` entries WITHOUT applying substitutions or
+    otherwise mutating *workflow*. Used by a pre-check (e.g. before a user
+    clicks Generate) that must not have side effects on the caller's workflow
+    dict. Built on the same ``workflow_model_slots()`` walk ``preflight_models``
+    uses - one shared walk, not a third independently-maintained one. Returns
+    ``[]`` when /object_info is unavailable (same best-effort behavior as
+    ``preflight_models``) or nothing is missing."""
+    slots = workflow_model_slots(workflow, api_url)
+    if slots is None:
+        return []
+    missing = []
+    for slot in slots:
+        value, options = slot["current"], slot["options"]
+        if value in options:
+            continue            # the file is present - good
+        if _pick_variant(value, options) is not None:
+            continue            # an unambiguous substitute exists - not "missing"
+        missing.append(MissingModelSlot(slot["class_type"], slot["input_name"],
+                                         value, options))
+    return missing
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +431,15 @@ def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
     ``urllib`` would reject the self-signed cert and silently skip the unload.
 
     Silent no-op when the URL is unset. Returns the server's JSON result
-    (``status`` / ``vram_freed`` / ``vram_before_bytes`` / ``vram_after_bytes``)
-    on success, or None on any failure - never blocks generation if localm is
-    not in the picture.
+    (``status``, plus ``vram_freed`` / ``vram_before_bytes`` /
+    ``vram_after_bytes`` when VRAM is measurable at all) on success, or None on
+    any failure - never blocks generation if localm is not in the picture.
+
+    Do not read the VRAM numbers without checking ``vram_reading_uncertain``:
+    when set, the GPU probe behind them timed out or was busy, so they may be a
+    stale cached reading and ``vram_freed`` may be null (unverifiable) rather
+    than a real True/False - see http_server._add_vram_fields. A box with no VRAM
+    telemetry at all simply omits the three fields, as before.
     """
     url = (localm_url or os.environ.get("LOCALM_URL", "")).rstrip("/")
     if not url:
@@ -423,8 +541,10 @@ def default_api_url() -> str:
         managed = managed_comfy_api_url_if_active()
         if managed:
             return managed
-    except Exception:
-        pass
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("managed-ComfyUI URL lookup failed; falling back to the configured "
+                     "/ default ComfyUI URL: %s", e)
     try:
         from localm.config import load_config
         cfg_url = load_config().get("comfy_api_url")
@@ -484,37 +604,61 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
-#  Readiness cache - ComfyUI does not need re-checking on every task
+#  Readiness cache - de-duplicate back-to-back reachability probes
 #
 #  Before this, ensure_comfy() pinged /system_stats on EVERY call, and every
 #  media submission called it twice back-to-back (once at the route-handler
 #  layer via ensure_available, once again at the top of the generator
 #  function) - plain redundant network round-trips, on top of the GUI's own
-#  5-second poll (settings.js, removed separately). ComfyUI does not appear
-#  or disappear on its own between requests, so once it has been confirmed
-#  reachable for a given api_url in this process's lifetime, later calls
-#  trust that instead of re-pinging: check on app start, on the Settings/
-#  Media page being opened, before the FIRST task submission, and on an
-#  explicit status request are enough. mark_comfy_dead() (called from
-#  stop_comfy(), and internally when ensure_comfy() can no longer reach it)
-#  clears the entry so the next check is real again.
+#  5-second poll (settings.js, removed separately). So a confirmation is
+#  remembered per api_url and reused instead of re-pinging.
+#
+#  It is remembered for a few SECONDS, not for the process lifetime. The
+#  original version cached it forever, on the premise that "ComfyUI does not
+#  appear or disappear on its own between requests" - which is false on this
+#  stack: an OOM on a large render, a ZLUDA/ROCm torch crash, the user closing
+#  its window, or VRAM eviction all kill it mid-session. A permanent entry then
+#  reported a DEAD ComfyUI as running, so every later generation submitted to a
+#  dead server and failed with an opaque ConnectionError, with both recovery
+#  paths (auto-launch from comfy_workdir, and the actionable "not reachable"
+#  message) silently disabled until the user hit Stop or reopened a media page -
+#  and on the CLI / the coder's generate_image path, where nothing re-primes the
+#  cache, for the whole process (REG-444).
+#
+#  The TTL keeps the entire win: the double-ping inside one submission is
+#  milliseconds apart, far inside the window. A ping is a ~1ms loopback call
+#  against a generation costing seconds to minutes, so a SHORT window is nearly
+#  free and a longer one would only widen the stale gap for no gain.
+#  mark_comfy_dead() (from stop_comfy(), and internally when ensure_comfy() can
+#  no longer reach it) still clears the entry outright.
 # ---------------------------------------------------------------------------
 
-_confirmed_alive: set[str] = set()
+# How long a confirmed-reachable result stays trusted. Sized for the back-to-back
+# double-ping this cache exists to collapse, NOT for "ComfyUI stays up".
+_CONFIRM_TTL_SECONDS = 5.0
+
+# api_url -> time.monotonic() when it was last confirmed reachable. monotonic, so
+# a wall-clock change (NTP, DST) cannot make an entry look fresh or ancient.
+_confirmed_alive: dict[str, float] = {}
 
 
 def mark_comfy_alive(api_url: str) -> None:
-    _confirmed_alive.add(api_url.rstrip("/"))
+    _confirmed_alive[api_url.rstrip("/")] = time.monotonic()
 
 
 def mark_comfy_dead(api_url: str) -> None:
-    _confirmed_alive.discard(api_url.rstrip("/"))
+    _confirmed_alive.pop(api_url.rstrip("/"), None)
 
 
 def is_comfy_confirmed(api_url: Optional[str] = None) -> bool:
-    """True when *api_url* has already been confirmed reachable this process
-    lifetime and nothing has invalidated that since (see module docstring)."""
-    return (api_url or default_api_url()).rstrip("/") in _confirmed_alive
+    """True when *api_url* was confirmed reachable within the last
+    ``_CONFIRM_TTL_SECONDS`` and nothing has invalidated it since.
+
+    Deliberately time-bounded: a confirmation is evidence that ComfyUI was up a
+    moment ago, never a promise that it still is (see the section comment above).
+    """
+    seen = _confirmed_alive.get((api_url or default_api_url()).rstrip("/"))
+    return seen is not None and (time.monotonic() - seen) < _CONFIRM_TTL_SECONDS
 
 
 def warm_comfy_status_async(api_url: Optional[str] = None) -> None:
@@ -649,7 +793,10 @@ def should_offer_managed_comfy_setup(detail, cfg: Optional[dict] = None) -> bool
         try:
             from localm.config import load_config
             cfg = load_config()
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("could not load config to check the managed-ComfyUI setup-offer "
+                         "flag; the one-time offer may show again: %s", e)
             cfg = {}
     try:
         return not bool(cfg.get(_MANAGED_SETUP_OFFERED_KEY))
@@ -827,7 +974,10 @@ def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
         try:
             from localm.config import load_config
             cfg = load_config()
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("could not load config to check the comfy_func_shim setting; "
+                         "the shim stays disabled for this spawn: %s", e)
             cfg = {}
     try:
         return bool(cfg.get("comfy_func_shim"))
@@ -837,21 +987,76 @@ def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
 
 def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
     """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
-    launch env (or the inherited env) and, ONLY when the shim is enabled, PREPENDS the
-    localm-owned shim dir to PYTHONPATH (preserving any pre-existing PYTHONPATH). When
-    the shim is off this returns exactly what the launch used before (None to inherit,
-    or the AMD env), so a normal run is untouched. Never writes anything to disk."""
+    launch env (or the inherited env), and layers on two things when they apply:
+
+    - ONLY when the shim is enabled, PREPENDS the localm-owned shim dir to PYTHONPATH
+      (preserving any pre-existing PYTHONPATH).
+    - ONLY for a USER'S OWN ComfyUI, ORDERS ``CUDA_VISIBLE_DEVICES``/
+      ``HIP_VISIBLE_DEVICES`` so the preferred card leads and EVERY OTHER CARD STAYS
+      VISIBLE (REG-532).
+
+    ORDER, NEVER MASK. This shipped wrong once (f094d3d0) as a bare
+    ``CUDA_VISIBLE_DEVICES=<one id>``, which deletes the other cards from torch's view
+    and silently disables ComfyUI core's per-component placement nodes
+    (``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``,
+    ``comfy_extras/nodes_multigpu.py``, registered ``nodes.py:2440``): a ``gpu:1`` that
+    no longer exists is a no-op. So we emit the full ordered list ("1,0,2"), exactly
+    what ComfyUI's own ``--default-device`` writes at ``main.py:69-76``, rather than
+    the single id ``--cuda-device`` writes at ``main.py:78-81``.
+
+    Why the ENV here and the ARGV for the managed instance: for a managed ComfyUI
+    localm builds the command itself, so it passes ``--default-device`` (see
+    ``managed_comfy_launch_cmd``). A user's own ComfyUI is started by THEIR launcher -
+    often a .bat, possibly ZLUDA-wrapped - which localm must not rewrite, so the child
+    env is the only lever. Both routes end in the same place: those two env vars.
+    Setting both mirrors ComfyUI itself, which matters on the ZLUDA/ROCm path where
+    CUDA is emulated over HIP. Deliberately NOT set for the managed instance, so its
+    device has exactly ONE source of truth (the argv) rather than two that could
+    disagree.
+
+    Nothing is set when the user configured no split and no main GPU, or when no
+    torch-visible device can be named honestly: ``visible_device_order()`` returns None
+    and a plain box spawns exactly as it does today, rather than being pinned to an
+    invented card (which would also hide a second GPU the user later adds). Never
+    writes anything to disk."""
     base = _amd_rocm_launch_env()
-    if not func_shim_enabled(cfg):
-        return base
+
+    order = None
+    try:
+        from localm.media.managed_comfy import managed_comfy_active
+        if not managed_comfy_active(cfg):
+            from localm.discover import visible_device_order
+            order = visible_device_order(cfg)
+    except Exception as e:
+        # Do NOT silently spawn with no device: that is the REG-532 defect (the swap
+        # gate reads combined free VRAM while the model lands on one card). We cannot
+        # fail the launch over it - that would break a working single-GPU setup - so
+        # surface it and continue exactly as before (rule 5: a note, not silence, and
+        # not an escalation).
+        from localm.debuglog import logger
+        logger.warning("could not resolve a GPU device order for the ComfyUI child env "
+                       "(%s); launching without one. On a multi-GPU box the media VRAM "
+                       "check may not match the card ComfyUI uses.", e)
+
+    shim_on = func_shim_enabled(cfg)
+    if not shim_on and not order:
+        return base          # unchanged: exactly what the launch used before
     env = base if base is not None else dict(os.environ)
-    shim = str(comfy_shim_dir())
-    prev = env.get("PYTHONPATH", "")
-    # Avoid a duplicate entry if we are re-spawning a ComfyUI that already had it.
-    if prev.split(os.pathsep)[:1] == [shim]:
-        env["PYTHONPATH"] = prev
-    else:
-        env["PYTHONPATH"] = shim + (os.pathsep + prev if prev else "")
+    if shim_on:
+        shim = str(comfy_shim_dir())
+        prev = env.get("PYTHONPATH", "")
+        # Avoid a duplicate entry if we are re-spawning a ComfyUI that already had it.
+        if prev.split(os.pathsep)[:1] == [shim]:
+            env["PYTHONPATH"] = prev
+        else:
+            env["PYTHONPATH"] = shim + (os.pathsep + prev if prev else "")
+    if order:
+        # The FULL order, not order[0]: every card stays visible, the preferred one
+        # merely leads. Emitting just the first id here is the masking bug this
+        # replaced.
+        visible = ",".join(str(i) for i in order)
+        env["CUDA_VISIBLE_DEVICES"] = visible
+        env["HIP_VISIBLE_DEVICES"] = visible
     return env
 
 
@@ -1020,19 +1225,44 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
 
     cfg = load_config()
 
-    # Resolve the ComfyUI folder (working dir) FIRST: explicit arg, then config.
-    # It anchors both launcher discovery and the cwd a relative launcher name
-    # runs from, so a bare "launch-comfyui.bat" works once the folder is known.
+    # A localm-managed instance (decision 6) knows its own launch command - its
+    # own venv + main.py, never the user's comfy_workdir/comfy_launch_cmd/
+    # discovery (a raw managed checkout has no bundled launcher script for
+    # discovery to find). Only applies when the CALLER did not already pass an
+    # explicit workdir/launch_cmd of its own - same "caller override wins"
+    # precedent default_api_url() already follows for the URL.
+    managed_launch_cmd = None
+    if workdir is None and not launch_cmd:
+        try:
+            from localm.media.managed_comfy import (
+                managed_comfy_active, managed_comfy_launch_cmd, managed_comfy_workdir)
+            if managed_comfy_active(cfg):
+                # Atomic: only adopt the managed workdir if BOTH calls succeed.
+                # Setting `workdir` from the first call and then having the
+                # second raise would leave `workdir` pointed at the managed
+                # folder with no matching launch_cmd, so the code below would
+                # fall through to unrelated global-config/discovery logic
+                # against that folder instead of a clean "not managed" outcome.
+                managed_workdir = managed_comfy_workdir()
+                managed_launch_cmd = managed_comfy_launch_cmd()
+                workdir = managed_workdir
+        except Exception:
+            managed_launch_cmd = None
+
+    # Resolve the ComfyUI folder (working dir): explicit arg / managed, then
+    # config. It anchors both launcher discovery and the cwd a relative
+    # launcher name runs from, so a bare "launch-comfyui.bat" works once the
+    # folder is known.
     if workdir is None:
         workdir = cfg.get("comfy_workdir")
 
-    # Resolve the launch command: explicit arg, then config, then - when the
-    # ComfyUI folder is known - auto-discover a launcher inside it (the user's
-    # own launch-comfyui.bat, else the stock comfyui.bat / run.bat). This is the
-    # "work with the install the user already has" path: pointing localm at the
-    # ComfyUI folder is enough; naming a script is optional.
+    # Resolve the launch command: explicit arg / managed, then config, then -
+    # when the ComfyUI folder is known - auto-discover a launcher inside it
+    # (the user's own launch-comfyui.bat, else the stock comfyui.bat / run.bat).
+    # This is the "work with the install the user already has" path: pointing
+    # localm at the ComfyUI folder is enough; naming a script is optional.
     if not launch_cmd:
-        launch_cmd = cfg.get("comfy_launch_cmd")
+        launch_cmd = managed_launch_cmd or cfg.get("comfy_launch_cmd")
     discovered = False
     if not launch_cmd and workdir:
         found = discover_launch_cmd(Path(workdir))

@@ -97,6 +97,58 @@ def _caller_can_allow_shell(request: Request) -> bool:
     return S.ADMIN in held or S.CODER_FULL in held
 
 
+def _caller_is_owner_key(request: Request) -> bool:
+    """True when the caller's credential IS the owner key, i.e. the one credential
+    whose authority does not come from a revocable keystore entry.
+
+    This asks a POSITIVE question - "is this principal the current owner key?" -
+    and reads nothing but the owner key itself. An earlier version of this fix
+    asked the negative ("absent from the keystore, therefore the owner") via
+    ``not key_hash_live(h)``, and that was wrong twice over (both caught by the
+    pre-merge security review of REG-509):
+
+    - ``verify()`` rejects an EXPIRED key on the bearer path, but expiry (unlike
+      ``revoke_key``) neither deletes the keystore record nor drops sessions, and
+      ``_principal_from_token`` exempts an ADMIN session from ``key_hash_live``
+      entirely. So an expired ADMIN-scoped keystore key over its still-live cookie
+      resolved a principal that ``key_hash_live`` called dead - and the negative
+      test read that as "the owner", handing a revoked-by-expiry key permanent
+      shell. That is precisely the LM-DA-014 hole this whole re-check exists to
+      close.
+    - ``_load_keystore()`` swallows OSError/ValueError and returns ``[]``, so a
+      transient unreadable/corrupt auth.json makes ``key_hash_live`` say "not
+      live" for a perfectly live key. Deriving a PERMANENT, persisted privilege
+      stamp from a fail-open read is exactly backwards - and note the module's own
+      ``_keystore_configured()`` deliberately fails CLOSED on those same errors.
+
+    ADMIN is deliberately not consulted: it is in PRIVILEGED_SCOPES, so the owner
+    may mint an ADMIN-scoped keystore key, and that key is revocable and must stay
+    subject to the re-check.
+
+    Returns False in open mode / for a tokenless caller: ``owner`` is then None,
+    which the runner already treats as needing no re-check.
+
+    KNOWN GAP (pre-existing, not a regression - master behaves the same): a job
+    created through an owner SESSION whose minting key was ALREADY rotated away
+    resolves to the old key's hash, so it does not match here and is not stamped.
+    Closing that needs the session to record at MINT time that the owner key
+    minted it (sessions.create), which is outside this change's blast radius.
+    """
+    from localm.auth import _hash_key, ct_equal, get_api_key
+    from localm.inference.http_server import principal_id
+    owner_key = get_api_key()
+    if not owner_key:
+        return False
+    h = principal_id(request)
+    if h is None:
+        return False
+    # ct_equal is the house idiom for every secret compare (see auth.ct_equal).
+    # Both sides here are computed sha256 hexdigests, so bare compare_digest could
+    # not actually raise on them - this is for uniformity, so no compare_digest-on-
+    # str remains anywhere to be copied to a site where the operand IS a raw header.
+    return ct_equal(h, _hash_key(owner_key))
+
+
 def _store() -> JobStore:
     return JobStore()
 
@@ -107,19 +159,25 @@ def _engine_resolver():
         from localm.inference.http_server import _engine as _live_engine
         if _live_engine is not None and _live_engine.loaded:
             return _live_engine
-    except Exception:
-        pass
+    except Exception as e:
+        # Fall through to the host resolver, but log so a persistently broken
+        # lookup is traceable rather than a silent degrade (AGENTS.md rule 5).
+        from localm.debuglog import logger
+        logger.debug("jobs engine resolver: live-engine lookup failed: %s", e)
     if _host is None:
         return None
     try:
         return _host.engine()
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("jobs engine resolver: host.engine() failed: %s", e)
         return None
 
 
 def _job_dict(job: Job) -> dict:
     d = job.to_dict()
     d.pop("owner", None)        # internal principal binding; never sent to the client
+    d.pop("owner_is_owner_key", None)     # ditto: how that binding is re-validated
     return d
 
 
@@ -177,6 +235,12 @@ async def create_job(req: JobCreate, request: Request):
             allow_shell=req.allow_shell,
             enabled=req.enabled,
             owner=principal_id(request),    # bind the job to its creator
+            # Capture WHAT KIND of credential that creator was, while it is still
+            # resolvable: a rotated-away owner key is indistinguishable from a
+            # revoked scoped key at run time (REG-509). Stamped for every job, not
+            # just allow_shell ones, so a later PATCH that enables shell on an
+            # owner-created job inherits the right answer.
+            owner_is_owner_key=_caller_is_owner_key(request),
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

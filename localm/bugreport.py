@@ -402,7 +402,13 @@ def _format_error(error: Optional[BaseException]) -> str:
     if error is None:
         return ""
     tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    tb = _scrub_home(tb)
+    # Full scrub, not just home paths: an exception message can embed a
+    # user-configured credentialed URL (a comfy_api_url / net_search_url / remote
+    # server base with user:pass@) or a pasted token, and this traceback ships in the
+    # uploaded "Error detail" body. _scrub_secrets adds the url-creds + bearer/apikey
+    # strips the sibling log-tail already applies (HON-15; do not report a scrub the
+    # module docstring promises but did not perform).
+    tb = _scrub_secrets(tb)
     # Keep the tail - the last frames are the useful ones, and a shorter report
     # is more likely to be read and sent.
     lines = tb.strip().splitlines()
@@ -459,23 +465,52 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
         return ""
 
 
-def _recent_hang_traces(home=None, max_chars: int = 8000) -> str:
-    """The most recent event-loop hang trace (``<logs>/hang_*.log``), if the
-    always-on stall watchdog captured one - every thread's stack at the moment the
-    server froze, which is exactly what diagnoses an intermittent "it hung" report.
-    Kept HEAD-first (the first snapshot names where the loop first stuck). Home
-    paths are scrubbed. Empty when no freeze was captured. Never raises."""
+# A hang trace older than this cannot plausibly belong to the run being reported,
+# whatever pid it carries (pids are reused - see REG-586). Generous on purpose: the
+# pid match below is the precise filter, and this only backstops a pid collision.
+_HANG_TRACE_MAX_AGE_S = 24 * 3600
+
+
+def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
+    """The event-loop hang trace captured by the run being reported
+    (``<logs>/hang_<date>_<pid>.log``), if the always-on stall watchdog captured
+    one - every thread's stack at the moment the server froze, which is exactly
+    what diagnoses an intermittent "it hung" report. Kept HEAD-first (the first
+    snapshot names where the loop first stuck). Home paths are scrubbed. Empty
+    when that run captured no freeze. Never raises.
+
+    Matched to *pid* - the run this report is about - the same way
+    _recent_log_tail already matches its log, and additionally bounded by
+    _HANG_TRACE_MAX_AGE_S. Both filters are needed and neither is enough alone:
+
+      * The watchdog is ON by default, so any transient >10s stall (a big index
+        build, VRAM pressure) writes a trace, and nothing ever prunes them. With
+        no filter, an ordinary report about something else entirely ("the model
+        gave a wrong answer") attached whatever freeze happened to be newest -
+        rendered under "## Server hang trace" asserting "the server froze",
+        i.e. a stale, unrelated trace presented as the diagnosis of the current
+        problem, sending triage down a false path (REG-542).
+      * A pid alone is not an identity (pids get reused), so an ancient trace
+        carrying this run's pid would still slip through; the age bound stops it.
+      * Age alone is not enough either: a recent freeze in a DIFFERENT localm
+        instance is not this report's problem; the pid match stops that.
+
+    A caller that cannot name the run (no pid) gets nothing rather than a guess:
+    attaching a trace we cannot tie to the report is the whole defect."""
     try:
+        import time as _time
         from pathlib import Path as _P
         if home is None:
             from localm.debuglog import logs_dir
             d = logs_dir()
         else:
             d = _P(home) / "logs"
-        if not d.is_dir():
+        if not d.is_dir() or pid is None:
             return ""
-        traces = sorted(d.glob("hang_*.log"),
-                        key=lambda p: p.stat().st_mtime, reverse=True)
+        cutoff = _time.time() - _HANG_TRACE_MAX_AGE_S
+        traces = sorted(
+            (p for p in d.glob(f"hang_*_{pid}.log") if p.stat().st_mtime >= cutoff),
+            key=lambda p: p.stat().st_mtime, reverse=True)
         if not traces:
             return ""
         text = traces[0].read_text(encoding="utf-8", errors="replace").strip()
@@ -531,6 +566,14 @@ def build_report(summary: str, reason: str = "",
                  error: Optional[BaseException] = None,
                  context: Optional[dict] = None) -> str:
     """Render an editable markdown bug report. The user owns it before sending."""
+    # The user-typed summary/reason are the only report fields not otherwise
+    # scrubbed; a home path (username) or pasted credential in them would ship in
+    # the uploaded body - and, via the derived title, into a PUBLIC issue. Scrub at
+    # this choke point so every caller (report_failure, save_user_report) is covered
+    # (HON-03/HON-15; AGENTS.md rule 5: a privacy step must not report a scrub it
+    # did not do). _scrub_secrets is idempotent and no-ops on empty text.
+    summary = _scrub_secrets(summary)
+    reason = _scrub_secrets(reason)
     diag = collect_diagnostics(context)
     err = _format_error(error)
 
@@ -728,10 +771,14 @@ def save_user_report(description: str, *, summary: str = "",
         tail = _recent_log_tail(pid=os.getpid())
         if tail:
             context["recent_log_tail"] = tail
-    # Always attach a captured hang trace when one exists (independent of
+    # Always attach a hang trace captured by THIS run (independent of
     # include_log): it only exists if the server actually froze, and it is the
-    # single most useful thing for diagnosing a "the app hung" report.
-    hang = _recent_hang_traces()
+    # single most useful thing for diagnosing a "the app hung" report. Scoped to
+    # our own pid like the log tail above: an old freeze from a previous run is
+    # not this report's problem, and presenting one as the diagnosis is worse
+    # than attaching nothing (REG-542).
+    import os as _os
+    hang = _recent_hang_traces(pid=_os.getpid())
     if hang:
         context["hang_traces"] = hang
     if isinstance(client, dict) and client:
@@ -739,9 +786,12 @@ def save_user_report(description: str, *, summary: str = "",
     text = build_report(summary, context=context)
     if description:
         # Drop the user's own words into the otherwise-empty "What I was doing".
+        # Scrub here: this is inserted AFTER build_report's own scrub pass and is
+        # uploaded verbatim in the report body when the user picks upload, so it must
+        # be scrubbed at this injection point too (HON-15).
         text = text.replace(
             "<!-- Please describe what you ran and what you expected. -->",
-            description)
+            _scrub_secrets(description))
     return save_report(text)
 
 
@@ -872,6 +922,13 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     reported as success (we do not hide problems). *opener* is injectable for
     tests (defaults to urllib)."""
     import json as _json
+
+    # Scrub the title at the upload boundary: it becomes a PUBLIC GitHub issue
+    # title, and callers pass the user's raw summary / description first line
+    # (report_failure, inference/routes/admin.py). This is the single choke point
+    # every uploaded title flows through, so scrubbing here covers all callers - a
+    # future one cannot forget (HON-03/HON-15). Idempotent; no-ops on empty text.
+    title = _scrub_secrets(title)
 
     # Fill each of url/token from config independently when not explicitly passed,
     # so an explicit token does not suppress loading the url from config (and vice
@@ -1339,7 +1396,9 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
             ctx["recent_log_tail"] = tail
         # If the watchdog captured a freeze before the run was force-killed, attach
         # its stacks too: a hang the user force-quit is exactly this recovery path.
-        hang = _recent_hang_traces(home)
+        # The CRASHED run's freeze, matched by its pid like the log tail above -
+        # not this recovering process's, and not some unrelated older one.
+        hang = _recent_hang_traces(home, pid=info.get("pid"))
         if hang:
             ctx["hang_traces"] = hang
         return report_failure(

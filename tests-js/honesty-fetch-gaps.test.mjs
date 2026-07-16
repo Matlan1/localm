@@ -5,6 +5,10 @@
 // - the debounced conversation PUT never checked r.ok (silent stale persistence).
 // - models.js ran r.json() BEFORE the r.ok branch, so a plain-text 500 killed
 //   the error toast entirely.
+// 2026-07-14 honesty audit follow-up:
+// - the Models PAGE (refreshModelsPage) never checked r.ok, so a 403 (key lacks
+//   models.read) or 401 (expired session) returned a JSON error body that parses
+//   fine -> models=[] -> the box read "No models yet", hiding the real failure.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -80,4 +84,41 @@ test("a plain-text 500 on model detail still shows the error toast", async () =>
   await drain();
   assert.ok(/Lookup failed/.test(window.document.getElementById("toast").textContent),
     "the error toast survives a non-JSON error body");
+});
+
+test("a 403 on the models page surfaces an honest error, not 'No models yet'", async () => {
+  // A key that lacks models.read -> 403 with a {detail:...} body (parses fine).
+  // The empty-list fallback would render the "No models yet" empty state, telling
+  // the user they have no models when really they have no permission.
+  const { window } = loadAppWithPages({ fetchImpl: async (url) => {
+    if (String(url).startsWith("/api/models")) {
+      return { ok: false, status: 403, statusText: "Forbidden",
+               json: async () => ({ detail: "forbidden" }), text: async () => "" };
+    }
+    return OK;
+  } });
+  runScript(window, "refreshModelsPage();");
+  await drain();
+  const box = window.document.getElementById("models-table");
+  assert.ok(/Could not load models \(HTTP 403\)/.test(box.textContent),
+    "the box shows the real HTTP status, not an empty state");
+  assert.ok(!/No models yet/.test(box.textContent),
+    "the misleading 'No models yet' empty state is NOT shown on a 403");
+});
+
+test("a 401 on the models page shows the key gate, not 'No models yet'", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: async (url) => {
+    if (String(url).startsWith("/api/models")) {
+      return { ok: false, status: 401, statusText: "Unauthorized",
+               json: async () => ({ detail: "unauthorized" }), text: async () => "" };
+    }
+    return OK;
+  } });
+  runScript(window, "refreshModelsPage();");
+  await drain();
+  assert.equal(window.document.getElementById("key-gate").style.display, "flex",
+    "an expired/absent session opens the in-page key gate");
+  const box = window.document.getElementById("models-table");
+  assert.ok(!/No models yet/.test(box.textContent),
+    "the misleading 'No models yet' empty state is NOT shown on a 401");
 });

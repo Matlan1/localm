@@ -13,6 +13,40 @@ from typing import Any, Optional
 from .base import ToolResult
 from .files import tool_read_file
 
+
+def _inherited_confirm_handler(parent: Any):
+    """The channel the CHILD asks for approval on: the parent's REAL one.
+
+    A child always runs ``run_task`` -> ``_loop(interactive=False)``, so it can
+    never use execution.py's own interactive prompt branch. Inheriting only the
+    parent's ``confirm_handler`` therefore left the default interactive REPL
+    (``localm coder`` without ``--yes``: auto_approve=False AND
+    confirm_handler=None, because the terminal REPL confirms via ``_confirm_tool``
+    rather than a handler) with no channel at all - so every delegated
+    write/shell/git hit the fail-closed branch and was DENIED, even though the
+    user was sitting at the terminal that the parent's own tools prompt on
+    (REG-507). "Inherit the parent's confirmation posture" was meant to ASK, not
+    to block.
+
+    Precedence:
+    - the parent's own handler when it has one (GUI/web routes to the browser);
+    - else the parent's terminal prompt when the parent is genuinely in an
+      interactive loop. spawn_agent runs synchronously inside the parent's own
+      tool call, so that terminal is free and the answer returns up the same
+      stack;
+    - else None: a genuinely unattended parent (a scheduled job, a non-interactive
+      run_task) has nobody to ask, so the child keeps failing CLOSED. That is the
+      2026-07-09 bypass fix and it stays intact - this never self-approves, it
+      only reaches a real human.
+    """
+    handler = getattr(parent, "confirm_handler", None)
+    if handler is not None:
+        return handler
+    if getattr(parent, "_interactive", False):
+        return getattr(parent, "_confirm_tool", None)
+    return None
+
+
 def tool_spawn_agent(
     cwd: Path,
     task: str,
@@ -92,7 +126,7 @@ def tool_spawn_agent(
         auto_approve=getattr(_parent_agent, "auto_approve", True),
         dry_run=getattr(_parent_agent, "dry_run", False),
         always_confirm=getattr(_parent_agent, "always_confirm", None),
-        confirm_handler=getattr(_parent_agent, "confirm_handler", None),
+        confirm_handler=_inherited_confirm_handler(_parent_agent),
         parent=_parent_agent,
         mode=inherited_mode,
         # A child must be no MORE capable than its parent: inherit the restriction

@@ -44,6 +44,9 @@ class MusicRequest(BaseModel):
     steps: int | None = None
     cfg: float | None = None
     lyrics_strength: float | None = None
+    # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
+    # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
+    model_overrides: dict[str, dict[str, str]] | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -93,8 +96,25 @@ async def music(req: MusicRequest, request: Request):
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
-        from localm.vram import decide_media_swap, unload_chat_for_media
+        from localm.vram import (decide_media_swap, media_single_device_shortfall,
+                                 media_split_notice, unload_chat_for_media)
+        notice = media_split_notice()
+        if notice:
+            job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
+        # REG-532: the gate reads COMBINED free VRAM across a configured GPU split,
+        # but ComfyUI masks devices and loads the WHOLE model onto ONE card, so a job
+        # that "fits" in 2x4 GB combined can still OOM on one 4 GB card. When the
+        # chosen card cannot hold it, swap anyway: unloading the chat model frees
+        # VRAM on every split card, including that one.
+        shortfall = media_single_device_shortfall(s)
+        if shortfall and not swap:
+            swap = True
+            job.push({"type": "line", "text":
+                      f"GPU {shortfall['index']} has "
+                      f"{shortfall['free'] / 1024 ** 3:.1f} GB free, but this job "
+                      f"needs {shortfall['needed'] / 1024 ** 3:.1f} GB on a single "
+                      "card - unloading the chat model first."})
         gen_swap = False
         if swap:
             if not unload_chat_for_media(job, self_url, "music"):
@@ -115,6 +135,8 @@ async def music(req: MusicRequest, request: Request):
             kwargs["cfg"] = req.cfg
         if req.lyrics_strength is not None:
             kwargs["lyrics_strength"] = req.lyrics_strength
+        if req.model_overrides:
+            kwargs["model_overrides"] = req.model_overrides
         ok, message = _backend.generate(
             s, req.tags, out_path,
             self_url=self_url,
@@ -216,6 +238,38 @@ async def music_history(request: Request):
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "music", [it["name"] for it in items]))
     return {"tracks": [it for it in items if it["name"] in allowed]}
+
+
+@_router.get("/api/music/comfy-models")
+async def music_comfy_models():
+    """Model-file slots the active music workflow exposes (for the Workflow
+    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
+    about unreachability (rule 5) - never a silently-empty picker.
+
+    Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
+    timeout), so it runs OFF the event loop: inline it stalled every concurrent
+    request server-wide while ComfyUI was slow (REG-638)."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
+    if slots is None:
+        return {"reachable": False, "api_url": s["api_url"], "slots": [],
+                "message": "ComfyUI is not running - launch it to see available models."}
+    return {"reachable": True, "api_url": s["api_url"], "slots": slots}
+
+
+@_router.post("/api/music/comfy-launch")
+async def music_comfy_launch():
+    """Start (or confirm) ComfyUI is up for the music plugin, without running a
+    generation - backs the Workflow panel's "Launch ComfyUI" button."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 
 def register(host) -> None:

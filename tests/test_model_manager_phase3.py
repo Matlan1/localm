@@ -474,3 +474,162 @@ class TestTraversalGuards:
         assert ok is True
         assert "newname" in store
         get_spy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# REG-477 / REG-514: the full-snapshot pull's model_type resolution and its disk
+# preflight both have to account for what is actually on disk.
+# ---------------------------------------------------------------------------
+
+_LLAMA_CONFIG = '{"architectures": ["LlamaForCausalLM"], "model_type": "llama"}'
+
+
+def _default_writer(d: Path):
+    (d / "config.json").write_text(_LLAMA_CONFIG, encoding="utf-8")
+    (d / "model.safetensors").write_bytes(b"x" * 1000)
+
+
+def _snapshot_env(monkeypatch, siblings, writer=None):
+    """Fake HF API + a snapshot_download that writes REAL files into dest, so the
+    type fallback below reads a real config.json rather than a mock of it."""
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(siblings))
+
+    def _fake_download(repo_id, local_dir, **kw):
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (writer or _default_writer)(d)
+        return str(d)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _fake_download)
+
+
+_LLM_SIBLINGS = [
+    SimpleNamespace(rfilename="config.json", size=len(_LLAMA_CONFIG)),
+    SimpleNamespace(rfilename="model.safetensors", size=1000),
+]
+
+
+class TestSnapshotTypeResolution:
+    def test_tagless_transformers_llm_registers_as_llm_not_unknown(
+            self, fake_registry, monkeypatch):
+        """REG-477: many base/older HF repos carry no exact pipeline_tag, so the
+        pre-download probe returns 'unknown'. The snapshot then registered
+        'unknown' WITHOUT ever reading the config.json it had just downloaded, so
+        a clearly-LlamaForCausalLM model silently vanished from GUI auto-select,
+        the MCP EngineCache and the jobs runner, though the same pull auto-loaded
+        and worked before."""
+        store, _ = fake_registry
+        _snapshot_env(monkeypatch, _LLM_SIBLINGS)
+
+        assert mm._pull_hf_snapshot("owner/repo", "tagless", model_type="unknown")
+
+        assert store["tagless"]["model_type"] == "llm", (
+            "a downloaded LlamaForCausalLM repo must register as an LLM")
+
+    def test_config_without_a_causal_arch_stays_unknown(
+            self, fake_registry, monkeypatch):
+        """Negative case: the fallback reads HARD metadata only. A repo whose
+        config.json shows no causal-LM architecture stays 'unknown' - never a
+        silent 'llm', which is the old fallback this must NOT restore."""
+        store, _ = fake_registry
+
+        def _writer(d: Path):
+            (d / "config.json").write_text(
+                '{"architectures": ["BertModel"]}', encoding="utf-8")
+            (d / "model.safetensors").write_bytes(b"x" * 1000)
+
+        _snapshot_env(monkeypatch, [
+            SimpleNamespace(rfilename="config.json", size=None),
+            SimpleNamespace(rfilename="model.safetensors", size=1000),
+        ], writer=_writer)
+
+        assert mm._pull_hf_snapshot("owner/bert", "berty", model_type="unknown")
+        assert store["berty"]["model_type"] == "unknown"
+
+    def test_a_resolved_probe_type_is_never_overridden(
+            self, fake_registry, monkeypatch):
+        """Negative case: when the HF probe DID resolve a type from hard metadata
+        (lora/vae/embedding/...) that stays authoritative - the config.json
+        fallback only answers what the probe could not."""
+        store, _ = fake_registry
+        _snapshot_env(monkeypatch, _LLM_SIBLINGS)      # config.json says causal LM
+
+        assert mm._pull_hf_snapshot("owner/adapter", "adapt", model_type="lora")
+        assert store["adapt"]["model_type"] == "lora"
+
+    def test_already_downloaded_snapshot_also_resolves_its_type(
+            self, fake_registry, monkeypatch):
+        """The early 'Already downloaded' branch registers too, so it needs the
+        same resolution - otherwise a re-pull re-stamps 'unknown'."""
+        store, models_dir = fake_registry
+        dest = models_dir / "tagless"
+        dest.mkdir(parents=True)
+        _default_writer(dest)
+        _snapshot_env(monkeypatch, _LLM_SIBLINGS)
+
+        assert mm._pull_hf_snapshot("owner/repo", "tagless", model_type="unknown")
+        assert store["tagless"]["model_type"] == "llm"
+
+
+class TestSnapshotResumePreflight:
+    def test_retry_counts_only_the_bytes_still_missing(
+            self, fake_registry, monkeypatch, capsys):
+        """REG-514: a disk-full pull leaves a partial dest. Once the user frees
+        enough for the REMAINING bytes the retry must proceed, but the preflight
+        demanded the FULL repo size, ignoring what was already on disk, so the
+        download could never resume - defeating the very recovery it was added
+        for. _pull_gguf_file sums only the missing parts and _pull_url uses
+        (total - already_have); this path did neither."""
+        store, models_dir = fake_registry
+        dest = models_dir / "partial"
+        dest.mkdir(parents=True)
+        # 6000 of ~10000 bytes already on disk; ~4000 still to fetch.
+        (dest / "config.json").write_text(_LLAMA_CONFIG, encoding="utf-8")
+        (dest / "shard-a.bin").write_bytes(b"x" * 6000)
+
+        siblings = [
+            SimpleNamespace(rfilename="config.json", size=len(_LLAMA_CONFIG)),
+            SimpleNamespace(rfilename="shard-a.bin", size=6000),
+            SimpleNamespace(rfilename="shard-b.bin", size=4000),      # missing
+        ]
+        _snapshot_env(monkeypatch, siblings,
+                      writer=lambda d: (d / "shard-b.bin").write_bytes(b"x" * 4000))
+        # The REAL check, against 5000 free: less than the 10000 total, more than
+        # the ~4000 actually still needed.
+        monkeypatch.setattr(mm, "_check_disk_space", pull_mod._check_disk_space)
+        monkeypatch.setattr(mm.shutil, "disk_usage",
+                            lambda p: SimpleNamespace(free=5000))
+
+        ok = mm._pull_hf_snapshot("owner/repo", "partial", model_type="unknown")
+
+        assert ok is True, ("the retry must resume: there is room for the "
+                            "remaining bytes\n" + capsys.readouterr().out)
+        assert (dest / "shard-b.bin").exists()
+
+    def test_a_genuinely_full_disk_still_refuses(
+            self, fake_registry, monkeypatch, capsys):
+        """Negative case: subtracting the on-disk bytes must not disable the
+        check. 100 bytes free and ~4000 still needed must still refuse."""
+        store, models_dir = fake_registry
+        dest = models_dir / "partial"
+        dest.mkdir(parents=True)
+        (dest / "config.json").write_text(_LLAMA_CONFIG, encoding="utf-8")
+        (dest / "shard-a.bin").write_bytes(b"x" * 6000)
+
+        siblings = [
+            SimpleNamespace(rfilename="config.json", size=len(_LLAMA_CONFIG)),
+            SimpleNamespace(rfilename="shard-a.bin", size=6000),
+            SimpleNamespace(rfilename="shard-b.bin", size=4000),
+        ]
+        downloaded = []
+        _snapshot_env(monkeypatch, siblings, writer=lambda d: downloaded.append(1))
+        monkeypatch.setattr(mm, "_check_disk_space", pull_mod._check_disk_space)
+        monkeypatch.setattr(mm.shutil, "disk_usage",
+                            lambda p: SimpleNamespace(free=100))
+
+        ok = mm._pull_hf_snapshot("owner/repo", "partial", model_type="unknown")
+
+        assert ok is False
+        assert downloaded == [], "nothing may transfer when the disk is really full"
+        assert "not enough disk space" in capsys.readouterr().out.lower()

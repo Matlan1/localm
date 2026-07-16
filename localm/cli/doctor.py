@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import multiprocessing as mp
+import sys
 from typing import Optional
 
 from ._core import console, main
@@ -169,6 +170,53 @@ def _check_worker_spawn() -> None:
             "runtime above checks out")
 
 
+def _check_venv_creation() -> None:
+    """Verify localm can actually create a nested venv via ``-m venv`` using
+    ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
+    depends on (managed_comfy_fresh.py, #621). Creates and immediately discards a
+    throwaway venv under a temp dir; never touches LOCALM_HOME or any real install.
+
+    A DIFFERENT code path from the worker-spawn check above (that exercises
+    multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
+    matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
+    silently failing with "[WinError 2]") passed a doctor run showing everything
+    green precisely because nothing probed this. This check would have caught it."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from localm._mp_spawn import real_base_python
+
+    venv_python = real_base_python() or sys.executable
+    ok = False
+    detail = ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="localm-doctor-venv-") as tmp:
+            dest = Path(tmp) / "probe-venv"
+            r = subprocess.run(
+                [str(venv_python), "-m", "venv", str(dest)],
+                capture_output=True, text=True, timeout=60)
+            expected = dest / ("Scripts/python.exe" if sys.platform == "win32"
+                               else "bin/python3")
+            ok = r.returncode == 0 and expected.is_file()
+            if not ok:
+                tail = (r.stderr or r.stdout or "").strip().splitlines()
+                detail = tail[-1] if tail else ""
+    except Exception as e:
+        console.print(f"  {_FAIL_SYM}  venv-creation check errored: {e}")
+        return
+
+    if ok:
+        console.print(f"  {_OK_SYM}  venv creation: OK "
+                      "(the managed-ComfyUI installer uses this)")
+    else:
+        console.print(
+            f"  {_FAIL_SYM}  venv creation FAILED"
+            + (f" ({detail})" if detail else "")
+            + " - managed ComfyUI setup ('localm comfy setup') will fail even "
+              "though the runtime above checks out")
+
+
 def _check_gpu_driver() -> bool:
     """Probe nvidia-smi / rocm-smi; return True if a GPU driver was found."""
     import subprocess
@@ -203,14 +251,46 @@ def _check_vram_torch() -> bool:
     try:
         import torch
         if torch.cuda.is_available():
+            from localm import discover
+            # The CLI deadline, not the server's 4s cap: a cold GPU driver init is
+            # measured at ~6.5s, and doctor is exactly where a cold box lands (same
+            # reason cli/models.py uses it). Never raises; [] just means no
+            # correction is available and the raw readings below stand.
+            try:
+                _gpus_corrected = discover.list_gpus(
+                    deadline=discover._GPU_PROBE_CLI_DEADLINE)
+            except Exception:
+                _gpus_corrected = []
             for i in range(torch.cuda.device_count()):
                 props = torch.cuda.get_device_properties(i)
-                # Driver-level free/total - torch's allocator counters miss
-                # everything allocated outside torch (llama.dll, other apps)
+                # Driver-level free/total, CORRECTED for cross-process blindness.
+                #
+                # torch.cuda.mem_get_info's raw "free" is not the whole board's on
+                # every platform: measured on Windows + an AMD ROCm/HIP build, it
+                # reports total - THIS process's own allocations and is blind to
+                # every other process (0.14 GB reported while 10.53 GB was genuinely
+                # in use). doctor is a fresh, short-lived process holding no model,
+                # so the raw number would show a nearly-empty card no matter what is
+                # actually resident - telling a user with a full GPU that it is free,
+                # which is the opposite of a diagnostic's job (AGENTS.md rule 5: never
+                # report a wrong number as fact). discover.list_gpus() applies the
+                # device-global correction where one exists and tags what it could
+                # not correct. See dev-notes/vram-cross-process-blindness.md.
                 free_b, total_b = torch.cuda.mem_get_info(i)
+                scope = None
+                for g in _gpus_corrected:
+                    if g.get("index") == i and g.get("free") is not None:
+                        free_b, scope = g["free"], g.get("free_scope")
+                        break
+                # Say so rather than quietly present a figure we know counts only our
+                # own allocations (the platform has no device-global source we can read).
+                note = ("  [dim](free counts only this process; other apps' VRAM "
+                        "is not visible on this driver)[/dim]"
+                        if scope == discover.FREE_SCOPE_PROCESS else "")
                 console.print(
                     f"  {_OK_SYM}  GPU {i}: {props.name}  "
                     f"{free_b / 1024**3:.1f} GB free / {total_b / 1024**3:.1f} GB total"
+                    f"{note}"
                 )
                 torch_gpu_found = True
         else:
@@ -453,6 +533,8 @@ def doctor():
       - The isolated worker process (used by every GGUF model load and the
         voice/STT engine) can actually be spawned - a real subprocess.Popen
         probe passes even when this cannot (#617)
+      - A nested venv can actually be created via `-m venv` - the same
+        mechanism the managed-ComfyUI installer depends on (#621)
       - GPU inference capability, from the backend localm actually provisioned
         (Vulkan / Metal / bundled-ROCm / CUDA), not just nvidia-smi/rocm-smi/torch
       - Available VRAM
@@ -471,6 +553,7 @@ def doctor():
     if lib_healthy:
         _check_native_abi()
     _check_worker_spawn()
+    _check_venv_creation()
     # smi/torch are SUPPLEMENTARY detail lines, not the verdict: they miss
     # localm's default Vulkan/Metal/bundled-ROCm GPU paths entirely. The verdict
     # is derived from what localm will actually load (audit doctor-1).

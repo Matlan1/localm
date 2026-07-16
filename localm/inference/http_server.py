@@ -186,12 +186,76 @@ def _gpu_registry_sync() -> None:
         _dbg.debug("gpu-registry sync failed (continuing): %s", e)
 
 
-def _attempt_cooperative_unload() -> bool:
+def _load_gpu_indices() -> set:
+    """Every device whose free VRAM this instance's next model load can actually
+    USE - the whole configured split when one is active, else just the main
+    device.
+
+    NOT ``{_current_gpu_index()}``: that is an IDENTITY answer ("which one device
+    is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
+    main_gpu_index even on a box whose split spans 0 AND 1. Weighing peers
+    against that single index while weighing VRAM against vram_capacity()'s
+    COMBINED split total contradicts itself, and dropped a sibling holding VRAM
+    on this instance's own second split device - turning a cooperative unload
+    that used to succeed into a 503 (the capacity-vs-identity distinction the
+    raw-accessor guard in scripts/check_hygiene.py exists to enforce).
+
+    Known limitation, stated rather than hidden (rule 5): a registry entry
+    advertises ONE ``gpu_index`` per instance (see _gpu_registry_sync), so a
+    SPLIT peer is represented only by its main device. A split peer whose main
+    device is outside our set is therefore still skipped even though it may hold
+    VRAM on a device we do use. Widening the entry to a device LIST is a registry
+    schema change, out of scope here; the effect is a missed cooperation
+    opportunity (the pre-existing 503), never a wrong yank."""
+    try:
+        from localm.config import load_config
+        from localm.discover import resolve_gpu_split
+        cfg = load_config()
+        pairs = resolve_gpu_split(cfg.get("gpu_split_indices"),
+                                  cfg.get("gpu_split_ratios"))
+        if len(pairs) >= 2:
+            return {idx for idx, _ratio in pairs}
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("could not resolve the configured GPU split for the "
+                   "cooperative-unload peer filter (%s); using the main device "
+                   "only", e)
+    return {_current_gpu_index()}
+
+
+def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
+                                free_bytes: Optional[int] = None,
+                                asked: Optional[set] = None) -> bool:
     """Best-effort: ask a live sibling localm instance (found via the
     cross-install GPU-coordination registry) to release its own VRAM, so this
     instance does not have to give up and 503 just because ITS OWN local
     eviction candidates are all busy. Returns True once a peer confirms it
     freed its model.
+
+    Cooperating COSTS the sibling every model it has loaded (the peer runs its
+    own ``unload_all_models``), so this is deliberately conservative about when
+    it is worth it (REG-454):
+
+    - *asked* (a set of instance_ids, per load attempt) makes each peer
+      answerable at most ONCE. The caller re-probes VRAM and calls back on
+      success, and a peer that has already released advertises no new VRAM -
+      but its entry can keep listing a model anyway (its own post-unload
+      registry write is best-effort and may have failed, or it reloaded), and
+      ``request_cooperative_unload`` reports success for "already_unloaded"
+      too. Without this the caller's ``while True`` would keep re-asking the
+      same peer forever, holding the per-model semaphore and re-probing VRAM,
+      never progressing.
+    - *needed_bytes*/*free_bytes* gate the yank on whether it could actually
+      help: if every candidate advertises a VRAM estimate and freeing ALL of
+      them still leaves this load short (a model far bigger than the card, or
+      a third-party app such as ComfyUI holding the bulk of VRAM), the peers
+      would lose their models for nothing and this load would 503 anyway. The
+      pre-existing 503 is the honest answer; do not take the sibling down with
+      us. An unknown estimate is not proof it cannot help, so it does not veto.
+
+    Only a peer on a device THIS load can use is considered (see
+    _load_gpu_indices - the whole configured split, not one index): freeing an
+    unrelated card's VRAM cannot make this load fit.
 
     Only runs when THIS instance itself is registered for coordination
     (``_gpu_coord`` set - never for a plain test app or an ``--isolated`` run,
@@ -218,7 +282,30 @@ def _attempt_cooperative_unload() -> bool:
         return False
     # Only a peer actually holding a model has anything to free.
     holders = [p for p in peers if p.get("model")]
+    if asked is not None:
+        holders = [p for p in holders if p.get("instance_id") not in asked]
+    my_gpus = _load_gpu_indices()
+    holders = [p for p in holders
+               if p.get("gpu_index") is None or p.get("gpu_index") in my_gpus]
+    if not holders:
+        return False
+
+    if needed_bytes is not None and free_bytes is not None:
+        estimates = [p.get("vram_estimate_bytes") for p in holders]
+        if all(isinstance(e, int) and e > 0 for e in estimates):
+            reclaimable = sum(estimates)
+            if free_bytes + reclaimable < needed_bytes:
+                _dbg.info(
+                    "cooperative unload skipped: freeing all %d peer(s) on GPU(s) "
+                    "%s would reclaim only ~%d MB on top of %d MB free, still short "
+                    "of the ~%d MB this load needs - leaving their models alone",
+                    len(holders), sorted(my_gpus), reclaimable // 1024 ** 2,
+                    free_bytes // 1024 ** 2, needed_bytes // 1024 ** 2)
+                return False
+
     for peer in holders:
+        if asked is not None:
+            asked.add(peer.get("instance_id"))
         try:
             ok = gpu_registry.request_cooperative_unload(peer)
         except Exception as e:
@@ -310,6 +397,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # actual share is short, reaching the native loader with too
             # little room on that device. Only applies to a GGUF-backend load.
             check_split_fit = _is_gguf(m_path)
+            # Peers already asked to cooperate during THIS load attempt: each is
+            # answerable once, so the loop below always makes progress (REG-454).
+            asked_peers: set = set()
 
             while True:
                 # Off the event loop: vram_capacity()/gpu_split_shortfall() route
@@ -373,7 +463,15 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     # coordination, see localm.gpu_registry). Off the event loop (it
                     # may make a blocking loopback call). Advisory: any failure falls
                     # through to the 503 below, never a harder failure than baseline.
-                    cooperated = await loop.run_in_executor(None, _attempt_cooperative_unload)
+                    # Bounded and fit-checked (see _attempt_cooperative_unload): each
+                    # peer is asked at most once per load attempt, so this loop always
+                    # progresses, and a yank that provably could not free enough is
+                    # not worth destroying a sibling's models for.
+                    cooperated = await loop.run_in_executor(
+                        None,
+                        lambda: _attempt_cooperative_unload(
+                            needed_bytes=vram_required + headroom,
+                            free_bytes=free_vram, asked=asked_peers))
                     if cooperated:
                         continue
                     if _engines:
@@ -477,14 +575,23 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             new_engine = _engine_factory(name)
             
         cancel = threading.Event()
+        # Install the fresh event for EVERY load, preempt or not. An engine object
+        # outlives a load (idle-unload keeps it in _engines for lazy reload), so a
+        # preempt=True switch that gets superseded leaves its FIRED event on the
+        # engine, and nothing else ever clears it. Installing only under preempt
+        # meant the next API-routed (preempt=False) load reused that stale SET
+        # event, and the backend honours it by aborting the load at once - a
+        # permanent spurious 503 "superseded" on every later request for that
+        # model (REG-461). Loads of one model are serialized by its own semaphore
+        # above, so this cannot clobber a concurrent load's event.
+        if hasattr(new_engine, "set_load_cancel"):
+            new_engine.set_load_cancel(cancel)
         if preempt:
-            # Only an explicit switch registers a load-cancel hook, so only a newer
+            # Only an explicit switch REGISTERS the hook globally, so only a newer
             # explicit switch can abort this load; API-routed loads (preempt=False)
             # run to completion, never cancelled by a concurrent different-model load.
             _switch_cancel = cancel
             _switch_loading = name
-            if hasattr(new_engine, "set_load_cancel"):
-                new_engine.set_load_cancel(cancel)
         try:
             await loop.run_in_executor(None, new_engine.load)
         except ModelLoadCancelled:
@@ -503,8 +610,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             on_active(name)
         # Cross-install GPU coordination: reflect the newly-active model so a
         # sibling's next VRAM/eviction check sees fresh state. No-op when not
-        # registered (see _gpu_registry_sync).
-        _gpu_registry_sync()
+        # registered (see _gpu_registry_sync). Offloaded for the same reason as
+        # the heartbeat below: registry file I/O plus, with a non-zero
+        # main_gpu_index, a real GPU driver probe - keep it OFF the event loop.
+        await loop.run_in_executor(None, _gpu_registry_sync)
         return {"status": "loaded", "model": name}
 
 
@@ -590,6 +699,64 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
     return _engines[name]
 
 
+def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool,
+                     before_scope=None) -> None:
+    """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
+    measurable (unchanged from before), plus an honest flag when the reading
+    cannot be presented as current fact - rather than asserting a wrong number
+    (AGENTS.md rule 5).
+
+    ``before is None`` returns early and adds NOTHING - the benign case (a
+    CPU-only box, or the Windows registry tier, which reports total but never
+    free) where a completed probe simply has no free reading to give. That is not
+    the fault this guards, and must not be dressed up as one: no VRAM telemetry is
+    the normal, permanent state there, so saying nothing is the honest answer.
+
+    THREE independent ways this reading can be wrong, and they are not the same bug:
+
+    - NOT FRESH (``before_fresh`` false): the probe timed out or was busy, so the
+      'before' value is a stale cached one (PR #693's case; see _vram_free_reading).
+    - AFTER UNVERIFIABLE (``released is None``): wait_for_vram_release() could not
+      verify the outcome (the 'after' reading went unmeasurable), so ``vram_freed``
+      is null rather than a false "VRAM did not drop" - a claim a reading that never
+      refreshed cannot support (PR #694's case).
+    - NOT DEVICE-SCOPED (``before_scope`` is FREE_SCOPE_PROCESS): the probe was
+      perfectly fresh, but on this platform the driver reports only the CALLING
+      process's own allocations. Since every GGUF load runs in an isolated worker
+      subprocess (backends/gguf.py, #606), the model's VRAM is in another process
+      and simply absent from the number - which is why before/after came back
+      byte-identical, and vram_freed false, across a load/unload cycle that an OS
+      counter showed working perfectly. Measured, see
+      dev-notes/vram-cross-process-blindness.md.
+
+    All three are reported through the same flag because they mean the same thing to
+    a caller (do not trust this number), but the note says which, so a bug report
+    points at the right one."""
+    if before is None:
+        return
+    from localm.discover import FREE_SCOPE_PROCESS
+    result.update(vram_freed=released, vram_before_bytes=before, vram_after_bytes=after)
+    reasons = []
+    if not before_fresh:
+        reasons.append(
+            "the GPU probe timed out or was busy when this reading was taken, so "
+            "it may reflect a stale cached value rather than the current state")
+    if released is None:
+        reasons.append(
+            "the free-VRAM reading went unmeasurable after the unload, so whether "
+            "VRAM was actually reclaimed could not be verified")
+    if before_scope == FREE_SCOPE_PROCESS:
+        reasons.append(
+            "this GPU's driver reports only THIS process's own VRAM allocations, "
+            "and the model is loaded in a separate worker process, so its memory "
+            "is not counted in these figures")
+    if reasons:
+        result["vram_reading_uncertain"] = True
+        result["vram_note"] = (
+            "vram_before_bytes/vram_after_bytes/vram_freed may be wrong: "
+            + "; ".join(reasons))
+
+
 async def unload_all_models() -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
@@ -605,13 +772,13 @@ async def unload_all_models() -> dict:
     original inline implementation."""
     global _active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
-    from localm.discover import vram_capacity
-    from localm.vram import wait_for_vram_release
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
+    from localm.inference import embedder as _embedder_mod
 
-    def _free():
-        return vram_capacity().get("free")
+    _free = _live_free_vram_bytes
 
-    before = _free()
+    before, before_fresh, before_scope = _vram_free_reading()
     unloaded_models = []
     skipped_in_use = []
 
@@ -645,6 +812,37 @@ async def unload_all_models() -> dict:
         finally:
             engine.unloading = False
 
+    # Release the shared embedder too - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring): it is loaded independently
+    # by RAG/memory/coder-episode callers via get_embedder(), never through
+    # switch_engine, so it was previously NEVER freed by "Unload all" even
+    # though the GUI reported everything released (only the chat engines'
+    # VRAM actually dropped - the embedder's stayed resident).
+    #
+    # loaded_dim()/active_requests() MUST run in the executor, not directly on
+    # this coroutine: get_embedder() can hold embedder._LOCK for the full
+    # duration of an IsolatedEmbedder native/subprocess load (up to its load
+    # timeout), and both of those accessors block on that same lock. A
+    # synchronous call here would freeze the WHOLE event loop - every other
+    # request this server is serving - for that entire window, not just this
+    # coroutine (confirmed via live reproduction during review, 2026-07-14).
+    # Executor-offloading them, like every other blocking call in this
+    # function, keeps the wait local to this one coroutine instead.
+    embedder_was_loaded = False
+    embedder_dim = await loop.run_in_executor(None, _embedder_mod.loaded_dim)
+    if embedder_dim is not None:
+        # Honor the in-flight-request pin (AUDIT-CRIT-1) for the embedder too,
+        # exactly like the chat-engine loop above: a request mid-embed() must
+        # not have its embedder (and the isolated worker process it is
+        # waiting on) freed out from under it. Skip it and report it
+        # alongside the pinned chat engines instead of a lying "unloaded".
+        embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
+        if embedder_active > 0:
+            skipped_in_use.append("embedding model")
+        else:
+            await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+            embedder_was_loaded = True
+
     # Update compatibility pointers - but NOT if the active engine was a pinned one
     # we deliberately left loaded (clearing it would strand the in-flight request's
     # active model).
@@ -653,13 +851,14 @@ async def unload_all_models() -> dict:
         _engine = None
         _inference_sem = None
 
-    if before is not None and unloaded_models:
+    released_anything = bool(unloaded_models) or embedder_was_loaded
+    if before is not None and released_anything:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
     else:
         released, after = 0, before
 
-    if unloaded_models:
+    if released_anything:
         status = "unloaded"
     elif skipped_in_use:
         status = "in_use"          # nothing freed: every loaded model is pinned
@@ -668,16 +867,87 @@ async def unload_all_models() -> dict:
     result = {
         "status": status,
         "model": unloaded_models[0] if unloaded_models else "none",
-        "unloaded_models": unloaded_models
+        "unloaded_models": unloaded_models,
+        "embedder_unloaded": embedder_was_loaded,
     }
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
-    if before is not None:
-        result.update(vram_freed=released,
-                      vram_before_bytes=before, vram_after_bytes=after)
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
     # Cross-install GPU coordination: reflect the now-empty/changed state for a
-    # sibling's next eviction decision. No-op when not registered.
-    _gpu_registry_sync()
+    # sibling's next eviction decision. No-op when not registered. Offloaded:
+    # registry file I/O plus, with a non-zero main_gpu_index, a GPU driver probe.
+    await loop.run_in_executor(None, _gpu_registry_sync)
+    return result
+
+
+async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
+    """If *name* is a registered model whose path matches the currently-loaded
+    shared embedder, release it and report the freed VRAM - the targeted-unload
+    counterpart to ``unload_all_models``'s embedder release above.
+
+    The embedder is a separate lifecycle from ``_engines`` (see
+    ``localm.inference.embedder``'s module docstring): ``unload_one_model``'s
+    own ``_engines.get(name)`` lookup can never find it, so without this a
+    resident embedding model registered under its own name (the common case:
+    a `localm pull`-ed GGUF selected as the embedding model) showed as
+    "loaded" on the Models page yet its per-row Unload button was a silent
+    no-op. Matched by resolved PATH, not by name/config, so it is correct
+    regardless of how ``embedding_model`` was originally resolved (an explicit
+    path, a registered name, or a known key) - what matters is which file is
+    actually resident. Returns None when *name* is not the embedder, so the
+    caller falls back to its normal "already_unloaded" outcome for a genuinely
+    untracked/never-loaded chat model."""
+    from localm.inference import embedder as _embedder_mod
+    # Executor-offloaded, not a direct call: get_embedder() can hold
+    # embedder._LOCK for the full duration of an IsolatedEmbedder
+    # native/subprocess load, and loaded_path() blocks on that same lock. A
+    # synchronous call here would freeze the WHOLE event loop for that window
+    # (same hazard as unload_all_models's loaded_dim() call - see its comment).
+    emb_path = await loop.run_in_executor(None, _embedder_mod.loaded_path)
+    if emb_path is None:
+        return None
+    from pathlib import Path
+    from localm.config import load_registry
+    from localm.model_manager import _entry_path
+    entry_path = _entry_path(load_registry().get(name))
+    if entry_path is None:
+        return None
+    try:
+        if Path(entry_path).resolve() != Path(emb_path).resolve():
+            return None
+    except OSError:
+        return None
+
+    # Honor the in-flight-request pin (AUDIT-CRIT-1): a request mid-embed()
+    # must not have its embedder freed out from under it. Report it as still
+    # in use instead of a lying "unloaded", matching unload_one_model's own
+    # pinned-chat-engine check just below. Executor-offloaded for the same
+    # reason as loaded_path() above - active_requests() also blocks on
+    # embedder._LOCK, which get_embedder() can hold for the length of an
+    # IsolatedEmbedder load; a synchronous call here would freeze the whole
+    # event loop, not just this request.
+    embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
+    if embedder_active > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
+
+    _free = _live_free_vram_bytes
+
+    before, before_fresh, before_scope = _vram_free_reading()
+    await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+    result = {"status": "unloaded", "model": name, "was_active": False}
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    # Offloaded for the same reason as this function's other executor hops above.
+    await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
 
@@ -694,11 +964,14 @@ async def unload_one_model(name: str) -> dict:
     outright should check the registry themselves before calling this."""
     global _active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
-    from localm.discover import vram_capacity
-    from localm.vram import wait_for_vram_release
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
+        embedder_result = await _unload_embedder_if_matches(name, loop)
+        if embedder_result is not None:
+            return embedder_result
         return {"status": "already_unloaded", "model": name}
     # Honor the in-flight-request pin (AUDIT-CRIT-1): an engine a request is
     # generating on must not be unloaded out from under it (it would reload it
@@ -708,10 +981,9 @@ async def unload_one_model(name: str) -> dict:
     if isinstance(active, int) and active > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
-    def _free():
-        return vram_capacity().get("free")
+    _free = _live_free_vram_bytes
 
-    before = _free()
+    before, before_fresh, before_scope = _vram_free_reading()
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
     # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
     # check above can fast-path-pin this engine while we free it (the pin-arrives-
@@ -740,10 +1012,11 @@ async def unload_one_model(name: str) -> dict:
         released, after = 0, before
 
     result = {"status": "unloaded", "model": name, "was_active": was_active}
-    if before is not None:
-        result.update(vram_freed=released,
-                      vram_before_bytes=before, vram_after_bytes=after)
-    _gpu_registry_sync()
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    # Offloaded: registry file I/O plus, with a non-zero main_gpu_index, a GPU
+    # driver probe - keep it OFF the event loop (same as the heartbeat).
+    await loop.run_in_executor(None, _gpu_registry_sync)
     return result
 
 
@@ -1320,11 +1593,14 @@ def _csrf_ok(request) -> bool:
     so a valid session always has a usable token. A cross-site page can neither read
     the HttpOnly session cookie nor the token (SOP), and cannot set a non-simple
     header; SameSite=Strict and the same-origin guard remain in force."""
+    from localm.auth import ct_equal
     header = request.headers.get(CSRF_HEADER, "")
     sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
     if not header or not sid:
         return False
-    return hmac.compare_digest(header, csrf_token_for(request, sid))
+    # ct_equal, not compare_digest: the header is caller-supplied and latin-1
+    # decoded, so a non-ASCII one would raise and turn this 403 into a 500.
+    return ct_equal(header, csrf_token_for(request, sid))
 
 
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
@@ -1585,6 +1861,19 @@ def mount_gui_surface(app) -> bool:
     return True
 
 
+def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
+    """Log a swallowed best-effort failure at *level* (with the current exception's
+    traceback) without ever raising. The nested-guard pattern already used at the
+    update-watchdog site, factored out for the shutdown/restart teardown chain: a
+    swallow stays discoverable (rule 5) yet can never itself break the stop/restart
+    (the logging call is guarded too)."""
+    try:
+        from localm.debuglog import logger as _dbg
+        getattr(_dbg, level, _dbg.debug)(msg, exc_info=True)
+    except Exception:
+        pass
+
+
 def _do_shutdown() -> None:
     """SRV-4: the actual stop sequence. Unload the model FIRST so the native
     context is freed cleanly (a hard exit while it is loaded segfaults during
@@ -1596,18 +1885,46 @@ def _do_shutdown() -> None:
         try:
             engine.unload()
         except Exception:
-            pass
+            # Best-effort clean teardown before exit; a failed unload must not
+            # block the stop, but log it so a segfault-on-exit has a breadcrumb.
+            _dbg_swallow("engine unload during shutdown failed (non-fatal)")
     # Unload mocked _engine if it is set and wasn't in _engines
     if _engine is not None and _engine not in _engines.values():
         try:
             _engine.unload()
         except Exception:
-            pass
+            _dbg_swallow("engine unload during shutdown failed (non-fatal)")
+    # Also release the shared embedder - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring), so a full stop actually
+    # frees ALL resident VRAM, not just the chat engines. Same swallow-but-log
+    # pattern as the engine unload above: shutdown must complete regardless,
+    # but a failure stays discoverable (rule 5).
+    try:
+        from localm.inference import embedder as _embedder_mod
+        # One lock-free call, deliberately NOT active_requests()/reset_embedder():
+        # both take the embedder's load lock, which get_embedder() holds for the
+        # FULL duration of an embedding-model load - so a stop issued during a
+        # load blocked on the guard itself and hung this shutdown, never reaching
+        # the worker teardown. release_for_exit() makes the whole decision without
+        # that lock: it terminates a busy worker outright (the pinned request
+        # cannot be served either way once we exit) and closes an idle one
+        # politely. It must run: os._exit below bypasses atexit, and
+        # multiprocessing's daemon-child reclamation IS an atexit hook, so a
+        # skipped release leaves the worker orphaned with its model resident in
+        # VRAM - defeating this path's whole purpose of freeing ALL of it
+        # (REG-650).
+        _embedder_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("embedder release during shutdown failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
     except Exception:
-        pass
+        # If the crash marker is NOT cleared, this intentional stop is reported as
+        # a crash on the next boot - a false "it crashed". Log it (WARNING) so that
+        # misattribution is discoverable instead of silent.
+        _dbg_swallow("could not disarm crash guard on shutdown; next boot may "
+                     "misreport this intentional stop as a crash", level="warning")
     import os
     os._exit(0)
 
@@ -1625,22 +1942,46 @@ def _request_shutdown(delay: float = 0.25) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _restart_argv() -> list:
+def _restart_argv(port: Optional[int] = None) -> list:
     """The command line to re-launch this server. Always ``python -m localm <args>``
     - the canonical entry the codebase uses - so a restart works regardless of how
     the server was originally started (a console-script .exe, ``-m``, or a script
-    path, any of which can make ``sys.argv[0]`` un-re-runnable by the interpreter)."""
+    path, any of which can make ``sys.argv[0]`` un-re-runnable by the interpreter).
+
+    *port* (the port this instance is ACTUALLY bound to) is appended as an explicit
+    ``-p``, so the new process comes back on the same port instead of re-running
+    pick_port() and picking a different one. Without it, an instance that was
+    auto-bumped off a busy default (started with no -p while another localm held
+    8642, so pick_port() gave it 8643) re-execs with no port token at all, calls
+    pick_port(None), finds 8642 free again now that the other instance is gone,
+    and silently moves - stranding the user's open GUI tab on a dead port, and
+    making the post-update watchdog poll the old port until it times out and
+    auto-rolls back a perfectly healthy build (REG-605).
+
+    Appending is safe against a user-supplied -p: click takes the LAST occurrence
+    of an option, and *port* is the port that value already resolved to, so the
+    two agree. Only serve/gui reach a restart, and both accept -p; a caller with
+    no known port (a bare create_app() that never advertised) passes None and gets
+    the untouched command line."""
     import sys
-    return [sys.executable, "-m", "localm", *sys.argv[1:]]
+    argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
+    if port:
+        argv += ["-p", str(port)]
+    return argv
 
 
-def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
+def _do_restart(*, update_watchdog: Optional[dict] = None,
+                port: Optional[int] = None) -> None:
     """R18: restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
     clear the crash marker so this intentional restart is not reported as a crash,
     then re-exec the same command line so the server comes back on the same port.
     os.execv replaces the process image and does not return on success. Separated
     from the route so it can be tested without actually re-execing.
+
+    *port* is the port this instance is actually bound to (app.state.instance_port,
+    set by advertise()); it is pinned into the re-exec command line so "comes back
+    on the same port" is TRUE rather than merely intended - see _restart_argv.
 
     *update_watchdog*, when given (only by the post-update restart path - see
     routes/admin.py's /api/update/apply), is a
@@ -1655,25 +1996,46 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
         try:
             engine.unload()
         except Exception:
-            pass
+            # Best-effort clean teardown before re-exec; a failed unload must not
+            # block the restart, but log it (a hard re-exec while loaded can
+            # segfault, so a breadcrumb helps if that happens).
+            _dbg_swallow("engine unload during restart failed (non-fatal)")
     # Unload mocked _engine if it is set and wasn't in _engines
     if _engine is not None and _engine not in _engines.values():
         try:
             _engine.unload()
         except Exception:
-            pass
+            _dbg_swallow("engine unload during restart failed (non-fatal)")
+    # Also release the shared embedder - a separate lifecycle from _engines (see
+    # localm.inference.embedder's module docstring), so a restart actually
+    # frees ALL resident VRAM before re-exec, not just the chat engines. Same
+    # swallow-but-log pattern as the engine unload above: restart must proceed
+    # regardless, but a failure stays discoverable (rule 5).
+    try:
+        from localm.inference import embedder as _embedder_mod
+        # Lock-free release - see the matching comment in _do_shutdown above for
+        # the full rationale. os.execv is the same case as os._exit: it replaces
+        # this process image but does NOT touch the separate worker child, and
+        # bypasses atexit, so without this the old worker survives the restart
+        # holding VRAM while the restarted server spawns a second one (REG-650).
+        _embedder_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("embedder release during restart failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
     except Exception:
-        pass
+        # Same misattribution hazard as _do_shutdown: an uncleared crash marker
+        # makes this intentional restart look like a crash next boot. Log it.
+        _dbg_swallow("could not disarm crash guard on restart; next boot may "
+                     "misreport this intentional restart as a crash", level="warning")
 
     try:
         global _audit
         if _audit is not None and hasattr(_audit, "close"):
             _audit.close()
     except Exception:
-        pass
+        _dbg_swallow("audit log close during restart failed (non-fatal)")
 
     try:
         from localm.debuglog import dump_ring_buffer, flush_log_handlers, recent_activity
@@ -1696,7 +2058,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
         # it creates no new trace file, so it is safe in privacy mode too.
         flush_log_handlers()
     except Exception:
-        pass
+        # Best-effort crash-recovery breadcrumbs (ring buffer + pre_restart.log)
+        # and the handler flush; a failure here must not block the restart, but it
+        # means the next boot has fewer diagnostics, so log rather than swallow.
+        _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
     import os
     import sys
@@ -1745,19 +2110,20 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
             except Exception:
                 pass
 
-    os.execv(sys.executable, _restart_argv())
+    os.execv(sys.executable, _restart_argv(port))
 
 
-def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None) -> None:
+def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
+                     port: Optional[int] = None) -> None:
     """Run _do_restart shortly after returning, so the 200 response flushes to the
     client before the process re-execs (mirrors _request_shutdown). *update_watchdog*
-    is forwarded to _do_restart unchanged - see its docstring."""
+    and *port* are forwarded to _do_restart unchanged - see its docstring."""
     import threading
     import time as _t
 
     def _run():
         _t.sleep(delay)
-        _do_restart(update_watchdog=update_watchdog)
+        _do_restart(update_watchdog=update_watchdog, port=port)
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -1820,7 +2186,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm import bugreport
                 bugreport.install_asyncio_handler(asyncio.get_running_loop())
             except Exception:
-                pass
+                # The very mechanism meant to surface silent asyncio-task failures
+                # must not itself fail silently; log it (mirrors the session-sweep
+                # guard just above) so its absence is discoverable.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("asyncio exception handler not installed (non-fatal)",
+                           exc_info=True)
         # Plugins register() before this loop existed, so loop-dependent plugin
         # work (the jobs scheduler) is queued on the manager; run it now the loop
         # is up - without this no scheduled job fired on a stock start (memory-audit
@@ -2187,12 +2558,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             and not request.url.path.startswith("/v1/models")
         )
         if (is_unsafe or is_metadata_get) and not request.url.path.startswith(_CROSS_ORIGIN_OK):
-            from localm.auth import any_key_configured, require_auth_enabled
+            from localm.auth import (any_key_configured, ct_equal,
+                                     require_auth_enabled)
             if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)
                 presented = _bearer_token(request)
-                token_ok = bool(token and presented
-                                 and hmac.compare_digest(presented, token))
+                token_ok = ct_equal(presented, token)
                 # AUD-CORSTOKEN: an unsafe-method request already passed the
                 # same-origin check above (or is exempt as _CROSS_ORIGIN_OK,
                 # which never reaches here); a metadata GET never went through

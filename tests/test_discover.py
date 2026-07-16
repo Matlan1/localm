@@ -9,10 +9,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from localm import discover
+# Imported at collection time ON PURPOSE, though the tests below reach it via
+# monkeypatch string targets rather than this name. discover imports it lazily
+# (inside _apply_device_global_free), so without this it would first execute INSIDE
+# TestListGpus's patch.dict(sys.modules, {"torch": ...}) block - and patch.dict, on
+# exit, restores sys.modules to its prior contents, EVICTING it while leaving the
+# stale module object bound as an attribute of the localm package. monkeypatch
+# resolves "localm.gpu_usage.X" via getattr on that package, so it would patch the
+# ORPHANED module while the code under test re-imports a fresh one, and every stub
+# below would silently no-op against real hardware. Importing it here keeps it in
+# sys.modules from the start, so patch.dict has nothing to evict.
+from localm import gpu_usage as _gpu_usage_imported_early  # noqa: F401
 from localm.discover import (
     DiscoverError, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
+    _native_backend_has_vulkan,
     _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
     resolve_gpu_split, resolve_main_gpu_index, split_device_count, vram_capacity,
@@ -371,7 +384,13 @@ class TestListGpus:
                    ("RTX 3060", 10_000_000_000, 12_000_000_000)]
         with self._fake_torch(devices):
             gpus = list_gpus()
-        assert gpus == [
+        # Enumeration fields only, NOT dict equality: entries also carry
+        # "free_scope", whose value legitimately depends on the real host (a
+        # device-global source exists on Windows, and the driver query is already
+        # device-global elsewhere). Pinning it here would make this enumeration test
+        # pass or fail on the tester's hardware. TestFreeScope below covers that
+        # field directly, with the source stubbed, so it stays deterministic.
+        assert [{k: g[k] for k in ("index", "name", "total", "free")} for g in gpus] == [
             {"index": 0, "name": "RTX 4090", "total": 24_000_000_000, "free": 20_000_000_000},
             {"index": 1, "name": "RTX 3060", "total": 12_000_000_000, "free": 10_000_000_000},
         ]
@@ -392,8 +411,12 @@ class TestListGpus:
              patch("subprocess.run", return_value=fake_proc):
             gpus = list_gpus()
         assert len(gpus) == 2
+        # free_scope "device" is part of this path's contract, and unlike the torch
+        # path it is host-independent: nvidia-smi's memory.free is the whole board's
+        # across every process, so it needs no correction on any platform.
         assert gpus[0] == {"index": 0, "name": "NVIDIA RTX 4090",
-                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2}
+                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
+                            "free_scope": "device"}
         assert gpus[1]["index"] == 1
         assert gpus[1]["name"] == "NVIDIA RTX 3060"
 
@@ -504,6 +527,47 @@ class TestListGpusSafety:
         assert elapsed < 2.0
         assert fallback == good, "a wedged probe must serve the last-known-good value, not []"
 
+    def test_reset_orphans_an_abandoned_probe_so_it_cannot_bleed(self, monkeypatch):
+        """An abandoned probe must not land its reading after a reset has retired it.
+
+        A probe that overruns its deadline is ABANDONED, not cancelled (a wedged
+        native call cannot be interrupted from Python), so that thread outlives the
+        reset and used to write _gpu_last_good afterwards - landing inside whatever
+        ran next. That is not hypothetical: a cold ROCm init (~6.5s, see this
+        module's own note) overruns the 4s deadline, so this box's REAL card was
+        arriving inside later tests that assert a fake or empty reading, failing
+        them intermittently (~15% of runs) with 'AMD Radeon RX 6900 XT'.
+
+        Guards the epoch fence in _reset_gpu_probe_cache. Clearing the globals
+        alone CANNOT fix this (the write happens after the clear), so a fix that
+        only re-clears would still fail this test."""
+        import threading
+        import time
+
+        from localm import discover
+
+        landed = threading.Event()
+
+        def _slow_probe():
+            time.sleep(0.4)          # still running when the reset below lands
+            landed.set()
+            return [{"index": 0, "name": "STRAGGLER", "total": 1, "free": 1}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow_probe)
+        assert list_gpus(deadline=0.05) == []      # overruns -> thread abandoned
+
+        # The next test's autouse fixture, while the probe thread is still running.
+        discover._reset_gpu_probe_cache()
+
+        assert landed.wait(5), "probe thread never finished; test cannot conclude"
+        time.sleep(0.2)   # give the straggler's write every chance to land
+        with discover._gpu_probe_lock:
+            leaked = discover._gpu_last_good
+        assert leaked is None, (
+            f"an abandoned probe wrote {leaked!r} into _gpu_last_good AFTER the "
+            f"reset retired it - it would be served to the next test/caller as a "
+            f"last-known-good reading")
+
 
 class TestListGpusTimeoutStatus:
     """A timed-out cold probe must be DISTINGUISHABLE from a genuine empty result
@@ -569,6 +633,30 @@ class TestListGpusTimeoutStatus:
         assert _GPU_PROBE_CLI_DEADLINE >= 10.0
 
 
+@pytest.fixture
+def _non_vulkan_host(monkeypatch):
+    """Pin the active native backend to NON-vulkan (REG-596).
+
+    resolve_main_gpu_index/resolve_gpu_split only cross-check a configured index
+    against the detected device list when the active backend is NOT vulkan (on
+    vulkan, list_gpus() is structurally blind to the real device list, so the
+    index is trusted instead - see _native_backend_has_vulkan). That check reads
+    the REAL provisioned runtime dir off disk, so without this pin the classes
+    below assert the drop-the-unknown-index behaviour on a host that skips it:
+    green on an unprovisioned/HIP box, RED on a vulkan-provisioned one (the
+    RECOMMENDED universal build), for the same source.
+
+    The vulkan side of the branch is covered explicitly by
+    TestVulkanBackendIndexPassthrough, and the detector itself by
+    TestNativeBackendHasVulkan, so pinning here narrows these classes to the
+    branch they mean to test rather than hiding the other one. Mirrors the
+    has_max_devices pin in TestApplyGpuSplit, which fixes the same class of
+    host-state leak.
+    """
+    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestResolveMainGpuIndex:
     def test_none_returns_zero_without_querying_devices(self, monkeypatch):
         calls = []
@@ -641,6 +729,7 @@ class TestResolveMainGpuIndex:
             _MAX_GPU_SPLIT_INDEX
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestApplyMainGpu:
     def test_unset_leaves_native_default_untouched(self):
         mp = SimpleNamespace(main_gpu=0)
@@ -670,6 +759,7 @@ class TestApplyMainGpu:
         assert mp.main_gpu == 0
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestResolveGpuSplit:
     _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
 
@@ -757,6 +847,128 @@ class TestResolveGpuSplit:
         assert resolve_gpu_split([3, 7]) == [(3, 1.0), (7, 1.0)]
 
 
+def _ggml_lib_name(stem: str) -> str:
+    """A ggml backend library filename matching THIS platform's _ggml_glob(), so
+    the detector below is exercised through its real glob rather than a stubbed
+    one."""
+    if sys.platform == "win32":
+        return f"ggml-{stem}.dll"
+    if sys.platform == "darwin":
+        return f"libggml-{stem}.dylib"
+    return f"libggml-{stem}.so"
+
+
+class TestVulkanBackendIndexPassthrough:
+    """REG-596: the vulkan side of the index-validation branch had NO coverage.
+
+    On the vulkan build, list_gpus() cannot enumerate the real device list at
+    all (it only sees torch.cuda / nvidia-smi), so a non-empty but
+    vulkan-incomplete list must NOT veto an explicitly configured index -
+    GPU-SPLIT-VKINDEX was confirmed live to silently drop a VALID device.
+    These pin the backend to vulkan and assert the pass-through contract, so
+    the behaviour is tested on every host instead of only on whichever runtime
+    happens to be provisioned.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _vulkan_host(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: True)
+
+    def test_main_gpu_index_absent_from_detected_list_is_trusted(self, caplog):
+        # The exact inversion of TestResolveMainGpuIndex's drop test: index 5 is
+        # not in the (vulkan-blind) list, so it is trusted, not swapped for 0.
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(5, gpus=[{"index": 0}, {"index": 1}])
+        assert idx == 5
+        assert not any("does not match" in r.message for r in caplog.records)
+
+    def test_gpu_split_unknown_index_is_kept(self):
+        assert resolve_gpu_split([0, 9], gpus=[{"index": 0}]) == \
+            [(0, 1.0), (9, 1.0)]
+
+    def test_gpu_split_ratios_still_pair_with_their_own_index(self):
+        # Nothing is dropped on vulkan, so every configured ratio keeps its index.
+        assert resolve_gpu_split([0, 5, 1], [3.0, 9.0, 1.0],
+                                 gpus=[{"index": 0}, {"index": 1}]) == \
+            [(0, 3.0), (5, 9.0), (1, 1.0)]
+
+    def test_apply_main_gpu_trusts_configured_index(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
+        mp = SimpleNamespace(main_gpu=0)
+        apply_main_gpu(mp, config={"main_gpu_index": 7})
+        assert mp.main_gpu == 7
+
+    def test_sanity_ceiling_still_enforced_on_vulkan(self, caplog):
+        # The ceiling is checked BEFORE any device-membership branching, so
+        # being unable to validate against a device list must NOT wave an absurd
+        # index through to the native loader.
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(500_000, gpus=[{"index": 0}])
+        assert idx == 0
+        assert any("ceiling" in r.message for r in caplog.records)
+
+    def test_split_sanity_ceiling_still_enforced_on_vulkan(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([0, 500_000], gpus=[{"index": 0}])
+        assert result == []
+        assert any("ceiling" in r.message for r in caplog.records)
+
+    def test_negative_index_still_rejected_on_vulkan(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(-1, gpus=[{"index": 0}])
+        assert idx == 0
+        assert any("negative" in r.message for r in caplog.records)
+
+
+class TestNativeBackendHasVulkan:
+    """REG-596: the detector whose host-dependence made the suite host-dependent
+    had no tests of its own. It reads the real shipped library set, so pin the
+    runtime dir at a tmp_path and assert on the file set."""
+
+    @pytest.fixture
+    def _runtime_dir(self, tmp_path, monkeypatch):
+        # _native_backend_has_vulkan imports these INSIDE the function, so patch
+        # them on the SOURCE module, not on localm.discover.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: tmp_path)
+        return tmp_path
+
+    def test_true_when_vulkan_backend_is_shipped(self, _runtime_dir):
+        (_runtime_dir / _ggml_lib_name("base")).write_bytes(b"")
+        (_runtime_dir / _ggml_lib_name("vulkan")).write_bytes(b"")
+        assert _native_backend_has_vulkan() is True
+
+    def test_false_when_a_non_vulkan_backend_is_shipped(self, _runtime_dir):
+        # e.g. the HIP/ROCm build: present, but not vulkan.
+        (_runtime_dir / _ggml_lib_name("base")).write_bytes(b"")
+        (_runtime_dir / _ggml_lib_name("hip")).write_bytes(b"")
+        assert _native_backend_has_vulkan() is False
+
+    def test_false_when_no_backend_libraries_present(self, _runtime_dir):
+        assert _native_backend_has_vulkan() is False
+
+    def test_false_when_runtime_dir_unresolved(self, monkeypatch):
+        # No native runtime provisioned at all: not vulkan, and must not raise.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: None)
+        assert _native_backend_has_vulkan() is False
+
+    def test_false_and_no_raise_when_the_probe_itself_fails(self, monkeypatch):
+        # Detection is best-effort: a broken runtime resolution must degrade to
+        # "not vulkan" (the validating branch) rather than break model loading.
+        def _boom():
+            raise OSError("runtime dir exploded")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        assert _native_backend_has_vulkan() is False
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestApplyGpuSplit:
     _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
 
@@ -844,6 +1056,7 @@ class TestApplyGpuSplit:
         assert floats[high_idx] == pytest.approx(1.0)
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramInfoRespectsConfiguredDevice:
     """vram_info() must reflect the CONFIGURED main GPU, not always device 0,
     once list_gpus() can see more than one device."""
@@ -874,6 +1087,7 @@ class TestVramInfoRespectsConfiguredDevice:
         assert info == {"total": 24_000_000_000, "free": 20_000_000_000}
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramCapacitySplitAware:
     """vram_capacity() must sum total/free across a CONFIGURED multi-GPU split
     (2+ valid resolve_gpu_split() devices) instead of vram_info()'s single main-
@@ -962,6 +1176,82 @@ class TestVramCapacitySplitAware:
         assert vram_capacity() == {"total": 16_000_000_000}
 
 
+class TestVramInfoReturnStatus:
+    """vram_info(return_status=True) must propagate list_gpus()'s own probe
+    status, so a caller reporting a specific VRAM number as CURRENT FACT (not
+    just a fit ceiling) can tell a fresh reading from a timed-out/stale one -
+    the gap a release-verify pass found in /v1/models/unload's vram_before/
+    after_bytes reporting."""
+
+    def test_default_call_keeps_plain_dict_contract(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe",
+                             lambda: [{"index": 0, "name": "A", "total": 8, "free": 4}])
+        assert vram_info() == {"total": 8, "free": 4}
+
+    def test_return_status_true_reports_ok_on_a_fresh_probe(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe",
+                             lambda: [{"index": 0, "name": "A", "total": 8, "free": 4}])
+        info, status = vram_info(return_status=True)
+        assert info == {"total": 8, "free": 4}
+        assert status == GPU_PROBE_OK
+
+    def test_return_status_true_reports_timeout_on_a_wedged_probe(self, monkeypatch):
+        import threading
+        release = threading.Event()
+
+        def _slow():
+            release.wait(10)
+            return [{"index": 0, "name": "A", "total": 8, "free": 4}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        info, status = vram_info(return_status=True)
+        release.set()
+        assert status == GPU_PROBE_TIMEOUT
+        # No last-known-good reading yet in this test, so info is the genuinely
+        # empty ({} via the no-torch/no-devices tail) - the point being asserted
+        # here is the STATUS, not this incidental value.
+        assert isinstance(info, dict)
+
+
+class TestVramCapacityReturnStatus:
+    """vram_capacity(return_status=True) must propagate probe status through
+    BOTH the single-GPU short-circuit (delegates to vram_info) and the
+    multi-GPU split-summed path, not just one of them."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+    ]
+
+    def test_no_split_configured_propagates_status_via_vram_info(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": None})
+        info, status = vram_capacity(return_status=True)
+        assert info == {"total": 24_000_000_000, "free": 20_000_000_000}
+        assert status == GPU_PROBE_OK
+
+    @pytest.mark.usefixtures("_non_vulkan_host")
+    def test_split_configured_propagates_status(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": [0, 1]})
+        info, status = vram_capacity(return_status=True)
+        assert info == {"total": 36_000_000_000, "free": 30_000_000_000}
+        assert status == GPU_PROBE_OK
+
+    def test_default_call_keeps_plain_dict_contract_regardless_of_split(self, monkeypatch):
+        """The ~28 test files that patch list_gpus()/vram_capacity() with a
+        plain no-kwarg stand-in must never see the new kwarg emitted unless
+        they opted in - this is what a release-verify-pass fix accidentally
+        broke on the first attempt (TypeError: unexpected keyword argument)."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity() == {"total": 36_000_000_000, "free": 30_000_000_000}
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestSplitDeviceCount:
     """split_device_count(): the DETECTED split size vram_capacity() uses to decide
     combined-vs-single, so a caption/message can name the VRAM basis honestly. Must
@@ -997,6 +1287,7 @@ class TestSplitDeviceCount:
         assert split_device_count({"gpu_split_indices": [0, 1]}) < 2
 
 
+@pytest.mark.usefixtures("_non_vulkan_host")
 class TestGpuSplitShortfall:
     """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not
     enough for a GGUF-backend load - apply_gpu_split() divides a model by a
@@ -1103,3 +1394,320 @@ class TestGpuSplitShortfall:
         result = gpu_split_shortfall(
             8_000_000_000, config={"gpu_split_indices": [0, 1]})
         assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestFreeScope:
+    """free_scope: whether a "free" reading counts EVERY process's VRAM, or only the
+    calling process's own allocations.
+
+    This exists because, measured on a Windows + AMD ROCm/HIP box,
+    torch.cuda.mem_get_info reports total - THIS process's own allocations and is
+    blind to every other process: with ~10.5 GB genuinely in use it reported 0.14 GB,
+    and a plain 4 GB torch tensor in a CHILD process moved it by exactly 0 while an
+    OS counter tracked it exactly. localm loads every GGUF in an isolated worker
+    SUBPROCESS, so a model's own VRAM lands squarely in that blind spot. See
+    dev-notes/vram-cross-process-blindness.md.
+
+    The device-global source is stubbed here so these stay deterministic on any host
+    (the real one is AMD/Windows-only); TestFreeScopeRealHardware covers the real
+    thing against real hardware.
+    """
+
+    def _gpus(self):
+        return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
+
+    def test_windows_corrects_free_to_device_global_and_tags_device(self, monkeypatch):
+        """The whole point: a reading that counted only our own allocations is
+        replaced by one that counts the model in the worker (and the game, and
+        ComfyUI), and is labelled as such."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        # Warm: this covers the CORRECTION, not the cold-budget guard
+        # (TestFreeScopeColdBudget owns that). Explicit so the two cannot interfere.
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 6_000_000_000    # 16G total - 10G really in use
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_windows_without_a_source_keeps_number_but_tags_process(self, monkeypatch):
+        """Rule 5: when nothing better can answer we do NOT silently pass a
+        known-process-local figure off as the board's - we keep it and say so, which
+        is what makes /v1/models/unload report the reading as uncertain instead of
+        asserting a wrong number as fact."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 15_000_000_000   # untouched
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
+    def test_non_windows_is_untouched_and_device_scoped(self, monkeypatch):
+        """On Linux/NVIDIA the driver query is device-global BY DOCUMENTATION (CUDA
+        specifies *free as "free according to the OS" and warns another process can
+        move it), so it must not be corrected - and the Windows-only source must not
+        even be consulted."""
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        def _boom(gpus):
+            raise AssertionError("must not consult the Windows source off Windows")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _boom)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 15_000_000_000
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_source_failure_is_surfaced_as_process_not_crashed(self, monkeypatch):
+        """A driver/ctypes failure in the correction must degrade to "we cannot vouch
+        for this number", never take down the caller that only wanted a probe."""
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        def _boom(gpus):
+            raise OSError("atiadlxx exploded")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _boom)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
+    def test_used_exceeding_total_clamps_to_zero_not_negative(self, monkeypatch):
+        """used and total come from different sources, so their difference can land
+        outside [0, total]; free must never go negative."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 99_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 0
+
+    def test_only_mapped_devices_are_corrected(self, monkeypatch):
+        """A multi-GPU box where the source can map only one device: the mapped one
+        gets truth, the unmapped one is honestly tagged rather than guessed at."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {1: 2_000_000_000})
+        gpus = [
+            {"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000},
+            {"index": 1, "name": "B", "total": 8_000_000_000, "free": 7_000_000_000},
+        ]
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+        assert gpus[0]["free"] == 15_000_000_000
+        assert gpus[1]["free_scope"] == discover.FREE_SCOPE_DEVICE
+        assert gpus[1]["free"] == 6_000_000_000
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestVramCapacityFreeScopePropagation:
+    """free_scope must travel WITH the number it describes, all the way to the caller
+    that decides whether to present it as current fact."""
+
+    _GPUS_DEVICE = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000,
+         "free_scope": "device"},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000,
+         "free_scope": "device"},
+    ]
+    _GPUS_MIXED = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000,
+         "free_scope": "device"},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000,
+         "free_scope": "process"},
+    ]
+
+    def test_vram_info_propagates_scope(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_DEVICE)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        assert vram_info()["free_scope"] == "device"
+
+    def test_split_sum_is_device_only_when_every_device_is(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_DEVICE)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity()["free_scope"] == "device"
+
+    def test_one_process_scoped_device_makes_the_whole_sum_process_scoped(self, monkeypatch):
+        """The sum is missing that device's other-process VRAM, so the TOTAL is not a
+        whole-board figure either - it must not be laundered into one by summing with
+        a device-scoped sibling."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_MIXED)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity()["free_scope"] == "process"
+
+    def test_untagged_devices_omit_the_key_rather_than_claim_process(self, monkeypatch):
+        """No tag means UNKNOWN. Labelling it "process" would assert a blindness we
+        never measured, and would break the plain-dict contract the ~28 test files
+        patching list_gpus() rely on."""
+        gpus = [
+            {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+            {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+        ]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity() == {"total": 36_000_000_000, "free": 30_000_000_000}
+
+
+@pytest.mark.integration
+class TestFreeScopeRealHardware:
+    """The claim that matters, against the REAL driver and REAL hardware: our
+    corrected reading tracks VRAM that ANOTHER PROCESS allocates, which the driver's
+    own query provably does not.
+
+    Marked integration (needs a real GPU + a real device-global source), so it is
+    excluded from the default run. Without it, every test above could pass while the
+    actual defect - the one a stub cannot reproduce - shipped unfixed.
+    """
+
+    def test_corrected_free_tracks_another_process_where_the_driver_query_cannot(self):
+        import subprocess
+        import sys as _sys
+        import textwrap
+        import time
+
+        torch = pytest.importorskip("torch")
+        if not torch.cuda.is_available():
+            pytest.skip("no CUDA/ROCm device present to measure")
+        gpus = list_gpus()
+        if not gpus or gpus[0].get("free_scope") != "device":
+            pytest.skip("no device-global VRAM source on this host, nothing to verify")
+
+        alloc_bytes = 2 * 1024 ** 3
+        child_src = textwrap.dedent(
+            """
+            import sys, torch
+            t = torch.empty(int(sys.argv[1]) // 4, dtype=torch.float32, device="cuda:0")
+            torch.cuda.synchronize()
+            print("READY", flush=True)
+            sys.stdin.readline()
+            """
+        )
+        before = list_gpus()[0]["free"]
+        raw_before = torch.cuda.mem_get_info(0)[0]
+        child = subprocess.Popen(
+            [_sys.executable, "-c", child_src, str(alloc_bytes)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+        try:
+            if (child.stdout.readline() or "").strip() != "READY":
+                pytest.skip("child could not allocate on this GPU (busy or too small)")
+            time.sleep(1.5)
+            during = list_gpus()[0]["free"]
+            raw_during = torch.cuda.mem_get_info(0)[0]
+        finally:
+            try:
+                child.stdin.write("go\n")
+                child.stdin.flush()
+                child.wait(timeout=30)
+            except Exception:
+                child.kill()
+
+        # Our reading SEES the other process (the whole fix), within a tolerance for
+        # the child's own context overhead and the driver's MB granularity.
+        assert (before - during) > alloc_bytes * 0.8, (
+            f"corrected free did not track another process's {alloc_bytes} B "
+            f"allocation: {before} -> {during}")
+        # ...and the raw driver query still does NOT, so this test is not passing
+        # vacuously because the platform quietly started reporting device-global.
+        assert abs(raw_before - raw_during) < 64 * 1024 ** 2, (
+            "the raw driver query suddenly tracks other processes; the premise of "
+            "this fix changed and it should be re-examined, not silently trusted")
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestFreeScopeColdBudget:
+    """The correction runs INSIDE the deadline-bounded probe, so it spends the same
+    budget the driver call already spent.
+
+    Opening the device-global source is a driver init MEASURED at ~750ms, against a
+    ~0.02ms warm read. Measured live, that cold cost pushed cold probes from a
+    comfortable 2.9-3.5s to 3.6-4.0s against the 4.0s cap and started timing them
+    out - and a timed-out probe costs the caller its free reading ENTIRELY (list_gpus
+    serves [], vram_info falls to the registry tier, which has no "free" at all). A
+    correct number is not worth trading for NO number, so a cold source is skipped
+    when the budget is thin. These guard that trade-off in both directions.
+    """
+
+    def _gpus(self):
+        return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
+
+    def test_cold_source_is_skipped_when_the_budget_is_thin(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        # 0.4s left of the probe's budget: not enough to absorb a ~750ms cold open.
+        monkeypatch.setattr(discover, "_probe_deadline_at",
+                            discover.time.monotonic() + 0.4)
+
+        def _must_not_run(gpus):
+            raise AssertionError("a cold source must not be opened on a thin budget")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _must_not_run)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 15_000_000_000          # untouched
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS   # and SAID so
+
+    def test_cold_source_runs_when_the_budget_is_ample(self, monkeypatch):
+        """A CLI caller passes the longer _GPU_PROBE_CLI_DEADLINE precisely so a cold
+        box can finish; the correction must take that room when it is there (this is
+        what keeps `localm doctor` honest on its single, cold probe)."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        monkeypatch.setattr(discover, "_probe_deadline_at",
+                            discover.time.monotonic() + 12.0)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 6_000_000_000
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_warm_source_runs_even_on_a_thin_budget(self, monkeypatch):
+        """A warm read is ~0.02ms and cannot overrun anything, so the guard must not
+        keep skipping once the source is open - otherwise a 4s-deadline server would
+        skip on every probe forever and the fix would silently never engage."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr(discover, "_probe_deadline_at",
+                            discover.time.monotonic() + 0.01)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 6_000_000_000
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_no_deadline_published_does_not_block_a_cold_open(self, monkeypatch):
+        """_probe_deadline_at is None outside a probe (e.g. a direct call). Unknown
+        budget must not be read as "no budget", or the correction would never run."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        monkeypatch.setattr(discover, "_probe_deadline_at", None)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_probe_publishes_its_deadline(self, monkeypatch):
+        """The guard is only as good as the budget it reads, so the probe must
+        actually publish one."""
+        seen = {}
+
+        def _probe():
+            seen["deadline_at"] = discover._probe_deadline_at
+            return [{"index": 0, "name": "A", "total": 1, "free": 1,
+                     "free_scope": "device"}]
+
+        monkeypatch.setattr(discover, "_list_gpus_probe", _probe)
+        before = discover.time.monotonic()
+        discover.list_gpus(deadline=9.0)
+        assert seen["deadline_at"] is not None
+        # published as "now + deadline", so it lands ~9s out
+        assert 8.0 < (seen["deadline_at"] - before) <= 9.5

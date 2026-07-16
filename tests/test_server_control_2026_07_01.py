@@ -30,7 +30,8 @@ def test_do_restart_marks_fds_non_inheritable(monkeypatch):
         raise _Stop()
 
     monkeypatch.setattr(os, "execv", _fake_execv)
-    monkeypatch.setattr(http_server, "_restart_argv", lambda: ["python", "-m", "localm"])
+    monkeypatch.setattr(http_server, "_restart_argv",
+                        lambda port=None: ["python", "-m", "localm"])
     monkeypatch.setattr(http_server, "_engine", None)
 
     try:

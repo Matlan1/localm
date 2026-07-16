@@ -211,6 +211,29 @@ class PullTokenRedeemRequest(BaseModel):
     token: str
 
 
+class MediaPreflightRequest(BaseModel):
+    """Model-relevant overrides for a pre-generate model-existence check. Only
+    the fields that can change WHICH model filename a loader node references -
+    prompt text, seed, steps, dimensions, etc. never affect that and are not
+    accepted here. Image uses clip_name1/clip_name2/lora_name; music uses
+    ckpt_name. ``model_overrides`` is the per-slot node_id/input_name dict from
+    the Workflow panel's model dropdowns (see apply_model_overrides()) - shared
+    by all three media types, applied first, exactly like the real generate
+    call, so a picked-but-not-installed model is caught here too."""
+    clip_name1: str | None = None
+    clip_name2: str | None = None
+    lora_name: str | None = None
+    ckpt_name: str | None = None
+    model_overrides: dict[str, dict[str, str]] | None = None
+
+
+class ComfyPullRequest(BaseModel):
+    # Only a filename the client saw in a preceding preflight response - NEVER a
+    # client-supplied repo/path. The server re-resolves everything else from
+    # COMFY_MODEL_SOURCES itself (see model_pull_comfy_source in routes/models.py).
+    filename: str
+
+
 class RemoveModelRequest(BaseModel):
     model: str
 
@@ -229,6 +252,17 @@ class AliasRequest(BaseModel):
 class SetTypeRequest(BaseModel):
     model: str
     model_type: str
+
+
+class ScanRequest(BaseModel):
+    # None (the default, and an empty/absent POST body - the old Scan button
+    # sends no body at all) scans the configured comfy_workdir, unchanged. An
+    # explicit workdir is a one-off scan of that folder (never written back to
+    # config) - gated behind host filesystem access, same trust level as the
+    # folder browser, since it lets the caller point the scanner anywhere.
+    workdir: str | None = None
+    # True previews counts by category and registers nothing.
+    dry_run: bool = False
 
 
 class ShareClearRequest(BaseModel):

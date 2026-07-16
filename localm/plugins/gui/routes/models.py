@@ -11,20 +11,24 @@ at the top of register(), so each handler body is identical to the original.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
 from localm.debuglog import logger
-from localm.inference.http_server import (principal_id, require_scope,
-                                          unload_all_models, unload_one_model)
+from localm.inference.http_server import (principal_id, require_fs_host,
+                                          require_scope, unload_all_models,
+                                          unload_one_model)
 import localm.inference.http_server as _hs
 from localm.plugins.executor import get_plugin_executor
-from localm.plugins.gui.web import (AliasRequest, LoadModelRequest,
+from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
+                                    LoadModelRequest, MediaPreflightRequest,
                                     PullRequest, PullTokenRedeemRequest,
-                                    RemoveModelRequest, SetTypeRequest,
-                                    UnloadModelRequest, consume_pull_grant)
+                                    RemoveModelRequest, ScanRequest,
+                                    SetTypeRequest, UnloadModelRequest,
+                                    consume_pull_grant)
 
 
 def _require_registered(model: str, registry: dict | None = None) -> dict:
@@ -60,6 +64,17 @@ def register(app: FastAPI, ctx) -> None:
         from localm.model_manager import _entry_path
         registry = load_registry()
         current = active_model()
+        # Fetched ONCE, off the event loop, before the row loop below (not per
+        # row): get_embedder() can hold embedder._LOCK for the full duration of
+        # an IsolatedEmbedder native/subprocess load, and loaded_path() blocks
+        # on that same lock. A synchronous call here would freeze the WHOLE
+        # event loop - every request this server is serving, not just this one
+        # - for that window (same hazard as http_server.unload_all_models's
+        # loaded_dim() call). The embedder's path cannot change mid-request, so
+        # one fetch correctly serves every row's comparison below.
+        from localm.inference import embedder as _embedder_mod
+        loop = asyncio.get_running_loop()
+        emb_path = await loop.run_in_executor(get_plugin_executor(), _embedder_mod.loaded_path)
         models = []
         for name, entry in sorted(registry.items()):
             epath = _entry_path(entry)
@@ -82,6 +97,18 @@ def register(app: FastAPI, ctx) -> None:
             except OSError:
                 pass
             engine = _hs._engines.get(name)
+            loaded = engine.loaded if engine is not None else False
+            # A registered model can also be the shared EMBEDDING model, loaded
+            # via get_embedder() - a lifecycle entirely separate from _engines
+            # (see localm.inference.embedder's module docstring), so it never
+            # shows up above. Recognise it by resolved PATH (not name/config)
+            # so this row's "loaded" status - and its per-row Unload control,
+            # gated on this flag - actually reflect a resident embedder.
+            if not loaded and emb_path is not None:
+                try:
+                    loaded = Path(emb_path).resolve() == path.resolve()
+                except OSError:
+                    loaded = False
             models.append({
                 "name": name,
                 "source": str(entry.get("source", "")),
@@ -91,18 +118,46 @@ def register(app: FastAPI, ctx) -> None:
                 # (loaded) without being the one currently serving requests -
                 # surfaced so the Models page can offer a per-row Unload
                 # action on ANY loaded model, not just the active one.
-                "loaded": engine.loaded if engine is not None else False,
+                "loaded": loaded,
                 "model_type": mtype,
             })
         return {"models": models, "active": current}
 
     @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def gui_scan_models():
-        from localm.model_manager.scan import scan_comfy_models
+    async def gui_scan_models(request: Request, req: ScanRequest | None = None):
+        """Scan for ComfyUI models. With no `workdir` (the old button's
+        bodyless POST, or an explicit `{}`), this is unchanged: it scans
+        whatever `comfy_workdir` is configured, MODELS_WRITE-only. An explicit
+        `workdir` is a one-off scan of an arbitrary folder for the guided
+        Import-from-ComfyUI flow - never written back to config - gated on
+        `require_fs_host` (called BEFORE the try/except below, so its 403
+        propagates as-is rather than getting reported as a generic 500): that
+        capability is equivalent to the host file/folder browser
+        (/api/fs/dirs), so a MODELS_WRITE-only key that lacks host filesystem
+        access cannot use this to enumerate or register arbitrary server
+        paths it could not otherwise browse. `dry_run` previews per-type
+        counts and registers nothing."""
+        from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
+        from functools import partial
+        workdir = req.workdir if req else None
+        dry_run = bool(req and req.dry_run)
+        if workdir:
+            require_fs_host(request)
         loop = asyncio.get_running_loop()
         try:
-            res = await loop.run_in_executor(get_plugin_executor(), scan_comfy_models)
+            if dry_run:
+                res = await loop.run_in_executor(
+                    get_plugin_executor(), partial(preview_comfy_models, workdir=workdir))
+                return {
+                    "dry_run": True,
+                    "method": res.method,
+                    "counts": res.counts,
+                    "already_registered": res.already_registered,
+                    "total_new": sum(res.counts.values()),
+                }
+            res = await loop.run_in_executor(
+                get_plugin_executor(), partial(scan_comfy_models, workdir=workdir))
             return {
                 "added": res.added,
                 "skipped": res.skipped,
@@ -247,6 +302,136 @@ def register(app: FastAPI, ctx) -> None:
         }, host_label=f"Model pull {spec}", owner=principal_id(request))
         return {"job_id": job.id}
 
+    # --------------- ComfyUI missing-model pre-check + curated pull -------- #
+    # Read-only pre-check the frontend calls BEFORE submitting a generate job
+    # (see images.js/music.js/video.js): does the currently-configured workflow
+    # reference any model file ComfyUI doesn't have, and if so, is there a
+    # curated HuggingFace source to offer downloading it from? Does not modify
+    # generate_image/generate_video/generate_music or their own preflight_models
+    # call - this is purely additive.
+
+    class _NullConsole:
+        """A do-nothing stand-in for rich.console.Console, so a read-only
+        pre-check (possibly polled repeatedly) never spams server-side console
+        output the way an actual generation job's progress printing would."""
+        def print(self, *a, **kw):
+            pass
+
+    def _build_check_workflow(kind: str, overrides: MediaPreflightRequest):
+        """Load *kind*'s currently-configured workflow template and shape it
+        with the same model-relevant overrides the generate form has pending,
+        mirroring the load-template -> apply_model_overrides -> _build_*_workflow
+        steps generate_image / generate_video / generate_music do - minus
+        actually submitting a job. ``model_overrides`` (the per-slot picks from
+        the Workflow panel's model dropdowns) is applied FIRST, exactly like the
+        real generate call, so a picked-but-not-installed model is caught here
+        too - otherwise this check would silently validate the template's
+        default filenames instead of what will actually run. input_image is
+        always None: the image/video builders upload it to ComfyUI as a real
+        network call, which a read-only check must never do. Returns the shaped
+        workflow dict, or raises ValueError for an unknown *kind*."""
+        if kind == "image":
+            from localm.image_gen.comfy import _build_image_workflow
+            from localm.image_gen.comfy import apply_model_overrides, workflow_path
+            workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
+            if overrides.model_overrides:
+                apply_model_overrides(workflow, overrides.model_overrides)
+            _build_image_workflow(
+                workflow, prompt="", api_url="", guidance=None, negative_prompt=None,
+                cfg=None, seed=0, clip_name1=overrides.clip_name1,
+                clip_name2=overrides.clip_name2, lora_name=overrides.lora_name,
+                lora_strength_model=1.0, lora_strength_clip=0.5, input_image=None,
+                denoise=None, fast_dequant=True, con=_NullConsole())
+            return workflow
+        if kind == "video":
+            from localm.video_gen.comfy import _build_video_workflow
+            from localm.video_gen.comfy import apply_model_overrides, workflow_path
+            workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
+            if overrides.model_overrides:
+                apply_model_overrides(workflow, overrides.model_overrides)
+            _build_video_workflow(
+                workflow, prompt="", negative_prompt=None, frames=1, fps=8,
+                width=None, height=None, steps=1, cfg=None, seed=0,
+                float_type=None, input_image=None, api_url="")
+            return workflow
+        if kind == "music":
+            from localm.music_gen.comfy import _build_music_workflow
+            from localm.music_gen.comfy import apply_model_overrides, workflow_path
+            workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
+            if overrides.model_overrides:
+                apply_model_overrides(workflow, overrides.model_overrides)
+            _build_music_workflow(
+                workflow, tags="", lyrics_text="", duration_seconds=1.0, seed=0,
+                steps=1, cfg=1.0, lyrics_strength=1.0,
+                ckpt_name=overrides.ckpt_name, float_type=None)
+            return workflow
+        raise ValueError(f"Unknown media kind: {kind}")
+
+    @app.post("/api/media/{kind}/preflight",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def media_preflight(kind: str, req: MediaPreflightRequest):
+        if kind not in ("image", "video", "music"):
+            raise HTTPException(404, f"Unknown media kind: {kind}")
+        from localm.media.comfy_client import describe_missing_models
+        from localm.media.managed_comfy import comfy_models_dest_dir, resolve_comfy_target
+        from localm.model_manager.registry import resolve_comfy_model_source
+
+        def _check():
+            try:
+                workflow = _build_check_workflow(kind, req)
+            except Exception as e:
+                logger.debug("preflight workflow build failed for %s: %s", kind, e)
+                return []
+            target = resolve_comfy_target()
+            return describe_missing_models(workflow, target.api_url)
+
+        loop = asyncio.get_running_loop()
+        missing = await loop.run_in_executor(get_plugin_executor(), _check)
+
+        results = []
+        for slot in missing:
+            source = resolve_comfy_model_source(slot.filename)
+            entry = {
+                "class_type": slot.class_type,
+                "input_name": slot.input_name,
+                "filename": slot.filename,
+                "source": None,
+                "dest_dir": None,
+            }
+            if source is not None:
+                repo, file = source.spec.rsplit(":", 1)
+                dest_dir = comfy_models_dest_dir(source.comfy_subfolder)
+                entry["source"] = {
+                    "repo": repo, "file": file,
+                    "size_bytes": source.size_bytes, "model_type": source.model_type,
+                }
+                entry["dest_dir"] = str(dest_dir) if dest_dir is not None else None
+            results.append(entry)
+        return {"missing": results}
+
+    @app.post("/api/models/pull-comfy-source",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_pull_comfy_source(req: ComfyPullRequest, request: Request):
+        from localm.media.managed_comfy import comfy_models_dest_dir
+        from localm.model_manager.registry import resolve_comfy_model_source
+        source = resolve_comfy_model_source(req.filename.strip())
+        if source is None:
+            raise HTTPException(400, f"Not a curated download source: {req.filename}")
+        dest_dir = comfy_models_dest_dir(source.comfy_subfolder)
+        if dest_dir is None:
+            raise HTTPException(
+                400,
+                "No known ComfyUI models folder to download into - set a "
+                "ComfyUI working directory in Settings > Media, or enable the "
+                "managed ComfyUI instance.")
+        args = ["pull", "--type", source.model_type, "--comfy-dest-dir", str(dest_dir),
+                "--no-register", "--", source.spec]
+        job = jobs.start_cli("pull", args, extra_env={
+            "LOCALM_PROGRESS_JSON": "1",
+            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        }, host_label=f"Model pull {source.spec}", owner=principal_id(request))
+        return {"job_id": job.id}
+
     @app.post("/api/models/remove", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_remove(req: RemoveModelRequest, request: Request):
         _require_registered(req.model)
@@ -259,16 +444,31 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/models/alias", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_alias(req: AliasRequest):
         registry = _require_registered(req.model)
-        if req.alias in registry:
-            raise HTTPException(409, f"Name already taken: {req.alias}")
-        from localm.model_manager import alias_model
+        # alias_model stores under the SANITIZED name (a space/slash/colon can
+        # never become a raw registry key), so precheck against that same name and
+        # report it back: prechecking the raw name let a collision through, and
+        # answering with the raw name told the user an alias that does not exist
+        # (REG-562).
+        from localm.model_manager import _sanitize_name, alias_model
+        alias = _sanitize_name(req.alias)
+        if alias in registry:
+            raise HTTPException(409, f"Name already taken: {alias}")
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(
+            created = await loop.run_in_executor(
                 get_plugin_executor(), alias_model, req.model, req.alias)
         except Exception as e:
             raise HTTPException(400, f"Alias failed: {e}")
-        return {"status": "aliased", "model": req.model, "alias": req.alias}
+        if not created:
+            # alias_model returns False for "model vanished" and "name taken"
+            # alike, and both were prechecked above, so reaching here means a
+            # concurrent writer won the race. Never answer "aliased" for an alias
+            # that was not created (AGENTS.md rule 5); say which race it lost.
+            from localm.config import load_registry
+            if req.model not in load_registry():
+                raise HTTPException(404, f"Model not registered: {req.model}")
+            raise HTTPException(409, f"Name already taken: {alias}")
+        return {"status": "aliased", "model": req.model, "alias": alias}
 
     @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_set_type(req: SetTypeRequest):

@@ -44,6 +44,9 @@ class ImagineRequest(BaseModel):
     guidance: float | None = None
     input_image: str | None = None    # path on this machine (img2img)
     denoise: float | None = None
+    # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
+    # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
+    model_overrides: dict[str, dict[str, str]] | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -135,8 +138,25 @@ async def imagine(req: ImagineRequest, request: Request):
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
-        from localm.vram import decide_media_swap, unload_chat_for_media
+        from localm.vram import (decide_media_swap, media_single_device_shortfall,
+                                 media_split_notice, unload_chat_for_media)
+        notice = media_split_notice()
+        if notice:
+            job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
+        # REG-532: the gate above reads COMBINED free VRAM across a configured GPU
+        # split, but ComfyUI masks devices and loads the WHOLE model onto ONE card.
+        # 2x4 GB free reads as 8 GB and "fits" a 4 GB job that then OOMs on one 4 GB
+        # card. When the card actually chosen cannot hold it, swap anyway: unloading
+        # the chat model frees VRAM on every split card, including that one.
+        shortfall = media_single_device_shortfall(s)
+        if shortfall and not swap:
+            swap = True
+            job.push({"type": "line", "text":
+                      f"GPU {shortfall['index']} has "
+                      f"{shortfall['free'] / 1024 ** 3:.1f} GB free, but this job "
+                      f"needs {shortfall['needed'] / 1024 ** 3:.1f} GB on a single "
+                      "card - unloading the chat model first."})
         gen_swap = False
         if swap:
             # Unload here (authenticated + logged) so the chat model is actually
@@ -163,6 +183,7 @@ async def imagine(req: ImagineRequest, request: Request):
             seed=req.seed,
             input_image=input_image,
             denoise=req.denoise,
+            model_overrides=req.model_overrides,
             swap=gen_swap,
             delete_outputs=delete_outputs,
             cancel_check=lambda: job.cancel_requested,
@@ -273,6 +294,42 @@ async def imagine_history(request: Request):
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "image", [it["name"] for it in items]))
     return {"images": [it for it in items if it["name"] in allowed]}
+
+
+@_router.get("/api/imagine/comfy-models")
+async def imagine_comfy_models():
+    """Model-file slots the active image workflow exposes (for the Workflow
+    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
+    about unreachability (rule 5) - never a silently-empty picker.
+
+    The slot resolution is a blocking urlopen of ComfyUI's /object_info (commonly
+    several MB, 10s timeout), so it runs OFF the event loop - inline it froze the
+    whole server, and every concurrent chat stream and job SSE with it, whenever
+    ComfyUI was slow or cold (REG-638), the same way the /comfy-launch route below
+    already offloads its own slow call."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
+    if slots is None:
+        return {"reachable": False, "api_url": s["api_url"], "slots": [],
+                "message": "ComfyUI is not running - launch it to see available models."}
+    return {"reachable": True, "api_url": s["api_url"], "slots": slots}
+
+
+@_router.post("/api/imagine/comfy-launch")
+async def imagine_comfy_launch():
+    """Start (or confirm) ComfyUI is up for the image plugin, without running a
+    generation - backs the Workflow panel's "Launch ComfyUI" button. Runs the
+    same ensure_available() path a real generation uses, off the event loop
+    since a cold ComfyUI start can take minutes."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 
 def register(host) -> None:

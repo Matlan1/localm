@@ -78,8 +78,19 @@ def _candidate_dirs() -> List[Path]:
         d = localm_llama_runtime.lib_dir()
         if d:
             dirs.append(Path(d))
-    except Exception:
-        pass
+    except ImportError:
+        pass   # the wheel is not installed yet - normal before `localm setup-llama`
+    except Exception as e:
+        # Anything other than "not installed" (e.g. an AttributeError from a
+        # broken/incomplete install that resolves as an empty namespace
+        # package with no lib_dir()) must not look identical to "no runtime
+        # provisioned" - that would hide a real environment bug behind a
+        # misleading "Cannot find llama.dll" message later on
+        # (AGENTS.md rule 5, do-not-hide-problems).
+        logger.warning(
+            "localm_llama_runtime is installed but broken (%r); skipping it "
+            "as a runtime candidate. Try reinstalling it: "
+            "uv pip install -e ./runtime", e)
 
     return dirs
 

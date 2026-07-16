@@ -130,6 +130,13 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
     if not name or not isinstance(name, str) or not name.replace("-", "_").isidentifier():
         raise ValueError(f"{manifest}: invalid or missing plugin name")
 
+    # [tools] exports: validated exactly as the legacy loader does (same message
+    # shape), so the two parsers cannot drift on the one manifest key they share.
+    _tools = data.get("tools", {})
+    exports = _tools.get("exports", []) if isinstance(_tools, dict) else []
+    if not (isinstance(exports, list) and all(isinstance(t, str) for t in exports)):
+        raise ValueError(f"{manifest}: [tools] exports must be a list of strings")
+
     s = data.get("surface", {}) if isinstance(data.get("surface"), dict) else {}
     if warnings is not None:
         unknown = [f"[plugin] {k}" for k in sorted(set(p) - KNOWN_PLUGIN_KEYS)]
@@ -162,6 +169,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
+        tool_exports=list(exports),
         path=str(plugin_dir),
     )
 
@@ -547,8 +555,12 @@ class PluginManager:
             name = getattr(_hs, "_active_model_name", None)
             if name and name in getattr(_hs, "_engines", {}):
                 return _hs._engines[name]
-        except Exception:
-            pass
+        except Exception as e:
+            # Fall back to the statically-injected engine, but log so the reason
+            # the live one was skipped is traceable (AGENTS.md rule 5).
+            from localm.debuglog import logger
+            logger.debug("plugin host: live inference-engine lookup failed, using "
+                         "static engine: %s", e)
         return self._inference_engine_static
 
     # ---- discovery (INSTALLED folder only) ---------------------------------
@@ -1461,6 +1473,9 @@ class PluginManager:
                 "assets_base": (f"/plugins/{name}"
                                 if spec and spec.surface and spec.surface.assets_dir
                                 else ""),
+                # Coder-agent tools a third-party plugin exports ([tools]
+                # exports), shown in the GUI's External plugins card.
+                "tool_exports": list(spec.tool_exports) if spec else [],
                 "requires_extras": spec.requires_extras if spec else [],
                 # Declared pip-extra requirements NOT installed on this host, so
                 # the GUI can offer a host-side "Install dependencies" action.
@@ -1528,6 +1543,31 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except Exception as e:
             raise HTTPException(400, f"Install failed: {e}")
         return {"status": "installed", "name": name}
+
+    @app.post("/api/plugins/install-external",
+              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
+    async def install_external_plugin_engine(body: dict):
+        """Install a THIRD-PARTY plugin from a local directory (the GUI's
+        External plugins card). The HTTP sibling of `localm plugin install
+        <dir>`: same manager call, so the two cannot drift. Copy + verify only,
+        no live mount - the plugin loads on the next server start, which is what
+        the GUI tells the user (install_external() would mount it live, but it
+        rolls back any plugin without a loadable register entry, which would
+        reject the legacy entry=/[tools]-exports plugins this card is for)."""
+        from pathlib import Path as _P
+        source = (body or {}).get("source", "")
+        if not source:
+            raise HTTPException(400, "Missing 'source' (local directory path)")
+        src = _P(source)
+        if not (src.is_dir() and (src / "plugin.toml").is_file()):
+            raise HTTPException(400, f"No plugin.toml in {source!r}")
+        try:
+            spec = manager.set_installed_from_dir(src, force=bool((body or {}).get("force")))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(400, f"Install failed: {e}")
+        return {"status": "installed", "name": spec.name, "version": spec.version}
 
     @app.post("/api/plugins/{name}/uninstall",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])

@@ -10,17 +10,58 @@ from localm.inference.backends.gguf import GgufBackend
 
 
 def _backend(tmp_path, size_bytes=80_000_000, n_gpu_layers=99, n_ctx=4096):
+    # A tiny REAL file (so is_file()/stat work) with the "on disk" size FAKED via
+    # _model_bytes, the same pattern test_auto_gpu_layers.py uses.
+    #
+    # This used to `truncate(size_bytes)` under the comment "Sparse-ish: just
+    # truncate to size without writing real bytes". That comment was WRONG:
+    # truncate() is NOT sparse on Windows/NTFS and allocates the full size for
+    # real (memory: windows-truncate-not-sparse). Measured on this box: one
+    # truncate(2GB) consumed 1.61 GB. This helper is called 17x per pass
+    # including two 9 GB models (~18.9 GB per pass), each in its own tmp_path,
+    # times the xdist workers, times pytest's retention of the last 3 basetemps.
+    # That is what filled D: to 99.5% and crashed the box (2026-07-15).
+    #
+    # Nothing here needs the bytes to exist: every caller only exercises the
+    # preflight DECISION, which reads the size back through _model_bytes().
+    # (test_model_bytes_sums_split_parts builds its own real files and is
+    # deliberately untouched - it tests the real stat-summing path at 1 MB.)
     f = tmp_path / "model.gguf"
-    # Sparse-ish: just truncate to size without writing real bytes
-    with open(f, "wb") as fh:
-        fh.truncate(size_bytes)
-    return GgufBackend(str(f), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    f.write_bytes(b"\0" * 4096)
+    b = GgufBackend(str(f), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    b._model_bytes = lambda: size_bytes
+    return b
 
 
 @pytest.fixture(autouse=True)
 def _small_overhead(monkeypatch):
     """Scale the fixed KV/buffer overhead down to match the MB-scale files."""
     monkeypatch.setattr(GgufBackend, "_VRAM_OVERHEAD_BYTES", 15_000_000)
+
+
+@pytest.fixture(autouse=True)
+def _reset_torch_broken_flag():
+    """_torch_rocm_init_broken is a deliberate process-lifetime cache (see its
+    docstring in _sizing.py) - correct for a real server process, but poison
+    for a test session where many unrelated tests share one process. Several
+    tests in this module (e.g. TestVramPreflight.test_load_failure_mentions_
+    vram_when_low) mock only _free_vram_bytes and leave GgufBackend's OTHER
+    real call, _total_vram_bytes(), unmocked; in an environment without torch
+    installed at all (no [gpu] extra - the common case for NVIDIA/Linux/macOS/
+    Vulkan/Metal, and for a quick dev venv on this AMD-ROCm-only project too),
+    that unmocked call hits a genuine `import torch` failure and latches the
+    flag True for the rest of the process - which then makes EVERY later test
+    that expects a real torch.cuda read (via patch.dict(sys.modules, ...)) see
+    None instead, regardless of its mock, since the flag check short-circuits
+    before `import torch` is even reached. Reset around every test in this
+    module so one test's incidental unmocked call can never leak into another
+    - this is a test-isolation fix only; the flag's process-wide production
+    behavior (_sizing.py) is untouched."""
+    from localm.inference.backends.llamacpp._sizing import VramSizingMixin
+    saved = VramSizingMixin._torch_rocm_init_broken
+    VramSizingMixin._torch_rocm_init_broken = False
+    yield
+    VramSizingMixin._torch_rocm_init_broken = saved
 
 
 class TestVramPreflight:
@@ -280,6 +321,10 @@ class TestFreeVramBytesDeviceSelection:
         assert free == 1_000
 
     def test_invalid_configured_index_falls_back_to_device_zero(self, monkeypatch):
+        # Pin non-Vulkan so membership validation actually runs, regardless of
+        # what native backend is provisioned in the ambient environment (see
+        # test_discover.py::TestResolveMainGpuIndex).
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 9})
         monkeypatch.setattr("localm.discover.list_gpus",
@@ -377,17 +422,6 @@ class TestFreeVramBytesUsesIsolatedNativeFallback:
         with patch.dict(sys.modules, {"torch": _BoomModule()}):
             free = GgufBackend._free_vram_bytes()
         assert free == 3_000
-
-    @pytest.fixture(autouse=True)
-    def _reset_torch_broken_flag(self):
-        """_torch_rocm_init_broken is a process-lifetime cache (deliberately -
-        see its docstring in _sizing.py) - reset it around every test in this
-        class so one test setting it can never leak into another."""
-        from localm.inference.backends.llamacpp._sizing import VramSizingMixin
-        saved = VramSizingMixin._torch_rocm_init_broken
-        VramSizingMixin._torch_rocm_init_broken = False
-        yield
-        VramSizingMixin._torch_rocm_init_broken = saved
 
     def test_torch_import_failure_is_cached_and_never_retried(self, monkeypatch):
         """The real bug this guards (found live, reproduced on demand - see

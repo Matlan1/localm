@@ -45,12 +45,16 @@ def home(tmp_path, monkeypatch):
 def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
     """Create the minimal on-disk layout that makes is_managed_comfy_installed()
     true, using the module's OWN path accessors so the test is platform-agnostic
-    (venv interpreter path differs on Windows vs POSIX)."""
+    (venv interpreter path differs on Windows vs POSIX). Includes the completion
+    marker (#621 follow-up: main.py + venv alone means "install still running",
+    not "installed" - see is_managed_comfy_installed()'s docstring)."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)
     paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
     paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
     assert mc.is_managed_comfy_installed()
     return paths
 
@@ -61,13 +65,53 @@ def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
 
 def test_defaults_are_off(home):
     c = cfg.load_config()
-    assert c["managed_comfy_enabled"] is False
     assert c["comfy_target"] == "own"          # decision 6: prefer own WHEN one exists
 
 
 def test_off_by_default_is_not_installed(home):
     assert mc.is_managed_comfy_installed() is False
     assert mc.managed_comfy_active() is False
+
+
+# --------------------------------------------------------------------------- #
+#  #621 follow-up: a still-installing instance must NOT read as "installed".  #
+# --------------------------------------------------------------------------- #
+
+def test_main_py_and_venv_alone_are_not_installed(home):
+    """Regression pin: the on-disk state right after `git clone` + `python -m
+    venv` (steps 1-2 of an 7-8 step pipeline) - main.py and the venv
+    interpreter exist, but torch/requirements/custom-nodes/the completion
+    marker have not run yet - must read as NOT installed. Reproduced live: a
+    real install takes minutes past this point, during which the Settings
+    pill, `localm comfy status`, and the actual Generate-button routing
+    (managed_comfy_active() calls this) all used to claim the instance was
+    ready and would route to it."""
+    paths = mc.managed_comfy_paths()
+    paths.main_py.parent.mkdir(parents=True, exist_ok=True)
+    paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
+    paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.write_text("", encoding="utf-8")
+
+    assert mc.is_managed_comfy_installed() is False
+    assert mc.managed_comfy_active() is False
+
+
+def test_installed_flips_true_only_once_the_marker_is_written(home):
+    """The other half of the same regression: once the marker DOES land (the
+    real pipeline's step 7/8, right after everything else has succeeded),
+    installed correctly flips true - the fix does not just make the check
+    permanently stricter, it makes it accurate."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
+    paths = mc.managed_comfy_paths()
+    paths.main_py.parent.mkdir(parents=True, exist_ok=True)
+    paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
+    paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.write_text("", encoding="utf-8")
+    assert mc.is_managed_comfy_installed() is False
+
+    (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
+
+    assert mc.is_managed_comfy_installed() is True
 
 
 def test_off_resolver_returns_users_comfy_exactly(home):
@@ -98,26 +142,13 @@ def test_off_does_not_create_managed_dirs(home):
     assert not paths.models_dir.exists()
 
 
-def test_enabled_but_not_installed_still_targets_user(home):
-    """Enabling the flag without an installed instance must NOT reroute: a
-    missing managed instance means the user's ComfyUI, regardless of the flag."""
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
-    assert mc.managed_comfy_active() is False
-    t = mc.resolve_comfy_target()
-    assert t.managed is False
-    assert t.api_url == "http://127.0.0.1:8188"
-    assert comfy_client.default_api_url() == "http://127.0.0.1:8188"
-
-
 # --------------------------------------------------------------------------- #
 #  Coexistence routing (decision 6).                                          #
 # --------------------------------------------------------------------------- #
 
 def test_installed_and_own_targets_managed(home):
     paths = _install_managed(home)
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
     assert mc.managed_comfy_active() is True
     t = mc.resolve_comfy_target()
     assert t.managed is True
@@ -131,8 +162,7 @@ def test_installed_and_own_targets_managed(home):
 
 def test_installed_but_target_user_targets_user(home):
     _install_managed(home)
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "user"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "user"})
     assert mc.managed_comfy_active() is False
     t = mc.resolve_comfy_target()
     assert t.managed is False
@@ -215,8 +245,7 @@ def test_cli_status_reports_managed_when_installed(cli_runner, monkeypatch):
     import localm.config as cfg2
     from localm.cli import main
     _install_managed(cfg2.home_dir())
-    cfg2.save_config({**cfg2.load_config(),
-                      "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg2.save_config({**cfg2.load_config(), "comfy_target": "own"})
     res = cli_runner.invoke(main, ["comfy", "status"])
     assert res.exit_code == 0, res.output
     assert mc.MANAGED_COMFY_API_URL in res.output

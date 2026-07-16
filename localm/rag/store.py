@@ -34,7 +34,8 @@ from localm.debuglog import logger as _log
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25
 from .chunk import chunk_text
-from .extract import (BLACKLISTED_SUFFIXES, ExtractError, classify_format,
+from .extract import (BLACKLISTED_SUFFIXES, SECRET_SUFFIXES,
+                      UNINDEXABLE_SUFFIXES, ExtractError, classify_format,
                       extract_bytes, extract_text, is_secret_index_name)
 
 ClassifyFn = Callable[[str], Optional[str]]
@@ -150,15 +151,21 @@ _MAX_WALK_DEPTH = 50
 
 
 def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
-    """Yield regular files under *root*, WITHOUT following symlinks or Windows
-    reparse points (junctions), bounded by depth and a visited-realpath set.
+    """Yield files under *root* without following linked DIRECTORIES, bounded by
+    depth and a visited-realpath set.
 
     ``rglob('*')`` follows NTFS junctions - which report ``is_symlink() == False``,
     so pathlib's symlink-loop guard misses them - and a self-referential junction
     makes the walk spin until the path length overflows (a folder-index DoS, B3).
-    This manual walk skips every reparse point / symlink and refuses to revisit a
-    resolved directory, so no directory cycle (junction OR bind-mount OR symlink)
-    can hang indexing. ``_SKIP_DIRS`` are pruned during descent too."""
+    This manual walk never descends into a linked directory (junction OR
+    bind-mount OR symlink) and refuses to revisit a resolved directory, so no
+    directory cycle can hang indexing. ``_SKIP_DIRS`` are pruned during descent.
+
+    A linked FILE **is** yielded (REG-569): only a directory can cycle, so a link
+    to a file is a terminal node the guard does not need to exclude, and dropping
+    those silently lost real documents that ``rglob`` used to index. Confinement
+    (a link escaping an allowed root) is enforced by ``_expand``'s confine loop,
+    not here."""
     reparse_flag = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     seen: set = set()
     stack: list = [(root, 0)]
@@ -181,16 +188,41 @@ def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
             try:
                 attrs = getattr(e.stat(follow_symlinks=False), "st_file_attributes", 0)
                 if e.is_symlink() or (attrs & reparse_flag):
-                    # A symlink / Windows junction is not followed (loop + escape
-                    # safety). Log a LINKED DIRECTORY at debug so a user who
-                    # expected a symlinked docs folder to be indexed can discover
-                    # why (we do not hide problems); files are skipped quietly.
+                    # Resolve what the link POINTS AT and branch on it, rather
+                    # than skipping every link (REG-569).
+                    #
+                    # A linked DIRECTORY is still not followed: that is what the
+                    # loop + escape guard is for, and it is the only shape that
+                    # can cycle. A linked FILE is a TERMINAL node - the walk never
+                    # recurses into it - so following one cannot loop, and
+                    # skipping it silently dropped legitimate documents from the
+                    # index (a docs folder of links to files elsewhere is a very
+                    # common layout; rglob+is_file indexed them before this walk
+                    # replaced it). Escape stays handled a layer up: _expand's
+                    # confine loop rejects symlinks escaping an allowed folder
+                    # when a policy is given, and the policy-less CLI operator is
+                    # unconfined by design.
+                    #
+                    # On Windows a file symlink sets the reparse-point attribute
+                    # too (so does e.g. a cloud-sync placeholder), which is why
+                    # this branches on the RESOLVED type instead of the attribute.
                     try:
                         if e.is_dir(follow_symlinks=True):
+                            # Log at debug so a user who expected a symlinked docs
+                            # folder to be indexed can discover why (rule 5).
                             _log.debug("rag: not following linked directory during "
                                        "index walk: %s", e.path)
-                    except OSError:
-                        pass
+                            continue
+                        if e.is_file(follow_symlinks=True):
+                            yield Path(e.path)
+                            continue
+                        # Neither: a dangling/unresolvable link. Nothing to index,
+                        # but say so rather than dropping it without a trace.
+                        _log.debug("rag: skipping unresolvable link during index "
+                                   "walk: %s", e.path)
+                    except OSError as exc:
+                        _log.debug("rag: could not resolve link during index walk: "
+                                   "%s (%s)", e.path, exc)
                     continue
                 if e.is_dir(follow_symlinks=False):
                     if e.name in _SKIP_DIRS:
@@ -232,7 +264,14 @@ def indexing_policy(cfg: Optional[dict] = None) -> dict:
         try:
             from localm.config import load_config
             cfg = load_config()
-        except Exception:
+        except Exception as e:
+            # A config we cannot load falls back to an EMPTY policy, which
+            # confine_index_path treats as whitelist-with-no-extra-roots: the safe,
+            # fail-CLOSED direction (it refuses more, never less). Benign default, but
+            # not hidden - a genuinely corrupt config should be discoverable. Rule 5.
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("rag indexing_policy: could not load config, using an empty "
+                       "fail-closed policy: %s", e)
             cfg = {}
     mode = cfg.get("rag_indexing_mode", "whitelist")
     if mode not in _INDEX_MODES:
@@ -243,7 +282,24 @@ def indexing_policy(cfg: Optional[dict] = None) -> dict:
         for r in cfg.get(key, []) or []:
             try:
                 out.append(Path(r).expanduser().resolve())
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                # A configured root we cannot resolve is DROPPED, but the two lists
+                # fail in OPPOSITE directions: dropping an ALLOWED root only fails
+                # CLOSED (a would-be-indexable path is then refused), while dropping a
+                # DENIED root fails OPEN - it silently removes a privacy control, so
+                # confine_index_path can no longer refuse a path inside a folder the
+                # user explicitly denied even though the UI still shows the deny. Rule
+                # 5: never silence this. Warn, naming the root, loudly for the denied
+                # list. (Cross-note: localm-privacy-review.)
+                from localm.debuglog import logger as _dbg
+                if key == "rag_denied_roots":
+                    _dbg.warning(
+                        "rag: denied root %r could not be resolved and is NOT being "
+                        "enforced - a path inside it may now be indexable: %s", r, e)
+                else:
+                    _dbg.warning(
+                        "rag: configured %s entry %r could not be resolved and is "
+                        "being ignored: %s", key, r, e)
                 continue
         return out
 
@@ -310,13 +366,20 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     # ./credentials or ./.env folder) is still walkable, not over-blocked. The CLI
     # (policy=None, returned above) stays unconfined: the local operator can already
     # read their own files, so an explicit single-file pick is still honoured there.
-    if rp.is_file() and (rp.suffix.lower() in BLACKLISTED_SUFFIXES
+    if rp.is_file() and (rp.suffix.lower() in SECRET_SUFFIXES
                          or is_secret_index_name(rp.name)):
         raise ConfinementError(
-            f"Refusing to index {rp.name}: files of this type (binary, model "
-            f"weights, or key/credential material) are not indexed through the "
-            f"API. Use the local CLI (`localm rag add`) if you really intend to.",
-            path=rp, reason="blacklisted_file")
+            f"Refusing to index {rp.name}: key/credential material is not "
+            f"indexed through the API. Use the local CLI (`localm rag add`) if "
+            f"you really intend to.",
+            path=rp, reason="secret_file")
+    # NOTE: a non-secret binary/media file (UNINDEXABLE_SUFFIXES: .mp4, .db, .7z,
+    # model weights, ...) deliberately does NOT raise here. Confinement is a
+    # SECURITY boundary, and "this file has no text in it" is not a security
+    # question - refusing it here made the caller's WHOLE request fail, so one
+    # video in a 30-file pick indexed nothing (REG-567). It is instead reported as
+    # an individual per-file failure by _add_paths_locked, which still refuses it
+    # BEFORE reading the bytes, so the multi-GB-model perf guard is preserved.
 
     if policy.get("mode") == "blacklist":
         # Allow anything not explicitly denied (the hard floor above still holds).
@@ -510,9 +573,21 @@ class Collection:
                 elif vectors:
                     # A non-empty vectors list that does not line up with the
                     # chunks is a stale/partial index, not "no embeddings yet".
+                    # Distinguish the two real causes instead of one blanket
+                    # "stale or partial" phrase: FEWER vectors than chunks is a
+                    # genuinely partial embed (e.g. interrupted mid-run, or a
+                    # doc added while embed_fn was broken); MORE vectors than
+                    # chunks means leftover/orphaned entries from a prior,
+                    # larger chunk set (e.g. docs removed or re-chunked without
+                    # the vector list being pruned to match) - not "in
+                    # progress". Both are fixed the same way (a full reindex
+                    # rebuilds vectors in lockstep with chunks - see
+                    # _add_paths_locked), but the diagnosis differs.
+                    kind = ("a partial embed" if len(vectors) < len(self._chunks)
+                            else "orphaned entries from a prior, larger index")
                     self._note_vector_degrade(
                         f"vectors.json has {len(vectors)} vectors for "
-                        f"{len(self._chunks)} chunks (stale or partial index); "
+                        f"{len(self._chunks)} chunks ({kind}); "
                         f"using BM25 lexical retrieval only", warn=True)
         self._bm25 = None
         # If meta.json was corrupt but chunks survived, rebuild a minimal docs
@@ -652,6 +727,18 @@ class Collection:
 
         for f in files:
             key = str(f)
+            # An EXPLICITLY-NAMED non-secret binary (a folder walk already filtered
+            # these out in _expand, so only a direct pick reaches here). Report it
+            # as an ordinary per-file failure - the same shape an ExtractError
+            # below produces - so the rest of the batch still indexes (REG-567).
+            # BEFORE stat/read_bytes: a named .gguf/.safetensors must never be
+            # pulled into RAM and hashed just to be rejected.
+            if f.suffix.lower() in UNINDEXABLE_SUFFIXES:
+                msg = (f"{f.name}: no extractable text (binary, media, or model "
+                       f"weights)")
+                failed.append({"path": key, "error": msg})
+                say(f"skip {msg}")
+                continue
             try:
                 stat = f.stat()
             except OSError as e:

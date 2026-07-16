@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Windows multiprocessing-spawn fix for the branded LocaLM.exe launcher (#617).
 
+``real_base_python()`` below is also reused by managed_comfy_fresh.py (#621): any
+code that needs to hand a subprocess a plain, correctly-self-named interpreter -
+not just multiprocessing's own internal spawn - hits the same class of bug for the
+same reason (see its docstring). One resolver, reused, rather than a third
+divergent attempt at this fix.
+
 CPython's multiprocessing has a Windows-only optimization (bpo-35797):
 whenever it detects the running interpreter differs from ``sys._base_executable``
 (its own definition of "running inside a venv"), a spawned child is launched via

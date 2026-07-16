@@ -51,6 +51,7 @@ from typing import Optional
 import click
 from rich.console import Console
 
+from localm import config
 from localm.debuglog import logger
 
 console = Console(highlight=False)
@@ -602,12 +603,20 @@ def _copy_binaries(src_dir: Path, target: Path) -> int:
 
 def _install_runtime_wheel(pkg_dir: Path) -> bool:
     """Install the runtime wheel editable into the active venv. Tries uv, then
-    pip. Returns True on success."""
+    pip. Returns True on success.
+
+    ``env`` pins uv's AND pip's caches inside the data dir (rule 4: self-contained),
+    same as the plugin-extra installer (plugins/deps.py). An editable install of a
+    local dir is a smaller leak than a full torch download, but build isolation still
+    pulls the build backend (setuptools/wheel) into the tool's cache, and either tool
+    would otherwise put it in a per-user location OUTSIDE the data dir. See
+    ``config.contained_pip_env``."""
+    env = config.contained_pip_env()
     last_err = ""
     for cmd in (["uv", "pip", "install", "-e", str(pkg_dir)],
                 [sys.executable, "-m", "pip", "install", "-e", str(pkg_dir)]):
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if r.returncode == 0:
                 return True
             # Keep the real pip/uv failure instead of discarding it, so the user

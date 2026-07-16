@@ -141,14 +141,35 @@ def _gh(args):
     return subprocess.run(["gh", *args], capture_output=True, text=True)
 
 
-def _run_ids(runner, workflow):
-    """The set of existing run databaseIds for *workflow* (empty on any error)."""
+def _run_ids(runner, workflow, *, required=False):
+    """The set of existing run databaseIds for *workflow*.
+
+    A FAILED query (non-zero gh exit, or unparseable output) is NOT the same as a
+    successful query that returned zero runs. For the BEFORE-snapshot that
+    require_ci_green() diffs against (*required* set), a failed query raises SystemExit
+    instead of masquerading as an empty set: with ``before == set()`` the first poll
+    treats every PRE-EXISTING run as 'new', so ``max(new)`` can select a stale already-
+    green run and ``gh run watch`` returns 0 immediately, printing 'CI passed' without
+    ever validating the run this gate just triggered (AGENTS.md rule 5: a gate that
+    passes without actually checking is the exact harm). A non-required (polling) call
+    keeps returning an empty set on a transient error - that just means 'no new run seen
+    yet', and the appear-timeout below still fires if it never recovers, so it fails loud
+    too, just later."""
     r = runner(["run", "list", "--workflow", workflow, "--limit", "15", "--json", "databaseId"])
     if getattr(r, "returncode", 1) != 0:
+        if required:
+            raise SystemExit(
+                "release CI gate: could not snapshot existing CI runs before triggering a "
+                f"new one: {getattr(r, 'stderr', '').strip()}. Refusing to publish - a failed "
+                "snapshot would make a pre-existing green run look like the one just triggered.")
         return set()
     try:
         return {int(x["databaseId"]) for x in json.loads(r.stdout or "[]")}
-    except Exception:
+    except Exception as e:
+        if required:
+            raise SystemExit(
+                "release CI gate: could not parse the CI run list for the before-snapshot "
+                f"({e}). Refusing to publish - see above.")
         return set()
 
 
@@ -180,8 +201,10 @@ def require_ci_green(ref: str = "master", *, workflow: str = "ci.yml", runner=_g
             raise SystemExit(f"release CI gate: could not enable CI (was {ci.get('state')}): "
                              f"{getattr(en, 'stderr', '').strip()}")
         print(f"release CI gate: enabled the CI workflow (was {ci.get('state')}).")
-    # 2. snapshot existing runs, then trigger a run on *ref*
-    before = _run_ids(runner, workflow)
+    # 2. snapshot existing runs, then trigger a run on *ref*. The snapshot is
+    #    load-bearing (the poll below diffs against it), so a FAILED snapshot query
+    #    must abort here, not silently become an empty set (see _run_ids).
+    before = _run_ids(runner, workflow, required=True)
     tr = runner(["workflow", "run", workflow, "--ref", ref])
     if getattr(tr, "returncode", 1) != 0:
         raise SystemExit(f"release CI gate: could not start CI on '{ref}': {getattr(tr, 'stderr', '').strip()}")
@@ -228,7 +251,19 @@ def _require_head_matches_origin(ref: str = "master", *, runner=None) -> None:
     on origin/<ref> and the verification record + tag key on local HEAD. If local HEAD
     is not origin/<ref>, CI could pass on code that is NOT what ships. Enforce that they
     are the SAME commit, so CI validated exactly the built artifact. *runner* injectable."""
-    _git(["fetch", "origin", ref], runner)   # refresh; a fetch failure surfaces as a mismatch below
+    # Refresh origin/<ref> from the remote FIRST. A fetch failure must abort: the old
+    # "a fetch failure surfaces as a mismatch below" reasoning is FALSE when the stale
+    # local origin/<ref> still equals HEAD (e.g. after an agent squash-merged via `gh`,
+    # which never updates local remote-tracking refs) - the compare below would then
+    # pass while GitHub's real <ref> has moved on, which is exactly the TOCTOU this gate
+    # exists to close. So we cannot trust origin/<ref> unless the fetch actually ran.
+    fetch = _git(["fetch", "origin", ref], runner)
+    if getattr(fetch, "returncode", 1) != 0:
+        raise SystemExit(
+            f"release: could not refresh origin/{ref} (git fetch failed: "
+            f"{getattr(fetch, 'stderr', '').strip()}). Refusing to publish against a "
+            f"possibly-stale ref - a stale local origin/{ref} that still equals HEAD would "
+            "otherwise let this gate pass while the real remote has moved on.")
     head = (getattr(_git(["rev-parse", "HEAD"], runner), "stdout", "") or "").strip()
     remote = (getattr(_git(["rev-parse", f"origin/{ref}"], runner), "stdout", "") or "").strip()
     if not head or not remote:

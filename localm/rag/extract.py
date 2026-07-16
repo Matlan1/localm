@@ -66,7 +66,27 @@ _ARCHIVE_SUFFIXES = {".zip", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz", ".txz
 
 EXTRACTABLE_SUFFIXES = _PLAIN_SUFFIXES | {".pdf", ".docx", ".html", ".htm", ".ipynb"} | _IMAGE_SUFFIXES | _ARCHIVE_SUFFIXES
 
-BLACKLISTED_SUFFIXES = {
+# SECRET / key material. A plain-text key/cert file must not land in a searchable,
+# model-visible index, whether via a folder walk (AUDIT-MED-18) or an
+# explicitly-named API pick (confine_index_path with a policy). Covers PEM
+# keys/certs, PKCS bundles, keystores, and formats that routinely embed a private
+# key inline (OpenVPN configs; direnv is handled by NAME in SECRET_INDEX_NAMES).
+#
+# Kept SEPARATE from UNINDEXABLE_SUFFIXES below because the two carry different
+# consequences, and conflating them was REG-567: naming a secret is a SECURITY
+# refusal the caller must be told about loudly, while naming a .mp4 is just "that
+# file has no text in it" and must not take down the other 29 files in the batch.
+SECRET_SUFFIXES = {
+    ".pem", ".key", ".crt", ".cer", ".der", ".p12", ".pfx",
+    ".keystore", ".jks", ".asc", ".gpg", ".kdbx",
+    ".ppk", ".p8", ".pk8", ".pkcs12", ".p7b", ".p7c", ".ovpn",
+}
+
+# NON-SECRET files with no extractable text. Skipping these is a convenience and a
+# perf guard, NOT a security boundary: nothing is protected by refusing to index a
+# .mp4, so a request that names one is not a refusal - the file is simply reported
+# as an individual failure and everything else in the batch still indexes.
+UNINDEXABLE_SUFFIXES = {
     # Executables / Binaries
     ".exe", ".dll", ".so", ".dylib", ".bin", ".out", ".app", ".msi",
     # Unsupported Images (non-standard / non-multimodal target)
@@ -81,18 +101,15 @@ BLACKLISTED_SUFFIXES = {
     ".pyc", ".pyd", ".db", ".sqlite",
     # Model weights / large ML binaries: multi-GB files with no index value that
     # would otherwise be fully read into RAM and sha256-hashed (twice) before
-    # being rejected, on every re-add (rag-blacklist-model-files).
+    # being rejected, on every re-add (rag-blacklist-model-files). This is why the
+    # per-file refusal below must still happen BEFORE the file is read.
     ".gguf", ".safetensors", ".pt", ".pth", ".onnx", ".ckpt", ".h5",
     ".pb", ".tflite", ".npz", ".npy", ".pkl",
-    # Secret / key material: plain-text key/cert files must not land in a
-    # searchable, model-visible index during a folder walk (AUDIT-MED-18) or via
-    # an explicitly-named API pick (confine_index_path with a policy). Covers PEM
-    # keys/certs, PKCS bundles, keystores, and formats that routinely embed a
-    # private key inline (OpenVPN configs, direnv is handled by name below).
-    ".pem", ".key", ".crt", ".cer", ".der", ".p12", ".pfx",
-    ".keystore", ".jks", ".asc", ".gpg", ".kdbx",
-    ".ppk", ".p8", ".pk8", ".pkcs12", ".p7b", ".p7c", ".ovpn",
 }
+
+# The union: everything a recursive folder walk filters out. Unchanged in content,
+# so the walk behaves exactly as before.
+BLACKLISTED_SUFFIXES = SECRET_SUFFIXES | UNINDEXABLE_SUFFIXES
 
 # Extensionless / dotfile secrets a recursive folder walk must skip - the suffix
 # blacklist cannot catch these (AUDIT-MED-18). This filters the recursive walk;
@@ -107,10 +124,37 @@ SECRET_INDEX_NAMES = {
 }
 
 
+# Config-doc TEMPLATES that are SAFE to index. These are committed to git by
+# convention and carry PLACEHOLDERS, not real values: they document which config
+# vars a project needs, which is genuinely useful context for a RAG index over a
+# repo. Blanket-matching ".env." dropped them silently (REG-460).
+#
+# An ALLOWLIST, deliberately, rather than a loosened prefix match. The safe/unsafe
+# split here is by name convention and only fail-safe in one direction: the
+# canonical github/gitignore Node.gitignore ignores `.env` and `.env.*` and
+# un-ignores ONLY `!.env.example`. Every other .env* name carries REAL values -
+# above all `.env.local`, the standard name for local SECRET overrides. So a name
+# that is not positively vetted here stays SECRET (AUDIT-MED-18: key material must
+# never land in a searchable, model-visible index).
+SAFE_ENV_TEMPLATE_NAMES = {
+    ".env.example",     # canonical; the one name upstream gitignore un-ignores
+    ".env.template",
+    ".env.sample",
+    ".env.dist",
+}
+
+
 def is_secret_index_name(name: str) -> bool:
     """True for a filename that a recursive index walk should skip as likely
-    secret material (extensionless keys, .env files, known credential files)."""
+    secret material (extensionless keys, .env files, known credential files).
+
+    A config-doc template in SAFE_ENV_TEMPLATE_NAMES is NOT secret - it is
+    committed placeholder documentation. Checked FIRST so the .env* rule below
+    cannot swallow it; everything the allowlist does not name stays secret.
+    """
     low = name.lower()
+    if low in SAFE_ENV_TEMPLATE_NAMES:
+        return False
     if low in SECRET_INDEX_NAMES:
         return True
     if low == ".env" or low.startswith(".env."):
@@ -295,7 +339,13 @@ def classify_format(text: str, filename: str = "", *,
         try:
             from localm.config import load_config
             enabled = bool(load_config().get("rag_classify_unknown_files", True))
-        except Exception:
+        except Exception as e:
+            # Config unreadable: fall back to the DEFAULT (feature on), matching a
+            # fresh install where the key is simply absent. Benign default, but surface
+            # it so a genuinely corrupt config is discoverable, not silent. Rule 5.
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("rag classify_format: could not load config, assuming "
+                       "rag_classify_unknown_files=on: %s", e)
             enabled = True
         if enabled:
             label = _normalise_label(classify_fn(text[:1000]) or "") or "text"
@@ -589,9 +639,27 @@ def _extract_tar_or_stream(data: bytes, filename: str,
     MAX_EXTRACT_DEPTH instead of recursing until RecursionError."""
     import tarfile
     import io
+    import zlib
     try:
         tf = tarfile.open(fileobj=io.BytesIO(data))
-    except tarfile.ReadError:
+    except (tarfile.ReadError, EOFError, zlib.error):
+        # "Cannot read this as a tar" arrives in more than one shape, and all of
+        # them take the same fallback. ReadError is the ordinary signal (it is
+        # simply not a tar). But a CORRUPT or TRUNCATED gzip surfaces
+        # differently: tarfile's gzopen reads the first tar block through a
+        # GzipFile, which raises EOFError on a truncated stream (or zlib.error
+        # for a mid-block corruption), and gzopen converts only OSError to
+        # ReadError - neither of those IS an OSError, so pre-REG-459 they
+        # escaped raw, past every `except ExtractError` guard in the callers:
+        # the folder index ABORTED THE WHOLE RUN instead of recording the one
+        # bad file in failed[], and the /api/rag/extract upload 500ed instead of
+        # returning its intended clean 422.
+        #
+        # Deliberately NOT a blanket `except Exception` (rule 5): these three are
+        # the decompression failures that mean "unreadable as a tar", so they
+        # fall through to _decompress_single_stream, which re-reads the bytes as
+        # a single stream and raises a clean, per-FILE ExtractError if that fails
+        # too. Anything else still propagates rather than being silently reshaped.
         inner = _decompress_single_stream(data, filename)
         return extract_bytes(inner, _strip_compression_suffix(filename),
                              describe_image_fn, _depth=_depth + 1)

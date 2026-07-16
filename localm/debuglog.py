@@ -78,6 +78,37 @@ def honor_env_debug() -> None:
         enable_debug()
 
 
+_deferred_records: "list[tuple[int, str, tuple]]" = []
+
+
+def defer_log(level: int, msg: str, *args) -> None:
+    """Queue a diagnostic raised BEFORE any log handler exists, for replay once
+    one does. Use this instead of ``logger.<level>()`` at MODULE-IMPORT scope.
+
+    Import-time code in ``localm/cli/**`` runs before Click invokes ``main()``
+    (which calls install_ring_buffer) and before any ``enable_debug()``, so at
+    that moment the localm logger has no handler and still inherits the root's
+    WARNING threshold. A plain ``logger.debug()`` there is therefore dropped AT
+    THE CALL and no later handler can recover it - a log line that looks like a
+    fix but is dead code (the failure mode that shipped in the first
+    _wire_plugin_cli_entries fix). Queued records are replayed by enable_debug(),
+    so they reach the debug log whichever way debug is turned on (LOCALM_DEBUG
+    via honor_env_debug, or a per-command --debug flag later in the run).
+
+    Bounded: a runaway producer can never grow this without limit."""
+    if len(_deferred_records) < 100:
+        _deferred_records.append((level, msg, args))
+
+
+def _flush_deferred() -> None:
+    """Emit and clear anything defer_log() queued. Idempotent: the queue is
+    drained, so a second enable_debug() call replays nothing twice."""
+    global _deferred_records
+    pending, _deferred_records = _deferred_records, []
+    for level, msg, args in pending:
+        logger.log(level, msg, *args)
+
+
 def uvicorn_log_level() -> str:
     """The uvicorn log level for a server launch: verbose ``info`` in debug mode
     so the console window shows requests / connections / errors live (SRV-5),
@@ -363,6 +394,7 @@ def enable_debug() -> Path:
 
     _install_thread_hook()
     logger.debug("debug mode enabled (pid %d)", os.getpid())
+    _flush_deferred()   # replay import-time diagnostics now the log file exists
     return path
 
 
@@ -504,10 +536,13 @@ def dedup_native_stderr():
         record_native_line(), so the GUI status window's log tail (which
         already polls that same buffer) shows the identical grouped view.
 
-    Nothing is lost from the persisted record: in debug mode, every RAW
-    (ungrouped) line is ALSO appended to the debug log file
+    Nothing is SILENTLY lost from the persisted record: in debug mode, every
+    RAW (ungrouped) line is ALSO appended to the debug log file
     (native_stderr_target()), exactly as _quiet_stderr already does for the
     windows it covers - only the two LIVE views are grouped, never the file.
+    If a persisted-log write itself fails (disk full, a closed fd), the line
+    still reaches the console and the ring buffer and a single warning is
+    emitted (see the _write_debug latch below) - degraded, never a silent drop.
 
     Draining a pipe requires an active reader (the writer blocks once it
     fills), so this spins up a background thread - entering/exiting this
@@ -533,6 +568,28 @@ def dedup_native_stderr():
 
     debug_fd = native_stderr_target()
 
+    # Latch: warn ONCE if a native line cannot be written to the persisted debug
+    # log, then stay silent. A persistently-failing fd must not spam the log, and
+    # the warning is itself drained back through this same reader - the latch caps
+    # that at one line.
+    _debug_write_failed = False
+
+    def _write_debug(data: bytes) -> None:
+        nonlocal _debug_write_failed
+        if debug_fd is None:
+            return
+        try:
+            os.write(debug_fd, data)
+        except OSError as e:
+            if not _debug_write_failed:
+                _debug_write_failed = True
+                # The line still reaches the console and the ring buffer (via
+                # _emit / grouper below), so this is degraded, not a silent drop;
+                # the docstring's "nothing silently lost" holds because we say so.
+                logger.warning("debuglog: native stderr line could not be written "
+                               "to the persisted debug log (%s); further such "
+                               "failures this session are suppressed", e)
+
     def _emit(text: str) -> None:
         if console is not None:
             with contextlib.suppress(OSError, ValueError):
@@ -555,17 +612,13 @@ def dedup_native_stderr():
                 buf += chunk
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
-                    if debug_fd is not None:
-                        with contextlib.suppress(OSError):
-                            os.write(debug_fd, raw + b"\n")
+                    _write_debug(raw + b"\n")
                     grouper.feed(raw.decode("utf-8", errors="replace"))
         finally:
             with contextlib.suppress(OSError):
                 os.close(read_fd)
         if buf:
-            if debug_fd is not None:
-                with contextlib.suppress(OSError):
-                    os.write(debug_fd, buf)
+            _write_debug(buf)
             grouper.feed(buf.decode("utf-8", errors="replace"))
         grouper.flush()
 

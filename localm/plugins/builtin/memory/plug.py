@@ -30,6 +30,7 @@ scope_key) isolation, exercised by the coder and the library tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading as _threading
@@ -56,6 +57,25 @@ _ENGINE = None
 def _chat_store(principal: str | None = None):
     from localm import memory as _mem
     return _mem.open_store(principal, "chat", "", root=_memory_root())
+
+
+def _ctx_principal(ctx) -> str | None:
+    """The memory-namespace principal for a chat-pipeline ctx, mirroring
+    memory_principal() on the request-based paths: an ADMIN-scoped (owner) caller
+    collapses to the shared "owner" namespace (None -> principal_of maps to
+    "owner"); a non-owner scoped key keeps its own key-hash namespace.
+
+    REG-464/AUDIT-MED-14: every WRITE path (memory_get/put/append/patch/delete +
+    memory_consolidate) and the auto-consolidate OUTLET already collapse
+    ADMIN->owner, so the recall INLET MUST resolve the SAME namespace here. Reading
+    the raw ctx.principal (the key hash) instead means, in protected mode, the
+    owner writes into "owner" but recall reads the per-key-hash namespace and
+    injects NONE of the owner's own saved memories. Tolerates a missing/None ctx
+    (a pipeline-less test call): getattr defaults keep it owner-scoped."""
+    from localm import scopes as _scopes
+    if _scopes.ADMIN in (getattr(ctx, "scopes", ()) or ()):
+        return None
+    return getattr(ctx, "principal", None)
 
 
 def _request_principal(request: Request | None) -> str | None:
@@ -156,19 +176,42 @@ def _embed_fn():
         return None
 
 
+async def _off_loop(fn):
+    """Run a blocking store operation OFF the server event loop.
+
+    BUG #648: a memory write resolves the shared embedder (via _embed_fn ->
+    get_embedder), which can trigger a VRAM swap (vram.evict_chat_for_embedder).
+    That swap must NOT run on the event-loop thread - it blocks on a coroutine the
+    loop itself has to execute, so doing it inline froze the whole server for up to
+    300s. Offloading to the default executor keeps the loop free (and lets the
+    eviction actually complete off-loop) while the store write / embedder load runs.
+    """
+    return await asyncio.get_running_loop().run_in_executor(None, fn)
+
+
 def _legacy_memory_file() -> Path:
     return _home() / "chat-memory.md"
 
 
 def _read_memory() -> str:
-    """The legacy flat chat-memory.md text (migration source), or empty string."""
+    """The legacy flat chat-memory.md text (migration source).
+
+    Returns "" ONLY when the file is genuinely ABSENT. Raises OSError when it
+    EXISTS but cannot be read (locked / IO error): the caller MUST distinguish
+    the two. Collapsing an unreadable file into "" let ``_migrate_legacy`` write
+    its permanent ``.legacy-imported`` marker having imported nothing - a false
+    success that also dropped the legacy facts from recall (AGENTS.md rule 5)."""
     p = _legacy_memory_file()
-    if p.is_file():
-        try:
-            return p.read_text(encoding="utf-8")
-        except OSError:
-            return ""
-    return ""
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning(
+            "legacy chat-memory.md exists but could not be read (%s); NOT treating "
+            "it as empty - migration retries next start, recall falls back", e)
+        raise
 
 
 def _strip_bullet(line: str) -> str:
@@ -274,7 +317,13 @@ def _rendered_text(store) -> str:
     recs = store.all()
     if recs:
         return "\n".join(f"- {r.text}" for r in recs)
-    return _read_memory().strip()
+    try:
+        return _read_memory().strip()
+    except OSError:
+        # Unreadable legacy file (already WARN-logged in _read_memory): show an
+        # empty textarea rather than 500 the memory modal. A display fallback,
+        # not a silenced write - the migration path still refuses to mark done.
+        return ""
 
 
 # ------------------------------------------------------------------ #
@@ -286,7 +335,8 @@ async def memory_get(request: Request = None):
     store = _request_store(request)
     writable = _persist_enabled()
     if writable:
-        _migrate_legacy(store)
+        # Offloaded: _migrate_legacy resolves the embedder (BUG #648), never on-loop.
+        await _off_loop(lambda: _migrate_legacy(store))
     # Corrections are only surfaced when writes are allowed: they are useless
     # read-only (accept/reject need a write), and store.corrections() prunes stale
     # entries as a side effect, which must never run in privacy mode (no new
@@ -322,20 +372,29 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
             f"most {N_MAX}. Trim the list before saving.")
     store = _request_store(request)
 
-    _migrate_legacy(store)
-    with store.lock():
-        store._load()
-        existing = {r.text: r for r in store.all()}
-        seen: set = set()
-        records: list = []
-        for f in facts:
-            if f in seen:
-                continue                      # collapse duplicate lines
-            seen.add(f)
-            keep = existing.get(f)
-            records.append(keep if keep is not None else MemoryRecord(
-                text=f, kind="semantic", source="user", importance=0.8))
-        store.replace(records, embed_fn=_embed_fn())
+    # Offloaded whole snapshot-decide-write block (BUG #648): store.replace ->
+    # _embed_fn -> get_embedder must not resolve the embedder on the loop thread.
+    # Keeping the migrate + lock + diff + replace together in one executor call
+    # preserves the atomicity the lock provides (a concurrent append can't land
+    # mid-diff), just off the loop.
+    def _do_put():
+        _migrate_legacy(store)
+        with store.lock():
+            store._load()
+            existing = {r.text: r for r in store.all()}
+            seen: set = set()
+            records: list = []
+            for f in facts:
+                if f in seen:
+                    continue                  # collapse duplicate lines
+                seen.add(f)
+                keep = existing.get(f)
+                records.append(keep if keep is not None else MemoryRecord(
+                    text=f, kind="semantic", source="user", importance=0.8))
+            store.replace(records, embed_fn=_embed_fn())
+        return records
+
+    records = await _off_loop(_do_put)
     return {"status": "saved", "count": len(records)}
 
 
@@ -347,16 +406,22 @@ async def memory_append(req: MemoryAppend, request: Request = None):
         raise HTTPException(400, "Nothing to remember")
     store = _request_store(request)
 
-    _migrate_legacy(store)
     from localm.memory import N_MAX, MemoryRecord
-    # Refuse to append past the cap rather than accept a fact the next prune would
-    # silently evict (audit F4).
-    if len(store) >= N_MAX:
-        raise HTTPException(
-            413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
-                 "adding another.")
-    rec = store.add(MemoryRecord(text=fact, kind="semantic", source="user",
-                                 importance=0.8), embed_fn=_embed_fn())
+
+    # Offloaded (BUG #648): _migrate_legacy and store.add both resolve the embedder
+    # (_embed_fn -> get_embedder), which must not run on the event-loop thread.
+    def _do_append():
+        _migrate_legacy(store)
+        # Refuse to append past the cap rather than accept a fact the next prune
+        # would silently evict (audit F4).
+        if len(store) >= N_MAX:
+            raise HTTPException(
+                413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
+                     "adding another.")
+        return store.add(MemoryRecord(text=fact, kind="semantic", source="user",
+                                      importance=0.8), embed_fn=_embed_fn())
+
+    rec = await _off_loop(_do_append)
     return {"status": "appended", "id": rec.id}
 
 
@@ -370,7 +435,8 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
         fields["text"] = req.text
     if req.importance is not None:
         fields["importance"] = req.importance
-    rec = (store.update(mem_id, embed_fn=_embed_fn(), **fields)
+    # Offloaded (BUG #648): store.update -> _embed_fn -> get_embedder off the loop.
+    rec = (await _off_loop(lambda: store.update(mem_id, embed_fn=_embed_fn(), **fields))
            if fields else store.get(mem_id))
     if rec is None:
         raise HTTPException(404, "No such memory")
@@ -390,7 +456,8 @@ async def memory_correction_accept(cid: str, request: Request = None):
     """Apply a proposed supersession of a trusted fact: replace its text (or delete
     it), archiving the old value to the recoverable .forgotten sidecar. The user is
     the one deciding - a synth candidate never auto-overwrites a user fact ([9])."""
-    return _apply_correction(cid, True, request)
+    # Offloaded (BUG #648): resolve_correction -> _embed_fn -> get_embedder off-loop.
+    return await _off_loop(lambda: _apply_correction(cid, True, request))
 
 
 @_router.post("/api/memory/corrections/{cid}/reject")
@@ -398,7 +465,8 @@ async def memory_correction_reject(cid: str, request: Request = None):
     """Dismiss a proposed supersession: keep the fact as-is, reset its
     last-confirmed staleness, and remember the dismissal so consolidation does not
     re-propose the same change on the next pass."""
-    return _apply_correction(cid, False, request)
+    # Offloaded (BUG #648): resolve_correction -> _embed_fn -> get_embedder off-loop.
+    return await _off_loop(lambda: _apply_correction(cid, False, request))
 
 
 @_router.get("/api/memory/forgotten")
@@ -418,7 +486,8 @@ async def memory_forgotten_restore(mem_id: str, request: Request = None):
     """Recover one archived record back into the live store (LM-DA-024)."""
     _require_writable()
     store = _request_store(request)
-    rec = store.restore_forgotten(mem_id, embed_fn=_embed_fn())
+    # Offloaded (BUG #648): restore_forgotten -> _embed_fn -> get_embedder off-loop.
+    rec = await _off_loop(lambda: store.restore_forgotten(mem_id, embed_fn=_embed_fn()))
     if rec is None:
         raise HTTPException(
             404, "No such forgotten record (or it is already restored)")
@@ -487,7 +556,10 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
             break
         try:
             raw = f.read_text(encoding="utf-8")
-        except OSError:
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.debug("memory consolidation: skipping unreadable session %s: %s",
+                         f, e)
             continue
         file_pieces = []
         for line in reversed(raw.splitlines()):
@@ -601,11 +673,28 @@ def _read_episodic_watermark(store) -> float:
         return 0.0                               # absent/corrupt -> process from scratch
 
 
-def _write_episodic_watermark(store, mtime: float) -> None:
+def _read_episodic_stems(store) -> set:
+    """The session stems already summarised AT EXACTLY last_mtime. mtime alone is
+    not a unique cursor: a bulk LOCALM_HOME restore, or a coarse-granularity volume
+    (FAT/exFAT/SMB, 1-2s mtime resolution), gives many files one identical mtime, so
+    a strict `st_mtime > watermark` filter would permanently skip the tied files the
+    per-run cap left unprocessed. Pairing the watermark mtime with the stems already
+    done at that mtime makes the cursor tie-safe (REG-591): a tied file is re-picked
+    iff its stem is not yet recorded. Absent/old sidecar -> empty set."""
+    try:
+        data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
+        stems = data.get("stems", [])
+        return set(stems) if isinstance(stems, list) else set()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+
+def _write_episodic_watermark(store, mtime: float, stems=()) -> None:
     p = _episodic_watermark_path(store)
     try:
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps({"last_mtime": float(mtime)}), encoding="utf-8")
+        tmp.write_text(json.dumps({"last_mtime": float(mtime),
+                                   "stems": sorted(stems)}), encoding="utf-8")
         tmp.replace(p)
     except OSError as e:
         from localm.debuglog import logger
@@ -618,7 +707,10 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
     ingests scratchpad. Empty when the file has no usable turns."""
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.debug("memory consolidation: unreadable session %s skipped "
+                     "(excluded from this summary): %s", path, e)
         return ""
     pieces: list[str] = []
     total = 0
@@ -649,46 +741,164 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
 
 _UNSET = object()
 
+# REG-591 (HIGH): cap real model generations per episodic pass. On the FIRST pass
+# over a large pre-existing history the watermark is 0.0, so every session file is
+# "new"; without a cap that is one serial engine generation PER FILE (minutes to
+# hours), monopolising the single inference engine and starving chat. Bound each
+# run and let the backlog drain over several runs (the watermark advances only past
+# files actually processed). Pre-#591 the episodic pass made exactly one call total.
+EPISODIC_MAX_PER_RUN = 5
+# REG-591 (MEDIUM): only summarise a SETTLED session (untouched for at least this
+# long). An active/growing session's mtime keeps advancing past the watermark, so
+# it was re-summarised from partial content on every later run, accumulating
+# overlapping partial episodes. A session idle this long is effectively over; this
+# matches the auto-consolidate debounce cadence (MEMORY_AUTO_MIN_INTERVAL).
+EPISODIC_SETTLE_SECONDS = 900.0
 
-def _store_episodes(store, complete, embed_fn=_UNSET) -> int:
+
+def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary
     (memory-audit 2026-07-02 [14]). Each episode is tagged with its source session id
-    + mtime. The watermark advances to the newest session SEEN (even one that yields
-    no usable summary), so nothing is re-summarised or retried forever. Deduped
-    against existing episodics (0.85). Best-effort; the caller confirmed writes are
-    allowed (privacy). Returns the number of episodes stored.
+    + mtime. Deduped against existing episodics (0.85). Best-effort; the caller
+    confirmed writes are allowed (privacy). Returns the number of episodes stored.
+
+    BOUNDED + SETTLED + ONE-PER-SESSION (REG-591):
+      - at most EPISODIC_MAX_PER_RUN real summaries per run, so a large first-pass
+        backlog drains over several runs instead of one unbounded serial burst;
+      - only SETTLED sessions (idle >= EPISODIC_SETTLE_SECONDS) are summarised, so a
+        conversation is never distilled mid-flight from partial content;
+      - the watermark advances only past a file actually processed (summarised, or
+        seen-but-empty), never past an unsettled file nor past files the cap deferred;
+      - a session that is RESUMED (grows after being summarised, so its mtime
+        re-crosses the watermark) SUPERSEDES its own earlier episode via the
+        meta["session"] stem tag, rather than accumulating a second record for the
+        same conversation. Net: exactly ONE episode per session stem, always the
+        fullest summary of it.
 
     *embed_fn*: reuse an already-resolved embedder (synthesize_memory calls this
     right after run_consolidation, in the same round, so it passes its own
     embed_fn instead of this function re-resolving get_embedder() a second
-    time). Omit to resolve independently (existing test callers)."""
+    time). Omit to resolve independently (existing test callers).
+
+    *now*: injected wall-clock for the settle check (defaults to time.time());
+    tests pass an explicit value for determinism."""
     ef = _embed_fn() if embed_fn is _UNSET else embed_fn
     try:
+        import time as _time
         from difflib import SequenceMatcher
 
         from localm.memory import MemoryRecord, summarize_session
         sdir = _home() / "sessions"
         if not sdir.is_dir():
             return 0
+        now = _time.time() if now is None else now
         watermark = _read_episodic_watermark(store)
+        wm_stems = _read_episodic_stems(store)     # stems already done AT watermark (tie-safe)
+        # A file is unprocessed if it is strictly newer than the watermark, OR ties
+        # the watermark mtime but its stem was not yet summarised (REG-591 tie-
+        # safety, see _read_episodic_stems). Sort by (mtime, stem) for a total,
+        # stable oldest-first order even when mtimes tie.
         new_files = sorted(
-            (f for f in sdir.glob("*.jsonl") if f.stat().st_mtime > watermark),
-            key=lambda p: p.stat().st_mtime)       # oldest-first: watermark advances monotonically
+            (f for f in sdir.glob("*.jsonl")
+             if f.stat().st_mtime > watermark
+             or (f.stat().st_mtime == watermark and f.stem not in wm_stems)),
+            key=lambda p: (p.stat().st_mtime, p.stem))
         if not new_files:
             return 0
         stored = 0
+        gens = 0                                   # real model generations this run (bounded)
         newest = watermark
+        newest_stems = set(wm_stems)               # carry forward stems recorded at `watermark`
+        # This session's OWN existing episodes, keyed by source stem, so a resumed
+        # session supersedes its earlier record instead of adding a duplicate
+        # (REG-591 residual; see the supersede branch below). A stem can map to
+        # SEVERAL records on a store written before that fix (the pass then
+        # re-summarised a grown session on every run), so this keeps a list and the
+        # supersede branch collapses them. Built once: each run sees each stem at most
+        # once (glob yields distinct paths), and add/update/delete reload internally.
+        prior_by_stem: dict = {}
+        for _r in store.all():
+            if getattr(_r, "kind", None) != "episodic":
+                continue
+            _meta = getattr(_r, "meta", None)
+            if isinstance(_meta, dict) and _meta.get("session"):
+                prior_by_stem.setdefault(_meta["session"], []).append(_r)
+
+        def _advance(mt: float, stem: str) -> None:
+            """Move the (mtime, stems-at-mtime) cursor past a processed file. A
+            file that ties `newest` ADDS its stem; a strictly-newer file resets the
+            stem set to just itself (nothing else at that new mtime is done yet)."""
+            nonlocal newest, newest_stems
+            if mt > newest:
+                newest, newest_stems = mt, {stem}
+            elif mt == newest:
+                newest_stems.add(stem)
+
         for f in new_files:
             mt = f.stat().st_mtime
-            newest = max(newest, mt)
+            # REG-591 (MEDIUM): a still-growing/active session keeps bumping its
+            # mtime past the watermark and would be re-summarised from partial
+            # content every run. Only summarise a SETTLED session, and do NOT
+            # advance the watermark past an unsettled one (so it is summarised
+            # exactly once, after it goes quiet). Files are oldest-first, so the
+            # first unsettled one means every later file is unsettled too -> stop.
+            if now - mt < EPISODIC_SETTLE_SECONDS:
+                break
             text = _session_text(f)
             if not text.strip():
+                _advance(mt, f.stem)               # no usable turns: seen, skip forever
                 continue
+            # REG-591 (HIGH): bound real generations per run. When the cap is hit,
+            # leave THIS file and the rest (and the cursor) for the next run, so a
+            # huge first-pass backlog drains over several runs instead of one
+            # unbounded serial burst.
+            if gens >= EPISODIC_MAX_PER_RUN:
+                break
             summ = summarize_session(complete, text)
+            gens += 1
+            _advance(mt, f.stem)                    # a real attempt was made -> advance past it
             if not summ:
                 continue
             lo = summ.lower()
+            # REG-591 (MEDIUM residual): ONE episode PER SESSION. The settle gate above
+            # only stops summarising a session while it is still being written; it does
+            # NOT stop a RESUMED session (the user continues the conversation later, the
+            # file grows, its mtime re-crosses the watermark) from being summarised a
+            # SECOND time. This pass has always tagged each episode with its source stem
+            # but never read that tag back, so the later summary landed as a SECOND
+            # record for the SAME conversation whenever it differed enough to clear the
+            # 0.85 dedup - which a grown conversation does by construction. Superseding
+            # (not skipping) is the right resolution: _session_text reads the WHOLE file,
+            # so the later summary is the fuller whole-experience record this pass exists
+            # to keep (audit [14]), and the earlier one is the partial.
+            priors = prior_by_stem.get(f.stem) or []
+            if priors:
+                # Collapse to ONE record for this conversation. A store written before
+                # this fix can hold several overlapping partials for the same stem;
+                # they are synth episodics this pass owns (it already dedups them and
+                # prune() evicts them by decay), and by definition they describe the
+                # SAME session the record we keep now covers in full. Bounded on
+                # purpose: only the stem being processed is collapsed, never a global
+                # sweep of the store.
+                priors.sort(key=lambda r: (getattr(r, "meta", None) or {}).get(
+                    "session_mtime") or 0.0)
+                keep = priors[-1]
+                for extra in priors[:-1]:
+                    store.delete(extra.id)
+                if SequenceMatcher(None, lo, keep.text.lower()).ratio() > 0.85:
+                    # Substantively the same story: keep the text, just re-stamp which
+                    # state of the session it reflects (no re-embed needed).
+                    store.update(keep.id,
+                                 meta={"session": f.stem, "session_mtime": mt})
+                    continue
+                # update() re-embeds on a text change, so the vector cannot go stale
+                # against the superseded text (memory-audit F3).
+                store.update(keep.id, text=summ, embed_fn=ef,
+                             meta={"session": f.stem, "session_mtime": mt})
+                continue
+            # Cross-stem dedup (unchanged): a DIFFERENT session whose summary near-
+            # duplicates an existing episode adds nothing.
             if any(r.kind == "episodic"
                    and SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85
                    for r in store.all()):
@@ -698,7 +908,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET) -> int:
                                    meta={"session": f.stem, "session_mtime": mt}),
                       embed_fn=ef)
             stored += 1
-        _write_episodic_watermark(store, newest)
+        _write_episodic_watermark(store, newest, newest_stems)
         return stored
     except Exception as e:
         from localm.debuglog import logger
@@ -785,7 +995,13 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
             return
         if not cfg.get("memory_enabled", True):
             return
-    except Exception:
+    except Exception as e:
+        # Config unreadable: stay disabled this turn (safe), but surface why so a
+        # persistently broken config is not an invisible "consolidation never runs"
+        # (AGENTS.md rule 5).
+        from localm.debuglog import logger
+        logger.debug("memory auto-consolidate: config read failed, skipping this "
+                     "turn: %s", e)
         return
     if not _persist_enabled():
         return                                # privacy: no new traces
@@ -856,12 +1072,10 @@ def _memory_outlet(text, messages, ctx):
     contained so it can never affect the reply."""
     try:
         # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
-        # memory_principal on the request-based paths (AUDIT-MED-14).
-        from localm import scopes as _scopes
-        prin = getattr(ctx, "principal", None)
-        if _scopes.ADMIN in (getattr(ctx, "scopes", ()) or ()):
-            prin = None
-        _maybe_auto_consolidate(prin)
+        # memory_principal on the request-based paths and the recall inlet
+        # (AUDIT-MED-14 / REG-464). Shared with _memory_inlet via _ctx_principal
+        # so reads and writes can never drift onto different namespaces again.
+        _maybe_auto_consolidate(_ctx_principal(ctx))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
@@ -927,7 +1141,10 @@ def _memory_inlet(messages, ctx):
         query = _recall_query(messages)
         if not query.strip():
             return None
-        store = _chat_store(getattr(ctx, "principal", None))
+        # REG-464: resolve the SAME namespace the write path / outlet write to
+        # (ADMIN/owner -> "owner"), or an owner's saved memories are never recalled
+        # in protected mode.
+        store = _chat_store(_ctx_principal(ctx))
 
         if writes_ok:
             _migrate_legacy(store)                 # migration is a write
@@ -959,16 +1176,46 @@ def _memory_inlet(messages, ctx):
         return None
 
 
+async def _memory_inlet_hook(messages, ctx):
+    """The REGISTERED inlet hook: runs _memory_inlet OFF the event loop.
+
+    _memory_inlet's body is blocking, on the highest-frequency path there is (every
+    chat turn): it _load()s the records JSONL AND the .vec.json embedding sidecar,
+    re-_save()s both under the namespace lock when reinforcing (store.py's
+    recall(reinforce=True)), and resolves the shared embedder. chat.py awaits
+    run_inlet, which calls a hook INLINE (chat_pipeline.py), so a sync hook does all
+    of that ON the uvicorn event loop - multiple MB of JSON parsed and rewritten per
+    turn once embeddings are on, stalling every other request (REG-520).
+
+    It also fixes a real degradation, not just latency: _embed_fn -> get_embedder can
+    trigger a VRAM swap, and BUG #648 (vram.py) makes that swap SKIP the guarded
+    chat-model eviction when it detects it is running on the loop thread - because
+    completing it there would deadlock. So on-loop, the embedder loaded alongside the
+    resident chat model ("may be tight on VRAM") with a warning saying this call
+    "should be offloaded to an executor". Off-loop, the eviction can actually run.
+
+    Kept as a thin wrapper so _memory_inlet stays sync and directly unit-testable;
+    run_inlet awaits an awaitable hook, so nothing else changes.
+    """
+    return await _off_loop(lambda: _memory_inlet(messages, ctx))
+
+
 def register(host) -> None:
     global _ENGINE
     host.mount_router(_router)
-    host.register_chat_hook("inlet", _memory_inlet)
+    host.register_chat_hook("inlet", _memory_inlet_hook)
     # Outlet: after each turn, grow the memory unattended (debounced, background,
     # log/full mode only). Disabling this plugin removes both hooks.
     host.register_chat_hook("outlet", _memory_outlet)
     try:
         _ENGINE = host.engine()
-    except Exception:
+    except Exception as e:
+        # No live engine at register time (headless / api-mode): memory falls back
+        # to lexical recall and skips auto-consolidation. Benign, but log so it is
+        # traceable rather than a silent degrade (AGENTS.md rule 5).
+        from localm.debuglog import logger
+        logger.debug("memory: no inference engine at register (%s); semantic recall "
+                     "and auto-consolidation degrade until one is available", e)
         _ENGINE = None
 
 

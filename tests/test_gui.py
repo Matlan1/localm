@@ -2610,6 +2610,70 @@ class TestImageGeneration:
         assert seen.get("url") == "http://127.0.0.1:9999"
 
 
+class TestImageComfyModelPicker:
+    """/api/imagine/comfy-models + /api/imagine/comfy-launch - the Workflow
+    panel's "Launch ComfyUI" button and per-slot model dropdowns."""
+
+    def test_comfy_models_reports_unreachable_honestly(self, img_app):
+        """No ComfyUI is running in this test app - the route must say so
+        (rule 5: never a silently-empty picker that looks like "no slots")."""
+        app, _ = img_app
+        with TestClient(app) as client:
+            r = client.get("/api/imagine/comfy-models")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reachable"] is False
+        assert data["slots"] == []
+        assert "message" in data and data["message"]
+
+    def test_comfy_models_returns_slots_when_reachable(self, img_app, monkeypatch):
+        # backend.py is loaded via the plugin engine's own unique module spec
+        # (see PluginManager.install), so it is NOT the same module object as
+        # `import localm.plugins.builtin.image.backend` from here - patching
+        # that would silently miss the live instance plug.py actually holds.
+        # _comfy_model_slots/ensure_available forward to the shared, normally-
+        # imported localm.image_gen.comfy module instead, which IS a single
+        # canonical instance - patch there, matching test_imagine_job_* above.
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        fake_slots = [{"node_id": "1", "class_type": "UnetLoaderGGUFAdvanced",
+                       "input_name": "unet_name", "current": "a.gguf",
+                       "options": ["a.gguf", "b.gguf"]}]
+        monkeypatch.setattr(comfy, "workflow_model_slots",
+                            lambda workflow, api_url: fake_slots)
+        with TestClient(app) as client:
+            r = client.get("/api/imagine/comfy-models")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reachable"] is True
+        assert data["slots"] == fake_slots
+
+    def test_comfy_launch_starts_comfy(self, img_app, monkeypatch):
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        seen = {}
+        monkeypatch.setattr(comfy, "ensure_comfy",
+                            lambda *a, **k: (seen.update(called=True), (True, "up"))[1])
+        with TestClient(app) as client:
+            r = client.post("/api/imagine/comfy-launch")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert seen.get("called") is True
+
+    def test_comfy_launch_reports_failure(self, img_app, monkeypatch):
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        monkeypatch.setattr(comfy, "ensure_comfy",
+                            lambda *a, **k: (False, "ComfyUI failed to start."))
+        with TestClient(app) as client:
+            r = client.post("/api/imagine/comfy-launch")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is False
+        assert "failed" in data["message"].lower()
+
+
 # ------------------------------------------------------------------ #
 #  Music plugin (/api/music*)                                          #
 # ------------------------------------------------------------------ #
@@ -2934,3 +2998,92 @@ class TestPairingQR:
         app, _ = gui_app
         with TestClient(app) as client:
             assert client.get("/api/pairing/qr").status_code == 401
+
+
+@pytest.fixture
+def alias_env(tmp_path, monkeypatch):
+    """A REAL, writable registry for the alias-route tests. config.py freezes
+    HOME_DIR/REGISTRY_FILE at import, so the autouse LOCALM_HOME env alone does
+    not redirect them; point the module attributes at a throwaway home and create
+    it (nothing else does, and the cross-process lock file needs the dir)."""
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    return home
+
+
+def _seed_registry(mm, entries):
+    """Write *entries* into this test's real (throwaway) registry, so the alias
+    route below drives the REAL alias_model against a REAL registry rather than a
+    mock of the very thing under test."""
+    def _apply(reg):
+        reg.update(entries)
+    mm.update_registry(_apply)
+
+
+def test_alias_route_reports_the_name_it_actually_stored(gui_app, alias_env):
+    """REG-562: alias_model sanitizes the new name, so a user-supplied name with a
+    space is stored as 'daily-driver' while the route used to answer 200 with the
+    RAW 'daily driver' - a name that does not exist in the registry. The GUI then
+    toasted a name the user could never use."""
+    from localm import model_manager as mm
+    app, _ = gui_app
+    _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
+
+    with TestClient(app) as client:
+        r = client.post("/api/models/alias",
+                        json={"model": "gemma3-12b", "alias": "daily driver"})
+        assert r.status_code == 200, r.text
+        stored = mm.load_registry()
+        # The alias really landed under the sanitized key...
+        assert "daily-driver" in stored
+        assert "daily driver" not in stored
+        # ...so that is the name the user must be told, not the raw one.
+        assert r.json()["alias"] == "daily-driver", (
+            "the route must report the name it actually created")
+
+
+def test_alias_route_refuses_a_sanitized_collision_instead_of_faking_success(gui_app, alias_env):
+    """REG-562, the worse half: 'daily driver' sanitizes onto an EXISTING
+    'daily-driver' key, so alias_model creates nothing and returns False. The
+    route ignored that and still answered 200 'aliased' - a step reporting
+    success after not doing the work (AGENTS.md rule 5)."""
+    from localm import model_manager as mm
+    app, _ = gui_app
+    _seed_registry(mm, {
+        "gemma3-12b": {"path": "x/g.gguf", "source": "local"},
+        "daily-driver": {"path": "x/other.gguf", "source": "local"},   # taken
+    })
+
+    with TestClient(app) as client:
+        r = client.post("/api/models/alias",
+                        json={"model": "gemma3-12b", "alias": "daily driver"})
+        assert r.status_code == 409, (
+            f"a collision must be refused, not reported as success: {r.text}")
+        # and the existing key must be untouched
+        assert mm.load_registry()["daily-driver"]["path"] == "x/other.gguf"
+
+
+def test_alias_route_still_takes_an_already_safe_name(gui_app, alias_env):
+    """The happy path stays intact: a name that needs no sanitizing round-trips
+    unchanged (this is the shape the suite already covered, which is why the
+    regression hid)."""
+    from localm import model_manager as mm
+    app, _ = gui_app
+    _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
+
+    with TestClient(app) as client:
+        r = client.post("/api/models/alias",
+                        json={"model": "gemma3-12b", "alias": "daily-driver"})
+        assert r.status_code == 200, r.text
+        assert r.json()["alias"] == "daily-driver"
+        assert "daily-driver" in mm.load_registry()
+        # a raw-name collision is still a 409
+        assert client.post("/api/models/alias",
+                           json={"model": "gemma3-12b",
+                                 "alias": "daily-driver"}).status_code == 409

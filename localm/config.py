@@ -103,6 +103,71 @@ def home_dir() -> Path:
     return _detect_home()
 
 
+def cache_dir() -> Path:
+    """Root for caches localm's OWN subprocesses write (rule 4: self-contained).
+
+    Anything localm downloads on the way to installing something - pip's wheel/http
+    cache while provisioning the managed ComfyUI venv, the Whisper STT model - belongs
+    INSIDE the data dir, not in the user's home profile. Left to their defaults those
+    tools cache to a per-user location (under ``%LOCALAPPDATA%`` on Windows,
+    ``~/.cache`` on POSIX) that has nothing to do with localm: measured live, the
+    managed-ComfyUI provisioning path alone had put ~11 GB of pip cache there, outside
+    the data dir, without ever asking or telling the user.
+
+    Derived from ``home_dir()`` (never a hardcoded path, rule 1), so the cache follows
+    LOCALM_HOME: point the data dir somewhere and localm's caches go with it. This is
+    deliberately NOT conditional on an ambient ``PIP_CACHE_DIR`` / ``HF_HUB_CACHE``:
+    containment is a guarantee of where localm's own bytes land, and a guarantee that
+    any unrelated environment variable can silently switch off is not one. LOCALM_HOME
+    is the knob."""
+    return home_dir() / "cache"
+
+
+def pip_cache_dir() -> Path:
+    """localm's OWN pip cache, inside the data dir (rule 4: self-contained).
+
+    Shared by every pip subprocess localm drives itself - plugin-extra installs
+    (plugins/deps.py), the native runtime wheel (setup_llama.py), and managed-ComfyUI
+    provisioning (media/managed_comfy_provision.py delegates here) - so wheels are
+    cached once, contained, and removed with the data dir. Left unset, pip caches to a
+    per-user location OUTSIDE the data dir (``%LOCALAPPDATA%\\pip\\cache`` on Windows,
+    ``~/.cache/pip`` on POSIX); measured live, provisioning alone had put multi-GB
+    there. A cache (not ``--no-cache-dir``) because those wheels are multi-GB and a
+    re-run would otherwise re-download all of it; the cost is disk INSIDE the data dir,
+    where it is visible and reclaimed with it."""
+    return cache_dir() / "pip"
+
+
+def uv_cache_dir() -> Path:
+    """localm's OWN uv cache, inside the data dir (rule 4: self-contained).
+
+    uv keeps a SEPARATE cache from pip (its own ``UV_CACHE_DIR``, default
+    ``%LOCALAPPDATA%\\uv\\cache`` on Windows / ``~/.cache/uv`` on POSIX). localm's
+    installers try ``uv pip install`` BEFORE falling back to ``python -m pip``, so uv's
+    cache has to be pinned too or the uv path silently leaks GBs outside the data dir
+    exactly as pip would. Same location root as pip's (``cache_dir()``), a sibling
+    subdir since the two tools' cache formats differ."""
+    return cache_dir() / "uv"
+
+
+def contained_pip_env(base: Optional[dict] = None) -> dict:
+    """A subprocess environment with pip's AND uv's caches pinned inside the data dir.
+
+    *base* defaults to a copy of the current process environment. localm's package
+    installers (plugins/deps.py, setup_llama.py) shell out to ``uv pip install`` first
+    and ``python -m pip install`` second; BOTH tools cache to a per-user location
+    outside the data dir when left to their defaults, so BOTH ``PIP_CACHE_DIR`` and
+    ``UV_CACHE_DIR`` are set here - pinning only one still leaks via the other. This
+    OVERRIDES any ambient value on purpose (see ``cache_dir()``): containment a stray
+    environment variable can silently switch off is not a guarantee. Callers pass the
+    returned dict as ``subprocess``'s ``env=``; a subprocess that runs neither tool
+    simply ignores the two extra vars, so it is safe to use everywhere."""
+    env = dict(os.environ if base is None else base)
+    env["PIP_CACHE_DIR"] = str(pip_cache_dir())
+    env["UV_CACHE_DIR"] = str(uv_cache_dir())
+    return env
+
+
 HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
@@ -133,6 +198,13 @@ DEFAULT_CONFIG: dict = {
     # so raise this only if a genuinely huge model on slow storage needs
     # longer than the generous default.
     "gguf_load_timeout_s": 900.0,
+    # How long a reply may take to produce its FIRST token before the worker is
+    # treated as hung. This covers prompt PREFILL, not one token's decode, so it
+    # is sized like the load timeout rather than the per-token ceiling: on CPU,
+    # under heavy partial offload, or with a very long prompt, prefill can
+    # legitimately take minutes. Raise this only if a genuinely slow box needs
+    # longer than the generous default.
+    "gguf_first_token_timeout_s": 900.0,
     # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
     # explicit selection (device 0). A stale index falls back to device 0 with
     # a logged warning, not a wrong/out-of-range GPU (see
@@ -226,16 +298,14 @@ DEFAULT_CONFIG: dict = {
     # user's install nor shims a ComfyUI it did not start. Set by the reactive
     # offer or `localm config comfy_func_shim on`; self-expires once Comfy is fixed.
     "comfy_func_shim": False,
-    # localm-managed ComfyUI (opt-in, off by default). When ON *and* a managed
-    # instance is installed under <LOCALM_HOME>/comfyui *and* comfy_target is
-    # "own", image/music/video target the OWN managed ComfyUI, not the user's.
-    # Inert until an instance exists; user's ComfyUI never modified. This flag
-    # only routes (provisioning is stages S2/S3). See localm/media/managed_comfy.py.
-    "managed_comfy_enabled": False,
-    # Which ComfyUI localm targets when a managed instance exists (coexistence).
-    # "own" (default) = prefer the managed instance when installed; "user" =
-    # always use the user's ComfyUI (comfy_workdir / comfy_api_url). With no
-    # managed instance, both behave identically.
+    # Which ComfyUI localm targets (coexistence). "own" (default) = use a
+    # localm-managed instance once one is installed under <LOCALM_HOME>/comfyui
+    # (`localm comfy setup`); inert until then, so a fresh install behaves
+    # identically to today. "user" = always use the user's own ComfyUI
+    # (comfy_workdir / comfy_api_url), even if a managed instance exists. With
+    # no managed instance, both behave identically. This key only routes
+    # (provisioning is stages S2/S3) and never modifies the user's own ComfyUI.
+    # See localm/media/managed_comfy.py.
     "comfy_target": "own",
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
@@ -276,6 +346,14 @@ DEFAULT_CONFIG: dict = {
     # <home>/models/embeddings on first use (auto only under net_mode=allow, else
     # run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
     "embedding_model": "bge-small-en-v1.5",
+    # How the embedding model's token states are pooled into one vector.
+    # "mean" (default) suits the bundled bge/nomic choices and is what every
+    # existing index was built with. A DECODER-based embedder (Qwen3-Embedding,
+    # gte-Qwen2) is trained for last-token pooling and is degraded by mean: set
+    # "last", or "auto" to follow whatever the GGUF declares. Changing this
+    # invalidates already-embedded RAG collections and memory vectors (same
+    # dimensions, different meaning), so re-index after changing it.
+    "embedding_pooling": "mean",
     # Which host folders the document-indexing (RAG) API may READ. All three keys
     # are OWNER-ONLY: a non-owner config:write key can neither see nor set them
     # (enforced at PATCH /v1/config; see settings_schema.admin_only). The localm
@@ -512,6 +590,34 @@ def _transient_backoff(attempt: int) -> None:
     time.sleep(min(_REPLACE_BACKOFF * (attempt + 1), _REPLACE_BACKOFF_CAP))
 
 
+def _is_transient_permission_error(e: OSError) -> bool:
+    """True when a PermissionError plausibly reflects a TRANSIENT file lock worth
+    riding out, rather than a stable denial no retry can change.
+
+    Windows is the only platform with the race this retry exists for: another
+    handle (a concurrent atomic replace, antivirus, the indexer, Windows Search)
+    holds the file open for microseconds and open()/os.replace raises
+    PermissionError - ERROR_SHARING_VIOLATION (32), or ERROR_ACCESS_DENIED (5)
+    when a replace collides with an AV lock. A genuine Windows ACL denial also
+    surfaces as winerror 5 and is indistinguishable from the AV case at this
+    layer, so Windows keeps retrying it: ~1s to be sure is the documented,
+    accepted trade there.
+
+    POSIX has no such race. open() raises EACCES/EPERM only when the mode or ACL
+    genuinely denies us (a mode-000 or root-owned file left by an earlier sudo
+    run), which is a stable state - the retry can never succeed and just burns
+    ~1s of time.sleep while holding _io_lock, which serializes config access
+    process-wide, including the per-request auth path (auth.require_auth ->
+    load_config). So on POSIX we fall back at once (the failure is still
+    surfaced by the caller, never hidden - it just is not retried)."""
+    if os.name != "nt":
+        return False
+    # winerror is absent only if this was not raised by the Windows layer at all
+    # (e.g. a test double); treat that as transient to preserve the established
+    # Windows behaviour rather than silently narrowing it.
+    return getattr(e, "winerror", None) in (5, 32, None)
+
+
 def _replace_atomic(src: Path, dst: Path) -> None:
     """``os.replace(src, dst)`` with a bounded retry on a transient Windows
     sharing violation.
@@ -523,13 +629,16 @@ def _replace_atomic(src: Path, dst: Path) -> None:
     the save. A genuine, persistent permission problem still surfaces (re-raised
     after the last attempt) - we retry the transient race, we never hide a real
     failure. On POSIX os.replace does not hit this, so the loop succeeds first
-    try."""
+    try; if it does raise there it is a STABLE denial (see
+    _is_transient_permission_error), re-raised at once rather than stalling ~1s
+    under _io_lock AND the cross-process lock for a retry that cannot succeed
+    (REG-566)."""
     for attempt in range(_REPLACE_RETRIES):
         try:
             os.replace(src, dst)
             return
-        except PermissionError:
-            if attempt == _REPLACE_RETRIES - 1:
+        except PermissionError as e:
+            if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
                 raise
             _transient_backoff(attempt)
 
@@ -602,7 +711,12 @@ def _read_json(path: Path, default):
                 # scanner does not make us spuriously fall back to .bak/defaults
                 # and momentarily discard live settings. A persistent EACCES
                 # surfaces after the retries via the same warning + fall-through.
-                if attempt < _REPLACE_RETRIES - 1:
+                # A STABLE denial (any POSIX EACCES - see
+                # _is_transient_permission_error) skips the retry entirely: it
+                # can never succeed, and this loop runs under _io_lock, so ~1s of
+                # backoff would stall every config read process-wide - including
+                # the per-request auth path - for nothing (REG-566).
+                if attempt < _REPLACE_RETRIES - 1 and _is_transient_permission_error(e):
                     _transient_backoff(attempt)
                     continue
                 print(f"[localm] {candidate.name} is unreadable ({e}); "
@@ -803,6 +917,30 @@ def _lock_owner_pid(raw: bytes):
         return None
 
 
+# The fencing tokens of locks THIS process currently holds, keyed by lock path.
+# This - not the pid recorded in the file - is what identifies a lock as ours.
+#
+# REG-586: a pid NUMBER is not an identity. The OS reuses pids freely across
+# process lifetimes, so a lock LEAKED by a crashed holder can carry the very pid
+# the OS later hands to a new localm process. Reading that as "held by me" turned
+# the clear nested-call error into a permanent wedge of every config/registry
+# write for that process's whole life, and short-circuited the staleness reclaim
+# that exists to prevent exactly that. The uuid4 nonce in each token makes this
+# exact instead: a leaked file can never match a token we are holding right now,
+# whatever pid it records.
+_held_lock_tokens: dict = {}
+_held_lock_tokens_guard = threading.Lock()
+
+
+def _lock_is_held_by_us(lockpath: Path, held: bytes) -> bool:
+    """True only when *held* is a fencing token THIS process wrote and still
+    holds - i.e. a genuine nested acquisition, not a pid collision."""
+    if not held:
+        return False
+    with _held_lock_tokens_guard:
+        return _held_lock_tokens.get(str(lockpath)) == held
+
+
 @contextlib.contextmanager
 def _cross_process_lock(target: Path):
     """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
@@ -834,12 +972,16 @@ def _cross_process_lock(target: Path):
     update_config()/update_registry() that calls back into either for the same
     file - not supported, this lock is not reentrant like _io_lock) from a
     confusing _CROSS_LOCK_TIMEOUT-long stall into an immediate, clear error: the
-    PID embedded in the token reveals "this is already held by ME," which is
-    only possible via the calling process's own nested acquisition (a sibling
-    thread in this process would already be blocked on the outer _io_lock before
-    ever reaching here).
+    token on disk matches one in _held_lock_tokens, which is only possible via
+    the calling process's own nested acquisition (a sibling thread in this
+    process would already be blocked on the outer _io_lock before ever reaching
+    here). Ownership is decided by that exact token, NOT by the pid recorded in
+    the file: pids are reused across process lifetimes, so a leaked lock carrying
+    our own pid must still be treated as foreign, and stay eligible for the
+    staleness reclaim below (REG-586 - a self-pid check here wedged every write
+    for the process's whole life, defeating that reclaim).
 
-    A lock file older than _CROSS_LOCK_STALE_AGE (and not self-held) is assumed
+    A lock file older than _CROSS_LOCK_STALE_AGE that we do not hold is assumed
     to belong to a crashed holder (a killed CLI, a hard-killed server) and is
     reclaimed instead of wedging every future config/registry write for the rest
     of the install's life; the reclaim is logged, never silent."""
@@ -855,7 +997,7 @@ def _cross_process_lock(target: Path):
                 held = lockpath.read_bytes()
             except OSError:
                 held = b""
-            if _lock_owner_pid(held) == os.getpid():
+            if _lock_is_held_by_us(lockpath, held):
                 raise RuntimeError(
                     f"{lockpath.name} is already held by this same process "
                     f"(pid {os.getpid()}) - a mutator passed to update_config()/"
@@ -902,10 +1044,23 @@ def _cross_process_lock(target: Path):
             except OSError:
                 pass
             raise
+        # Record the token only once it is actually ON DISK: a failed write above
+        # unlinks the file, so registering earlier would leave us believing we
+        # hold a lock that does not exist.
+        with _held_lock_tokens_guard:
+            _held_lock_tokens[str(lockpath)] = token
         break
     try:
         yield
     finally:
+        # Forget our claim FIRST, and unconditionally: once we leave this block we
+        # no longer hold the lock, whatever happens to the file below. Leaving a
+        # stale entry here would make a LATER acquisition of the same path read a
+        # foreign lock as our own nested call (the REG-586 wedge, rebuilt in
+        # memory).
+        with _held_lock_tokens_guard:
+            if _held_lock_tokens.get(str(lockpath)) == token:
+                del _held_lock_tokens[str(lockpath)]
         # Fencing-token release (see docstring): only remove the lock file if it
         # still holds the token WE wrote. If it doesn't, another process reclaimed
         # it as stale while we were still legitimately inside our critical section

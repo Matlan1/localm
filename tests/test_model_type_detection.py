@@ -17,11 +17,14 @@ change is real):
 """
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
 
 from localm import model_manager as mm
+from localm.model_manager import gguf as _gguf_mod
+from localm.model_manager.gguf import gguf_embedding_signal
 from localm.model_manager.pull import _hf_pipeline_tag_to_type
 
 
@@ -183,6 +186,12 @@ def test_is_auto_chat_eligible():
     assert is_auto_chat_eligible({"model_type": "llm"}) is True
     assert is_auto_chat_eligible({}) is True                       # legacy entry = llm
     assert is_auto_chat_eligible({"model_type": "unknown"}) is False
+    # An 'embedding' entry must never be auto-picked as the default CHAT model
+    # (it loads via a dedicated embeddings-mode context, not the causal chat
+    # path) - a real risk now that setup-embeddings can register one into the
+    # main registry, making an embedding-only registry a plausible first-run
+    # state (adversarial review finding, confirmed by live reproduction).
+    assert is_auto_chat_eligible({"model_type": "embedding"}) is False
 
 
 def test_unknown_not_auto_selected_but_runnable_by_name(monkeypatch):
@@ -197,9 +206,31 @@ def test_unknown_not_auto_selected_but_runnable_by_name(monkeypatch):
     assert ec.resolve_model("zeta-unknown") == "zeta-unknown"
 
 
+def test_embedding_not_auto_selected_but_runnable_by_name(monkeypatch):
+    # Same guarantee as the 'unknown' case above, for 'embedding': an
+    # embedding-only registry must not auto-load one of them as the chat
+    # model (it would fail or serve nonsense via the causal chat path), but
+    # it stays runnable when named explicitly.
+    from localm.plugins.mcpserver.server import EngineCache
+    reg = {"zeta-embed": {"path": "x", "model_type": "embedding"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: reg)
+    ec = EngineCache(default_model=None)
+    with pytest.raises(ValueError):
+        ec.resolve_model(None)
+    assert ec.resolve_model("zeta-embed") == "zeta-embed"
+
+
 def test_autopick_prefers_llm_over_unknown(monkeypatch):
     from localm.plugins.mcpserver.server import EngineCache
     reg = {"a-unknown": {"path": "x", "model_type": "unknown"},
+           "b-llm": {"path": "y", "model_type": "llm"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: reg)
+    assert EngineCache(default_model=None).resolve_model(None) == "b-llm"
+
+
+def test_autopick_prefers_llm_over_embedding(monkeypatch):
+    from localm.plugins.mcpserver.server import EngineCache
+    reg = {"a-embed": {"path": "x", "model_type": "embedding"},
            "b-llm": {"path": "y", "model_type": "llm"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: reg)
     assert EngineCache(default_model=None).resolve_model(None) == "b-llm"
@@ -250,3 +281,299 @@ def test_cli_set_type_command(tmp_path, monkeypatch):
     # an out-of-vocab type is rejected by the click.Choice constraint
     res2 = runner.invoke(cli_pkg.main, ["set-type", "cli_model", "bogus"])
     assert res2.exit_code != 0
+
+
+# --------------------------------------------------------------------------- #
+#  Branch A-embedding: a distinct 'embedding' MODEL_TYPES value, detected      #
+#  from HARD GGUF metadata (general.architecture / *.pooling_type), never a   #
+#  filename guess. Covers gguf.py (gguf_embedding_signal), registry.py        #
+#  (_detect_local_model_type + sync_models_dir), pull.py (the HF pipeline_tag #
+#  classifier + the post-download auto-upgrade), and cli/models.py (--type).  #
+# --------------------------------------------------------------------------- #
+
+def _build_gguf_bytes(architecture: str, extra_kv: "dict | None" = None) -> bytes:
+    """Construct a minimal-but-structurally-valid GGUF v3 file byte-for-byte in
+    the layout ``_gguf_metadata_probe`` (localm/model_manager/gguf.py) parses:
+    magic ``b"GGUF"`` + uint32 version + uint64 tensor_count + uint64 kv_count,
+    followed by exactly ``kv_count`` length-prefixed (key, type, value) triples.
+    Every KV here is written as GGUF_TYPE_STRING(8) - the real format's own
+    string encoding is a uint64 length prefix then the raw utf-8 bytes, used for
+    both the key and the value. ``extra_kv`` entries only need to exist for
+    ``gguf_embedding_signal``'s pooling_type check, which keys off the KEY name
+    alone, so a placeholder string value is fine. Padded with trailing zero
+    bytes (never parsed - the loop stops after ``kv_count`` entries) so the file
+    clears gguf.py's own ``_GGUF_MIN_BYTES`` floor, exactly like a real model.
+    """
+    extra_kv = extra_kv or {}
+
+    def _kv_string(key: str, value: str) -> bytes:
+        kb = key.encode("utf-8")
+        vb = value.encode("utf-8")
+        return (
+            struct.pack("<Q", len(kb)) + kb
+            + struct.pack("<I", 8)          # GGUF_TYPE_STRING
+            + struct.pack("<Q", len(vb)) + vb
+        )
+
+    kv_count = 1 + len(extra_kv)
+    buf = bytearray()
+    buf += b"GGUF"
+    buf += struct.pack("<I", 3)             # version 3
+    buf += struct.pack("<Q", 0)             # tensor_count
+    buf += struct.pack("<Q", kv_count)      # kv_count
+    buf += _kv_string("general.architecture", architecture)
+    for key, value in extra_kv.items():
+        buf += _kv_string(key, str(value))
+
+    floor = _gguf_mod._GGUF_MIN_BYTES
+    if len(buf) < floor:
+        buf += b"\x00" * (floor - len(buf))
+    return bytes(buf)
+
+
+# ------------------------- gguf_embedding_signal ------------------------- #
+
+def test_gguf_embedding_signal_bert_architecture_true(tmp_path):
+    f = tmp_path / "bert-embed.gguf"
+    f.write_bytes(_build_gguf_bytes("bert"))
+    assert gguf_embedding_signal(f) is True
+
+
+def test_gguf_embedding_signal_llama_no_pooling_false(tmp_path):
+    # A causal-chat architecture with no pooling_type key at all -> not an
+    # embedding model.
+    f = tmp_path / "llama-chat.gguf"
+    f.write_bytes(_build_gguf_bytes("llama"))
+    assert gguf_embedding_signal(f) is False
+
+
+def test_gguf_embedding_signal_qwen3_pooling_type_true(tmp_path):
+    # The decoder-reuse case from the real bug report (Qwen3-Embedding-8B-Q8_0.gguf):
+    # general.architecture stays "qwen3" (identical to the chat variant), but a
+    # pooling-configured export carries a "<arch>.pooling_type" key the chat
+    # variant never writes - that key alone is the signal.
+    f = tmp_path / "qwen3-embed.gguf"
+    f.write_bytes(_build_gguf_bytes("qwen3", {"qwen3.pooling_type": "1"}))
+    assert gguf_embedding_signal(f) is True
+
+
+def test_gguf_embedding_signal_truncated_file_no_crash(tmp_path):
+    # GGUF magic present but the header is cut off before tensor/kv counts can
+    # even be read - must degrade to "no signal", never raise.
+    f = tmp_path / "truncated.gguf"
+    f.write_bytes(b"GGUF" + b"\x03\x00\x00")
+    assert gguf_embedding_signal(f) is False
+
+
+def test_gguf_embedding_signal_bert_survives_huge_vocab_truncation(tmp_path):
+    # Adversarial-review regression (confirmed by live reproduction before the
+    # fix): general.architecture="bert" resolves EARLY in the KV walk, but a
+    # real embedding model's tokenizer vocab array (multilingual models like
+    # bge-m3 carry 250k+ tokens) can push the file's metadata block past the
+    # bounded probe read. Before the fix, the loop kept scanning for a
+    # pooling_type key it would never need (architecture alone is already
+    # definitive) until the huge array ran the parse past the probe bound,
+    # which raised and discarded the ALREADY-RESOLVED architecture - silently
+    # misclassifying a huge multilingual embedding GGUF as 'llm'. The fix
+    # breaks out of the KV walk as soon as EITHER signal is definitively known
+    # and preserves whatever was already resolved if a later key does trip a
+    # parse error, so this must return True regardless of what follows.
+    buf = bytearray()
+    buf += b"GGUF"
+    buf += struct.pack("<I", 3)              # version 3
+    buf += struct.pack("<Q", 0)               # tensor_count
+    buf += struct.pack("<Q", 2)               # kv_count: architecture + huge vocab array
+
+    def _kv_string(key: str, value: str) -> bytes:
+        kb, vb = key.encode("utf-8"), value.encode("utf-8")
+        return (struct.pack("<Q", len(kb)) + kb
+                + struct.pack("<I", 8) + struct.pack("<Q", len(vb)) + vb)
+
+    buf += _kv_string("general.architecture", "bert")
+
+    # A huge tokenizer.ggml.tokens array: ARRAY(9) of STRING(8) elements, many
+    # more than fit in the probe bound - simulates a real multilingual vocab.
+    key = b"tokenizer.ggml.tokens"
+    buf += struct.pack("<Q", len(key)) + key
+    buf += struct.pack("<I", 9)               # GGUF_TYPE_ARRAY
+    n_tokens = 400_000
+    buf += struct.pack("<I", 8)               # element type: STRING
+    buf += struct.pack("<Q", n_tokens)
+    token = b"tok"
+    for _ in range(n_tokens):
+        buf += struct.pack("<Q", len(token)) + token   # ~5 MB total, past the 4 MB probe bound
+
+    f = tmp_path / "bert-huge-vocab.gguf"
+    f.write_bytes(bytes(buf))
+    assert gguf_embedding_signal(f) is True
+
+
+def test_gguf_embedding_signal_non_gguf_file_no_crash(tmp_path):
+    f = tmp_path / "not-a-model.bin"
+    f.write_bytes(b"this is definitely not a gguf file" * 50)
+    assert gguf_embedding_signal(f) is False
+
+
+# ------------------------------ add_local --------------------------------- #
+
+def test_add_local_gguf_bert_architecture_is_embedding(tmp_path, isolated_home):
+    f = tmp_path / "my-embedder.gguf"
+    f.write_bytes(_build_gguf_bytes("bert"))
+    assert mm.add_local(str(f)) is True
+    assert mm.load_registry()["my-embedder"]["model_type"] == "embedding"
+
+
+def test_add_local_full_gguf_llama_architecture_still_llm(tmp_path, isolated_home):
+    # Regression guard distinct from test_add_local_gguf_still_llm above: that
+    # test's blob is UNPARSEABLE (no real kv block), exercising the "parse
+    # failed -> no signal -> llm" fallback. This one is a fully valid GGUF whose
+    # metadata DOES parse (a real architecture, no pooling key) - proving the
+    # negative path through the real parser, not just the fallback.
+    f = tmp_path / "my-chat-model.gguf"
+    f.write_bytes(_build_gguf_bytes("llama"))
+    assert mm.add_local(str(f)) is True
+    assert mm.load_registry()["my-chat-model"]["model_type"] == "llm"
+
+
+# --------------------------- sync_models_dir ------------------------------- #
+
+def test_sync_models_dir_discovers_embedding_gguf(isolated_home):
+    dest = isolated_home / "models" / "auto-embed.gguf"
+    dest.write_bytes(_build_gguf_bytes("nomic-bert"))
+    result = mm.sync_models_dir()
+    assert result.added == 1
+    assert mm.load_registry()["auto-embed"]["model_type"] == "embedding"
+
+
+# --------------------------- _hf_pipeline_tag_to_type ---------------------- #
+
+def test_hf_feature_extraction_is_embedding(monkeypatch):
+    _patch_hf(monkeypatch, {"pipeline_tag": "feature-extraction", "tags": []})
+    assert _hf_pipeline_tag_to_type("owner/repo") == "embedding"
+
+
+def test_hf_sentence_similarity_is_embedding(monkeypatch):
+    _patch_hf(monkeypatch, {"pipeline_tag": "sentence-similarity", "tags": []})
+    assert _hf_pipeline_tag_to_type("owner/repo") == "embedding"
+
+
+# ------------------------------ pull_model --------------------------------- #
+
+def test_pull_model_auto_upgrades_gguf_to_embedding(tmp_path, isolated_home, monkeypatch):
+    # pull_model's default model_type="auto" resolves a bare *.gguf spec to
+    # 'llm' up front (the container format is a hard signal on its own), but
+    # _pull_gguf_file then probes the freshly-downloaded file's OWN metadata and
+    # upgrades an auto-resolved 'llm' to 'embedding' when the bytes say so.
+    import huggingface_hub
+    import requests
+
+    embedding_bytes = _build_gguf_bytes("bert")
+
+    def _fake_download(repo_id, filename, local_dir, **kw):
+        p = Path(local_dir) / filename
+        p.write_bytes(embedding_bytes)
+        return str(p)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+    # Avoid any real network: no HF metadata digest, and the disk-space
+    # preflight HEAD fails closed to total_size=0 (still a benign no-op path).
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
+    monkeypatch.setattr(
+        requests, "head",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+
+    assert mm.pull_model("owner/repo:auto-embed.gguf") is True
+    assert mm.load_registry()["auto-embed"]["model_type"] == "embedding"
+
+
+def test_pull_model_explicit_llm_type_not_overridden(tmp_path, isolated_home, monkeypatch):
+    # Companion negative case: the SAME embedding-signal bytes pulled with an
+    # explicit model_type="llm" must stay 'llm' - the auto-upgrade in
+    # _pull_gguf_file is gated on type_is_auto and must never override an
+    # explicitly-passed --type.
+    import huggingface_hub
+    import requests
+
+    embedding_bytes = _build_gguf_bytes("bert")
+
+    def _fake_download(repo_id, filename, local_dir, **kw):
+        p = Path(local_dir) / filename
+        p.write_bytes(embedding_bytes)
+        return str(p)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
+    monkeypatch.setattr(
+        requests, "head",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+
+    assert mm.pull_model("owner/repo:forced-llm.gguf", model_type="llm") is True
+    assert mm.load_registry()["forced-llm"]["model_type"] == "llm"
+
+
+# ---------------------------------- CLI ------------------------------------ #
+
+def test_cli_add_explicit_type_overrides_detection(tmp_path, monkeypatch):
+    import localm.config as cfg
+    from click.testing import CliRunner
+    import localm.cli as cli_pkg
+
+    home = tmp_path / ".localm"
+    (home / "models").mkdir(parents=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    for attr, val in (("HOME_DIR", home), ("MODELS_DIR", home / "models"),
+                      ("CONFIG_FILE", home / "config.json"),
+                      ("REGISTRY_FILE", home / "registry.json")):
+        monkeypatch.setattr(cfg, attr, val)
+    monkeypatch.setattr(mm, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(mm, "REGISTRY_FILE", home / "registry.json")
+
+    # A llama-architecture GGUF with no pooling key would auto-detect as 'llm' -
+    # the explicit --type embedding below must win regardless (explicit choice
+    # is never silently overridden by detection).
+    f = tmp_path / "chat-model.gguf"
+    f.write_bytes(_build_gguf_bytes("llama"))
+
+    runner = CliRunner()
+    res = runner.invoke(cli_pkg.main, ["add", str(f), "--type", "embedding"])
+    assert res.exit_code == 0, res.output
+    assert mm.load_registry()["chat-model"]["model_type"] == "embedding"
+
+    # An out-of-vocabulary --type is rejected by click's Choice constraint.
+    res2 = runner.invoke(cli_pkg.main, ["add", str(f), "--type", "bogus-not-a-type"])
+    assert res2.exit_code != 0
+
+
+# --------------------------- setup-embeddings ------------------------------ #
+
+def test_setup_embeddings_registers_once_not_twice(isolated_home, monkeypatch):
+    from click.testing import CliRunner
+    from localm.cli.maintenance import setup_embeddings
+    from localm.inference import embedder
+
+    emb_dir = isolated_home / "models" / "embeddings"
+    emb_dir.mkdir(parents=True, exist_ok=True)
+    fake = emb_dir / "bge-small-en-v1.5-q4_k_m.gguf"
+    fake.write_bytes(_build_gguf_bytes("bert"))
+
+    # Stub the DOWNLOADER (the environment), not the sync logic under test -
+    # same pattern as test_cli_setup_embeddings_msg.py, but the fake file sits
+    # under <home>/models/embeddings so the registry-sync branch fires.
+    monkeypatch.setattr(embedder, "resolve_embedding_model_path",
+                        lambda allow_download=True: str(fake))
+
+    runner = CliRunner()
+    res1 = runner.invoke(setup_embeddings, [])
+    assert res1.exit_code == 0, res1.output
+    reg1 = mm.load_registry()
+    assert len(reg1) == 1
+    name1 = next(iter(reg1))
+    assert reg1[name1]["model_type"] == "embedding"
+
+    # A second invocation resolves to the SAME path again - must not create a
+    # duplicate registry entry (find_aliases_by_path guards it).
+    res2 = runner.invoke(setup_embeddings, [])
+    assert res2.exit_code == 0, res2.output
+    reg2 = mm.load_registry()
+    assert len(reg2) == len(reg1)
+    assert set(reg2) == set(reg1)

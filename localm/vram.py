@@ -128,6 +128,262 @@ def decide_media_swap(settings: dict, *,
         policy=settings.get("swap_policy", "auto"))
 
 
+def media_single_device_shortfall(settings: dict, *,
+                                  config: Optional[dict] = None) -> Optional[dict]:
+    """``{"index", "needed", "free"}`` when the ONE card ComfyUI will actually use
+    cannot hold the WHOLE media model, else ``None`` (fine, or nothing to check).
+
+    THE OTHER HALF OF ``decide_media_swap`` (REG-532). That gate reads COMBINED free
+    across a configured split, which is the right CAPACITY question and MUST stay that
+    way (every capacity decision uses the combined number). But no single model is
+    DIVIDED across the split the way a tensor_split GGUF is: each component loads whole
+    onto one ``get_torch_device()`` (``model_management.py:194``). So the gate can be
+    satisfied by 2x4 GB = 8 GB combined while a 4 GB model lands on ONE 4 GB card and
+    OOMs, spills to shared RAM, or trips the ROCm TDR. The gate is not wrong; it simply
+    cannot see placement.
+
+    NOTE, and do not let this rot: ComfyUI core CAN place DIFFERENT components (model /
+    CLIP / VAE) on different cards via ``comfy_extras/nodes_multigpu.py``'s
+    ``Select*Device`` nodes. localm does not emit those yet. When it does, this check
+    must become per-component against each component's chosen card, not one card for
+    the whole job - the estimate here would then be over-strict rather than wrong, but
+    it would still be measuring a placement that no longer happens.
+
+    This answers the placement question instead: does the specific card
+    ``discover.resolve_preferred_device()`` chose hold the WHOLE model plus the same
+    headroom the aggregate demands. Deliberately NOT ``discover.gpu_split_shortfall``,
+    which checks a per-device RATIO SHARE - right for a tensor_split GGUF, an
+    UNDER-check here (a card holding 40% of a split would be asked for 40% of the model
+    and then handed 100% of it).
+
+    Uses the SAME headroom as ``should_swap_for_media`` so the per-device check is not
+    held to a thinner margin than the aggregate ceiling it composes with (the
+    convention ``gpu_split_shortfall`` documents).
+
+    Returns None (nothing to check) when the policy is not 'auto' (an explicit
+    always/never is the user's choice and is not second-guessed), when no split is
+    configured (the combined reading already IS the single card's), when the estimate
+    is unknown ('auto' already swaps on unknown), or when per-device free is
+    unmeasurable (cannot check; do not block a load that might work).
+    """
+    if settings.get("swap_policy", "auto") != "auto":
+        return None
+    need = settings.get("vram_estimate_bytes")
+    if not isinstance(need, int) or need <= 0:
+        return None
+    from localm.config import load_config
+    from localm.discover import (list_gpus, resolve_preferred_device,
+                                 split_device_count)
+    cfg = config if config is not None else load_config()
+    if split_device_count(cfg) < 2:
+        return None
+    gpus = list_gpus()
+    idx = resolve_preferred_device(cfg, gpus=gpus)
+    if idx is None:
+        return None
+    dev = {g.get("index"): g for g in gpus}.get(idx)
+    if dev is None or dev.get("free") is None:
+        return None
+    needed = need + _DEFAULT_HEADROOM
+    free = dev["free"]
+    if free >= needed:
+        return None
+    return {"index": idx, "needed": needed, "free": free}
+
+
+def media_split_notice(config: Optional[dict] = None) -> Optional[str]:
+    """A user-visible line for a box with a configured GPU split, saying media runs on
+    ONE card and why, or ``None`` when there is nothing to say.
+
+    The user explicitly configured a split and is NOT getting it for media, so this is
+    a capability shortfall they must be told about, not a debug detail. The house
+    precedent for exactly this shape is the partial-GPU-offload console notice in
+    ``inference/backends/llamacpp/_sizing.py``. Deliberately not ``logger.debug``: the
+    always-on ring buffer is INFO+, so a debug line is invisible without --debug and
+    would never reach a bug report.
+
+    Returns None on a single-GPU / unsplit box so a user who configured nothing is
+    never nagged about a shortfall that does not exist.
+    """
+    from localm.config import load_config
+    from localm.discover import resolve_preferred_device, split_device_count
+    cfg = config if config is not None else load_config()
+    n = split_device_count(cfg)
+    if n < 2:
+        return None
+    idx = resolve_preferred_device(cfg)
+    where = f"GPU {idx}" if idx is not None else "a single GPU"
+    return (f"Note: your GPU split spans {n} cards, but image/music/video generation "
+            f"currently runs on ONE card ({where}, the one with the most free VRAM). "
+            "A single model cannot be divided across cards the way chat and embeddings "
+            "are, so your split ratios do not apply here. Chat and embeddings still use "
+            "the full split.")
+
+
+def decide_embedder_swap(embedder_estimate_bytes: Optional[int], *,
+                         policy: str = "auto",
+                         read_free: Optional[Callable[[], Optional[int]]] = None) -> bool:
+    """Decide whether to unload the chat LLM before the shared embedder loads
+    (``localm.inference.embedder.get_embedder()``), reading live free VRAM.
+
+    Generalizes ``decide_media_swap`` for a caller that has no per-plugin
+    ``settings`` dict of its own - just the embedder's own estimated footprint
+    and the resolved ``model_swap_policy``. Both funnel through the same
+    ``should_swap_for_media`` decision, so the embedder gets the identical
+    auto/always/never semantics the image/music/video plugins already use."""
+    if read_free is None:
+        def read_free() -> Optional[int]:
+            from localm.discover import vram_capacity
+            return vram_capacity().get("free")
+    return should_swap_for_media(read_free(), embedder_estimate_bytes, policy=policy)
+
+
+def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
+    """Free every loaded chat engine so the shared embedder's own load has VRAM
+    room, through the SAME guarded path the server's "Unload all" button uses
+    (``http_server.unload_all_models``).
+
+    The embedder loads in-process (not as a background job with a self_url), so
+    unlike ``unload_chat_for_media`` this does not round-trip over HTTP: it
+    mirrors ``jobs/runner.py``'s ``_evict_shared_engine_for_media`` instead,
+    submitting the coroutine onto the server's captured event loop
+    (``http_server._server_loop``) via ``asyncio.run_coroutine_threadsafe`` and
+    blocking THIS (caller's) thread on the result. That is required, not
+    optional: ``unload_all_models`` honors the in-flight-request pin and
+    serializes with ``get_engine`` only when it runs ON the loop - a raw
+    off-loop unload would race a concurrent request the way the pin-during-
+    unload fix (BUG-9b) already had to close for the media path.
+
+    Returns the unload status ("unloaded" / "in_use" / "already_unloaded"), or
+    "skipped" when the server loop is unreachable (no live server - e.g. a bare
+    CLI embed) / "error" on a failure to complete - in which case the embedder
+    loads alongside whatever chat model is resident (degraded, logged, never a
+    crash - AGENTS.md rule 5: every degrade is surfaced, not silent)."""
+    import asyncio
+    from localm.debuglog import logger
+    from localm.inference import http_server as _hs
+
+    loop = getattr(_hs, "_server_loop", None)
+    if loop is None or not loop.is_running():
+        logger.debug("embedder: cannot reach the server loop to evict the chat "
+                     "model safely; loading the embedder alongside it (may be "
+                     "tight on VRAM)")
+        return "skipped"
+    # BUG #648: if this call is ALREADY running on the server loop's own thread
+    # (an async route resolved get_embedder() synchronously without offloading),
+    # the run_coroutine_threadsafe(...).result() below would DEADLOCK - the loop
+    # thread would block waiting for a coroutine only it can run, freezing the
+    # whole server for the full timeout, then swallowing the TimeoutError. Detect
+    # that and skip the guarded eviction: the embedder loads alongside the resident
+    # chat model (degraded, logged - never a freeze, and never silent per rule 5).
+    # Callers should offload to an executor so the eviction can actually run (the
+    # memory routes now do; this is the belt-and-braces guard for any other caller).
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop:
+        logger.warning("embedder: get_embedder() ran on the server event loop; "
+                       "skipping the guarded chat-model eviction to avoid "
+                       "deadlocking the loop (loading the embedder alongside the "
+                       "resident chat model - may be tight on VRAM). This call "
+                       "should be offloaded to an executor.")
+        return "skipped"
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_hs.unload_all_models(), loop)
+        res = fut.result(timeout=timeout_s)
+    except Exception as e:
+        logger.debug("embedder: guarded chat-model eviction did not complete "
+                     "(%s); loading the embedder without evicting", e)
+        return "error"
+    return res.get("status", "unloaded") if isinstance(res, dict) else "unloaded"
+
+
+def _vram_free_reading() -> tuple:
+    """``(free_bytes, fresh, scope)``: a free-VRAM reading, whether the probe behind
+    it was fresh (list_gpus() completed inside its deadline) rather than a
+    timed-out/busy fallback to a stale last-known-good value, and the reading's
+    ``free_scope``.
+
+    Used for BOTH ends of the before/after delta (hence the name: it was
+    ``_vram_before_reading`` when only the 'before' end checked freshness, before
+    #694 moved it here and #697 added ``scope``). The 'after' end needs it just as
+    much - see _live_free_vram_bytes below.
+
+    A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to
+    the user must know this: presenting a stale fallback as the CURRENT state
+    is exactly the rule-5 gap a release-verify pass caught - /v1/models/unload
+    reported byte-identical before/after readings, and vram_freed: false,
+    across two calls made minutes apart with genuinely different real GPU
+    states (confirmed stale via an OS-level VRAM counter showing the actual
+    free/use cycle worked correctly the whole time).
+
+    ``scope`` is the reading's ``free_scope`` (see
+    discover._apply_device_global_free): FREE_SCOPE_PROCESS means the number counts
+    only THIS process's allocations, so on that platform it cannot see a model the
+    isolated GGUF worker loaded - a SECOND, independent way this same before/after
+    report can be wrong while the probe is perfectly fresh (not the staleness the
+    'fresh' flag guards). None when the double/fallback did not say.
+
+    Defensive against a test double that patches vram_capacity()/vram_info()/
+    list_gpus() with a plain no-kwarg callable or a fixed dict return_value
+    (neither accepts/implements return_status): such a double is treated as
+    "status unknown, assume fresh" (permissive, matching this reading's
+    behavior before return_status existed) rather than raising on a rejected
+    kwarg or an unexpected shape - only a REAL probe chain needs to prove
+    itself stale."""
+    from localm.discover import GPU_PROBE_OK, vram_capacity
+    try:
+        result = vram_capacity(return_status=True)
+    except TypeError:
+        result = vram_capacity()
+    if isinstance(result, tuple) and len(result) == 2:
+        info, probe_status = result
+        fresh = probe_status == GPU_PROBE_OK
+    else:
+        info, fresh = result, True
+    return info.get("free"), fresh, info.get("free_scope")
+
+
+def _live_free_vram_bytes():
+    """Free VRAM in bytes from a FRESH probe, or None when the reading is not
+    live - the reader wait_for_vram_release() polls for the 'after' end.
+
+    Checking freshness on the 'before' end alone is not enough, and the gap is
+    not theoretical: the before-probe is itself what WARMS the driver, and the
+    native unload running between the two reads is exactly the kind of work that
+    wedges it. Once any probe overruns, discover._gpu_probe_inflight stays True
+    until the abandoned thread returns, so every subsequent poll is served the
+    frozen last-known-good value - which the before-read just refreshed. So
+    after == before, no rise, and the endpoint concluded "vram_freed": false with
+    before_fresh=True and therefore NO uncertainty flag at all: the original lie,
+    reproduced over real HTTP against the previous fix. Returning None here makes
+    that unmeasurable rather than falsely equal (AGENTS.md rule 5).
+
+    None means "could not measure now", never a fabricated 0.
+
+    NOT every free-VRAM caller is migrated to this, deliberately. Ones weighing
+    CAPACITY rather than reporting a completed action (the fit badges, the swap
+    gates, the eviction ceiling) still call vram_capacity() directly: a stale
+    ceiling costs an over- or under-swap, while refusing to decide at all would
+    break a working box every time the probe merely ran slow. What "unknown"
+    should MEAN for a decision gate is a real design question, and it is not
+    answered here.
+
+    Known gaps that ARE this same defect and are recorded rather than quietly
+    half-fixed - each one QUOTES a free figure that can come from a timed-out
+    probe, so each needs that design answer first:
+      - http_server.switch_engine's 503 refusals ("Not enough VRAM to load 'x'
+        (need ~N MB, M MB free)", and the split-shortfall variant beside it);
+      - sysstats.vram_capacity() -> GET /api/stats -> the GUI status bar;
+      - gui/routes/models.py's /api/vram-estimate -> the Settings free-VRAM line.
+    None of these is self-correcting: once a probe overruns,
+    discover._gpu_probe_inflight stays True until the abandoned thread returns,
+    so every later call keeps serving the same frozen value."""
+    free, fresh, _scope = _vram_free_reading()
+    return free if fresh else None
+
+
 def wait_for_vram_release(
     read_free: Callable[[], Optional[int]],
     *,
@@ -143,8 +399,19 @@ def wait_for_vram_release(
     ``timeout_s`` elapses.
 
     Returns ``(released, final_free)``: ``True`` once the rise is observed,
-    ``False`` on timeout, and ``None`` (released) when ``before_bytes`` is None
-    (VRAM unmeasurable - cannot verify, so behave as before and do not block).
+    ``False`` on timeout, and ``None`` (released) when the outcome CANNOT BE
+    VERIFIED - either because ``before_bytes`` is None, or because the reading was
+    still unmeasurable when the timeout expired.
+
+    That second None case is the honesty guard. ``False`` is a positive claim -
+    "VRAM did not drop" - and a poll that could not take a reading does not support
+    it. It matters because ``read_free`` is normally backed by the deadline-bounded
+    GPU probe (``discover.list_gpus``), whose status-aware callers pass None here
+    the moment a probe stops answering and starts serving a FROZEN last-known-good
+    value. Without this branch that frozen value equals ``before_bytes``, shows no
+    rise, and reports a confident "no VRAM was freed" while VRAM was in fact freed
+    (AGENTS.md rule 5). None reuses this function's already-documented "cannot
+    verify" meaning rather than inventing a fourth outcome.
 
     The ``/v1/models/unload`` endpoint uses this so it does NOT return until VRAM
     is actually reclaimed; otherwise a media model can load on top of a
@@ -159,7 +426,10 @@ def wait_for_vram_release(
         if final is not None and final - before_bytes >= min_rise_bytes:
             return (True, final)
         if monotonic() >= deadline:
-            return (False, final)
+            # Poll to the deadline first (a slow probe may recover and still show
+            # the rise); only the reading we actually END on decides. An
+            # unmeasurable one proves nothing either way.
+            return ((False, final) if final is not None else (None, final))
         sleep(poll_s)
         final = read_free()
 
@@ -207,7 +477,17 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
                       "No chat model was loaded - VRAM already free."})
             return True
         before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
-        if data.get("vram_freed") and before is not None and after is not None:
+        uncertain = bool(data.get("vram_reading_uncertain"))
+        if uncertain:
+            # The server flagged its own reading as possibly stale, so neither a
+            # GB figure nor "has not dropped yet" is a claim we may pass on to the
+            # user as fact - both would be arithmetic on a number the server just
+            # said it could not stand behind. This branch is checked BEFORE them
+            # for exactly that reason (rule 5).
+            job.push({"type": "line", "text":
+                      "Chat model unloaded - could not confirm how much VRAM was "
+                      "freed (no live GPU reading) - continuing."})
+        elif data.get("vram_freed") and before is not None and after is not None:
             gb = max(0.0, (after - before) / 1024 ** 3)
             job.push({"type": "line", "text":
                       f"Chat model unloaded - freed {gb:.1f} GB of VRAM."})
@@ -242,7 +522,17 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     job.push({"type": "line", "text": "Reloading the chat model..."})
     try:
         from localm.selfclient import self_request
-        self_request("POST", "/models/load", timeout=300, base_url=self_url)
+        resp = self_request("POST", "/models/load", timeout=300, base_url=self_url)
+        if not resp.ok:
+            # A non-2xx (503 "No model specified", 401, or a 500 when the engine
+            # load fails because the media backend still holds VRAM - the exact
+            # hazard this module manages) means the reload did NOT happen. Report
+            # that honestly instead of the false "Chat model ready." - lazy reload
+            # on the next message still recovers, so this is a message fix, not an
+            # escalation. Mirrors unload_chat_for_media's resp.ok check above.
+            job.push({"type": "line", "text":
+                      f"Reload deferred to the next message (HTTP {resp.status_code})."})
+            return
         job.push({"type": "line", "text": "Chat model ready."})
     except Exception as e:
         job.push({"type": "line", "text": f"Reload deferred to the next message ({e})."})

@@ -51,6 +51,7 @@ from localm.media.comfy_client import (
     _upload_image,
     _venv_python,
     _with_warning,
+    apply_model_overrides,
     clear_comfy_history,
     comfy_exec_error_message,
     comfy_fetch_output,
@@ -82,6 +83,7 @@ from localm.media.comfy_client import (
     SUBMIT_NO_ID,
     SUBMIT_OK,
     SUBMIT_URL_ERROR,
+    workflow_model_slots,
 )
 
 # load_config is referenced by some tests as a module attribute (a soft,
@@ -99,7 +101,8 @@ __all__ = [
     "_comfy_output_root", "_derive_workdir_from_cmd", "_format_missing",
     "_image_dimensions", "_is_link", "_link_source_id", "_localm_unload",
     "_looks_like_model_files", "_normalize_model_base", "_pick_variant",
-    "_upload_image", "_venv_python", "_with_warning", "clear_comfy_history",
+    "_upload_image", "_venv_python", "_with_warning",
+    "apply_model_overrides", "clear_comfy_history",
     "comfy_exec_error_message",
     "comfy_fetch_output", "comfy_http_error_detail", "comfy_object_info",
     "comfy_poll_until_done", "comfy_submit_prompt", "contain_comfy_artifacts",
@@ -110,7 +113,7 @@ __all__ = [
     "preflight_models", "resolve_sampler_roles", "sanitize_comfy_url",
     "set_seed_on", "set_seed_on_all",
     "SUBMIT_ERROR", "SUBMIT_HTTP_ERROR", "SUBMIT_NO_ID", "SUBMIT_OK",
-    "SUBMIT_URL_ERROR", "load_config",
+    "SUBMIT_URL_ERROR", "load_config", "workflow_model_slots",
 ]
 
 
@@ -122,7 +125,7 @@ _WORKFLOW_PATH = Path(__file__).parent / "flux_workflow.json"
 _WORKFLOW_EXAMPLE_PATH = Path(__file__).parent / "flux_workflow.example.json"
 
 
-def _workflow_path() -> Path:
+def workflow_path() -> Path:
     # Resolution order: 1. a workflow the user selected for the image plugin
     # (uploaded + picked on the Image page), 2. the legacy personal
     # flux_workflow.json, 3. the committed example. Selection is purely additive.
@@ -456,6 +459,7 @@ def generate_image(
     seed: Optional[int] = None,
     clip_name1: Optional[str] = None,
     clip_name2: Optional[str] = None,
+    model_overrides: Optional[dict] = None,
     lora_name: Optional[str] = None,
     lora_strength_model: float = 1.0,
     lora_strength_clip: float = 0.5,
@@ -511,6 +515,15 @@ def generate_image(
     clip_name2
         Override the T5 encoder filename.  If the name ends in ``.gguf``,
         the node is automatically switched to ``DualCLIPLoaderGGUF``.
+    model_overrides
+        Generic per-node model-slot overrides: ``{node_id: {input_name: value}}``,
+        the shape ``localm.media.comfy_client.workflow_model_slots()`` returns
+        slots in. Lets a caller override ANY model-file combo in the active
+        workflow (the base UNET/checkpoint, VAE, or anything else a custom
+        workflow adds) - not just clip_name1/clip_name2/lora_name, which only
+        cover the shipped template's own encoder/LoRA slots. Applied before any
+        other workflow shaping, so a later explicit clip_name1/clip_name2/
+        lora_name still wins if both are given for the same field.
     lora_name
         LoRA filename to inject (optional).
     lora_strength_model
@@ -565,9 +578,11 @@ def generate_image(
     # 2. Load workflow template (personal flux_workflow.json if present,
     # else the committed example)
     try:
-        workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
+        workflow = json.loads(workflow_path().read_text(encoding="utf-8"))
     except Exception as e:
         return False, f"Failed to load FLUX workflow template: {e}"
+    if model_overrides:
+        apply_model_overrides(workflow, model_overrides)
 
     # 2a-9. Shape the FLUX workflow from the call's parameters (perf dequant,
     # encoder overrides, img2img, prompt / guidance / LoRA / negative injection,

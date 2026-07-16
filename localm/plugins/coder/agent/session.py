@@ -148,8 +148,20 @@ class _SessionMixin:
             if changed:
                 diff_override = git_diff
         # A failure with no file change (an investigation-only or
-        # failed-before-first-write session) still carries a lesson.
-        had_failure = (not self._last_run_ok) or len(self._error_trace) >= 2
+        # failed-before-first-write session) still carries a lesson - but the bar
+        # is a run that ACTUALLY failed to finish, and this stays deliberately
+        # narrow because it costs a full model reflection that the CLI pays for
+        # SYNCHRONOUSLY as the user quits. Two things are not failures (REG-594):
+        #  - a bare tool-error COUNT: `len(self._error_trace) >= 2` fired on any
+        #    routine read-only session that hit a couple of incidental failures (a
+        #    missing read_file, a failed grep) - extremely common, no lesson. It was
+        #    redundant too: a genuinely broken run trips max_turns or a circuit
+        #    breaker (_GLOBAL_ERROR_ABORT / _REPEAT_RESPONSE_ABORT / the per-tool
+        #    streak), and every one of those already clears _last_run_ok.
+        #  - a USER-initiated stop: the user asked to leave, which is the worst
+        #    moment to start a 1024-token inference, and their own Ctrl-C is not a
+        #    lesson to learn.
+        had_failure = (not self._last_run_ok) and not self._user_stopped
         if not changed and not had_failure:
             return
         if self.on_event is not None:

@@ -100,11 +100,18 @@ def age_seconds(updated_at_iso: Optional[str]) -> Optional[float]:
 
 
 def _lock_down_dir(path: Path) -> None:
+    # mkdir failure is allowed to surface: the only caller (write_entry) catches
+    # OSError, logs it, and returns None - so a dir we truly cannot create is not
+    # silently ignored.
+    path.mkdir(parents=True, exist_ok=True)
     try:
-        path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, 0o700)
-    except OSError:
-        pass
+    except OSError as e:
+        # 0700 is best-effort hardening. chmod is EXPECTED to no-op/fail on Windows
+        # (POSIX mode bits are not enforced there) and can fail on some
+        # filesystems; the registry still functions without it. Debug-log rather
+        # than swallow (module header: "logged, never silenced (RULE 5)").
+        logger.debug("gpu_registry: could not chmod 0700 %s: %s", path, e)
 
 
 # ------------------------------------------------------------------ #
@@ -141,8 +148,12 @@ def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
         tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)
-        except OSError:
-            pass
+        except OSError as e:
+            # 0600 on the token-bearing entry is best-effort hardening; chmod is
+            # EXPECTED to no-op/fail on Windows and some filesystems. The entry is
+            # still written; degrade with a debug log, not a silent pass (module
+            # header: "logged, never silenced (RULE 5)").
+            logger.debug("gpu_registry: could not chmod 0600 %s: %s", tmp, e)
         os.replace(tmp, path)   # atomic on Windows + POSIX
         return path
     except OSError as e:

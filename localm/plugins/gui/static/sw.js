@@ -12,7 +12,46 @@
 // v49: pages/settings.js changed (the ComfyUI setup log no longer erases itself
 // on failure, #621) - a stale-cache miss on THIS exact bump is what made that
 // fix invisible to an already-installed PWA in the field.
-const CACHE = "localm-shell-v49";
+// v50: pages/settings.js changed again (the managed_comfy_enabled checkbox was
+// removed - a stale-cached client would keep showing it AND get "unknown config
+// key" on save, since the server no longer accepts that field).
+// v51: index.html and pages/models.js changed (the ComfyUI re-scan button moved
+// out of its hidden tab-gated row into the "Add a model" card) - a stale-cached
+// client would keep the button invisible on the All/LLMs tabs.
+// v52: app/helpers.js and pages/images.js/music.js/video.js changed (the
+// ComfyUI missing-model download offer) - a stale-cached client would keep
+// missing the pre-generate model check and the download confirm modal.
+// v53: index.html and pages/models.js changed (a new "Embedding" Model
+// Manager tab + type option) - a stale-cached client would keep lacking the
+// tab and the per-row type <select> would be missing the 'embedding' choice.
+// v54: pages/models.js changed again (the "Unload all" toast now also counts
+// the shared embedding model's release, and a row for a registered model that
+// IS the resident embedder now correctly shows loaded/Unload) - a stale-cached
+// client would keep under-reporting freed VRAM and miss the per-row control.
+// v55: pages/models.js's "Import from ComfyUI..." Browse button was fixed (it
+// silently did nothing - openModal() has no stack, so the folder picker it
+// opened destroyed the Import dialog's own DOM before the picked path could be
+// written back); pages/settings.js and style.css dropped the rotating
+// per-plugin accent color on the Media section's three boxes in favor of one
+// consistent accent. A stale-cached client would keep the broken Browse
+// button and the mismatched accent colors.
+// v56: pages/settings.js's managed-ComfyUI panel gained a "corrupt install /
+// needs repair" state (Repair button, POST /api/comfy/repair) distinguishing
+// an abandoned setup attempt from a clean "not set up" - a stale-cached
+// client would keep showing the old dead-end Set-up-button-that-just-409s.
+// v57: pages/plugins.js now drives the External plugins card off the engine API
+// (/api/plugins + /api/plugins/install-external + /api/plugins/{name}/uninstall)
+// instead of the deleted /v1/plugins, which 404'd the whole card (REG-585), and
+// app/models-sidebar.js publishes the active model as soon as a load lands so
+// chat is not falsely refused for up to 30s afterwards (REG-471), and
+// pages/models.js names the alias the server actually stored (REG-562). A
+// stale-cached client would keep calling routes that no longer exist, keep the
+// false "No model loaded" refusal, and keep naming an alias that does not exist.
+// v58: chat.js's refreshCtxLimit() privacy-mode branch now wipes the live
+// in-memory conversation only once per page load, not on every 30s poll tick
+// (GUI-LIVE-WIPE) - a stale-cached client would keep erasing a user's own
+// first message every 30 seconds in privacy mode.
+const CACHE = "localm-shell-v58";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

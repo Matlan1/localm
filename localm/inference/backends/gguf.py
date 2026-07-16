@@ -29,6 +29,7 @@ from typing import Iterator, List, Optional
 from rich.console import Console
 
 from .base import BaseBackend, ModelLoadCancelled
+from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
 console = Console()
@@ -113,7 +114,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         Cached from the child's load response (self._supports_images) rather
         than read live off a real LlamaCpp instance - that instance now lives
         in the isolated worker process, not here."""
-        return bool(self._loaded and self._supports_images)
+        return bool(self.loaded and self._supports_images)   # property: a dead worker has no vision
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -230,13 +231,29 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             from localm.model_meta import store_n_layers
             store_n_layers(self.model_path, n_layers)
 
-        # VRAM usage after load - device-level driver numbers (a global,
-        # cross-process view - measured from THIS process exactly as
-        # accurately as from the child, since it reflects the whole GPU, not
-        # a single process's allocations). torch's allocator counters
-        # (memory_allocated/reserved) can only see torch's own allocations and
-        # always read 0.00 for llama.dll. "in use" therefore includes every
-        # process on the GPU; the delta is what this load itself consumed.
+        # VRAM usage after load - device-level driver numbers.
+        #
+        # CORRECTION (this comment previously asserted the exact opposite, and that
+        # false belief is what shipped the bug): these numbers are NOT necessarily a
+        # global, cross-process view, and are NOT "measured from THIS process exactly
+        # as accurately as from the child". Measured on Windows + an AMD ROCm/HIP
+        # build, torch.cuda.mem_get_info reports total - THIS process's own
+        # allocations and is blind to every other process (0.14 GB reported while
+        # 10.53 GB was genuinely in use; a plain torch tensor in a CHILD process moved
+        # the parent's reading by exactly 0). Since _load_native() runs the model in
+        # an isolated WORKER subprocess, the model's VRAM is in another process - so
+        # on that platform the "this load" delta below reads +0.00 GB every time.
+        # That was assumed from CUDA's documented device-global semantics (which DO
+        # hold on Linux/NVIDIA) and never measured here.
+        #
+        # _vram_levels() reads torch directly and is NOT routed through
+        # discover.list_gpus()'s device-global correction, so this console line is
+        # still subject to the above; it is a dim informational line, not a fit
+        # decision. See dev-notes/vram-cross-process-blindness.md.
+        #
+        # torch's allocator counters (memory_allocated/reserved) are a different
+        # thing again: they see only torch's own allocations and always read 0.00 for
+        # llama.dll, which is why they are not used here.
         for i, (free, total) in enumerate(self._vram_levels()):
             used = (total - free) / 1024**3
             line = (f"  vram     : {used:.2f} GB in use / "
@@ -260,10 +277,42 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         constant could ever cover."""
         from localm.inference.backends.llamacpp._runner import LOAD_TIMEOUT_DEFAULT
         from localm.config import load_config
+        raw = load_config().get("gguf_load_timeout_s")
         try:
-            return float(load_config().get("gguf_load_timeout_s") or LOAD_TIMEOUT_DEFAULT)
+            return float(raw or LOAD_TIMEOUT_DEFAULT)
         except (TypeError, ValueError):
+            # A present-but-unparseable value (e.g. "abc", a list) is a real
+            # misconfiguration, distinct from the benign missing/empty case
+            # (None/0 -> the default above with no exception). Surface it under
+            # --debug rather than silently masking a typo'd config as if the
+            # user had simply not set it (rule 5).
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("gguf_load_timeout_s is set but not a valid number "
+                         "(%r); using the default %.0fs", raw, LOAD_TIMEOUT_DEFAULT)
             return LOAD_TIMEOUT_DEFAULT
+
+    @staticmethod
+    def _first_token_timeout_seconds() -> float:
+        """How long to wait for a reply's FIRST token, from config
+        (``gguf_first_token_timeout_s``) or the generous built-in default.
+        Configurable for the same reason as the load timeout above: it covers
+        prompt PREFILL, whose duration varies enormously by install (CPU vs GPU,
+        partial offload, prompt length) - far more than a fixed constant could
+        cover. See FIRST_TOKEN_TIMEOUT_DEFAULT for why this is not the per-token
+        ceiling."""
+        from localm.inference.backends.llamacpp._runner import FIRST_TOKEN_TIMEOUT_DEFAULT
+        from localm.config import load_config
+        raw = load_config().get("gguf_first_token_timeout_s")
+        try:
+            return float(raw or FIRST_TOKEN_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            # Same rule-5 reasoning as _load_timeout_seconds above: a typo'd
+            # value is a real misconfiguration, not a silent fall-through.
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("gguf_first_token_timeout_s is set but not a valid "
+                         "number (%r); using the default %.0fs",
+                         raw, FIRST_TOKEN_TIMEOUT_DEFAULT)
+            return FIRST_TOKEN_TIMEOUT_DEFAULT
 
     def unload(self) -> None:
         # Ask the isolated worker to close cleanly (native teardown + its
@@ -287,15 +336,49 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @property
     def loaded(self) -> bool:
-        return self._loaded
+        # A backend whose isolated worker is GONE is not loaded, whatever
+        # _loaded says. The worker can be killed out from under this object on
+        # paths that never run unload(): _cancel_stream_and_drain kills it when
+        # a mid-stream cancel is not confirmed within its drain timeout, and
+        # _simple_request kills it on its own timeout - both call
+        # ModelRunner.shutdown(), which nulls the runner's queues and process.
+        # Neither raises RuntimeError into chat_stream's handler below
+        # (GeneratorExit is not a RuntimeError), so _loaded stayed True next to
+        # a dead runner. Engine.chat_stream then skipped its auto-reload and
+        # called straight into the dead runner, whose first act is
+        # self._req_q.put(...) on None -> AttributeError, which is not caught or
+        # unloaded either, so EVERY later request to this model repeated it
+        # until the model was manually evicted or the server restarted.
+        # Reporting the truth here makes the next request reload cleanly instead
+        # (load() builds a fresh ModelRunner) - REG-606.
+        if not self._loaded:
+            return False
+        is_alive = getattr(self._runner, "is_alive", None)
+        return True if is_alive is None else bool(is_alive())
 
     def validate_grammar(self, grammar: Optional[str]) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
         so a bad grammar is a clean 400 rather than a native fault that would latch
         _grammar_unsupported and silently strip grammar from later requests. No-op
         when not loaded (no vocab to parse against) or when *grammar* is empty."""
-        if grammar and self._loaded and self._runner is not None:
-            self._runner.check_grammar(grammar)
+        if grammar and self.loaded and self._runner is not None:   # property, see count_tokens
+            try:
+                self._runner.check_grammar(grammar)
+            except RunnerBusy:
+                # A generation is streaming on this model right now and holds the
+                # worker's response queue. validate_grammar is called
+                # synchronously on the server's async event loop (before the
+                # per-model inference semaphore), so blocking here would freeze
+                # the whole loop for the length of that generation (HON-02
+                # review finding). Defer the check: when generation builds the
+                # sampler it rejects a malformed grammar with the SAME clean
+                # InvalidGrammarError (llama.py raises it on the native NULL
+                # return, before any token) - so deferring only moves a bad
+                # grammar from an up-front 400 to a generation-time error, never
+                # a native fault or a latched degrade.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf validate_grammar: worker busy with a live "
+                           "stream; deferring grammar validation to generation time")
 
     # ------------------------------------------------------------------ #
     #  Tokenisation                                                        #
@@ -303,21 +386,54 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def count_tokens(self, text: str) -> int:
         """Return exact token count using the loaded model's vocabulary (an
-        RPC to the isolated worker)."""
-        if self._loaded and self._runner is not None:
-            return self._runner.count_tokens(text)
-        # Not loaded yet - fall back to a chars/4 heuristic
+        RPC to the isolated worker), or the chars/4 heuristic when the worker
+        is busy streaming or the model is not loaded yet."""
+        # `self.loaded`, NOT the raw `self._loaded`: the property is what knows the
+        # worker is gone. _simple_request kills it on its own timeout (and the
+        # cancel-drain does the same), nulling the queues while _loaded stays True -
+        # so gating on the attribute here called straight into a dead runner and
+        # `self._req_q.put(...)` raised AttributeError on None, which is not
+        # RunnerBusy and so escaped uncaught, on every later count (REG-606).
+        if self.loaded and self._runner is not None:
+            try:
+                return self._runner.count_tokens(text)
+            except RunnerBusy:
+                # A generation is streaming on this model right now and holds
+                # the worker's response queue (HON-02). Rather than block this
+                # request's token accounting behind a whole generation - or risk
+                # its RPC reply racing the live stream's envelopes - fall back to
+                # the documented chars/4 estimate immediately and say so under
+                # --debug.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf count_tokens: worker busy with a live stream; "
+                           "using the chars/4 estimate")
+        # Not loaded yet, or the worker is mid-stream - chars/4 heuristic. A
+        # genuine RPC failure (worker crash/timeout) is NOT swallowed here: it
+        # propagates, preserving this method's existing contract.
         return max(1, len(text) // 4)
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
         """Return exact token count of the structured messages formatted with
         the model's embedded chat template (an RPC to the isolated worker,
         which alone holds the native model pointer the template needs)."""
-        if self._loaded and self._runner is not None:
+        if self.loaded and self._runner is not None:   # the property - see count_tokens
             try:
                 return self._runner.count_messages_tokens(messages)
-            except Exception:
-                pass
+            except RunnerBusy:
+                # Worker busy with a live stream (HON-02) - use the heuristic
+                # rather than queue behind the generation. See count_tokens.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf count_messages_tokens: worker busy with a live "
+                           "stream; using the heuristic estimate")
+            except Exception as e:
+                # An unexpected RPC failure (worker crash/timeout, an encode
+                # error): the super() return below is then a heuristic ESTIMATE,
+                # not an exact count, and context-budgeting downstream is
+                # trusting an approximation - so surface it under --debug rather
+                # than swallowing it silently (rule 5).
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf count_messages_tokens RPC failed (%s); using "
+                           "the heuristic estimate", type(e).__name__)
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #
@@ -415,7 +531,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # instead of abandoning the runner's generator mid-flight.
         self.last_finish_reason = "stop"
         try:
-            yield from self._runner.chat_stream(**kwargs)
+            yield from self._runner.chat_stream(
+                first_chunk_timeout=self._first_token_timeout_seconds(), **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled (a real native abort, or
             # an unrecoverable fault GgufWorker.chat_stream deliberately left

@@ -114,6 +114,34 @@ def _complete_model_name(ctx, param, incomplete):
 
 
 
+def _stdout_is_a_pipe() -> bool:
+    """True when stdout is a PIPE - the only shape in which a downstream consumer
+    (``localm ... | head``, ``| findstr``) can close the far end under us.
+
+    This is the discriminator for a bare EINVAL, which Windows raises for a broken
+    pipe AND for a broad set of genuine I/O misuse (see _GracefulGroup.invoke). It
+    is not a guess: on Windows a real early pipe close was MEASURED to surface as
+    OSError errno=22 with isinstance(e, BrokenPipeError) False, so the exception
+    alone cannot be trusted - while os.fstat reports S_ISFIFO True for that same
+    stdout at the handler, and False for a console or a file redirect.
+
+    Deliberately NOT "flush stdout and see if it fails": the flush that broke the
+    pipe already discarded the buffer, so by the time this runs a second flush
+    SUCCEEDS on a genuinely dead pipe (measured) - that probe reports healthy for
+    the exact case it is meant to catch. A zero-byte write is no better (measured:
+    it returns 0 on a broken pipe)."""
+    import os
+    import stat
+    try:
+        return stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode)
+    except Exception:
+        # No fileno (a wrapped/replaced stdout) or stdout is gone: not a pipe we
+        # can confirm, so an EINVAL here is treated as a REAL error and reported.
+        # Failing toward reporting is the safe direction - a spurious report is
+        # noise, a swallowed failure is a lie (rule 5).
+        return False
+
+
 class _GracefulGroup(click.Group):
     """Single, cross-cutting failure handler for the whole CLI.
 
@@ -138,8 +166,31 @@ class _GracefulGroup(click.Group):
             # EPIPE/EINVAL from the stdout flush. That is NOT a bug: do not report it
             # (reporting would write to the same dead stdout and re-crash), and exit
             # as if killed by SIGPIPE. A real OSError falls through to reporting.
+            #
+            # EINVAL must be qualified by stdout ACTUALLY being a pipe (REG-555).
+            # Windows raises errno 22 for a broad set of GENUINE I/O misuse - reading
+            # a directory as a file, an invalid or reserved path, a bad handle, some
+            # native/ctypes and socket calls. Accepting a bare EINVAL as "the pipe
+            # closed" meant any of those exited 0, printed nothing and filed no
+            # report: the command hard-failed and told the user, and every script
+            # checking the exit code, that it had SUCCEEDED. That is the
+            # fail-closed-to-silent-success shape rule 5 exists to forbid, and it hid
+            # real bugs.
+            #
+            # EPIPE needs no such qualification (it means exactly "broken pipe", and
+            # Python maps it to BrokenPipeError anyway - verified, not assumed).
+            #
+            # Known residual, stated rather than papered over: a genuine EINVAL
+            # raised WHILE stdout happens to be a pipe is still read as a pipe close.
+            # Nothing available at this layer separates those two (the measurements
+            # in _stdout_is_a_pipe rule out the obvious probes), and the alternative -
+            # a bug report on every legitimate `| head` - is the regression this
+            # handler was written to fix. The common shapes (a terminal, a file
+            # redirect, no pipe at all) are now reported correctly.
             import errno
-            if isinstance(e, BrokenPipeError) or e.errno in (errno.EPIPE, errno.EINVAL):
+            if (isinstance(e, BrokenPipeError)
+                    or e.errno == errno.EPIPE
+                    or (e.errno == errno.EINVAL and _stdout_is_a_pipe())):
                 try:
                     sys.stdout.close()
                 except Exception:

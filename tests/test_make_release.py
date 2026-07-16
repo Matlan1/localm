@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import types
 import zipfile
@@ -83,8 +84,9 @@ class _FakeGh:
     """A scripted `gh` runner for require_ci_green: records calls and returns canned
     results per subcommand, with no network. `run list` returns empty on the first
     (snapshot) call, then a new run id, so the 'wait for the run to appear' loop ends."""
-    def __init__(self, *, state="active", watch_rc=0, appear=True):
+    def __init__(self, *, state="active", watch_rc=0, appear=True, snapshot_rc=0):
         self.state, self.watch_rc, self.appear = state, watch_rc, appear
+        self.snapshot_rc = snapshot_rc                     # non-zero => before-snapshot query fails
         self.calls, self._lists = [], 0
 
     def __call__(self, args):
@@ -100,7 +102,9 @@ class _FakeGh:
             return res()
         if args[:2] == ["run", "list"]:
             self._lists += 1
-            if self._lists == 1:
+            if self._lists == 1:                           # the before-snapshot
+                if self.snapshot_rc != 0:
+                    return res(rc=self.snapshot_rc, err="gh: could not list runs (API error)")
                 return res(out="[]")                       # snapshot: no runs yet
             return res(out=json.dumps([{"databaseId": 999}] if self.appear else []))
         if args[:2] == ["run", "watch"]:
@@ -149,6 +153,60 @@ def test_ci_gate_errors_if_run_never_appears(monkeypatch):
                                       appear_timeout_s=30, poll_s=10)
 
 
+# ---- HONESTY FIX #1: a FAILED before-snapshot must ABORT, not silently pass ----
+# _run_ids() used to return set() on ANY error. With before == set(), the poll below
+# treats every PRE-EXISTING run as 'new', max(new) selects a stale already-green run,
+# `gh run watch` returns 0 instantly, and the gate printed "full CI passed" without
+# ever validating the run it just triggered (AGENTS.md rule 5). The snapshot query is
+# now *required*: a failed snapshot raises SystemExit.
+
+def test_run_ids_required_raises_on_nonzero_exit():
+    """The before-snapshot query failing (non-zero gh exit) must raise, not return an
+    empty set that a later diff would misread as 'no runs existed yet'."""
+    def failing(_args):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="gh: boom")
+    with pytest.raises(SystemExit, match="snapshot"):
+        make_release._run_ids(failing, "ci.yml", required=True)
+
+
+def test_run_ids_required_raises_on_unparseable_output():
+    """A zero exit but garbage JSON for the snapshot must ALSO raise when required -
+    an unparseable snapshot is no more trustworthy than a failed one."""
+    def garbage(_args):
+        return types.SimpleNamespace(returncode=0, stdout="not json", stderr="")
+    with pytest.raises(SystemExit, match="snapshot"):
+        make_release._run_ids(garbage, "ci.yml", required=True)
+
+
+def test_run_ids_non_required_stays_soft_on_error():
+    """A polling call (not required) keeps returning an empty set on a transient error:
+    that just means 'no new run seen this poll', and the appear-timeout still fires if
+    it never recovers - so it fails loud too, just later, without aborting on a blip."""
+    def failing(_args):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="blip")
+    assert make_release._run_ids(failing, "ci.yml") == set()
+
+
+def test_run_ids_parses_ids_on_success():
+    """Sanity: a good response is still parsed into the id set (both modes)."""
+    def ok(_args):
+        return types.SimpleNamespace(
+            returncode=0, stdout=json.dumps([{"databaseId": 5}, {"databaseId": 7}]), stderr="")
+    assert make_release._run_ids(ok, "ci.yml") == {5, 7}
+    assert make_release._run_ids(ok, "ci.yml", required=True) == {5, 7}
+
+
+def test_ci_gate_aborts_when_before_snapshot_query_fails(monkeypatch):
+    """End to end: with the before-snapshot query failing, require_ci_green must raise
+    SystemExit and NEVER reach `gh run watch` - the old code would have watched a stale
+    pre-existing green run and reported success."""
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="active", watch_rc=0, snapshot_rc=1)   # snapshot query errors
+    with pytest.raises(SystemExit, match="snapshot"):
+        make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)
+    assert not fake.called("run", "watch"), "must abort at the snapshot, never watch a stale run"
+
+
 # --------------------------------------------------------------------------- #
 #  pre-publish live-verification record gate                                  #
 # --------------------------------------------------------------------------- #
@@ -188,6 +246,38 @@ def test_changed_areas_empty_when_no_diff():
     assert release_verify.changed_areas("HEAD", REPO_ROOT) == []
 
 
+def test_changed_areas_raises_on_unknown_ref(tmp_path):
+    """HONESTY FIX #4: a mistyped/unfetched --since ref makes `git diff` fail; that must
+    raise, NOT return [] that main() prints as '(nothing)'. The old swallow let a human
+    scope the mandatory cold-install verification to nothing off a diff that never ran,
+    then record a PASS (AGENTS.md rule 5). Uses a real throwaway repo so the git failure
+    is genuine, not mocked."""
+    import os
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
+    (tmp_path / "f.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True, env=env)
+    with pytest.raises(SystemExit, match="could not diff"):
+        release_verify.changed_areas("v9.9.9-does-not-exist", tmp_path)
+
+
+def test_changed_areas_still_empty_on_genuine_empty_diff(tmp_path):
+    """The other side of FIX #4: a SUCCESSFUL diff that is genuinely empty still returns
+    [] (not an error). HEAD..HEAD in a real repo has no changes."""
+    import os
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
+    (tmp_path / "f.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True, env=env)
+    assert release_verify.changed_areas("HEAD", tmp_path) == []
+
+
 # --------------------------------------------------------------------------- #
 #  pre-publish HEAD==origin and tag-availability gates (fake git runner)      #
 # --------------------------------------------------------------------------- #
@@ -223,6 +313,22 @@ def test_head_matches_origin_blocks_when_diverged():
         (["rev-parse", "origin/master"], 0, _OTHER + "\n"),
     ])
     with pytest.raises(SystemExit, match="not origin/master"):
+        make_release._require_head_matches_origin("master", runner=r)
+
+
+def test_head_matches_origin_blocks_when_fetch_fails():
+    """HONESTY FIX #2: a failed `git fetch origin <ref>` must ABORT, not fall through to
+    comparing a STALE local origin/<ref>. The killer case is a stale ref that still
+    EQUALS HEAD (e.g. after a `gh` squash-merge, which never updates local remote refs):
+    the old code's "a fetch failure surfaces as a mismatch below" was false there - HEAD
+    == stale-origin passed the gate while GitHub's real ref had moved on (the TOCTOU this
+    gate exists to close)."""
+    r = _git_runner([
+        (["fetch"], 1, ""),                                # fetch FAILS
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+        (["rev-parse", "origin/master"], 0, _HEAD + "\n"),  # stale ref == HEAD -> would pass!
+    ])
+    with pytest.raises(SystemExit, match="stale"):
         make_release._require_head_matches_origin("master", runner=r)
 
 
