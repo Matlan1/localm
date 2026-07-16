@@ -205,32 +205,56 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
         self.assertNotIn("vram_reading_uncertain", body)
 
     def test_live_probe_with_no_rise_still_reports_the_honest_false(self):
-        """A genuinely-not-freed result must survive the fix intact, unflagged.
+        """A genuinely-not-freed result must survive the fix intact, unflagged -
+        but ONLY on a DEVICE-GLOBAL reading, which is now asserted, not assumed.
 
-        READ THIS BEFORE RELYING ON THE NAME. What makes the false "honest" here is
-        the test's own fiction that a FRESH reading is an ACCURATE one. That holds
-        only where the driver's free-VRAM figure is device-global. It is NOT true on
-        Windows + AMD, where torch.cuda.mem_get_info reports `total - THIS process's
-        own allocations` and is blind to every other process - measured on an
-        RX 6900 XT: a child holding 1 GB moved the parent's reading by exactly 0
-        bytes while the OS counter moved 1.7 GB. Since every GGUF model loads in an
-        isolated worker subprocess (#606), a fresh reading taken in the SERVER
-        process cannot see the model's VRAM at all, so a real unload there produces
-        this same no-rise and the "false" is a LIE, not an honest negative.
+        The honest-negative is only honest where the driver's free-VRAM figure is
+        device-global (Linux, or NVIDIA, or an AMD/Windows reading corrected by the
+        device-global source). There, a fresh reading that does not rise genuinely
+        means nothing was freed, and reporting vram_freed=false without an
+        uncertainty flag is correct. `free_scope="device"` on the reading below is
+        what makes that true rather than merely fresh.
 
-        So freshness (what this file guards) is necessary but NOT sufficient: fresh
-        does not imply true. The missing axis is the reading's SCOPE, which is being
-        added separately. When it lands, this test must be re-targeted to assert the
-        honest-negative only for a device-global reading rather than assuming one -
-        do not work around it."""
+        The blind case - a process-scoped reading, where a fresh no-rise proves
+        nothing because the model's VRAM is in another process - is its own test
+        (test_process_scoped_no_rise_is_flagged_not_an_honest_false), and there the
+        SAME no-rise MUST be flagged uncertain. Freshness is necessary but not
+        sufficient; scope is the axis that separates the two."""
         with patch("localm.discover.list_gpus",
-                   side_effect=_list_gpus_double([dict(_IDLE, free=10 * GB)],
-                                                 GPU_PROBE_OK)):
+                   side_effect=_list_gpus_double(
+                       [dict(_IDLE, free=10 * GB, free_scope="device")],
+                       GPU_PROBE_OK)):
             r = self.client.post("/v1/models/unload")
         body = r.json()
         self.assertIs(body["vram_freed"], False)
         self.assertEqual(body["vram_before_bytes"], 10 * GB)
         self.assertNotIn("vram_reading_uncertain", body)
+
+    def test_process_scoped_no_rise_is_flagged_not_an_honest_false(self):
+        """The complement, and the whole reason scope had to be added: on a
+        PROCESS-SCOPED reading a no-rise is NOT proof that nothing was freed.
+
+        Measured on an RX 6900 XT: torch.cuda.mem_get_info reports
+        `total - THIS process's own allocations` and is blind to every other
+        process (a child holding 1 GB moved the parent reading by exactly 0 bytes
+        while the OS counter moved 1.7 GB). Since every GGUF model loads in an
+        isolated worker subprocess (#606), the server's own reading cannot see the
+        model's VRAM, so a real unload produces this identical no-rise. Reporting a
+        bare vram_freed=false there would be the exact rule-5 lie this whole change
+        exists to kill: telling the user a measurement property held when it could
+        not have. So the SAME reading and the SAME no-rise as the test above, but
+        tagged process-scoped, MUST carry the uncertainty flag."""
+        with patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double(
+                       [dict(_IDLE, free=10 * GB, free_scope="process")],
+                       GPU_PROBE_OK)):
+            r = self.client.post("/v1/models/unload")
+        body = r.json()
+        # The figure is still reported (it is the best we have), but flagged, never
+        # presented as fact.
+        self.assertEqual(body["vram_before_bytes"], 10 * GB)
+        self.assertIs(body["vram_reading_uncertain"], True)
+        self.assertIn("worker process", body["vram_note"])
 
     def test_box_with_no_vram_telemetry_says_nothing_at_all(self):
         """The benign case must NOT be dressed up as the fault. A CPU-only box (or
@@ -266,6 +290,25 @@ class TestUnloadOneEndpointHonesty(_UnloadCase):
         self.assertEqual(body["status"], "unloaded")
         self.assertGreater(calls["n"], 1, "the after-poll never ran")
         self.assertNoUnqualifiedNotFreed(body)
+
+    def test_process_scoped_no_rise_is_flagged_here_too(self):
+        """The per-model button must not lie where "unload all" is honest. All three
+        unload paths thread before_scope through the same _add_vram_fields, so a
+        refactor that wires it for one path and forgets this one would silently
+        reopen the blindness on the per-model button - this pins it shut."""
+        from localm.inference import http_server as hs
+        with patch.dict(hs._engines, {"test-model": self.engine}, clear=False), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double(
+                       [dict(_IDLE, free=10 * GB, free_scope="process")],
+                       GPU_PROBE_OK)), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait):
+            r = self.client.post("/v1/models/unload", json={"model": "test-model"})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["vram_before_bytes"], 10 * GB)
+        self.assertIs(body["vram_reading_uncertain"], True)
+        self.assertIn("worker process", body["vram_note"])
 
 
 class TestMediaSwapMessageHonesty(unittest.TestCase):

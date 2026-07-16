@@ -19,6 +19,7 @@ from __future__ import annotations
 import ctypes
 import re
 import threading
+import time
 from collections.abc import Sequence
 from typing import Optional
 
@@ -409,6 +410,12 @@ def _list_gpus_with_status(deadline: float) -> tuple:
             served = list(_gpu_last_good) if _gpu_last_good is not None else []
             return served, GPU_PROBE_BUSY
         _gpu_probe_inflight = True
+        # Published under the SAME lock that claims the in-flight slot (only one
+        # probe is ever in flight, so there is only one deadline to describe): the
+        # probe body reads it to decide whether it can afford a cold device-global
+        # source without overrunning this deadline. See _apply_device_global_free.
+        global _probe_deadline_at
+        _probe_deadline_at = time.monotonic() + deadline
         # Captured under the SAME lock that claims the in-flight slot: an unlocked
         # read here could pair this probe with an epoch a concurrent reset has
         # already retired, which is the exact race the epoch exists to close.
@@ -418,7 +425,7 @@ def _list_gpus_with_status(deadline: float) -> tuple:
     done = threading.Event()
 
     def _run() -> None:
-        global _gpu_last_good, _gpu_probe_inflight
+        global _gpu_last_good, _gpu_probe_inflight, _probe_deadline_at
         value = None
         try:
             value = _list_gpus_probe()
@@ -439,6 +446,11 @@ def _list_gpus_with_status(deadline: float) -> tuple:
                 if value is not None:
                     _gpu_last_good = value
                 _gpu_probe_inflight = False
+                # Cleared with the in-flight slot: the budget describes THIS probe
+                # and nothing else. Leaving it set would hand a later reader an
+                # expired deadline, which reads as "no budget left" and would skip a
+                # cold source that in fact had all the time in the world.
+                _probe_deadline_at = None
         # Deliberately OUTSIDE the epoch gate and unconditional: a caller still
         # inside its deadline is waiting on `done`, and withholding it would make
         # it wait out the full deadline and report a COMPLETED probe as a TIMEOUT -
@@ -498,6 +510,7 @@ def _list_gpus_probe() -> list:
                 out.append({"index": i, "name": name,
                             "total": int(total), "free": int(free)})
             if out:
+                _apply_device_global_free(out)
                 return out
     except Exception:
         pass
@@ -520,6 +533,10 @@ def _list_gpus_probe() -> list:
                         "index": int(idx_s), "name": name,
                         "total": int(total_mb) * 1024 ** 2,
                         "free": int(free_mb) * 1024 ** 2,
+                        # nvidia-smi's memory.free is the whole board's, across
+                        # every process (that is what it exists to report), so
+                        # unlike the torch path above it needs no correction.
+                        "free_scope": FREE_SCOPE_DEVICE,
                     })
                 except ValueError:
                     continue   # a malformed line never hides the rest
@@ -528,6 +545,103 @@ def _list_gpus_probe() -> list:
     except Exception:
         pass
     return []
+
+
+# How much of the world a GPU entry's "free" actually accounts for. A caller that
+# presents free VRAM as CURRENT FACT (a "will it fit" refusal, a freed-bytes report)
+# must know the difference; a caller that only wants a fit CEILING ("total") does not.
+FREE_SCOPE_DEVICE = "device"    # every process's VRAM is counted - the number is the board's
+FREE_SCOPE_PROCESS = "process"  # ONLY this process's own allocations are counted (see below)
+
+# Probe budget below which a COLD (not-yet-opened) device-global source is skipped
+# rather than risk overrunning the probe deadline. The cold open is MEASURED at
+# ~750ms; this is that with margin, since overrunning costs the caller its free
+# reading entirely. See _apply_device_global_free.
+_CORRECTION_COLD_BUDGET_S = 1.5
+
+# When the in-flight probe's deadline expires (monotonic), or None outside a probe.
+# Set by _list_gpus_with_status under the same lock that claims the in-flight slot,
+# so the probe body can tell how much of its budget is left before spending ~750ms
+# on a cold source. Safe as a module global precisely because _gpu_probe_inflight
+# serialises probes: only ever one in flight to describe.
+_probe_deadline_at = None
+
+
+def _apply_device_global_free(gpus: list) -> None:
+    """Correct each entry's ``free`` to a DEVICE-GLOBAL figure where this platform's
+    driver query is not one already, and tag every entry with ``free_scope`` so a
+    caller can tell a whole-board number from a process-local one. Mutates *gpus*.
+
+    WHY (measured, see dev-notes/vram-cross-process-blindness.md): on Windows with an
+    AMD ROCm/HIP torch build, ``torch.cuda.mem_get_info`` reports
+    ``total - the calling process's own allocations`` and is blind to every other
+    process. Measured live: 0.14 GB reported "in use" while 10.53 GB genuinely was.
+    That is not a staleness bug (PR #693's domain - the probe here is FRESH and still
+    wrong), and it is not llama.cpp-specific: a plain torch tensor in a child process
+    is equally invisible. It bites localm hard because every GGUF load is
+    out-of-process (backends/gguf.py, since #606), so the model's own VRAM is ALWAYS
+    in another process from the server measuring it - as is a game or a ComfyUI.
+
+    On Linux, and on NVIDIA, the driver query is device-global BY DOCUMENTATION (CUDA
+    specifies *free as "free according to the OS" and warns that another process can
+    move it), so nothing is corrected there and the reading is tagged
+    :data:`FREE_SCOPE_DEVICE` unchanged.
+
+    When no better source can answer on Windows, the entry keeps the driver's number
+    but is tagged :data:`FREE_SCOPE_PROCESS` rather than silently passing a
+    known-process-local figure off as the board's (AGENTS.md rule 5). That tag is
+    what makes /v1/models/unload say its reading is uncertain instead of asserting a
+    wrong one as fact."""
+    import sys
+    if sys.platform != "win32":
+        for g in gpus:
+            g["free_scope"] = FREE_SCOPE_DEVICE
+        return
+    try:
+        from localm.gpu_usage import device_global_used_bytes, source_is_warm
+        # This runs INSIDE the deadline-bounded probe, so it spends the SAME budget
+        # the driver call already spent. Opening the source costs ~750ms ONCE per
+        # process (a driver init); a warm read costs ~0.02ms. Measured, that cold
+        # 750ms was enough to push cold probes from a comfortable 2.9-3.5s to
+        # 3.6-4.0s against the 4.0s cap and start timing them out - and a timeout
+        # costs the caller its free reading ENTIRELY (list_gpus serves [] and
+        # vram_info falls to the registry tier, which has no "free" at all). A
+        # correct number is not worth trading for no number, so a COLD source is
+        # skipped when the remaining budget is too thin to absorb it; the reading is
+        # then tagged process-scoped (honest) instead of silently uncorrected. A warm
+        # source is free and always runs, so a long-lived server pays this at most
+        # once, and a CLI caller passing the longer _GPU_PROBE_CLI_DEADLINE has room
+        # for it on the first go.
+        if not source_is_warm():
+            remaining = None
+            if _probe_deadline_at is not None:
+                remaining = _probe_deadline_at - time.monotonic()
+            if remaining is not None and remaining < _CORRECTION_COLD_BUDGET_S:
+                logger.debug(
+                    "list_gpus: %.2fs left of the probe budget is too thin for a "
+                    "cold device-global source (~%.1fs); leaving this reading "
+                    "process-scoped rather than risking a timeout that would return "
+                    "no free VRAM at all", remaining, _CORRECTION_COLD_BUDGET_S)
+                for g in gpus:
+                    g["free_scope"] = FREE_SCOPE_PROCESS
+                return
+        used = device_global_used_bytes(gpus)
+    except Exception as e:
+        # Surfaced, not silenced: the entries below are then tagged process-scoped,
+        # so the wrongness is reported rather than hidden.
+        logger.debug("list_gpus: device-global VRAM source failed: %s", e)
+        used = {}
+    for g in gpus:
+        u = used.get(g.get("index"))
+        if u is None:
+            g["free_scope"] = FREE_SCOPE_PROCESS
+            continue
+        total = int(g["total"])
+        # Clamp: the used figure and `total` come from different sources (the driver's
+        # total vs the adapter's dedicated usage), so their difference can land just
+        # outside [0, total] without either being wrong enough to matter.
+        g["free"] = max(0, min(total, total - int(u)))
+        g["free_scope"] = FREE_SCOPE_DEVICE
 
 
 def _native_backend_has_vulkan() -> bool:
@@ -876,6 +990,11 @@ def vram_info(*, return_status: bool = False):
         out = {"total": g["total"]}
         if g.get("free") is not None:
             out["free"] = g["free"]
+            # Travels WITH the number it describes: a caller presenting free VRAM as
+            # current fact must be able to tell a whole-board figure from a
+            # process-local one (see _apply_device_global_free). Absent when free is.
+            if g.get("free_scope") is not None:
+                out["free_scope"] = g["free_scope"]
         return _ret(out)
 
     import sys
@@ -977,6 +1096,18 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
     frees = [g.get("free") for g in split_gpus]
     if all(f is not None for f in frees):
         out["free"] = sum(frees)
+        # All-or-nothing, mirroring the "free" key above: a sum is only a whole-board
+        # figure if EVERY device in it is. One process-scoped device makes the whole
+        # sum process-scoped, because that device's other-process VRAM is missing
+        # from it. Absent entirely when NO device reported a scope: that means
+        # UNKNOWN, and labelling it "process" would assert a blindness we have not
+        # measured (as wrong as asserting the number is fact) while also breaking the
+        # plain-dict contract every existing caller and test double relies on.
+        scopes = [g.get("free_scope") for g in split_gpus if g.get("free_scope")]
+        if scopes:
+            out["free_scope"] = (FREE_SCOPE_DEVICE
+                                 if all(s == FREE_SCOPE_DEVICE for s in scopes)
+                                 else FREE_SCOPE_PROCESS)
     return _ret(out)
 
 
