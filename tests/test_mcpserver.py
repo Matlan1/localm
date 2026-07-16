@@ -537,6 +537,55 @@ class TestGenerateImageSafety:
         assert "PROGRESS_NOISE_ON_STDOUT" in captured.err
 
 
+class TestChatEmbedStdoutSafety:
+    """BUG-11: chat/embed/pull_model's own engines.get() call (a fresh model
+    load, e.g. the first turn of a new MCP session) must not leak native
+    load-time diagnostics onto the JSON-RPC stdout stream either - the same
+    bug class TestGenerateImageSafety covers above, missed here because the
+    risky call is engines.get() itself rather than a separately-patchable
+    module function."""
+
+    def _noisy_engines(self, default_model="stub-model"):
+        def noisy_factory(model_name):
+            print("NATIVE_LOAD_NOISE_ON_STDOUT")
+            return _stub_engine_factory(model_name)
+        return EngineCache(default_model=default_model, engine_factory=noisy_factory)
+
+    def test_chat_load_keeps_stdout_clean(self, capsys):
+        engines = self._noisy_engines()
+        server = MCPStdioServer(build_tools(engines, enable_images=True))
+        resp = _req(server, "tools/call",
+                    {"name": "chat", "arguments": {"prompt": "hi"}})
+        assert resp["result"]["isError"] is False
+        captured = capsys.readouterr()
+        assert "NATIVE_LOAD_NOISE_ON_STDOUT" not in captured.out
+        assert "NATIVE_LOAD_NOISE_ON_STDOUT" in captured.err
+
+    def test_embed_load_keeps_stdout_clean(self, capsys):
+        engines = self._noisy_engines()
+        server = MCPStdioServer(build_tools(engines, enable_images=True))
+        resp = _req(server, "tools/call",
+                    {"name": "embed", "arguments": {"texts": ["a"]}})
+        assert resp["result"].get("isError") in (None, False)
+        captured = capsys.readouterr()
+        assert "NATIVE_LOAD_NOISE_ON_STDOUT" not in captured.out
+        assert "NATIVE_LOAD_NOISE_ON_STDOUT" in captured.err
+
+    def test_pull_model_post_download_load_keeps_stdout_clean(self, capsys):
+        """The download step was already guarded; the load-after-pull step
+        (engines.get(name), after registering) was not."""
+        engines = self._noisy_engines()
+        server = MCPStdioServer(build_tools(engines, enable_images=True))
+        with patch("localm.model_manager.pull.pull_model", return_value=True):
+            resp = _req(server, "tools/call",
+                        {"name": "pull_model",
+                         "arguments": {"repo": "org/repo", "name": "newmodel"}})
+        assert resp["result"]["isError"] is False
+        captured = capsys.readouterr()
+        assert "NATIVE_LOAD_NOISE_ON_STDOUT" not in captured.out
+        assert "NATIVE_LOAD_NOISE_ON_STDOUT" in captured.err
+
+
 class TestModelDiscoveryTools:
     """system_stats / search_models / list_model_files / pull_model - always
     advertised (no plugin gate, unlike run_coder_task) since they only need
