@@ -1575,6 +1575,16 @@ class TestFreeScopeRealHardware:
         torch = pytest.importorskip("torch")
         if not torch.cuda.is_available():
             pytest.skip("no CUDA/ROCm device present to measure")
+        # This test's SECOND assertion is that the RAW driver query is blind to the
+        # child's allocation - which is only true on the measured-blind platform
+        # (Windows + an AMD ROCm/HIP torch build). On Linux, or on any NVIDIA/CUDA
+        # build, cudaMemGetInfo is device-global, so the raw query DOES see the child
+        # and that assertion would spuriously FAIL rather than the test being
+        # inapplicable. Gate the run to where the premise actually holds.
+        if _sys.platform != "win32" or not getattr(torch.version, "hip", None):
+            pytest.skip("cross-process blindness is measured only on Windows + an "
+                        "AMD ROCm/HIP torch build; raw mem_get_info is device-global "
+                        "elsewhere, so this experiment does not apply")
         gpus = list_gpus()
         if not gpus or gpus[0].get("free_scope") != "device":
             pytest.skip("no device-global VRAM source on this host, nothing to verify")
@@ -1711,3 +1721,154 @@ class TestFreeScopeColdBudget:
         assert seen["deadline_at"] is not None
         # published as "now + deadline", so it lands ~9s out
         assert 8.0 < (seen["deadline_at"] - before) <= 9.5
+
+
+class TestGpuUsageSourceRobustness:
+    """gpu_usage.py source-selection and warmth, post-#697 review.
+
+    These guard three defects a review found in the merged fix: a transient PDH
+    failure permanently disabling the source, source_is_warm() ignoring PDH's cold
+    cost, and the platform detector that decides whether an uncorrected reading is
+    known-blind. All are stubbed off real hardware so they run on any host.
+    """
+
+    def _reset(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        return gu
+
+    def test_transient_pdh_query_failure_does_not_permanently_poison(self, monkeypatch):
+        """A momentary query hiccup must be retryable, not a process-lifetime disable
+        (rule 5 missing-vs-corrupt). Only a genuinely-permanent condition
+        (win32pdh unimportable) may set the sticky {}."""
+        gu = self._reset(monkeypatch)
+        import types
+
+        calls = {"collect": 0}
+
+        fake_pdh = types.SimpleNamespace(
+            PERF_DETAIL_WIZARD=0, PDH_FMT_LARGE=0,
+            OpenQuery=lambda: object(),
+            EnumObjectItems=lambda *a, **k: ([], ["luid_0_0_phys_0"]),
+            MakeCounterPath=lambda spec: "path",
+            AddEnglishCounter=lambda q, p: object(),
+            GetFormattedCounterValue=lambda h, f: (0, 123),
+        )
+
+        def _collect_raises(_q):
+            calls["collect"] += 1
+            raise OSError("transient PDH hiccup")
+
+        fake_pdh.CollectQueryData = _collect_raises
+        monkeypatch.setitem(__import__("sys").modules, "win32pdh", fake_pdh)
+
+        assert gu._pdh_adapter_used() == []
+        # The killer assertion: state is NOT the sticky-disabled {} - the open query
+        # survives for a retry.
+        assert gu._pdh_state != {}, "a transient query failure permanently poisoned PDH"
+        assert gu._pdh_state is not None and gu._pdh_state.get("query") is not None
+
+        # And a retry after the driver recovers actually works.
+        fake_pdh.CollectQueryData = lambda _q: None
+        assert gu._pdh_adapter_used() == [123]
+
+    def test_win32pdh_unimportable_is_stickily_disabled(self, monkeypatch):
+        """The genuinely-permanent case still sticks: no point retrying an import
+        that will never succeed."""
+        gu = self._reset(monkeypatch)
+        monkeypatch.setitem(__import__("sys").modules, "win32pdh", None)  # import -> TypeError
+        assert gu._pdh_adapter_used() == []
+        assert gu._pdh_state == {}
+
+    def test_source_is_warm_accounts_for_pdh_not_just_adl(self, monkeypatch):
+        """On a non-AMD box ADL is proven-unusable ({}) but PDH is the source that
+        answers; keying warmth on ADL alone would call the source warm while a cold
+        ~887ms PDH open still lies ahead of the deadline."""
+        gu = self._reset(monkeypatch)
+        # ADL tried and unusable, PDH not yet opened: a cold PDH open is pending, so
+        # NOT warm (the bug returned True here).
+        monkeypatch.setattr(gu, "_adl_state", {})
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        assert gu.source_is_warm() is False
+        # PDH now open -> warm.
+        monkeypatch.setattr(gu, "_pdh_state", {"query": object()})
+        assert gu.source_is_warm() is True
+        # ADL usable -> warm regardless of PDH (AMD path never opens PDH).
+        monkeypatch.setattr(gu, "_adl_state", {"dll": object()})
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        assert gu.source_is_warm() is True
+        # Nothing tried yet -> cold.
+        monkeypatch.setattr(gu, "_adl_state", None)
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        assert gu.source_is_warm() is False
+
+    def test_raw_reading_is_process_scoped_only_on_windows_amd_hip(self, monkeypatch):
+        import localm.gpu_usage as gu
+        import sys as _sys
+
+        class _FakeTorch:
+            version = SimpleNamespace(hip="7.13", cuda=None)
+
+        # Windows + ROCm/HIP build -> known blind.
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
+        assert gu.raw_reading_is_process_scoped() is True
+        # Windows + CUDA (NVIDIA) build -> device-global by docs, NOT known blind.
+        _FakeTorch.version = SimpleNamespace(hip=None, cuda="12.4")
+        monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
+        assert gu.raw_reading_is_process_scoped() is False
+        # Non-Windows -> never (device-global by docs), even on a HIP build.
+        monkeypatch.setattr(gu.sys, "platform", "linux", raising=False)
+        _FakeTorch.version = SimpleNamespace(hip="7.13", cuda=None)
+        monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
+        assert gu.raw_reading_is_process_scoped() is False
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestUncorrectedScopeIsNotAlwaysProcess:
+    """discover._apply_device_global_free must NOT tag every uncorrected Windows
+    reading FREE_SCOPE_PROCESS. That over-claim (the pre-review behaviour) put a
+    spurious 'process-blind' note + vram_reading_uncertain on NVIDIA/Windows, where
+    cudaMemGetInfo is device-global by documentation and the number is actually fine.
+    """
+
+    def _gpus(self):
+        return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
+
+    def test_windows_non_blind_uncorrected_is_device_not_process(self, monkeypatch):
+        """No source maps (empty dict), but the raw reading is NOT known-blind
+        (NVIDIA/Windows): tag DEVICE, do not fabricate a blindness."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+        assert gpus[0]["free"] == 15_000_000_000
+
+    def test_windows_blind_uncorrected_is_still_process(self, monkeypatch):
+        """The known-blind platform (AMD/Windows) still tags PROCESS when it cannot
+        correct - the honest signal must survive."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
+    def test_cold_budget_skip_uses_platform_scope_not_blanket_process(self, monkeypatch):
+        """The cold-budget skip must also honour the distinction: a cold-skipped
+        NVIDIA/Windows probe is DEVICE (its number is fine), not a spurious PROCESS."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
+        monkeypatch.setattr(discover, "_probe_deadline_at", discover.time.monotonic() + 0.1)
+
+        def _must_not_run(gpus):
+            raise AssertionError("cold budget too thin: source must not be opened")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _must_not_run)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE

@@ -364,7 +364,7 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
     seeding the wait from the live-only reader silently turned the wait into a
     0-second no-op (caught in review, measured 5.06s -> 0.00s)."""
 
-    def _switch(self, status):
+    def _switch(self, status, scope="device"):
         from localm.plugins.mcpserver.server import EngineCache
         waits = []
         real_wait = wait_for_vram_release
@@ -376,11 +376,15 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
             return real_wait(read_free, **kw)
 
         logs = []
+        # Default DEVICE-scoped: these tests isolate the STALENESS axis (fresh vs
+        # stale), so the reading must be device-global or the scope axis would
+        # confound them. The process-scoped (blind) case is its own test below.
+        gpu = dict(_IDLE, free_scope=scope) if scope else dict(_IDLE)
         cache = EngineCache(default_model="a",
                             engine_factory=lambda n: MagicMock(display_name=n))
         cache.get("a")                      # load the first model
         with patch("localm.discover.list_gpus",
-                   side_effect=_list_gpus_double([_IDLE], status)), \
+                   side_effect=_list_gpus_double([gpu], status)), \
              patch("localm.vram.wait_for_vram_release", _spy_wait), \
              patch("localm.plugins.mcpserver.server._log",
                    side_effect=lambda m: logs.append(m)):
@@ -408,9 +412,23 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
                       f"dropped (rule 5): {logs}")
 
     def test_live_probe_with_no_rise_still_says_it_did_not_rise(self):
-        """The honest negative survives: both ends live, genuinely no rise."""
+        """The honest negative survives: both ends live AND device-global, genuinely
+        no rise. Device-global is what makes the no-rise backable (see the
+        process-scoped complement below)."""
         _waits, logs = self._switch(GPU_PROBE_OK)
         self.assertIn("did not rise", logs)
+
+    def test_process_scoped_no_rise_cannot_claim_it_did_not_rise(self):
+        """The scope complement (#697 follow-up): a fresh but PROCESS-scoped reading
+        cannot see the previous model's VRAM in its isolated worker, so a no-rise
+        proves nothing. This path had dropped the scope, so it logged the same false
+        'did not rise' the /v1/models/unload paths were fixed for."""
+        _waits, logs = self._switch(GPU_PROBE_OK, scope="process")
+        self.assertNotIn("did not rise", logs,
+                         f"claimed VRAM did not rise from a blind reading: {logs}")
+        self.assertIn("could not confirm", logs,
+                      f"a process-scoped reading must be surfaced as unconfirmable "
+                      f"(rule 5), not silently dropped: {logs}")
 
     def test_stale_before_with_a_recovered_after_still_cannot_claim_no_rise(self):
         """The INVERSE shape, and just as ordinary: the before-read times out on a
