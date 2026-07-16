@@ -623,3 +623,67 @@ class TestReadlineWithTimeout:
         elapsed = time.time() - t0
         assert result is None
         assert elapsed < 2.0, f"timeout wrapper did not return promptly: {elapsed:.2f}s"
+
+
+class TestFreeVramCrossProcessCorrection:
+    """#697/#700 follow-up (V&V finding #1): the GGUF sizing DECISION path must
+    consume a DEVICE-GLOBAL free reading, not the raw process-scoped one. The blind
+    reading only ever OVERSTATES free VRAM, so a decision made on it overcommits
+    exactly when another process (a game, ComfyUI, another model's isolated worker)
+    holds the card - the TDR / WDDM-spill case auto-offload exists to prevent."""
+
+    def test_correction_is_applied_when_a_source_answers(self):
+        """raw says 15GB free (blind); device-global says 6GB genuinely free -> the
+        decision path must use 6GB."""
+        with patch.object(GgufBackend, "_free_total_vram_bytes",
+                          return_value=(15_000_000_000, 16_000_000_000)), \
+             patch.object(GgufBackend, "_device_global_free_bytes",
+                          return_value=6_000_000_000):
+            assert GgufBackend._free_vram_bytes() == 6_000_000_000
+
+    def test_uncorrected_reading_kept_when_no_source(self):
+        """Device-global platforms (Linux/NVIDIA) and torch-less builds return None
+        from the corrector, so the raw reading - correct there - is kept unchanged."""
+        with patch.object(GgufBackend, "_free_total_vram_bytes",
+                          return_value=(15_000_000_000, 16_000_000_000)), \
+             patch.object(GgufBackend, "_device_global_free_bytes", return_value=None):
+            assert GgufBackend._free_vram_bytes() == 15_000_000_000
+
+    def test_isolated_fallback_is_also_corrected(self):
+        """When torch cannot answer, the isolated ggml probe's reading (equally blind
+        on Win/AMD) is corrected too, not just the torch path."""
+        with patch.object(GgufBackend, "_free_total_vram_bytes", return_value=(None, None)), \
+             patch("localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+                   return_value=(15_000_000_000, 16_000_000_000)), \
+             patch.object(GgufBackend, "_device_global_free_bytes",
+                          return_value=6_000_000_000):
+            assert GgufBackend._free_vram_bytes() == 6_000_000_000
+
+    def test_none_when_nothing_is_measurable(self):
+        with patch.object(GgufBackend, "_free_total_vram_bytes", return_value=(None, None)), \
+             patch("localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+                   return_value=None):
+            assert GgufBackend._free_vram_bytes() is None
+
+    def test_corrector_returns_none_off_known_blind_platform(self):
+        """The correction must only fire where the raw reading is KNOWN blind, or it
+        would fabricate a number on a platform that never needed one."""
+        with patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=False):
+            assert GgufBackend._device_global_free_bytes(16_000_000_000) is None
+
+    def test_corrector_computes_total_minus_device_global_used(self):
+        with patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=True), \
+             patch("localm.gpu_usage.device_global_used_bytes",
+                   return_value={0: 10_000_000_000}), \
+             patch("localm.discover.resolve_main_gpu_index", return_value=0):
+            assert GgufBackend._device_global_free_bytes(16_000_000_000) == 6_000_000_000
+
+    def test_corrector_never_raises_into_a_model_load(self):
+        """A correction that cannot be made must degrade to 'use the uncorrected
+        reading', never crash a load (rule 5)."""
+        with patch("localm.gpu_usage.raw_reading_is_process_scoped",
+                   side_effect=RuntimeError("driver boom")):
+            assert GgufBackend._device_global_free_bytes(16_000_000_000) is None
+
+    def test_corrector_none_total_is_none(self):
+        assert GgufBackend._device_global_free_bytes(None) is None

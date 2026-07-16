@@ -117,15 +117,28 @@ _ADL_ALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int)
 
 
 def _adl_open() -> dict:
-    """Open ADL once and cache the context, or cache {} when unusable (not an AMD
-    box, no driver, an ADL that refuses to init). Never raises."""
+    """Open ADL once and cache the context. Returns the cached state, or {} when ADL
+    is not usable this call. Never raises.
+
+    Distinguishes PERMANENT from TRANSIENT unusability (rule 5, missing-vs-corrupt),
+    mirroring the PDH path: a missing ``atiadlxx.dll`` (any non-AMD box) is permanent
+    and latched to a sticky {} so we never re-attempt the throwing load; a
+    ``ADL2_Main_Control_Create`` failure (the driver momentarily not answering) is
+    NOT latched - it returns {} for this call but leaves ``_adl_state`` None so the
+    next call retries, rather than disabling ADL for the whole process on a hiccup."""
     global _adl_state
     if _adl_state is not None:
         return _adl_state
-    state: dict = {}
     try:
         dll = ctypes.WinDLL("atiadlxx.dll")
-
+    except Exception as e:
+        # No atiadlxx.dll (any non-AMD box) is the ordinary case, not a fault, and it
+        # is PERMANENT: latch off so we never re-attempt the throwing load. The PDH
+        # path still covers this box.
+        logger.debug("gpu_usage: ADL unavailable: %s", e)
+        _adl_state = {}
+        return _adl_state
+    try:
         # ADL calls this back to allocate the AdapterInfo array. The buffers must
         # outlive the call, so they are parked on the cached state, not a local.
         keepalive: list = []
@@ -139,17 +152,16 @@ def _adl_open() -> dict:
         ctx = ctypes.c_void_p()
         # 1 = "connect to a running driver only", so this never spins one up.
         if dll.ADL2_Main_Control_Create(_alloc, 1, ctypes.byref(ctx)) != _ADL_OK:
-            _adl_state = {}
-            return _adl_state
-        state = {"dll": dll, "ctx": ctx, "alloc": _alloc, "keepalive": keepalive}
-    except Exception as e:
-        # No atiadlxx.dll (any non-AMD box) is the ordinary case, not a fault:
-        # debug, not a warning, and the PDH path below still covers this box.
-        logger.debug("gpu_usage: ADL unavailable: %s", e)
-        _adl_state = {}
+            # TRANSIENT-possible (driver busy): do NOT latch - retry next call.
+            logger.debug("gpu_usage: ADL2_Main_Control_Create failed; will retry")
+            return {}
+        _adl_state = {"dll": dll, "ctx": ctx, "alloc": _alloc, "keepalive": keepalive}
         return _adl_state
-    _adl_state = state
-    return state
+    except Exception as e:
+        # An unexpected init error (not the DLL absence handled above): also treat as
+        # retryable rather than latching ADL off for the process lifetime.
+        logger.debug("gpu_usage: ADL init failed; will retry: %s", e)
+        return {}
 
 
 def _adl_used_by_bus() -> Dict[int, int]:
@@ -202,10 +214,12 @@ def _pdh_adapter_used() -> list:
     subprocess), which is the difference between a probe that can sit on a request
     path and one that cannot.
 
-    Instances are summed per adapter LUID. The ADAPTER counter is used rather than
-    summing the per-process `\\GPU Process Memory` instances, because shared surfaces
-    are counted against several processes and the sum overcounts (measured: 8.70 GB
-    summed vs 7.33 GB actually on the adapter)."""
+    Returns one value per adapter-LUID instance (the `GPU Adapter Memory` instance
+    name IS the adapter LUID, so each appears once - there is no cross-instance
+    summing). The ADAPTER counter is used rather than summing the per-process
+    `\\GPU Process Memory` instances, because shared surfaces are counted against
+    several processes and that sum overcounts (measured: 8.70 GB summed vs 7.33 GB
+    actually on the adapter)."""
     global _pdh_state
     if _pdh_state is not None and not _pdh_state:
         return []

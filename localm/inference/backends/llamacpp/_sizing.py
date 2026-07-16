@@ -120,8 +120,13 @@ class VramSizingMixin:
                 idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
                 free, total = torch.cuda.mem_get_info(idx)
                 return int(free), int(total)
-        except Exception:
-            pass
+        except Exception as e:
+            # Degrades honestly to (None, None) -> the isolated-probe fallback in
+            # _free_vram_bytes. Surfaced at debug (rule 5) rather than a bare pass so
+            # a driver hiccup on this read is diagnosable under --debug.
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("torch.cuda.mem_get_info read failed (%s); falling back to "
+                       "the isolated native VRAM probe", type(e).__name__)
         return None, None
 
     @classmethod
@@ -171,13 +176,63 @@ class VramSizingMixin:
 
         A classmethod (not staticmethod), so a subclass/test that monkeypatches
         ``_free_total_vram_bytes`` on itself is honoured here too - the internal
-        cross-reference dispatches through ``cls``, not a hardcoded class name."""
-        t = cls._free_total_vram_bytes()[0]
-        if t is not None:
-            return t
-        from localm.inference.backends.llamacpp import _loader
-        mem = _loader.gpu_memory_isolated()
-        return mem[0] if mem is not None else None
+        cross-reference dispatches through ``cls``, not a hardcoded class name.
+
+        CROSS-PROCESS CORRECTION: both reads above (torch and the isolated ggml
+        probe) report ``total - THIS process's own allocations`` on Windows + an AMD
+        ROCm/HIP build and are blind to every other process (measured; see
+        dev-notes/vram-cross-process-blindness.md). A LOAD DECISION made on that blind
+        number OVERSTATES free VRAM and overcommits exactly when another process (a
+        game, ComfyUI, another model in its isolated worker) holds the card - the
+        TDR / WDDM-spill case auto-offload exists to avoid. So the free reading is
+        corrected to a device-global figure where the raw one is KNOWN blind; on
+        every other platform (device-global by documentation, or unmeasured) it is
+        kept unchanged. This is the DECISION half of the same fix #697 applied to the
+        reporting surfaces - _auto_gpu_layers / _auto_ctx_max / _check_vram all read
+        through here."""
+        free_raw, total = cls._free_total_vram_bytes()
+        if free_raw is None:
+            from localm.inference.backends.llamacpp import _loader
+            mem = _loader.gpu_memory_isolated()
+            if mem is not None:
+                free_raw, total = int(mem[0]), int(mem[1])
+        if free_raw is None:
+            return None
+        corrected = cls._device_global_free_bytes(total)
+        return corrected if corrected is not None else free_raw
+
+    @staticmethod
+    def _device_global_free_bytes(total: Optional[int]) -> Optional[int]:
+        """``total`` minus ALL-process VRAM usage on the configured main GPU, or
+        None when no device-global correction applies - the raw reading is not
+        known-blind on this platform, or the correction source cannot map/answer.
+
+        Never raises: a correction that cannot be made must degrade to "use the
+        uncorrected reading", never crash a model load (rule 5, the same fail-safe
+        posture as the isolated probe). Only acts where
+        gpu_usage.raw_reading_is_process_scoped() is True (Windows + a ROCm/HIP torch
+        build), so NVIDIA / Linux / Vulkan reads - device-global by documentation, or
+        unmeasured - are left exactly as before."""
+        if total is None:
+            return None
+        try:
+            from localm.gpu_usage import (device_global_used_bytes,
+                                          raw_reading_is_process_scoped)
+            if not raw_reading_is_process_scoped():
+                return None
+            from localm.config import load_config
+            from localm.discover import resolve_main_gpu_index
+            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            used = device_global_used_bytes([{"index": idx, "total": total}])
+            u = used.get(idx)
+            if u is None:
+                return None
+            return max(0, total - int(u))
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("cross-process VRAM correction unavailable (%s); using the "
+                       "uncorrected free reading for sizing", type(e).__name__)
+            return None
 
     @classmethod
     def _total_vram_bytes(cls) -> Optional[int]:

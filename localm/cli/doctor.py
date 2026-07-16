@@ -259,7 +259,10 @@ def _check_vram_torch() -> bool:
             try:
                 _gpus_corrected = discover.list_gpus(
                     deadline=discover._GPU_PROBE_CLI_DEADLINE)
-            except Exception:
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("doctor: device-global VRAM correction probe failed "
+                           "(%s); showing the raw torch readings", type(e).__name__)
                 _gpus_corrected = []
             for i in range(torch.cuda.device_count()):
                 props = torch.cuda.get_device_properties(i)
