@@ -203,6 +203,14 @@ def _worker_main(req_q, resp_q) -> None:
     # faster-whisper import so OpenMP reads it at init.
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _silence_native_crash_dialogs()
+
+    from localm._mp_spawn import install_parent_death_watchdog
+    install_parent_death_watchdog()   # die with the parent even on a hard kill
+                                       # (End Task / force-close); daemon=True is
+                                       # atexit-gated and does not cover that, so
+                                       # else this STT worker outlives the server
+                                       # holding its model in VRAM.
+
     model = None
     model_name = None
     while True:

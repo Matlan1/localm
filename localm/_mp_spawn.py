@@ -57,9 +57,16 @@ all. Calling this when NOT running under a renamed launcher is a harmless no-op
 from __future__ import annotations
 
 import multiprocessing
+import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
+
+# Set once, inside a worker process, when the parent-death watchdog thread is
+# running. Module-level so a second call in the same process is a cheap no-op;
+# each spawned worker is a fresh process, so it always starts False there.
+_parent_death_watchdog_installed = False
 
 
 def real_base_python() -> Optional[Path]:
@@ -86,3 +93,71 @@ def ensure_spawn_uses_venv_python() -> None:
     base_python = real_base_python()
     if base_python is not None:
         multiprocessing.set_executable(str(base_python))
+
+
+def install_parent_death_watchdog() -> bool:
+    """Make THIS spawned worker process die when its parent dies - HOWEVER the
+    parent died, including an uncatchable hard kill (Windows TerminateProcess /
+    Task Manager "End Task", POSIX SIGKILL) where NO parent-side code runs.
+
+    Call at the very top of a worker's process-main. Returns True if the watchdog
+    thread was installed, False if there is nothing to watch (the main process) or
+    the mechanism is unavailable.
+
+    WHY this is needed even though every worker is spawned ``daemon=True``:
+    multiprocessing's daemon-child reclamation is an atexit hook
+    (``multiprocessing.util._exit_function``), and atexit never runs under a hard
+    kill. Every localm reclamation path (``ModelRunner.shutdown()`` on unload,
+    ``embedder.release_for_exit()`` on stop/restart) is parent-side Python, which by
+    definition does not run when the parent is force-killed. So without this, a
+    force-closed / End-Task'd server leaves its model worker alive, holding its
+    model resident in VRAM indefinitely, and the next start plans against a card
+    that is mostly full (reproduced in the real product 2026-07-16).
+
+    HOW: multiprocessing ALREADY hands a spawned child a waitable parent sentinel
+    (Windows: an ``OpenProcess(SYNCHRONIZE)`` handle; POSIX: a dup'd pipe fd),
+    exposed as ``multiprocessing.parent_process().join()`` - which blocks until the
+    parent terminates, signalled by the kernel no matter how the parent died. A
+    tiny daemon thread waits on it and, the instant it fires, ``os._exit(0)``s.
+
+    ``os._exit`` (not ``worker.close()`` / ``sys.exit``) is deliberate: a model's
+    ``close()`` takes the generation lock that is held during a native decode, so a
+    polite close mid-generation would deadlock - and the parent is already gone, so
+    an immediate process exit is both sufficient (it frees the VRAM) and the only
+    thing that cannot hang. The native binding is a ctypes ``CDLL`` (verified),
+    which releases the GIL during ``llama_decode``, so this thread still gets the
+    GIL to run even while the worker is mid-token.
+
+    Fully guarded and idempotent: a no-op in the main process (``parent_process()``
+    is None there) and if anything is unavailable, so it can never block a normal
+    worker start."""
+    global _parent_death_watchdog_installed
+    if _parent_death_watchdog_installed:
+        return True
+    try:
+        parent = multiprocessing.parent_process()
+    except Exception:
+        return False
+    if parent is None:
+        return False   # the main process, not a spawned child - nothing to watch
+
+    def _wait_and_die() -> None:
+        try:
+            parent.join()   # blocks on the kernel sentinel until the parent dies
+        except Exception:
+            # Could not wait on the parent sentinel. Do NOT assume the parent
+            # died - leave the worker running (no watchdog) rather than kill a
+            # worker whose parent is still alive. This keeps the "degrade safely,
+            # never disrupt a normal worker" contract literally true.
+            return
+        # The parent is gone; exit now so this process (and its VRAM) does not
+        # outlive it. os._exit, never a clean shutdown - see the docstring.
+        os._exit(0)
+
+    try:
+        threading.Thread(target=_wait_and_die, daemon=True,
+                         name="localm-parent-death-watch").start()
+    except Exception:
+        return False
+    _parent_death_watchdog_installed = True
+    return True

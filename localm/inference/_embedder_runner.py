@@ -70,6 +70,13 @@ def _runner_main(req_q, resp_q) -> None:
     attach_child_logging()   # native load-failure diagnostics land in the
                               # shared debug log from this process too.
 
+    from localm._mp_spawn import install_parent_death_watchdog
+    install_parent_death_watchdog()   # die with the parent even on a hard kill
+                                       # (End Task / force-close); daemon=True is
+                                       # atexit-gated and does not cover that, so
+                                       # else this worker outlives the server
+                                       # holding its embedding model in VRAM.
+
     embedder = None
 
     while True:
