@@ -195,6 +195,63 @@ test("AUD-INSTANCEID: a mismatch also clears the Coder tab's stale " +
     "after the instance-id mismatch is confirmed");
 });
 
+test("GUI-LIVE-WIPE: a SECOND refreshCtxLimit() call in privacy mode (the 30s " +
+     "poll, init.js) must not wipe a conversation the poll itself did not start " +
+     "- it should only ever wipe stale content the FIRST time privacy mode is " +
+     "confirmed for this page load", async () => {
+  const { window } = loadApp({
+    fetchImpl: makeFetch({ instanceId: "backend-x" }),
+  });
+  runScript(window, `
+    window.fetch = async (url) => {
+      const u = String(url);
+      if (u === "/v1/config") {
+        return { ok: true, status: 200, text: async () => "",
+          json: async () => ({ effective_mode: "privacy", n_ctx_max: 16384,
+                                instance_id: "backend-x" }) };
+      }
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+    };
+    window.chatState = chat;
+    refreshCtxLimit();
+  `);
+  await drain();
+  assert.equal(window.chatState.privacy, true);
+  assert.equal(window.chatState.conversations.length, 0,
+    "sanity check: the first call still wipes stale content as before");
+
+  // Simulate the user's OWN live conversation - the first message just landed
+  // (or is still streaming) in this same tab, no reload, no other instance
+  // involved. Rendered explicitly here since real message-send flows through
+  // runCompletion()'s own renderChat()/renderConvList(), not refreshCtxLimit().
+  runScript(window, `
+    chat.conversations.push({
+      id: "live-1", title: "Say the word BANANA", updated_at: 1000,
+      pinned: false, folder: null, branches: [],
+      messages: [{ role: "user", content: "Say the word BANANA and nothing else." },
+                 { role: "assistant", content: "Banana" }],
+    });
+    chat.activeId = "live-1";
+    renderConvList();
+  `);
+  assert.equal(window.chatState.conversations.length, 1);
+
+  // The 30s poll (init.js: setInterval(refreshCtxLimit, 30000)) fires again -
+  // still privacy mode, nothing about the backend changed.
+  runScript(window, "refreshCtxLimit();");
+  await drain();
+
+  assert.equal(window.chatState.conversations.length, 1,
+    "a second privacy-mode confirmation must NOT wipe the tab's own live " +
+    "conversation - only the first confirmation may reset stale content");
+  assert.equal(window.chatState.activeId, "live-1");
+  const listText = window.document.getElementById("conv-list").textContent;
+  assert.ok(listText.includes("Say the word BANANA"),
+    "the live conversation must still be rendered in the sidebar after the " +
+    "second poll tick");
+});
+
 test("reconcileInstanceId: a matching id is a no-op (nothing wiped)", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.instanceId", "same-id");

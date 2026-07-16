@@ -47,7 +47,11 @@
 // pages/models.js names the alias the server actually stored (REG-562). A
 // stale-cached client would keep calling routes that no longer exist, keep the
 // false "No model loaded" refusal, and keep naming an alias that does not exist.
-const CACHE = "localm-shell-v57";
+// v58: chat.js's refreshCtxLimit() privacy-mode branch now wipes the live
+// in-memory conversation only once per page load, not on every 30s poll tick
+// (GUI-LIVE-WIPE) - a stale-cached client would keep erasing a user's own
+// first message every 30 seconds in privacy mode.
+const CACHE = "localm-shell-v58";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
