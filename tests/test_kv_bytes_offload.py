@@ -364,6 +364,15 @@ class TestFreeVramBytesPrefersBackend:
         # the isolated fallback would say something different; torch must win.
         monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
                             staticmethod(lambda: (7 * 1024 ** 3, 16 * 1024 ** 3)))
+        # Since #706, _free_vram_bytes applies a device-global correction on a
+        # Windows + ROCm/HIP box (real ADL/PDH adapter usage), which silently
+        # replaces the faked free above with a REAL measurement on exactly that
+        # hardware - the same trap test_auto_gpu_layers.py's _patch_vram_reads
+        # documents (a faked 7/16 GB reading came back as ~14 GB free live).
+        # Patch it to None so this test asserts source SELECTION (torch vs
+        # isolated), not the separately-tested correction step.
+        monkeypatch.setattr(GgufBackend, "_device_global_free_bytes",
+                            staticmethod(lambda total: None))
         assert GgufBackend._free_vram_bytes() == 7 * 1024 ** 3
 
     def test_falls_back_to_isolated_probe_when_torch_unavailable(self, monkeypatch):
@@ -373,6 +382,10 @@ class TestFreeVramBytesPrefersBackend:
                             lambda: (5 * 1024 ** 3, 16 * 1024 ** 3))
         monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
                             staticmethod(lambda: (None, None)))
+        # See the sibling test above: isolate from the real device-global
+        # correction so this asserts fallback SELECTION, not the correction.
+        monkeypatch.setattr(GgufBackend, "_device_global_free_bytes",
+                            staticmethod(lambda total: None))
         assert GgufBackend._free_vram_bytes() == 5 * 1024 ** 3
 
 
