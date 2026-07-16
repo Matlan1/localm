@@ -75,6 +75,27 @@ def test_validate_media_block_blank_clears_override():
     assert merge == {"comfy": {"workdir": None}}
 
 
+def test_validate_media_block_rejects_malformed_api_url():
+    # A non-URL or a scheme-less / hostless value is rejected at SET time (surfaced
+    # as a ValueError -> 400 by the route) instead of being stored and silently
+    # dropped to the loopback default at READ time by sanitize_comfy_url.
+    for bad in ("not a url", "127.0.0.1:8188", "localhost:8188",
+                "ftp://host", "://nohost", "http://"):
+        with pytest.raises(ValueError):
+            ss.validate_media_block("image", {"api_url": bad})
+
+
+def test_validate_media_block_accepts_valid_api_url_and_blank_clears():
+    assert ss.validate_media_block("image", {"api_url": "http://127.0.0.1:8188"}) == \
+        {"comfy": {"api_url": "http://127.0.0.1:8188"}}
+    # LAN host + https, on a different plugin, is fine too
+    assert ss.validate_media_block("music", {"api_url": "https://box.lan:8188"}) == \
+        {"comfy": {"api_url": "https://box.lan:8188"}}
+    # blank still clears the override without a URL check
+    assert ss.validate_media_block("image", {"api_url": ""}) == \
+        {"comfy": {"api_url": None}}
+
+
 # --------------------------------------------------------------------------- #
 #  Endpoint                                                                    #
 # --------------------------------------------------------------------------- #
@@ -176,6 +197,18 @@ def test_post_unknown_plugin_404_and_bad_field_400(client):
                        json={"bogus": 1}).status_code == 400
     assert client.post("/v1/media/config/image",
                        json={"swap_policy": "sometimes"}).status_code == 400
+
+
+def test_post_rejects_malformed_api_url(client):
+    # Open-mode owner (shell token) -> the api_url admin gate is bypassed, so the
+    # value reaches validation: a malformed URL is a 400, a well-formed one persists.
+    assert client.post("/v1/media/config/image",
+                       json={"api_url": "not a url"}).status_code == 400
+    r = client.post("/v1/media/config/image",
+                    json={"api_url": "http://127.0.0.1:8188"})
+    assert r.status_code == 200, r.text
+    from localm.config import load_config
+    assert load_config()["plugins"]["image"]["comfy"]["api_url"] == "http://127.0.0.1:8188"
 
 
 def test_write_requires_config_write_scope(client, monkeypatch):
