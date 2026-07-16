@@ -17,8 +17,10 @@ preflight: weights + ~1.5 GB overhead for KV cache and compute buffers.
 from __future__ import annotations
 
 import ctypes
+import inspect
 import re
 import threading
+import time
 from collections.abc import Sequence
 from typing import Optional
 
@@ -324,6 +326,20 @@ GPU_PROBE_BUSY = "busy"        # another probe is inflight, or the probe thread 
 _gpu_probe_lock = threading.Lock()
 _gpu_last_good: Optional[list] = None    # last SUCCESSFUL probe; served on a wedge
 _gpu_probe_inflight = False
+# Published TOGETHER with _gpu_probe_inflight (under _gpu_probe_lock) when a probe
+# thread is started, and cleared when it lands, so a PATIENT off-loop caller can
+# JOIN the running probe instead of being handed an instant GPU_PROBE_BUSY. The
+# default guard behaviour is still to refuse to pile a second probe on a driver
+# already being probed (BUSY) - that instant answer is what keeps the WebUI
+# responsive on a permanent wedge. Joining is strictly opt-in (list_gpus'
+# wait_for_inflight), for a caller already OFF the event loop that can afford to
+# wait out a cold driver init: it is the ONLY thing that lets a long deadline
+# actually help on a cold box, because there the first probe (often a 4s
+# event-loop heartbeat) holds the in-flight slot for the whole ~4.6s cold init,
+# so every other caller in that window would otherwise short-circuit on BUSY
+# without ever probing - the exact 0.0000s no-op a deadline-15 RETRY hits.
+_gpu_probe_done: Optional[threading.Event] = None
+_gpu_probe_result: Optional[dict] = None
 # Bumped by _reset_gpu_probe_cache() to ORPHAN any probe thread still in flight.
 # An abandoned probe (see the DEADLINE note above) is by definition still running
 # and will write its reading whenever the native call finally returns - which can
@@ -346,13 +362,21 @@ def _reset_gpu_probe_cache() -> None:
     they assert a fake or empty reading. Bumping the epoch makes that late write
     a no-op (see _run), which the clears alone provably could not do."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
+    global _gpu_probe_done, _gpu_probe_result
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
+        # Unpublish the join handles too: after a reset the slot reads free, so no
+        # caller should join a probe from the epoch just retired. An abandoned
+        # thread still holding its own local done/result is unaffected (it sets its
+        # local event and, epoch-mismatched, will not touch these globals again).
+        _gpu_probe_done = None
+        _gpu_probe_result = None
         _gpu_probe_epoch += 1
 
 
-def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False):
+def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False,
+              wait_for_inflight: bool = False):
     """Every GPU device visible right now: ``[{"index", "name", "total",
     "free"}, ...]``, or ``[]`` when nothing is measurable.
 
@@ -384,41 +408,109 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     a name-aware ``nvidia-smi`` listing (ALL devices, not just the first) for
     the GGUF-only install that has no torch.
 
+    ``wait_for_inflight`` (opt-in, default False) changes ONLY what happens when a
+    probe is already in flight: instead of returning :data:`GPU_PROBE_BUSY` at once
+    with the last-known-good reading, this call JOINS the running probe and waits on
+    its completion, bounded by its own ``deadline``. This is what makes a longer
+    ``deadline`` actually help on a cold box: there the FIRST probe (typically a 4s
+    event-loop heartbeat via /api/stats) holds the in-flight slot for the entire
+    ~4.6s cold ROCm/CUDA init, so a model-load probe arriving in that window would
+    otherwise short-circuit on BUSY without ever probing - the identical 0.0000s
+    no-op a deadline-15 RETRY hits on the same guard. Set it ONLY together with a
+    long ``deadline`` and ONLY off the event loop: like the long deadline itself, a
+    joining wait can block the caller up to ``deadline`` seconds, which must never
+    land on the server's single loop (PR #541). It never spawns a second probe, so
+    it cannot pile onto a wedged driver; a permanent wedge still just times the
+    joiner out at its own ``deadline``.
+
     Deliberately does NOT fall back to the Windows display-adapter registry:
     that tier (see vram_info()) can only report one aggregate "largest
     adapter" number with no per-device identity, so it cannot support GPU
     *selection* - only vram_info()'s single-number "total VRAM for fit
     badges" use case. That is a scope boundary, not an oversight."""
-    gpus, status = _list_gpus_with_status(deadline)
+    gpus, status = _list_gpus_with_status(deadline, wait_for_inflight)
     return (gpus, status) if return_status else gpus
 
 
-def _list_gpus_with_status(deadline: float) -> tuple:
+def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
     """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)``
     where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` /
     :data:`GPU_PROBE_BUSY`. Split out so ``list_gpus`` can expose the status opt-in
-    without duplicating the thread + deadline machinery."""
-    global _gpu_last_good, _gpu_probe_inflight
+    without duplicating the thread + deadline machinery. ``wait_for_inflight``: see
+    :func:`list_gpus` - a patient off-loop caller JOINS a probe already in flight
+    (bounded by ``deadline``) rather than short-circuiting on BUSY."""
+    global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_done, _gpu_probe_result
+    global _probe_deadline_at   # published with the slot for #697's cold-budget check
+    join_done = None
+    join_result = None
     with _gpu_probe_lock:
         if _gpu_probe_inflight:
-            # A probe is already running (a concurrent caller, or a prior one that
-            # wedged the driver). Never pile on: hand back the last-known-good
-            # reading so this caller stays free. No fresh reading was taken, so the
-            # status is BUSY (not a clean OK); [] is the safe "unknown" answer when
-            # nothing has succeeded yet.
-            served = list(_gpu_last_good) if _gpu_last_good is not None else []
+            if wait_for_inflight and _gpu_probe_done is not None:
+                # A patient off-loop caller. Rather than pile a second probe on a
+                # driver already being probed (or be handed an instant BUSY for a
+                # reading that is on its way), JOIN the in-flight probe: wait on ITS
+                # completion event, bounded by our own deadline. Both handles are
+                # captured HERE, under the same lock that observed the in-flight
+                # slot, so a concurrent completion cannot null them between this
+                # check and the wait below.
+                join_done = _gpu_probe_done
+                join_result = _gpu_probe_result
+            else:
+                # Default: never pile on. Hand back the last-known-good reading so
+                # this caller stays free. No fresh reading was taken, so the status
+                # is BUSY (not a clean OK); [] is the safe "unknown" answer when
+                # nothing has succeeded yet. This instant answer is what keeps the
+                # event loop responsive on a permanent wedge.
+                served = list(_gpu_last_good) if _gpu_last_good is not None else []
+                return served, GPU_PROBE_BUSY
+        else:
+            _gpu_probe_inflight = True
+            # Published under the SAME lock that claims the in-flight slot (only one
+            # probe is ever in flight, so there is only one deadline to describe):
+            # #697's probe body reads it to decide whether it can afford a cold
+            # device-global VRAM source without overrunning this deadline. See
+            # _apply_device_global_free.
+            _probe_deadline_at = time.monotonic() + deadline
+            # Captured under the SAME lock that claims the in-flight slot: an
+            # unlocked read here could pair this probe with an epoch a concurrent
+            # reset has already retired, which is the exact race the epoch exists to
+            # close.
+            my_epoch = _gpu_probe_epoch
+            # Created and PUBLISHED under the lock, atomically with the in-flight
+            # slot, so any joiner that sees inflight=True also sees these handles
+            # (never a half-published state). Cleared by _run when the probe lands.
+            result: dict = {}
+            done = threading.Event()
+            _gpu_probe_done = done
+            _gpu_probe_result = result
+
+    # JOIN path: we did not start a probe; wait on the one already running.
+    if join_done is not None:
+        if join_done.wait(deadline):
+            # The joined probe landed. Its result carries a "value" key iff its
+            # thread actually ran to completion; the key is ABSENT only when the
+            # starting caller could not spawn the thread and woke joiners via
+            # done.set() so they would not hang - that is a BUSY, not a fresh OK.
+            if "value" in join_result:
+                v = join_result["value"]
+                return (list(v) if v is not None else []), GPU_PROBE_OK
+            with _gpu_probe_lock:
+                served = list(_gpu_last_good) if _gpu_last_good is not None else []
             return served, GPU_PROBE_BUSY
-        _gpu_probe_inflight = True
-        # Captured under the SAME lock that claims the in-flight slot: an unlocked
-        # read here could pair this probe with an epoch a concurrent reset has
-        # already retired, which is the exact race the epoch exists to close.
-        my_epoch = _gpu_probe_epoch
+        # Our own deadline expired while waiting on the in-flight probe: same
+        # outcome as starting one that overran - the driver is stuck, serve
+        # last-known-good and report TIMEOUT (never mistaken for "no GPU"). We
+        # spawned nothing, so this never piled onto the wedge.
+        logger.debug("list_gpus: waited %.1fs on an in-flight GPU probe that did "
+                     "not complete; returning last-known GPU info", deadline)
+        with _gpu_probe_lock:
+            served = list(_gpu_last_good) if _gpu_last_good is not None else []
+            return served, GPU_PROBE_TIMEOUT
 
-    result: dict = {}
-    done = threading.Event()
-
+    # START path: we own the in-flight slot.
     def _run() -> None:
-        global _gpu_last_good, _gpu_probe_inflight
+        global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_done, _gpu_probe_result
+        global _probe_deadline_at
         value = None
         try:
             value = _list_gpus_probe()
@@ -439,11 +531,22 @@ def _list_gpus_with_status(deadline: float) -> tuple:
                 if value is not None:
                     _gpu_last_good = value
                 _gpu_probe_inflight = False
+                # Unpublish alongside the in-flight slot: a NEW caller must start a
+                # fresh probe, not join one that has already landed. A joiner that
+                # already captured its local handle is unaffected - it waits on that
+                # same `done`, which is set unconditionally just below.
+                _gpu_probe_done = None
+                _gpu_probe_result = None
+                # Cleared with the in-flight slot too (#697): the budget describes
+                # THIS probe and nothing else. Leaving it set would hand a later
+                # reader an expired deadline, which reads as "no budget left" and
+                # would skip a cold source that in fact had all the time in the world.
+                _probe_deadline_at = None
         # Deliberately OUTSIDE the epoch gate and unconditional: a caller still
-        # inside its deadline is waiting on `done`, and withholding it would make
-        # it wait out the full deadline and report a COMPLETED probe as a TIMEOUT -
-        # manufacturing the very "no GPU"/inconclusive lie the status contract
-        # above exists to prevent.
+        # inside its deadline - the starter OR any joiner - is waiting on `done`,
+        # and withholding it would make it wait out the full deadline and report a
+        # COMPLETED probe as a TIMEOUT, manufacturing the very "no GPU"/inconclusive
+        # lie the status contract above exists to prevent.
         result["value"] = value
         done.set()
 
@@ -460,6 +563,13 @@ def _list_gpus_with_status(deadline: float) -> tuple:
         with _gpu_probe_lock:
             if _gpu_probe_epoch == my_epoch:
                 _gpu_probe_inflight = False
+                _gpu_probe_done = None
+                _gpu_probe_result = None
+        # Wake any caller that joined between our publish above and this failure, so
+        # it does not wait out its full deadline on a probe that will never run.
+        # `result` has no "value" key (the thread never set it), which the join
+        # path reads as BUSY - the honest status here.
+        done.set()
         logger.debug("list_gpus: could not start probe thread: %s", e)
         served = list(_gpu_last_good) if _gpu_last_good is not None else []
         return served, GPU_PROBE_BUSY
@@ -498,6 +608,7 @@ def _list_gpus_probe() -> list:
                 out.append({"index": i, "name": name,
                             "total": int(total), "free": int(free)})
             if out:
+                _apply_device_global_free(out)
                 return out
     except Exception:
         pass
@@ -520,6 +631,10 @@ def _list_gpus_probe() -> list:
                         "index": int(idx_s), "name": name,
                         "total": int(total_mb) * 1024 ** 2,
                         "free": int(free_mb) * 1024 ** 2,
+                        # nvidia-smi's memory.free is the whole board's, across
+                        # every process (that is what it exists to report), so
+                        # unlike the torch path above it needs no correction.
+                        "free_scope": FREE_SCOPE_DEVICE,
                     })
                 except ValueError:
                     continue   # a malformed line never hides the rest
@@ -528,6 +643,122 @@ def _list_gpus_probe() -> list:
     except Exception:
         pass
     return []
+
+
+# How much of the world a GPU entry's "free" actually accounts for. A caller that
+# presents free VRAM as CURRENT FACT (a "will it fit" refusal, a freed-bytes report)
+# must know the difference; a caller that only wants a fit CEILING ("total") does not.
+FREE_SCOPE_DEVICE = "device"    # every process's VRAM is counted - the number is the board's
+FREE_SCOPE_PROCESS = "process"  # ONLY this process's own allocations are counted (see below)
+
+# Probe budget below which a COLD (not-yet-opened) device-global source is skipped
+# rather than risk overrunning the probe deadline. The cold open is MEASURED at
+# ~750ms; this is that with margin, since overrunning costs the caller its free
+# reading entirely. See _apply_device_global_free.
+_CORRECTION_COLD_BUDGET_S = 1.5
+
+# When the in-flight probe's deadline expires (monotonic), or None outside a probe.
+# Set by _list_gpus_with_status under the same lock that claims the in-flight slot,
+# so the probe body can tell how much of its budget is left before spending ~750ms
+# on a cold source. Safe as a module global precisely because _gpu_probe_inflight
+# serialises probes: only ever one in flight to describe.
+_probe_deadline_at = None
+
+
+def _apply_device_global_free(gpus: list) -> None:
+    """Correct each entry's ``free`` to a DEVICE-GLOBAL figure where this platform's
+    driver query is not one already, and tag every entry with ``free_scope`` so a
+    caller can tell a whole-board number from a process-local one. Mutates *gpus*.
+
+    WHY (measured, see dev-notes/vram-cross-process-blindness.md): on Windows with an
+    AMD ROCm/HIP torch build, ``torch.cuda.mem_get_info`` reports
+    ``total - the calling process's own allocations`` and is blind to every other
+    process. Measured live: 0.14 GB reported "in use" while 10.53 GB genuinely was.
+    That is not a staleness bug (PR #693's domain - the probe here is FRESH and still
+    wrong), and it is not llama.cpp-specific: a plain torch tensor in a child process
+    is equally invisible. It bites localm hard because every GGUF load is
+    out-of-process (backends/gguf.py, since #606), so the model's own VRAM is ALWAYS
+    in another process from the server measuring it - as is a game or a ComfyUI.
+
+    On Linux, and on NVIDIA, the driver query is device-global BY DOCUMENTATION (CUDA
+    specifies *free as "free according to the OS" and warns that another process can
+    move it), so nothing is corrected there and the reading is tagged
+    :data:`FREE_SCOPE_DEVICE` unchanged.
+
+    When no better source can answer on Windows, the entry keeps the driver's number
+    but is tagged :data:`FREE_SCOPE_PROCESS` rather than silently passing a
+    known-process-local figure off as the board's (AGENTS.md rule 5). That tag is
+    what makes /v1/models/unload say its reading is uncertain instead of asserting a
+    wrong one as fact."""
+    import sys
+    if sys.platform != "win32":
+        for g in gpus:
+            g["free_scope"] = FREE_SCOPE_DEVICE
+        return
+
+    # The scope to use when a device-global correction is NOT available for an entry
+    # (source cold-skipped, unmappable, or failed). Tag PROCESS only where the raw
+    # reading is KNOWN blind (Windows + an AMD ROCm/HIP torch build); elsewhere on
+    # Windows the raw cudaMemGetInfo is device-global by documentation (NVIDIA), so
+    # tagging it PROCESS would assert a blindness never measured and raise a spurious
+    # uncertainty flag on a number that is actually fine. Computed defensively up
+    # front so it is defined on every path below, including the import-failure except.
+    try:
+        from localm.gpu_usage import raw_reading_is_process_scoped
+        uncorrected_scope = (FREE_SCOPE_PROCESS if raw_reading_is_process_scoped()
+                             else FREE_SCOPE_DEVICE)
+    except Exception:
+        # gpu_usage unimportable is a real bug, not an environment condition, but it
+        # must not crash a probe. Conservative default: DEVICE - never assert a
+        # blindness we cannot confirm.
+        uncorrected_scope = FREE_SCOPE_DEVICE
+
+    try:
+        from localm.gpu_usage import device_global_used_bytes, source_is_warm
+        # This runs INSIDE the deadline-bounded probe, so it spends the SAME budget
+        # the driver call already spent. Opening the source costs ~750ms ONCE per
+        # process (a driver init); a warm read costs ~0.02ms. Measured, that cold
+        # 750ms was enough to push cold probes from a comfortable 2.9-3.5s to
+        # 3.6-4.0s against the 4.0s cap and start timing them out - and a timeout
+        # costs the caller its free reading ENTIRELY (list_gpus serves [] and
+        # vram_info falls to the registry tier, which has no "free" at all). A
+        # correct number is not worth trading for no number, so a COLD source is
+        # skipped when the remaining budget is too thin to absorb it; the reading is
+        # then tagged with the uncorrected scope instead of silently uncorrected. A
+        # warm source is free and always runs, so a long-lived server pays this at
+        # most once, and a CLI caller passing the longer _GPU_PROBE_CLI_DEADLINE has
+        # room for it on the first go.
+        if not source_is_warm():
+            remaining = None
+            if _probe_deadline_at is not None:
+                remaining = _probe_deadline_at - time.monotonic()
+            if remaining is not None and remaining < _CORRECTION_COLD_BUDGET_S:
+                logger.debug(
+                    "list_gpus: %.2fs left of the probe budget is too thin for a "
+                    "cold device-global source (~%.1fs); leaving this reading "
+                    "%s rather than risking a timeout that would return no free VRAM "
+                    "at all", remaining, _CORRECTION_COLD_BUDGET_S, uncorrected_scope)
+                for g in gpus:
+                    g["free_scope"] = uncorrected_scope
+                return
+        used = device_global_used_bytes(gpus)
+    except Exception as e:
+        # Surfaced, not silenced: the entries below are then tagged with the
+        # uncorrected scope (PROCESS only where the raw reading is known blind), so a
+        # real blindness is reported without over-claiming one where it is not.
+        logger.debug("list_gpus: device-global VRAM source failed: %s", e)
+        used = {}
+    for g in gpus:
+        u = used.get(g.get("index"))
+        if u is None:
+            g["free_scope"] = uncorrected_scope
+            continue
+        total = int(g["total"])
+        # Clamp: the used figure and `total` come from different sources (the driver's
+        # total vs the adapter's dedicated usage), so their difference can land just
+        # outside [0, total] without either being wrong enough to matter.
+        g["free"] = max(0, min(total, total - int(u)))
+        g["free_scope"] = FREE_SCOPE_DEVICE
 
 
 def _native_backend_has_vulkan() -> bool:
@@ -876,6 +1107,11 @@ def vram_info(*, return_status: bool = False):
         out = {"total": g["total"]}
         if g.get("free") is not None:
             out["free"] = g["free"]
+            # Travels WITH the number it describes: a caller presenting free VRAM as
+            # current fact must be able to tell a whole-board figure from a
+            # process-local one (see _apply_device_global_free). Absent when free is.
+            if g.get("free_scope") is not None:
+                out["free_scope"] = g["free_scope"]
         return _ret(out)
 
     import sys
@@ -977,6 +1213,18 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
     frees = [g.get("free") for g in split_gpus]
     if all(f is not None for f in frees):
         out["free"] = sum(frees)
+        # All-or-nothing, mirroring the "free" key above: a sum is only a whole-board
+        # figure if EVERY device in it is. One process-scoped device makes the whole
+        # sum process-scoped, because that device's other-process VRAM is missing
+        # from it. Absent entirely when NO device reported a scope: that means
+        # UNKNOWN, and labelling it "process" would assert a blindness we have not
+        # measured (as wrong as asserting the number is fact) while also breaking the
+        # plain-dict contract every existing caller and test double relies on.
+        scopes = [g.get("free_scope") for g in split_gpus if g.get("free_scope")]
+        if scopes:
+            out["free_scope"] = (FREE_SCOPE_DEVICE
+                                 if all(s == FREE_SCOPE_DEVICE for s in scopes)
+                                 else FREE_SCOPE_PROCESS)
     return _ret(out)
 
 
@@ -1057,43 +1305,116 @@ def applied_split_device_count(config: Optional[dict] = None) -> int:
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios")))
 
 
-def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> list:
+def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
+    """``(gpus, status)`` from :func:`list_gpus`, tolerant of a test double patched
+    in as a plain no-kwarg callable - the historical bare-list contract that the
+    ~28 test modules stubbing ``list_gpus`` rely on. A double whose signature does
+    not accept ``return_status`` is called bare and its reading treated as
+    :data:`GPU_PROBE_OK`: it models a completed probe, exactly as a bare stub did
+    before the status channel existed, so only a REAL status-capable probe can ever
+    report itself stale/busy here. Signature-inspected rather than a blanket
+    ``except TypeError`` so a genuine ``TypeError`` raised INSIDE ``list_gpus`` is
+    never mistaken for a rejected kwarg and swallowed (the refinement over
+    ``vram._vram_free_reading``'s try/except that its own author flagged). In
+    production ``list_gpus`` always accepts ``return_status``, so the bare branch is
+    a test-only affordance, never taken by the real probe.
+
+    *deadline* is forwarded to ``list_gpus`` only when given (None leaves its
+    default cap untouched), so an OFF-event-loop caller can spend a longer budget on
+    a cold driver init that overruns the short server cap - the only way to get a
+    FRESH first-load reading (a timed-out probe cannot be retried: it is abandoned,
+    not cancelled, and a retry short-circuits to the frozen last-known-good)."""
+    try:
+        accepts = "return_status" in inspect.signature(list_gpus).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        kw = {"return_status": True}
+        if deadline is not None:
+            kw["deadline"] = deadline
+        return list_gpus(**kw)
+    return list_gpus(), GPU_PROBE_OK
+
+
+def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
+                        *, return_status: bool = False,
+                        deadline: Optional[float] = None):
     """``[{"index", "needed", "free"}, ...]`` for every configured split device
-    whose live free VRAM cannot cover its proportional share of
-    *vram_required* - empty when no split is configured/resolvable, every
-    device has enough, or per-device free is unmeasurable (nothing to check).
+    whose free VRAM, read from a FRESH probe this call (:data:`GPU_PROBE_OK`),
+    cannot cover its proportional share of *vram_required*. Empty when no split is
+    configured, fewer than two split devices resolve, every device has live
+    headroom, OR the live per-device check could not run this call (see the probe
+    freshness contract below). A shortfall entry is emitted ONLY under a fresh
+    ``GPU_PROBE_OK`` reading, so every ``free`` in the result is a current
+    measurement a caller may quote to the user as fact.
 
-    ``vram_capacity()`` is an AGGREGATE check: it proves total combined free
-    VRAM across the split is enough, but ``apply_gpu_split()`` (the GGUF/
-    llama.cpp backend's tensor_split writer) divides a model by a STATIC
-    per-config ratio with NO live per-device capacity awareness of its own -
-    unlike the HF/transformers backend, whose ``device_map="auto"`` is built
-    from live per-device ``torch.cuda.mem_get_info()`` free VRAM instead (see
-    ``backends/hf.py``'s ``_cuda_device_map``), so it already self-corrects.
-    Without this check, a model too big for one device's actual share could
-    still pass the aggregate check (e.g. another already-loaded model sits
-    asymmetrically on one split device more than another) and reach
-    llama.cpp's native loader with too little room on that device - not
-    always a catchable Python exception, since the native loader can hard-
-    abort the process rather than return NULL. Callers should treat any
-    non-empty result as a hard refusal for a GGUF-backend load (see
-    ``http_server.switch_engine``), not merely a warning.
+    ``vram_capacity()`` is an AGGREGATE check: it proves total combined free VRAM
+    across the split is enough, but ``apply_gpu_split()`` (the GGUF/llama.cpp
+    backend's tensor_split writer) divides a model by a STATIC per-config ratio with
+    NO live per-device capacity awareness of its own - unlike the HF/transformers
+    backend, whose ``device_map="auto"`` is built from live per-device
+    ``torch.cuda.mem_get_info()`` free VRAM instead (see ``backends/hf.py``'s
+    ``_cuda_device_map``), so it already self-corrects. Without this check, a model
+    too big for one device's actual share could still pass the aggregate check (e.g.
+    another already-loaded model sits asymmetrically on one split device more than
+    another) and reach llama.cpp's native loader with too little room on that device
+    - not always a catchable Python exception, since the native loader can hard-abort
+    the WORKER process rather than return NULL (that abort is contained to the
+    isolated load worker, never the server - PR #606, see
+    ``backends/llamacpp/_runner.py``). Callers should treat any non-empty result as a
+    hard refusal for a GGUF-backend load (see ``http_server.switch_engine``), not
+    merely a warning.
 
-    Only meaningful for the GGUF/llama.cpp load path - callers should gate on
-    that themselves (e.g. via ``inference.engine._is_gguf``); this function
-    has no way to know which backend a given load will use.
+    Probe freshness (AGENTS.md rule 5). ``list_gpus()`` is deadline-bounded: on a
+    TIMEOUT/BUSY it serves a FROZEN last-known-good reading, and a cold driver init
+    overruns that cap on a healthy box (~6.5s vs the 4s cap, see
+    ``_GPU_PROBE_DEADLINE``), so an overrun is normal, not a fault. This gate
+    therefore does NOT compute a shortfall from a stale reading and does NOT refuse
+    on one (refusing would break every working box's first load); on a non-OK probe
+    it returns ``[]`` (best-effort admit, logged at debug), relying on the isolated
+    worker's contained abort above as the backstop. An empty bare-list result thus
+    cannot, on its own, be told apart from "verified all-clear": a caller that must
+    distinguish "checked, clear" from "could not check" MUST pass
+    ``return_status=True`` to receive ``(shortfall, status)`` carrying the underlying
+    :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY`.
 
-    Deliberately takes no headroom margin of its own (a device with EXACTLY
-    enough free for its proportional share passes) - if a caller wants the
-    same safety margin the aggregate ``vram_capacity()`` check demands, add
-    it to *vram_required* before calling (e.g. ``vram_required + headroom``),
-    so a per-device share is not held to a thinner margin than the aggregate
-    ceiling it composes with.
+    This proves the reading is LIVE, not COMPLETE. On a backend/OS where ``free``
+    counts only this process's own allocations (blind to other processes' VRAM), a
+    fresh reading can still under-state usage; that completeness axis is orthogonal
+    and is carried per-device elsewhere, not by this probe status.
+
+    Only meaningful for the GGUF/llama.cpp load path - callers should gate on that
+    themselves (e.g. via ``inference.engine._is_gguf``); this function has no way to
+    know which backend a given load will use.
+
+    Deliberately takes no headroom margin of its own (a device with EXACTLY enough
+    free for its proportional share passes) - if a caller wants the same safety
+    margin the aggregate ``vram_capacity()`` check demands, add it to *vram_required*
+    before calling (e.g. ``vram_required + headroom``), so a per-device share is not
+    held to a thinner margin than the aggregate ceiling it composes with.
+
+    With ``return_status=True`` returns ``(shortfall, status)``; otherwise the bare
+    ``shortfall`` list (the historical shape every existing caller relies on).
+
+    *deadline* is forwarded to the underlying ``list_gpus`` probe (None leaves its
+    default cap). It is a KNOB an OFF-event-loop caller that runs this via
+    ``run_in_executor`` (e.g. ``switch_engine``) can opt into by passing
+    :data:`_GPU_PROBE_CLI_DEADLINE`, so a cold driver init that overruns the short
+    server cap still completes and yields a FRESH per-device reading instead of
+    timing out into the best-effort admit above. Passing nothing keeps the short cap
+    (the current caller behaviour): such a caller simply falls into that admit on a
+    cold first load. An on-loop caller must NOT pass a long deadline (a long block
+    would freeze the loop, PR #541).
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
+
+    def _ret(shortfall, status):
+        return (shortfall, status) if return_status else shortfall
+
     if not cfg.get("gpu_split_indices"):
-        return []
+        # No split configured: a conclusive answer that needs no hardware probe.
+        return _ret([], GPU_PROBE_OK)
     if _native_backend_has_vulkan():
         # GPU-SPLIT-VKINDEX honest-unknown: on the vulkan build the configured
         # split indices live in ggml-vulkan's own index space at load time, which
@@ -1117,26 +1438,55 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> li
             "index space, which list_gpus() cannot map to a card, so no per-device "
             "check can name the right device (GPU-SPLIT-VKINDEX); relying on the "
             "subprocess-isolated loader to catch an oversized load instead.")
-        return []
-    gpus = list_gpus()
+        # Conclusive skip with no probe, so it mirrors the no-split return above and
+        # reports GPU_PROBE_OK - NOT a non-OK "stale probe" status: nothing was
+        # probed, and (like the no-split branch) this is a deterministic routing
+        # decision, not an inconclusive reading. A future return_status consumer that
+        # needs to tell "checked-clear" from "vulkan-skip" apart would want a distinct
+        # status; flagged for the probe-status owner rather than overloaded here.
+        return _ret([], GPU_PROBE_OK)
+
+    gpus, status = _list_gpus_reading(deadline)
+    if status != GPU_PROBE_OK:
+        # No FRESH reading this call: list_gpus served a frozen last-known-good value
+        # (or []) after a probe TIMEOUT/BUSY. This gate's whole contract is a LIVE
+        # per-device check, so it neither quotes that stale "free" as a current figure
+        # (AGENTS.md rule 5) NOR refuses on it: a cold ROCm/CUDA driver init overruns
+        # the 4s probe cap on a HEALTHY box (~6.5s, see _GPU_PROBE_DEADLINE), so
+        # refusing would break working setups on every first load. The check could not
+        # run this call -> admit best-effort, surfaced via debug + the returned status,
+        # never a silent success. The GGUF/embedder load runs in an isolated worker
+        # whose native abort is contained to that child (PR #606) - the backstop a
+        # best-effort admit relies on.
+        logger.debug("gpu_split_shortfall: probe status=%s (no fresh per-device VRAM "
+                     "reading); admitting split load best-effort, per-device fit "
+                     "unverified this call", status)
+        return _ret([], status)
+
     pairs = resolve_gpu_split(
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
     if len(pairs) < 2:
-        return []
+        return _ret([], status)
     by_index = {g.get("index"): g for g in gpus}
     total_ratio = sum(ratio for _, ratio in pairs)
     if total_ratio <= 0:
-        return []
+        return _ret([], status)
     shortfall = []
     for idx, ratio in pairs:
         g = by_index.get(idx)
         if g is None or g.get("free") is None:
-            continue   # unmeasurable for this device - cannot check, do not block
+            # Structural guard for a malformed/absent device dict ONLY - NOT the
+            # "probe could not run" handler (that is the status != OK branch above).
+            # Under GPU_PROBE_OK, list_gpus emits an int "free" for every device and
+            # DROPS a non-reporting one (see :493/:525), so this branch is dead in
+            # production; it only stops a None-free entry (e.g. test-injected) from
+            # crashing the loop.
+            continue
         needed = int(vram_required * (ratio / total_ratio))
         free = g["free"]
         if free < needed:
             shortfall.append({"index": idx, "needed": needed, "free": free})
-    return shortfall
+    return _ret(shortfall, status)
 
 
 def resolve_preferred_device(config: Optional[dict] = None, *,

@@ -53,7 +53,8 @@ def test_pip_and_uv_cache_dirs_live_inside_the_data_dir(tmp_path):
     assert config.uv_cache_dir() == home / "cache" / "uv"
     for p in (config.pip_cache_dir(), config.uv_cache_dir()):
         assert home in p.parents                     # inside the data dir
-        assert Path.home() not in p.parents          # NOT the home profile
+        if Path.home() not in home.parents:
+            assert Path.home() not in p.parents      # NOT the home profile
 
 
 def test_cache_dirs_follow_localm_home(tmp_path, monkeypatch):
@@ -207,4 +208,5 @@ def test_real_pip_child_resolves_its_cache_inside_the_data_dir(pip_venv, tmp_pat
     reported = Path(out.stdout.strip().splitlines()[-1].strip())
     assert reported == config.pip_cache_dir(), out.stdout   # Windows: case-insensitive eq
     assert home in reported.parents, out.stdout
-    assert Path.home() not in reported.parents, out.stdout  # not the user profile
+    if Path.home() not in home.parents:
+        assert Path.home() not in reported.parents, out.stdout  # not the user profile

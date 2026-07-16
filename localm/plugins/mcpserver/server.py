@@ -143,7 +143,12 @@ class EngineCache:
             # a 0-second no-op on any box whose probe merely ran slow. For the
             # 'after' POLL, None correctly means "cannot verify". Freshness is
             # carried separately, for the REPORT, not the wait.
-            before_free, before_fresh = _vram_free_reading()
+            # scope IS used, for the same reason the /v1/models/unload report needs
+            # it: a process-scoped reading (Windows/AMD, blind to the model in its
+            # isolated worker) genuinely CANNOT observe the free rising after unload,
+            # so "did not rise" would be a false claim, not a backable one. It is
+            # folded into the verdict below, not just the report.
+            before_free, before_fresh, before_scope = _vram_free_reading()
             try:
                 self._engine.unload()
             except Exception as e:
@@ -156,18 +161,25 @@ class EngineCache:
             # against; see vram.wait_for_vram_release). before_free is None only
             # when VRAM is not measurable AT ALL (a CPU-only box), in which case
             # there is nothing to wait for and this is a no-op, as before.
+            from localm.discover import FREE_SCOPE_DEVICE
             from localm.vram import wait_for_vram_release
             released, _final = wait_for_vram_release(
                 _live_free_vram_bytes, before_bytes=before_free)
-            if released is False and before_fresh:
-                # Both ends read live: "did not rise" is a claim we can back.
+            backable = before_fresh and before_scope == FREE_SCOPE_DEVICE
+            if released is False and backable:
+                # Fresh AND device-global on both ends: "did not rise" is a claim we
+                # can back. A process-scoped reading is excluded here precisely
+                # because it cannot see the model's VRAM in its isolated worker, so a
+                # no-rise there proves nothing (it falls to the honest branch below).
                 _log(f"warning: VRAM free did not rise after unloading "
                      f"{self._loaded_name} within the timeout - loading {name} anyway")
-            elif before_free is not None and (released is None or not before_fresh):
-                # Either end came off a timed-out/busy probe, so whether the free
+            elif before_free is not None and (released is None or not backable):
+                # Either end came off a timed-out/busy probe, OR the reading is
+                # process-scoped (blind to the worker's VRAM), so whether the free
                 # landed is unknown. Say that rather than the "did not rise" claim
-                # above, which a reading we never took cannot support (rule 5).
-                # The wait still ran; only the verdict is withheld.
+                # above, which a reading we never took - or one that cannot see the
+                # freed memory - cannot support (rule 5). The wait still ran; only the
+                # verdict is withheld.
                 _log(f"warning: could not confirm the VRAM free after unloading "
                      f"{self._loaded_name} (no live GPU reading) - loading "
                      f"{name} anyway")

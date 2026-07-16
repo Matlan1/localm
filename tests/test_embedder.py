@@ -688,6 +688,41 @@ def test_isolated_embedder_vulkan_split_skips_per_device_and_still_loads(
         "the honest-unknown per-device skip must be surfaced at INFO (reaches a bug report)"
 
 
+def test_isolated_embedder_split_preflight_admits_on_stale_probe(monkeypatch, tmp_path):
+    """Consumer-level oracle, no consumer edit: the embedder split preflight is
+    gpu_split_shortfall's OTHER figure-quoting caller. This drives the REAL
+    gpu_split_shortfall (list_gpus patched, not the function stubbed) with a TIMEOUT
+    probe whose frozen reading reads too small. The source fix returns [] instead of
+    fabricating a shortfall, so _preflight_vram must NOT raise a 'Not enough VRAM ...
+    {stale MB} free' RuntimeError, and the child spawns. Reverting the discover.py
+    fix makes the real gpu_split_shortfall refuse from the stale reading -> RED."""
+    from localm.discover import GPU_PROBE_TIMEOUT
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x" * 4000)          # needed = int(4800 * ratio) per device
+    # A frozen last-known-good reading that reads far too small for even this tiny
+    # ask: the OLD code would quote its stale "free" and refuse both devices.
+    stale = [{"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 1000},
+             {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 1000}]
+
+    def _list_gpus(*a, return_status=False, **k):
+        return (stale, GPU_PROBE_TIMEOUT) if return_status else stale
+
+    monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
+    # The embedder now gates on applied_split_device_count (loader truth); pin it to
+    # 2 to enter the split branch, and pin non-vulkan so the REAL gpu_split_shortfall
+    # reaches the stale-probe path under test here, not the vulkan honest-unknown skip.
+    monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: 2)
+    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
+    monkeypatch.setattr("localm.discover.list_gpus", _list_gpus)
+    monkeypatch.setattr(
+        "localm.config.load_config",
+        lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
+
+    e = emb.IsolatedEmbedder(str(f), n_gpu_layers=99)   # must NOT raise
+    assert e.dim == 5
+    assert len(_StubRunner.instances) == 1              # the child was spawned
+
+
 def test_isolated_embedder_embed_respawns_after_prior_crash(monkeypatch):
     """A crash on a PRIOR embed() call must not permanently disable the
     embedder: the NEXT call transparently respawns + reloads (so one

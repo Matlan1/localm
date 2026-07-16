@@ -251,14 +251,55 @@ def _check_vram_torch() -> bool:
     try:
         import torch
         if torch.cuda.is_available():
+            from localm import discover
+            # The CLI deadline, not the server's 4s cap: a cold GPU driver init is
+            # measured at ~6.5s, and doctor is exactly where a cold box lands (same
+            # reason cli/models.py uses it). Never raises; [] just means no
+            # correction is available and the raw readings below stand.
+            try:
+                _gpus_corrected = discover.list_gpus(
+                    deadline=discover._GPU_PROBE_CLI_DEADLINE)
+            except Exception:
+                _gpus_corrected = []
             for i in range(torch.cuda.device_count()):
                 props = torch.cuda.get_device_properties(i)
-                # Driver-level free/total - torch's allocator counters miss
-                # everything allocated outside torch (llama.dll, other apps)
+                # Driver-level free/total, CORRECTED for cross-process blindness.
+                #
+                # torch.cuda.mem_get_info's raw "free" is not the whole board's on
+                # every platform: measured on Windows + an AMD ROCm/HIP build, it
+                # reports total - THIS process's own allocations and is blind to
+                # every other process (0.14 GB reported while 10.53 GB was genuinely
+                # in use). doctor is a fresh, short-lived process holding no model,
+                # so the raw number would show a nearly-empty card no matter what is
+                # actually resident - telling a user with a full GPU that it is free,
+                # which is the opposite of a diagnostic's job (AGENTS.md rule 5: never
+                # report a wrong number as fact). discover.list_gpus() applies the
+                # device-global correction where one exists and tags what it could
+                # not correct. See dev-notes/vram-cross-process-blindness.md.
                 free_b, total_b = torch.cuda.mem_get_info(i)
+                scope = None
+                for g in _gpus_corrected:
+                    if g.get("index") == i and g.get("free") is not None:
+                        free_b, scope = g["free"], g.get("free_scope")
+                        break
+                # Say so rather than quietly present a figure we know counts only our
+                # own allocations. This fires for a PROCESS-tagged reading AND for an
+                # untagged one (scope=None) on a known-blind platform - the latter is
+                # the GPU_PROBE_TIMEOUT / registry-fallback case, where no corrected
+                # entry exists so free_b is the raw, blind mem_get_info value and must
+                # not be printed as fact (rule 5). On a device-global platform
+                # (Linux / NVIDIA) raw_reading_is_process_scoped() is False, so an
+                # uncorrected reading there prints without a spurious caveat.
+                from localm import gpu_usage
+                blind = (scope == discover.FREE_SCOPE_PROCESS
+                         or (scope != discover.FREE_SCOPE_DEVICE
+                             and gpu_usage.raw_reading_is_process_scoped()))
+                note = ("  [dim](free counts only this process; other apps' VRAM "
+                        "is not visible on this driver)[/dim]" if blind else "")
                 console.print(
                     f"  {_OK_SYM}  GPU {i}: {props.name}  "
                     f"{free_b / 1024**3:.1f} GB free / {total_b / 1024**3:.1f} GB total"
+                    f"{note}"
                 )
                 torch_gpu_found = True
         else:

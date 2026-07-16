@@ -10,8 +10,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from localm import discover
+# Imported at collection time ON PURPOSE, though the tests below reach it via
+# monkeypatch string targets rather than this name. discover imports it lazily
+# (inside _apply_device_global_free), so without this it would first execute INSIDE
+# TestListGpus's patch.dict(sys.modules, {"torch": ...}) block - and patch.dict, on
+# exit, restores sys.modules to its prior contents, EVICTING it while leaving the
+# stale module object bound as an attribute of the localm package. monkeypatch
+# resolves "localm.gpu_usage.X" via getattr on that package, so it would patch the
+# ORPHANED module while the code under test re-imports a fresh one, and every stub
+# below would silently no-op against real hardware. Importing it here keeps it in
+# sys.modules from the start, so patch.dict has nothing to evict.
+from localm import gpu_usage as _gpu_usage_imported_early  # noqa: F401
 from localm.discover import (
-    DiscoverError, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
+    DiscoverError, GPU_PROBE_BUSY, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _native_backend_has_vulkan,
@@ -374,7 +386,13 @@ class TestListGpus:
                    ("RTX 3060", 10_000_000_000, 12_000_000_000)]
         with self._fake_torch(devices):
             gpus = list_gpus()
-        assert gpus == [
+        # Enumeration fields only, NOT dict equality: entries also carry
+        # "free_scope", whose value legitimately depends on the real host (a
+        # device-global source exists on Windows, and the driver query is already
+        # device-global elsewhere). Pinning it here would make this enumeration test
+        # pass or fail on the tester's hardware. TestFreeScope below covers that
+        # field directly, with the source stubbed, so it stays deterministic.
+        assert [{k: g[k] for k in ("index", "name", "total", "free")} for g in gpus] == [
             {"index": 0, "name": "RTX 4090", "total": 24_000_000_000, "free": 20_000_000_000},
             {"index": 1, "name": "RTX 3060", "total": 12_000_000_000, "free": 10_000_000_000},
         ]
@@ -395,8 +413,12 @@ class TestListGpus:
              patch("subprocess.run", return_value=fake_proc):
             gpus = list_gpus()
         assert len(gpus) == 2
+        # free_scope "device" is part of this path's contract, and unlike the torch
+        # path it is host-independent: nvidia-smi's memory.free is the whole board's
+        # across every process, so it needs no correction on any platform.
         assert gpus[0] == {"index": 0, "name": "NVIDIA RTX 4090",
-                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2}
+                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
+                            "free_scope": "device"}
         assert gpus[1]["index"] == 1
         assert gpus[1]["name"] == "NVIDIA RTX 3060"
 
@@ -611,6 +633,227 @@ class TestListGpusTimeoutStatus:
         relax - otherwise `localm gpus` inherits the same premature timeout."""
         assert _GPU_PROBE_CLI_DEADLINE > _GPU_PROBE_DEADLINE
         assert _GPU_PROBE_CLI_DEADLINE >= 10.0
+
+
+class TestListGpusJoinInflight:
+    """A patient off-loop caller must be able to JOIN a probe already in flight
+    (opt-in wait_for_inflight), not just get an instant BUSY.
+
+    WHY this is the real fix, and a longer deadline alone is not: on a cold box the
+    FIRST probe (typically the GUI's 4s /api/stats heartbeat, off-loaded but at the
+    4s cap) holds _gpu_probe_inflight for the entire ~4.6s cold ROCm/CUDA init. A
+    model-load probe arriving in that window hits the in-flight guard and returns
+    BUSY + last-known-good in ~0.000s WITHOUT probing - the identical short-circuit
+    a deadline-15 RETRY hits (measured 0.0000s). So switch_engine's VRAM-fit gate
+    saw free=None -> measurable=False -> loaded unchecked, EVEN with a long
+    deadline, because it never got to run its own probe. Joining the in-flight
+    probe is what actually lets the long deadline pay off in the concurrent case.
+    The mutation test below (flag OFF -> still BUSY) proves these are not
+    tautological: the join, not the deadline, is what changes the outcome."""
+
+    _GOOD = [{"index": 0, "name": "GPU0", "total": 8, "free": 4}]
+
+    @pytest.fixture(autouse=True)
+    def _reset_probe_state(self):
+        """These tests deliberately leave an abandoned probe thread in flight
+        (the whole point: a caller that overran its deadline). Reset before and
+        after each so a straggler's late write to _gpu_last_good cannot bleed into
+        a sibling test - the epoch fence in _reset_gpu_probe_cache is what makes
+        that late write a no-op."""
+        from localm import discover
+        discover._reset_gpu_probe_cache()
+        yield
+        discover._reset_gpu_probe_cache()
+
+    def test_patient_caller_joins_and_gets_a_real_reading(self, monkeypatch):
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow():
+            started.set()
+            release.wait(10)          # a cold init still running when the joiner arrives
+            return list(self._GOOD)
+
+        # Kick off the in-flight probe via a starter that times out at 0.15s.
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        starter = {}
+
+        def _starter():
+            starter["res"] = list_gpus(deadline=0.15, return_status=True)
+
+        st = threading.Thread(target=_starter)
+        st.start()
+        assert started.wait(2), "probe thread never started"
+        st.join()
+        assert starter["res"][1] == GPU_PROBE_TIMEOUT
+
+        # Joiner: patient, opts in -> joins the still-running probe.
+        joiner = {}
+
+        def _joiner():
+            t0 = time.monotonic()
+            g, s = list_gpus(deadline=5.0, return_status=True,
+                             wait_for_inflight=True)
+            joiner["res"] = (g, s, time.monotonic() - t0)
+
+        jt = threading.Thread(target=_joiner)
+        jt.start()
+        time.sleep(0.2)               # joiner is now blocked on the in-flight probe
+        release.set()                 # probe completes -> joiner must wake with it
+        jt.join()
+        gpus, status, elapsed = joiner["res"]
+        assert status == GPU_PROBE_OK, "a joined, completed probe is a fresh OK reading"
+        assert gpus == self._GOOD, "the joiner must get the probe's REAL value"
+        assert elapsed < 4.0, (
+            f"joiner waited {elapsed:.1f}s - it should have woken when the probe "
+            f"landed, not waited out its 5s deadline")
+
+    def test_without_opt_in_a_concurrent_caller_still_gets_busy(self, monkeypatch):
+        """MUTATION guard: the SAME concurrent scenario, but the second caller does
+        NOT opt in -> it must still short-circuit on BUSY in ~0s. This is the bug
+        the join fixes; if this ever returns OK, wait_for_inflight has been made
+        the unconditional default and the event-loop protection is gone."""
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow():
+            started.set()
+            release.wait(10)
+            return list(self._GOOD)
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+
+        def _starter():
+            list_gpus(deadline=0.15, return_status=True)
+
+        st = threading.Thread(target=_starter)
+        st.start()
+        assert started.wait(2)
+        st.join()
+
+        t0 = time.monotonic()
+        gpus, status = list_gpus(deadline=5.0, return_status=True)  # no opt-in
+        elapsed = time.monotonic() - t0
+        release.set()
+        assert status == GPU_PROBE_BUSY, (
+            "a concurrent caller that did NOT opt in must still get BUSY")
+        assert elapsed < 1.0, (
+            f"BUSY must be instant ({elapsed:.2f}s) - it never waited on the probe")
+
+    def test_joiner_on_a_permanent_wedge_times_out_at_its_own_deadline(self, monkeypatch):
+        """A join must be BOUNDED by the joiner's own deadline and must never spawn
+        a second probe: on a truly wedged driver the joiner returns TIMEOUT at its
+        deadline (not a hang, not a pile-on)."""
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()   # never set within the test -> permanent wedge
+
+        def _wedged():
+            started.set()
+            release.wait(30)
+            return list(self._GOOD)
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _wedged)
+
+        def _starter():
+            list_gpus(deadline=0.15, return_status=True)
+
+        st = threading.Thread(target=_starter)
+        st.start()
+        assert started.wait(2)
+        st.join()
+
+        t0 = time.monotonic()
+        gpus, status = list_gpus(deadline=0.5, return_status=True,
+                                 wait_for_inflight=True)
+        elapsed = time.monotonic() - t0
+        release.set()                 # let the abandoned probe finish now
+        assert status == GPU_PROBE_TIMEOUT
+        assert 0.4 < elapsed < 2.0, (
+            f"joiner should time out at ~0.5s, not hang or return early ({elapsed:.2f}s)")
+
+    def test_wait_for_inflight_with_no_probe_running_starts_its_own(self, monkeypatch):
+        """When nothing is in flight, wait_for_inflight is a no-op: the caller just
+        runs its own probe (the headless/first-caller path), so the flag is safe to
+        pass unconditionally from an off-loop caller."""
+        import time
+
+        def _slow():
+            time.sleep(0.3)
+            return list(self._GOOD)
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        gpus, status = list_gpus(deadline=3.0, return_status=True,
+                                 wait_for_inflight=True)
+        assert status == GPU_PROBE_OK
+        assert gpus == self._GOOD
+
+    def test_spawn_failure_wakes_a_joiner_instead_of_hanging(self, monkeypatch):
+        """If the STARTER publishes its join handles and THEN fails to spawn the
+        probe thread, a caller that joined in that window must be woken (BUSY), not
+        left waiting out its whole deadline on a probe that will never run. Guards
+        the done.set() in the spawn-failure path."""
+        import threading
+        import time
+
+        real_thread = threading.Thread
+        at_spawn = threading.Event()
+        let_fail = threading.Event()
+
+        class _BlockingThenFail:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                # We are now PAST publishing the join handles, at the spawn point.
+                at_spawn.set()
+                let_fail.wait(5)
+                raise RuntimeError("cannot start new thread (simulated)")
+
+        # Only discover's probe spawn is redirected; the test spawns its own
+        # threads via `real_thread` captured above.
+        monkeypatch.setattr("localm.discover.threading.Thread", _BlockingThenFail)
+        monkeypatch.setattr("localm.discover._list_gpus_probe",
+                            lambda: list(self._GOOD))
+
+        starter = {}
+
+        def _starter():
+            starter["res"] = list_gpus(deadline=5.0, return_status=True)
+
+        joiner = {}
+
+        def _joiner():
+            t0 = time.monotonic()
+            g, s = list_gpus(deadline=5.0, return_status=True,
+                             wait_for_inflight=True)
+            joiner["res"] = (s, time.monotonic() - t0)
+
+        st = real_thread(target=_starter)
+        st.start()
+        assert at_spawn.wait(2), "starter never reached the spawn point"
+        # Starter has published inflight + join handles and is now blocked in
+        # start(); a joiner arriving here joins and waits on the starter's `done`.
+        jt = real_thread(target=_joiner)
+        jt.start()
+        time.sleep(0.2)               # joiner is now blocked on the join handle
+        let_fail.set()                # starter's spawn now raises
+        st.join()
+        jt.join()
+        assert starter["res"][1] == GPU_PROBE_BUSY
+        joiner_status, joiner_elapsed = joiner["res"]
+        assert joiner_status == GPU_PROBE_BUSY, (
+            "a spawn failure must wake the joiner as BUSY, not leave it hanging")
+        assert joiner_elapsed < 3.0, (
+            f"joiner hung {joiner_elapsed:.1f}s waiting on a probe that never ran")
 
 
 @pytest.fixture
@@ -1515,3 +1758,585 @@ class TestGpuSplitShortfall:
         result = gpu_split_shortfall(
             8_000_000_000, config={"gpu_split_indices": [0, 1]})
         assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]
+
+    # --- Probe-freshness contract (AGENTS.md rule 5) ----------------------------
+    # A refusal gate must never compute a shortfall (and quote its stale "free" MB)
+    # from a reading list_gpus served frozen after a probe TIMEOUT/BUSY. These pin
+    # both halves: a non-OK probe admits without fabricating a figure, and a fresh
+    # (GPU_PROBE_OK) probe still bites on a genuine per-device shortfall.
+
+    @staticmethod
+    def _probe(gpus, status):
+        """A faithful list_gpus double: honours return_status like the real probe, so
+        the tolerant reader sees a status-capable callable and consumes ``status``
+        rather than defaulting a bare stub to GPU_PROBE_OK."""
+        def fake(*a, return_status=False, **k):
+            return (gpus, status) if return_status else gpus
+        return fake
+
+    def test_stale_timeout_probe_does_not_manufacture_a_shortfall(self, monkeypatch):
+        """THE regression. On TIMEOUT list_gpus serves a FROZEN reading; both devices
+        here read far too small for the 20 GB ask, so the OLD code (bare list_gpus +
+        always-run loop) flagged BOTH and quoted their stale free. The fix returns []
+        and, opt-in, the non-OK status - no figure it never measured reaches a user."""
+        gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
+                {"index": 1, "name": "B", "total": 8_000_000_000, "free": 100_000_000}]
+        cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(gpus, GPU_PROBE_TIMEOUT))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == []
+        assert gpu_split_shortfall(20_000_000_000, cfg, return_status=True) == (
+            [], GPU_PROBE_TIMEOUT)
+
+    def test_busy_probe_also_admits_without_fabricating(self, monkeypatch):
+        """BUSY (a concurrent or wedged probe served the last-known-good value) is
+        inconclusive exactly like TIMEOUT: admit, no fabricated figure."""
+        gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
+                {"index": 1, "name": "B", "total": 8_000_000_000, "free": 100_000_000}]
+        cfg = {"gpu_split_indices": [0, 1]}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(gpus, GPU_PROBE_BUSY))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == []
+        assert gpu_split_shortfall(20_000_000_000, cfg, return_status=True) == (
+            [], GPU_PROBE_BUSY)
+
+    def test_fresh_probe_still_reports_a_real_per_device_shortfall(self, monkeypatch):
+        """Guards against an over-abstain 'fix' (always return []): a FRESH
+        (GPU_PROBE_OK) probe that genuinely cannot cover one device's share must still
+        flag it, and every returned free is a live figure a caller may quote."""
+        gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
+                {"index": 1, "name": "B", "total": 64_000_000_000, "free": 50_000_000_000}]
+        cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(gpus, GPU_PROBE_OK))
+        expected = [{"index": 0, "needed": 10_000_000_000, "free": 100_000_000}]
+        assert gpu_split_shortfall(20_000_000_000, cfg) == expected
+        assert gpu_split_shortfall(20_000_000_000, cfg, return_status=True) == (
+            expected, GPU_PROBE_OK)
+
+    def test_fresh_all_clear_returns_empty_with_ok_status(self, monkeypatch):
+        """A fresh probe where every device covers its share: [] AND GPU_PROBE_OK, so
+        a status-aware caller can tell this 'verified clear' from a 'could not check'
+        (both return [] bare)."""
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            self._probe(self._GPUS, GPU_PROBE_OK))
+        assert gpu_split_shortfall(
+            4_000_000_000, {"gpu_split_indices": [0, 1]}, return_status=True) == (
+            [], GPU_PROBE_OK)
+
+    def test_no_split_configured_is_conclusive_ok_without_probing(self, monkeypatch):
+        """No split configured -> a conclusive ([], OK) that needs no hardware probe:
+        list_gpus must not be called at all."""
+        def _boom(*a, **k):
+            raise AssertionError("list_gpus must not be probed when no split configured")
+        monkeypatch.setattr("localm.discover.list_gpus", _boom)
+        assert gpu_split_shortfall(
+            10_000_000_000, config={"gpu_split_indices": None},
+            return_status=True) == ([], GPU_PROBE_OK)
+
+    def test_deadline_is_forwarded_to_the_probe(self, monkeypatch):
+        """An off-loop caller passes a longer deadline so a cold driver init that
+        overruns the short server cap still yields a FRESH first-load reading rather
+        than timing out into the best-effort admit. The value must reach list_gpus."""
+        seen = {}
+
+        def fake(*a, return_status=False, deadline=None, **k):
+            seen["deadline"] = deadline
+            return (self._GPUS, GPU_PROBE_OK) if return_status else self._GPUS
+
+        monkeypatch.setattr("localm.discover.list_gpus", fake)
+        gpu_split_shortfall(4_000_000_000, {"gpu_split_indices": [0, 1]},
+                            deadline=_GPU_PROBE_CLI_DEADLINE)
+        assert seen["deadline"] == _GPU_PROBE_CLI_DEADLINE
+
+    def test_default_deadline_is_not_forced_onto_the_probe(self, monkeypatch):
+        """No deadline given -> the kwarg must NOT be passed at all, leaving list_gpus'
+        own default cap intact. Forwarding a literal None would override that real
+        default and cap the probe at None."""
+        seen = {}
+
+        def fake(*a, return_status=False, **k):
+            seen["deadline"] = k.get("deadline", "absent")
+            return (self._GPUS, GPU_PROBE_OK) if return_status else self._GPUS
+
+        monkeypatch.setattr("localm.discover.list_gpus", fake)
+        gpu_split_shortfall(4_000_000_000, {"gpu_split_indices": [0, 1]})
+        assert seen["deadline"] == "absent"
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestFreeScope:
+    """free_scope: whether a "free" reading counts EVERY process's VRAM, or only the
+    calling process's own allocations.
+
+    This exists because, measured on a Windows + AMD ROCm/HIP box,
+    torch.cuda.mem_get_info reports total - THIS process's own allocations and is
+    blind to every other process: with ~10.5 GB genuinely in use it reported 0.14 GB,
+    and a plain 4 GB torch tensor in a CHILD process moved it by exactly 0 while an
+    OS counter tracked it exactly. localm loads every GGUF in an isolated worker
+    SUBPROCESS, so a model's own VRAM lands squarely in that blind spot. See
+    dev-notes/vram-cross-process-blindness.md.
+
+    The device-global source is stubbed here so these stay deterministic on any host
+    (the real one is AMD/Windows-only); TestFreeScopeRealHardware covers the real
+    thing against real hardware.
+    """
+
+    def _gpus(self):
+        return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
+
+    def test_windows_corrects_free_to_device_global_and_tags_device(self, monkeypatch):
+        """The whole point: a reading that counted only our own allocations is
+        replaced by one that counts the model in the worker (and the game, and
+        ComfyUI), and is labelled as such."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        # Warm: this covers the CORRECTION, not the cold-budget guard
+        # (TestFreeScopeColdBudget owns that). Explicit so the two cannot interfere.
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 6_000_000_000    # 16G total - 10G really in use
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_windows_without_a_source_keeps_number_but_tags_process(self, monkeypatch):
+        """Rule 5: when nothing better can answer we do NOT silently pass a
+        known-process-local figure off as the board's - we keep it and say so, which
+        is what makes /v1/models/unload report the reading as uncertain instead of
+        asserting a wrong number as fact."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 15_000_000_000   # untouched
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
+    def test_non_windows_is_untouched_and_device_scoped(self, monkeypatch):
+        """On Linux/NVIDIA the driver query is device-global BY DOCUMENTATION (CUDA
+        specifies *free as "free according to the OS" and warns another process can
+        move it), so it must not be corrected - and the Windows-only source must not
+        even be consulted."""
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        def _boom(gpus):
+            raise AssertionError("must not consult the Windows source off Windows")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _boom)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 15_000_000_000
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_source_failure_is_surfaced_as_process_not_crashed(self, monkeypatch):
+        """A driver/ctypes failure in the correction must degrade to "we cannot vouch
+        for this number", never take down the caller that only wanted a probe."""
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        def _boom(gpus):
+            raise OSError("atiadlxx exploded")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _boom)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
+    def test_used_exceeding_total_clamps_to_zero_not_negative(self, monkeypatch):
+        """used and total come from different sources, so their difference can land
+        outside [0, total]; free must never go negative."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 99_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 0
+
+    def test_only_mapped_devices_are_corrected(self, monkeypatch):
+        """A multi-GPU box where the source can map only one device: the mapped one
+        gets truth, the unmapped one is honestly tagged rather than guessed at."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {1: 2_000_000_000})
+        gpus = [
+            {"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000},
+            {"index": 1, "name": "B", "total": 8_000_000_000, "free": 7_000_000_000},
+        ]
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+        assert gpus[0]["free"] == 15_000_000_000
+        assert gpus[1]["free_scope"] == discover.FREE_SCOPE_DEVICE
+        assert gpus[1]["free"] == 6_000_000_000
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestVramCapacityFreeScopePropagation:
+    """free_scope must travel WITH the number it describes, all the way to the caller
+    that decides whether to present it as current fact."""
+
+    _GPUS_DEVICE = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000,
+         "free_scope": "device"},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000,
+         "free_scope": "device"},
+    ]
+    _GPUS_MIXED = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000,
+         "free_scope": "device"},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000,
+         "free_scope": "process"},
+    ]
+
+    def test_vram_info_propagates_scope(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_DEVICE)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        assert vram_info()["free_scope"] == "device"
+
+    def test_split_sum_is_device_only_when_every_device_is(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_DEVICE)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity()["free_scope"] == "device"
+
+    def test_one_process_scoped_device_makes_the_whole_sum_process_scoped(self, monkeypatch):
+        """The sum is missing that device's other-process VRAM, so the TOTAL is not a
+        whole-board figure either - it must not be laundered into one by summing with
+        a device-scoped sibling."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_MIXED)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity()["free_scope"] == "process"
+
+    def test_untagged_devices_omit_the_key_rather_than_claim_process(self, monkeypatch):
+        """No tag means UNKNOWN. Labelling it "process" would assert a blindness we
+        never measured, and would break the plain-dict contract the ~28 test files
+        patching list_gpus() rely on."""
+        gpus = [
+            {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+            {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+        ]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity() == {"total": 36_000_000_000, "free": 30_000_000_000}
+
+
+@pytest.mark.integration
+class TestFreeScopeRealHardware:
+    """The claim that matters, against the REAL driver and REAL hardware: our
+    corrected reading tracks VRAM that ANOTHER PROCESS allocates, which the driver's
+    own query provably does not.
+
+    Marked integration (needs a real GPU + a real device-global source), so it is
+    excluded from the default run. Without it, every test above could pass while the
+    actual defect - the one a stub cannot reproduce - shipped unfixed.
+    """
+
+    def test_corrected_free_tracks_another_process_where_the_driver_query_cannot(self):
+        import subprocess
+        import sys as _sys
+        import textwrap
+        import time
+
+        torch = pytest.importorskip("torch")
+        if not torch.cuda.is_available():
+            pytest.skip("no CUDA/ROCm device present to measure")
+        # This test's SECOND assertion is that the RAW driver query is blind to the
+        # child's allocation - which is only true on the measured-blind platform
+        # (Windows + an AMD ROCm/HIP torch build). On Linux, or on any NVIDIA/CUDA
+        # build, cudaMemGetInfo is device-global, so the raw query DOES see the child
+        # and that assertion would spuriously FAIL rather than the test being
+        # inapplicable. Gate the run to where the premise actually holds.
+        if _sys.platform != "win32" or not getattr(torch.version, "hip", None):
+            pytest.skip("cross-process blindness is measured only on Windows + an "
+                        "AMD ROCm/HIP torch build; raw mem_get_info is device-global "
+                        "elsewhere, so this experiment does not apply")
+        gpus = list_gpus()
+        if not gpus or gpus[0].get("free_scope") != "device":
+            pytest.skip("no device-global VRAM source on this host, nothing to verify")
+
+        alloc_bytes = 2 * 1024 ** 3
+        child_src = textwrap.dedent(
+            """
+            import sys, torch
+            t = torch.empty(int(sys.argv[1]) // 4, dtype=torch.float32, device="cuda:0")
+            torch.cuda.synchronize()
+            print("READY", flush=True)
+            sys.stdin.readline()
+            """
+        )
+        before = list_gpus()[0]["free"]
+        raw_before = torch.cuda.mem_get_info(0)[0]
+        child = subprocess.Popen(
+            [_sys.executable, "-c", child_src, str(alloc_bytes)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+        try:
+            if (child.stdout.readline() or "").strip() != "READY":
+                pytest.skip("child could not allocate on this GPU (busy or too small)")
+            time.sleep(1.5)
+            during = list_gpus()[0]["free"]
+            raw_during = torch.cuda.mem_get_info(0)[0]
+        finally:
+            try:
+                child.stdin.write("go\n")
+                child.stdin.flush()
+                child.wait(timeout=30)
+            except Exception:
+                child.kill()
+
+        # Our reading SEES the other process (the whole fix), within a tolerance for
+        # the child's own context overhead and the driver's MB granularity.
+        assert (before - during) > alloc_bytes * 0.8, (
+            f"corrected free did not track another process's {alloc_bytes} B "
+            f"allocation: {before} -> {during}")
+        # ...and the raw driver query still does NOT, so this test is not passing
+        # vacuously because the platform quietly started reporting device-global.
+        assert abs(raw_before - raw_during) < 64 * 1024 ** 2, (
+            "the raw driver query suddenly tracks other processes; the premise of "
+            "this fix changed and it should be re-examined, not silently trusted")
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestFreeScopeColdBudget:
+    """The correction runs INSIDE the deadline-bounded probe, so it spends the same
+    budget the driver call already spent.
+
+    Opening the device-global source is a driver init MEASURED at ~750ms, against a
+    ~0.02ms warm read. Measured live, that cold cost pushed cold probes from a
+    comfortable 2.9-3.5s to 3.6-4.0s against the 4.0s cap and started timing them
+    out - and a timed-out probe costs the caller its free reading ENTIRELY (list_gpus
+    serves [], vram_info falls to the registry tier, which has no "free" at all). A
+    correct number is not worth trading for NO number, so a cold source is skipped
+    when the budget is thin. These guard that trade-off in both directions.
+    """
+
+    def _gpus(self):
+        return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
+
+    def test_cold_source_is_skipped_when_the_budget_is_thin(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        # 0.4s left of the probe's budget: not enough to absorb a ~750ms cold open.
+        monkeypatch.setattr(discover, "_probe_deadline_at",
+                            discover.time.monotonic() + 0.4)
+
+        def _must_not_run(gpus):
+            raise AssertionError("a cold source must not be opened on a thin budget")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _must_not_run)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 15_000_000_000          # untouched
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS   # and SAID so
+
+    def test_cold_source_runs_when_the_budget_is_ample(self, monkeypatch):
+        """A CLI caller passes the longer _GPU_PROBE_CLI_DEADLINE precisely so a cold
+        box can finish; the correction must take that room when it is there (this is
+        what keeps `localm doctor` honest on its single, cold probe)."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        monkeypatch.setattr(discover, "_probe_deadline_at",
+                            discover.time.monotonic() + 12.0)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 6_000_000_000
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_warm_source_runs_even_on_a_thin_budget(self, monkeypatch):
+        """A warm read is ~0.02ms and cannot overrun anything, so the guard must not
+        keep skipping once the source is open - otherwise a 4s-deadline server would
+        skip on every probe forever and the fix would silently never engage."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr(discover, "_probe_deadline_at",
+                            discover.time.monotonic() + 0.01)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free"] == 6_000_000_000
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_no_deadline_published_does_not_block_a_cold_open(self, monkeypatch):
+        """_probe_deadline_at is None outside a probe (e.g. a direct call). Unknown
+        budget must not be read as "no budget", or the correction would never run."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        monkeypatch.setattr(discover, "_probe_deadline_at", None)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: 10_000_000_000})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+    def test_probe_publishes_its_deadline(self, monkeypatch):
+        """The guard is only as good as the budget it reads, so the probe must
+        actually publish one."""
+        seen = {}
+
+        def _probe():
+            seen["deadline_at"] = discover._probe_deadline_at
+            return [{"index": 0, "name": "A", "total": 1, "free": 1,
+                     "free_scope": "device"}]
+
+        monkeypatch.setattr(discover, "_list_gpus_probe", _probe)
+        before = discover.time.monotonic()
+        discover.list_gpus(deadline=9.0)
+        assert seen["deadline_at"] is not None
+        # published as "now + deadline", so it lands ~9s out
+        assert 8.0 < (seen["deadline_at"] - before) <= 9.5
+
+
+class TestGpuUsageSourceRobustness:
+    """gpu_usage.py source-selection and warmth, post-#697 review.
+
+    These guard three defects a review found in the merged fix: a transient PDH
+    failure permanently disabling the source, source_is_warm() ignoring PDH's cold
+    cost, and the platform detector that decides whether an uncorrected reading is
+    known-blind. All are stubbed off real hardware so they run on any host.
+    """
+
+    def _reset(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        return gu
+
+    def test_transient_pdh_query_failure_does_not_permanently_poison(self, monkeypatch):
+        """A momentary query hiccup must be retryable, not a process-lifetime disable
+        (rule 5 missing-vs-corrupt). Only a genuinely-permanent condition
+        (win32pdh unimportable) may set the sticky {}."""
+        gu = self._reset(monkeypatch)
+        import types
+
+        calls = {"collect": 0}
+
+        fake_pdh = types.SimpleNamespace(
+            PERF_DETAIL_WIZARD=0, PDH_FMT_LARGE=0,
+            OpenQuery=lambda: object(),
+            EnumObjectItems=lambda *a, **k: ([], ["luid_0_0_phys_0"]),
+            MakeCounterPath=lambda spec: "path",
+            AddEnglishCounter=lambda q, p: object(),
+            GetFormattedCounterValue=lambda h, f: (0, 123),
+        )
+
+        def _collect_raises(_q):
+            calls["collect"] += 1
+            raise OSError("transient PDH hiccup")
+
+        fake_pdh.CollectQueryData = _collect_raises
+        monkeypatch.setitem(__import__("sys").modules, "win32pdh", fake_pdh)
+
+        assert gu._pdh_adapter_used() == []
+        # The killer assertion: state is NOT the sticky-disabled {} - the open query
+        # survives for a retry.
+        assert gu._pdh_state != {}, "a transient query failure permanently poisoned PDH"
+        assert gu._pdh_state is not None and gu._pdh_state.get("query") is not None
+
+        # And a retry after the driver recovers actually works.
+        fake_pdh.CollectQueryData = lambda _q: None
+        assert gu._pdh_adapter_used() == [123]
+
+    def test_win32pdh_unimportable_is_stickily_disabled(self, monkeypatch):
+        """The genuinely-permanent case still sticks: no point retrying an import
+        that will never succeed."""
+        gu = self._reset(monkeypatch)
+        monkeypatch.setitem(__import__("sys").modules, "win32pdh", None)  # import -> TypeError
+        assert gu._pdh_adapter_used() == []
+        assert gu._pdh_state == {}
+
+    def test_source_is_warm_accounts_for_pdh_not_just_adl(self, monkeypatch):
+        """On a non-AMD box ADL is proven-unusable ({}) but PDH is the source that
+        answers; keying warmth on ADL alone would call the source warm while a cold
+        ~887ms PDH open still lies ahead of the deadline."""
+        gu = self._reset(monkeypatch)
+        # ADL tried and unusable, PDH not yet opened: a cold PDH open is pending, so
+        # NOT warm (the bug returned True here).
+        monkeypatch.setattr(gu, "_adl_state", {})
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        assert gu.source_is_warm() is False
+        # PDH now open -> warm.
+        monkeypatch.setattr(gu, "_pdh_state", {"query": object()})
+        assert gu.source_is_warm() is True
+        # ADL usable -> warm regardless of PDH (AMD path never opens PDH).
+        monkeypatch.setattr(gu, "_adl_state", {"dll": object()})
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        assert gu.source_is_warm() is True
+        # Nothing tried yet -> cold.
+        monkeypatch.setattr(gu, "_adl_state", None)
+        monkeypatch.setattr(gu, "_pdh_state", None)
+        assert gu.source_is_warm() is False
+
+    def test_raw_reading_is_process_scoped_only_on_windows_amd_hip(self, monkeypatch):
+        import localm.gpu_usage as gu
+        import sys as _sys
+
+        class _FakeTorch:
+            version = SimpleNamespace(hip="7.13", cuda=None)
+
+        # Windows + ROCm/HIP build -> known blind.
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
+        assert gu.raw_reading_is_process_scoped() is True
+        # Windows + CUDA (NVIDIA) build -> device-global by docs, NOT known blind.
+        _FakeTorch.version = SimpleNamespace(hip=None, cuda="12.4")
+        monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
+        assert gu.raw_reading_is_process_scoped() is False
+        # Non-Windows -> never (device-global by docs), even on a HIP build.
+        monkeypatch.setattr(gu.sys, "platform", "linux", raising=False)
+        _FakeTorch.version = SimpleNamespace(hip="7.13", cuda=None)
+        monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
+        assert gu.raw_reading_is_process_scoped() is False
+
+
+@pytest.mark.usefixtures("_non_vulkan_host")
+class TestUncorrectedScopeIsNotAlwaysProcess:
+    """discover._apply_device_global_free must NOT tag every uncorrected Windows
+    reading FREE_SCOPE_PROCESS. That over-claim (the pre-review behaviour) put a
+    spurious 'process-blind' note + vram_reading_uncertain on NVIDIA/Windows, where
+    cudaMemGetInfo is device-global by documentation and the number is actually fine.
+    """
+
+    def _gpus(self):
+        return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
+
+    def test_windows_non_blind_uncorrected_is_device_not_process(self, monkeypatch):
+        """No source maps (empty dict), but the raw reading is NOT known-blind
+        (NVIDIA/Windows): tag DEVICE, do not fabricate a blindness."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+        assert gpus[0]["free"] == 15_000_000_000
+
+    def test_windows_blind_uncorrected_is_still_process(self, monkeypatch):
+        """The known-blind platform (AMD/Windows) still tags PROCESS when it cannot
+        correct - the honest signal must survive."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
+    def test_cold_budget_skip_uses_platform_scope_not_blanket_process(self, monkeypatch):
+        """The cold-budget skip must also honour the distinction: a cold-skipped
+        NVIDIA/Windows probe is DEVICE (its number is fine), not a spurious PROCESS."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
+        monkeypatch.setattr(discover, "_probe_deadline_at", discover.time.monotonic() + 0.1)
+
+        def _must_not_run(gpus):
+            raise AssertionError("cold budget too thin: source must not be opened")
+
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _must_not_run)
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE

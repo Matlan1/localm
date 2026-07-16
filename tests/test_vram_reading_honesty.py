@@ -205,32 +205,56 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
         self.assertNotIn("vram_reading_uncertain", body)
 
     def test_live_probe_with_no_rise_still_reports_the_honest_false(self):
-        """A genuinely-not-freed result must survive the fix intact, unflagged.
+        """A genuinely-not-freed result must survive the fix intact, unflagged -
+        but ONLY on a DEVICE-GLOBAL reading, which is now asserted, not assumed.
 
-        READ THIS BEFORE RELYING ON THE NAME. What makes the false "honest" here is
-        the test's own fiction that a FRESH reading is an ACCURATE one. That holds
-        only where the driver's free-VRAM figure is device-global. It is NOT true on
-        Windows + AMD, where torch.cuda.mem_get_info reports `total - THIS process's
-        own allocations` and is blind to every other process - measured on an
-        RX 6900 XT: a child holding 1 GB moved the parent's reading by exactly 0
-        bytes while the OS counter moved 1.7 GB. Since every GGUF model loads in an
-        isolated worker subprocess (#606), a fresh reading taken in the SERVER
-        process cannot see the model's VRAM at all, so a real unload there produces
-        this same no-rise and the "false" is a LIE, not an honest negative.
+        The honest-negative is only honest where the driver's free-VRAM figure is
+        device-global (Linux, or NVIDIA, or an AMD/Windows reading corrected by the
+        device-global source). There, a fresh reading that does not rise genuinely
+        means nothing was freed, and reporting vram_freed=false without an
+        uncertainty flag is correct. `free_scope="device"` on the reading below is
+        what makes that true rather than merely fresh.
 
-        So freshness (what this file guards) is necessary but NOT sufficient: fresh
-        does not imply true. The missing axis is the reading's SCOPE, which is being
-        added separately. When it lands, this test must be re-targeted to assert the
-        honest-negative only for a device-global reading rather than assuming one -
-        do not work around it."""
+        The blind case - a process-scoped reading, where a fresh no-rise proves
+        nothing because the model's VRAM is in another process - is its own test
+        (test_process_scoped_no_rise_is_flagged_not_an_honest_false), and there the
+        SAME no-rise MUST be flagged uncertain. Freshness is necessary but not
+        sufficient; scope is the axis that separates the two."""
         with patch("localm.discover.list_gpus",
-                   side_effect=_list_gpus_double([dict(_IDLE, free=10 * GB)],
-                                                 GPU_PROBE_OK)):
+                   side_effect=_list_gpus_double(
+                       [dict(_IDLE, free=10 * GB, free_scope="device")],
+                       GPU_PROBE_OK)):
             r = self.client.post("/v1/models/unload")
         body = r.json()
         self.assertIs(body["vram_freed"], False)
         self.assertEqual(body["vram_before_bytes"], 10 * GB)
         self.assertNotIn("vram_reading_uncertain", body)
+
+    def test_process_scoped_no_rise_is_flagged_not_an_honest_false(self):
+        """The complement, and the whole reason scope had to be added: on a
+        PROCESS-SCOPED reading a no-rise is NOT proof that nothing was freed.
+
+        Measured on an RX 6900 XT: torch.cuda.mem_get_info reports
+        `total - THIS process's own allocations` and is blind to every other
+        process (a child holding 1 GB moved the parent reading by exactly 0 bytes
+        while the OS counter moved 1.7 GB). Since every GGUF model loads in an
+        isolated worker subprocess (#606), the server's own reading cannot see the
+        model's VRAM, so a real unload produces this identical no-rise. Reporting a
+        bare vram_freed=false there would be the exact rule-5 lie this whole change
+        exists to kill: telling the user a measurement property held when it could
+        not have. So the SAME reading and the SAME no-rise as the test above, but
+        tagged process-scoped, MUST carry the uncertainty flag."""
+        with patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double(
+                       [dict(_IDLE, free=10 * GB, free_scope="process")],
+                       GPU_PROBE_OK)):
+            r = self.client.post("/v1/models/unload")
+        body = r.json()
+        # The figure is still reported (it is the best we have), but flagged, never
+        # presented as fact.
+        self.assertEqual(body["vram_before_bytes"], 10 * GB)
+        self.assertIs(body["vram_reading_uncertain"], True)
+        self.assertIn("worker process", body["vram_note"])
 
     def test_box_with_no_vram_telemetry_says_nothing_at_all(self):
         """The benign case must NOT be dressed up as the fault. A CPU-only box (or
@@ -266,6 +290,25 @@ class TestUnloadOneEndpointHonesty(_UnloadCase):
         self.assertEqual(body["status"], "unloaded")
         self.assertGreater(calls["n"], 1, "the after-poll never ran")
         self.assertNoUnqualifiedNotFreed(body)
+
+    def test_process_scoped_no_rise_is_flagged_here_too(self):
+        """The per-model button must not lie where "unload all" is honest. All three
+        unload paths thread before_scope through the same _add_vram_fields, so a
+        refactor that wires it for one path and forgets this one would silently
+        reopen the blindness on the per-model button - this pins it shut."""
+        from localm.inference import http_server as hs
+        with patch.dict(hs._engines, {"test-model": self.engine}, clear=False), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double(
+                       [dict(_IDLE, free=10 * GB, free_scope="process")],
+                       GPU_PROBE_OK)), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait):
+            r = self.client.post("/v1/models/unload", json={"model": "test-model"})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["vram_before_bytes"], 10 * GB)
+        self.assertIs(body["vram_reading_uncertain"], True)
+        self.assertIn("worker process", body["vram_note"])
 
 
 class TestMediaSwapMessageHonesty(unittest.TestCase):
@@ -310,6 +353,72 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
             "vram_before_bytes": 10 * GB, "vram_after_bytes": 10 * GB})
         self.assertIn("has not dropped", " ".join(lines))
 
+    def test_in_use_is_not_reported_as_unloaded(self):
+        """Regression: a pinned chat engine (mid-generation) makes
+        unload_all_models() return {"status": "in_use", "vram_freed": 0} without
+        raising and without a non-2xx - so resp.ok is True and the old code fell
+        straight through the already_unloaded check into the generic "Chat model
+        unloaded." branch (0 is not False, so `vram_freed is False` never matched
+        either). That told the image/music/video caller VRAM was free when the
+        chat model was still fully resident - the exact driver-hang hazard this
+        module exists to prevent (see the module docstring)."""
+        ok, lines = self._push_lines({
+            "status": "in_use", "model": "none", "vram_freed": 0,
+            "vram_before_bytes": 10 * GB, "vram_after_bytes": 10 * GB,
+            "skipped_in_use": ["chat-model"]})
+        self.assertFalse(ok, "must report failure so the caller falls back to "
+                             "its own conservative swap handling")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed the chat model was unloaded while it was "
+                         f"still pinned: {lines}")
+        self.assertIn("busy", joined)
+
+
+class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
+    """The regression test above hand-crafts the {"status": "in_use", ...} body -
+    it pins the CONTRACT but not that unload_all_models() actually produces that
+    body for a genuinely pinned engine. This drives the REAL
+    ``POST /v1/models/unload`` route (via the same TestClient the other endpoint
+    tests in this file use) with an engine whose ``active_requests`` is set like
+    an in-flight request would, so both halves of the bug are exercised together:
+    the real server-side pin check AND unload_chat_for_media's consumption of
+    whatever it actually returns."""
+
+    class _Adapter:
+        """Wraps the TestClient's httpx response in the requests.Response shape
+        unload_chat_for_media actually touches (.ok/.status_code/.json())."""
+
+        def __init__(self, r):
+            self._r = r
+            self.ok = r.status_code < 400
+            self.status_code = r.status_code
+
+        def json(self):
+            return self._r.json()
+
+    def test_pinned_engine_is_reported_honestly_not_as_unloaded(self):
+        self.engine.active_requests = 1          # a request is mid-generation
+
+        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None):
+            return self._Adapter(self.client.post(f"/v1{path}"))
+
+        from localm import vram as vram_mod
+        job = MagicMock()
+        lines = []
+        job.push.side_effect = lambda d: lines.append(d.get("text", ""))
+        with patch("localm.selfclient.self_request", fake_self_request):
+            ok = vram_mod.unload_chat_for_media(job, "http://x", "image")
+
+        self.assertFalse(ok, "a pinned chat model was not actually unloaded")
+        self.assertTrue(self.engine.loaded,
+                        "the pinned engine must survive the media handover's unload")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed success while the real endpoint reported the "
+                         f"engine still pinned: {lines}")
+        self.assertIn("busy", joined)
+
 
 class TestMcpModelSwitchHonesty(unittest.TestCase):
     """The MCP server's model switch runs the same before/after cycle, and made
@@ -321,7 +430,7 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
     seeding the wait from the live-only reader silently turned the wait into a
     0-second no-op (caught in review, measured 5.06s -> 0.00s)."""
 
-    def _switch(self, status):
+    def _switch(self, status, scope="device"):
         from localm.plugins.mcpserver.server import EngineCache
         waits = []
         real_wait = wait_for_vram_release
@@ -333,11 +442,15 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
             return real_wait(read_free, **kw)
 
         logs = []
+        # Default DEVICE-scoped: these tests isolate the STALENESS axis (fresh vs
+        # stale), so the reading must be device-global or the scope axis would
+        # confound them. The process-scoped (blind) case is its own test below.
+        gpu = dict(_IDLE, free_scope=scope) if scope else dict(_IDLE)
         cache = EngineCache(default_model="a",
                             engine_factory=lambda n: MagicMock(display_name=n))
         cache.get("a")                      # load the first model
         with patch("localm.discover.list_gpus",
-                   side_effect=_list_gpus_double([_IDLE], status)), \
+                   side_effect=_list_gpus_double([gpu], status)), \
              patch("localm.vram.wait_for_vram_release", _spy_wait), \
              patch("localm.plugins.mcpserver.server._log",
                    side_effect=lambda m: logs.append(m)):
@@ -365,9 +478,23 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
                       f"dropped (rule 5): {logs}")
 
     def test_live_probe_with_no_rise_still_says_it_did_not_rise(self):
-        """The honest negative survives: both ends live, genuinely no rise."""
+        """The honest negative survives: both ends live AND device-global, genuinely
+        no rise. Device-global is what makes the no-rise backable (see the
+        process-scoped complement below)."""
         _waits, logs = self._switch(GPU_PROBE_OK)
         self.assertIn("did not rise", logs)
+
+    def test_process_scoped_no_rise_cannot_claim_it_did_not_rise(self):
+        """The scope complement (#697 follow-up): a fresh but PROCESS-scoped reading
+        cannot see the previous model's VRAM in its isolated worker, so a no-rise
+        proves nothing. This path had dropped the scope, so it logged the same false
+        'did not rise' the /v1/models/unload paths were fixed for."""
+        _waits, logs = self._switch(GPU_PROBE_OK, scope="process")
+        self.assertNotIn("did not rise", logs,
+                         f"claimed VRAM did not rise from a blind reading: {logs}")
+        self.assertIn("could not confirm", logs,
+                      f"a process-scoped reading must be surfaced as unconfirmable "
+                      f"(rule 5), not silently dropped: {logs}")
 
     def test_stale_before_with_a_recovered_after_still_cannot_claim_no_rise(self):
         """The INVERSE shape, and just as ordinary: the before-read times out on a

@@ -231,13 +231,29 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             from localm.model_meta import store_n_layers
             store_n_layers(self.model_path, n_layers)
 
-        # VRAM usage after load - device-level driver numbers (a global,
-        # cross-process view - measured from THIS process exactly as
-        # accurately as from the child, since it reflects the whole GPU, not
-        # a single process's allocations). torch's allocator counters
-        # (memory_allocated/reserved) can only see torch's own allocations and
-        # always read 0.00 for llama.dll. "in use" therefore includes every
-        # process on the GPU; the delta is what this load itself consumed.
+        # VRAM usage after load - device-level driver numbers.
+        #
+        # CORRECTION (this comment previously asserted the exact opposite, and that
+        # false belief is what shipped the bug): these numbers are NOT necessarily a
+        # global, cross-process view, and are NOT "measured from THIS process exactly
+        # as accurately as from the child". Measured on Windows + an AMD ROCm/HIP
+        # build, torch.cuda.mem_get_info reports total - THIS process's own
+        # allocations and is blind to every other process (0.14 GB reported while
+        # 10.53 GB was genuinely in use; a plain torch tensor in a CHILD process moved
+        # the parent's reading by exactly 0). Since _load_native() runs the model in
+        # an isolated WORKER subprocess, the model's VRAM is in another process - so
+        # on that platform the "this load" delta below reads +0.00 GB every time.
+        # That was assumed from CUDA's documented device-global semantics (which DO
+        # hold on Linux/NVIDIA) and never measured here.
+        #
+        # _vram_levels() reads torch directly and is NOT routed through
+        # discover.list_gpus()'s device-global correction, so this console line is
+        # still subject to the above; it is a dim informational line, not a fit
+        # decision. See dev-notes/vram-cross-process-blindness.md.
+        #
+        # torch's allocator counters (memory_allocated/reserved) are a different
+        # thing again: they see only torch's own allocations and always read 0.00 for
+        # llama.dll, which is why they are not used here.
         for i, (free, total) in enumerate(self._vram_levels()):
             used = (total - free) / 1024**3
             line = (f"  vram     : {used:.2f} GB in use / "

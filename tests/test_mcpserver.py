@@ -262,6 +262,38 @@ class TestEngineCache:
             f"timeout warning) even though the single main GPU (10GB -> "
             f"10GB) alone never would: {logged}")
 
+    def test_process_scoped_no_rise_logs_could_not_confirm_not_did_not_rise(self):
+        """#697 follow-up: on a Windows/AMD process-scoped reading, the model-switch
+        VRAM check must NOT log the false 'did not rise'. The reading is blind to the
+        previous model's VRAM (it lives in an isolated worker), so a no-rise there
+        proves nothing - the same rule-5 defect the /v1/models/unload paths were
+        fixed for, which this path had left unwired (it dropped the scope)."""
+        from localm.config import load_config as real_load_config
+        from localm.discover import GPU_PROBE_OK
+        GB = 1024 ** 3
+        base_cfg = real_load_config()
+
+        def _list_gpus(*, deadline=None, return_status=False):
+            served = [{"index": 0, "name": "A", "total": 16 * GB, "free": 10 * GB,
+                       "free_scope": "process"}]
+            return (served, GPU_PROBE_OK) if return_status else served
+
+        logged = []
+        cache = EngineCache("m", engine_factory=_stub_engine_factory)
+        cache.get("a")
+        with patch("localm.discover.list_gpus", side_effect=_list_gpus), \
+             patch("localm.config.load_config",
+                   return_value={k: v for k, v in base_cfg.items()
+                                 if k != "gpu_split_indices"}), \
+             patch("localm.vram.wait_for_vram_release", return_value=(False, 10 * GB)), \
+             patch("localm.plugins.mcpserver.server._log", logged.append):
+            second = cache.get("b")
+        assert second is not None
+        assert any("could not confirm" in m for m in logged), (
+            f"a fresh but process-scoped no-rise must be reported as unconfirmable: {logged}")
+        assert not any("did not rise" in m for m in logged), (
+            f"logged a false 'did not rise' on a blind process-scoped reading: {logged}")
+
     def test_no_default_falls_back_to_first_registered(self):
         cache = EngineCache(None, engine_factory=_stub_engine_factory)
         with patch("localm.config.load_registry",
