@@ -325,6 +325,20 @@ GPU_PROBE_BUSY = "busy"        # another probe is inflight, or the probe thread 
 _gpu_probe_lock = threading.Lock()
 _gpu_last_good: Optional[list] = None    # last SUCCESSFUL probe; served on a wedge
 _gpu_probe_inflight = False
+# Published TOGETHER with _gpu_probe_inflight (under _gpu_probe_lock) when a probe
+# thread is started, and cleared when it lands, so a PATIENT off-loop caller can
+# JOIN the running probe instead of being handed an instant GPU_PROBE_BUSY. The
+# default guard behaviour is still to refuse to pile a second probe on a driver
+# already being probed (BUSY) - that instant answer is what keeps the WebUI
+# responsive on a permanent wedge. Joining is strictly opt-in (list_gpus'
+# wait_for_inflight), for a caller already OFF the event loop that can afford to
+# wait out a cold driver init: it is the ONLY thing that lets a long deadline
+# actually help on a cold box, because there the first probe (often a 4s
+# event-loop heartbeat) holds the in-flight slot for the whole ~4.6s cold init,
+# so every other caller in that window would otherwise short-circuit on BUSY
+# without ever probing - the exact 0.0000s no-op a deadline-15 RETRY hits.
+_gpu_probe_done: Optional[threading.Event] = None
+_gpu_probe_result: Optional[dict] = None
 # Bumped by _reset_gpu_probe_cache() to ORPHAN any probe thread still in flight.
 # An abandoned probe (see the DEADLINE note above) is by definition still running
 # and will write its reading whenever the native call finally returns - which can
@@ -347,13 +361,21 @@ def _reset_gpu_probe_cache() -> None:
     they assert a fake or empty reading. Bumping the epoch makes that late write
     a no-op (see _run), which the clears alone provably could not do."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
+    global _gpu_probe_done, _gpu_probe_result
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
+        # Unpublish the join handles too: after a reset the slot reads free, so no
+        # caller should join a probe from the epoch just retired. An abandoned
+        # thread still holding its own local done/result is unaffected (it sets its
+        # local event and, epoch-mismatched, will not touch these globals again).
+        _gpu_probe_done = None
+        _gpu_probe_result = None
         _gpu_probe_epoch += 1
 
 
-def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False):
+def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False,
+              wait_for_inflight: bool = False):
     """Every GPU device visible right now: ``[{"index", "name", "total",
     "free"}, ...]``, or ``[]`` when nothing is measurable.
 
@@ -385,47 +407,109 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     a name-aware ``nvidia-smi`` listing (ALL devices, not just the first) for
     the GGUF-only install that has no torch.
 
+    ``wait_for_inflight`` (opt-in, default False) changes ONLY what happens when a
+    probe is already in flight: instead of returning :data:`GPU_PROBE_BUSY` at once
+    with the last-known-good reading, this call JOINS the running probe and waits on
+    its completion, bounded by its own ``deadline``. This is what makes a longer
+    ``deadline`` actually help on a cold box: there the FIRST probe (typically a 4s
+    event-loop heartbeat via /api/stats) holds the in-flight slot for the entire
+    ~4.6s cold ROCm/CUDA init, so a model-load probe arriving in that window would
+    otherwise short-circuit on BUSY without ever probing - the identical 0.0000s
+    no-op a deadline-15 RETRY hits on the same guard. Set it ONLY together with a
+    long ``deadline`` and ONLY off the event loop: like the long deadline itself, a
+    joining wait can block the caller up to ``deadline`` seconds, which must never
+    land on the server's single loop (PR #541). It never spawns a second probe, so
+    it cannot pile onto a wedged driver; a permanent wedge still just times the
+    joiner out at its own ``deadline``.
+
     Deliberately does NOT fall back to the Windows display-adapter registry:
     that tier (see vram_info()) can only report one aggregate "largest
     adapter" number with no per-device identity, so it cannot support GPU
     *selection* - only vram_info()'s single-number "total VRAM for fit
     badges" use case. That is a scope boundary, not an oversight."""
-    gpus, status = _list_gpus_with_status(deadline)
+    gpus, status = _list_gpus_with_status(deadline, wait_for_inflight)
     return (gpus, status) if return_status else gpus
 
 
-def _list_gpus_with_status(deadline: float) -> tuple:
+def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
     """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)``
     where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` /
     :data:`GPU_PROBE_BUSY`. Split out so ``list_gpus`` can expose the status opt-in
-    without duplicating the thread + deadline machinery."""
-    global _gpu_last_good, _gpu_probe_inflight
+    without duplicating the thread + deadline machinery. ``wait_for_inflight``: see
+    :func:`list_gpus` - a patient off-loop caller JOINS a probe already in flight
+    (bounded by ``deadline``) rather than short-circuiting on BUSY."""
+    global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_done, _gpu_probe_result
+    global _probe_deadline_at   # published with the slot for #697's cold-budget check
+    join_done = None
+    join_result = None
     with _gpu_probe_lock:
         if _gpu_probe_inflight:
-            # A probe is already running (a concurrent caller, or a prior one that
-            # wedged the driver). Never pile on: hand back the last-known-good
-            # reading so this caller stays free. No fresh reading was taken, so the
-            # status is BUSY (not a clean OK); [] is the safe "unknown" answer when
-            # nothing has succeeded yet.
-            served = list(_gpu_last_good) if _gpu_last_good is not None else []
+            if wait_for_inflight and _gpu_probe_done is not None:
+                # A patient off-loop caller. Rather than pile a second probe on a
+                # driver already being probed (or be handed an instant BUSY for a
+                # reading that is on its way), JOIN the in-flight probe: wait on ITS
+                # completion event, bounded by our own deadline. Both handles are
+                # captured HERE, under the same lock that observed the in-flight
+                # slot, so a concurrent completion cannot null them between this
+                # check and the wait below.
+                join_done = _gpu_probe_done
+                join_result = _gpu_probe_result
+            else:
+                # Default: never pile on. Hand back the last-known-good reading so
+                # this caller stays free. No fresh reading was taken, so the status
+                # is BUSY (not a clean OK); [] is the safe "unknown" answer when
+                # nothing has succeeded yet. This instant answer is what keeps the
+                # event loop responsive on a permanent wedge.
+                served = list(_gpu_last_good) if _gpu_last_good is not None else []
+                return served, GPU_PROBE_BUSY
+        else:
+            _gpu_probe_inflight = True
+            # Published under the SAME lock that claims the in-flight slot (only one
+            # probe is ever in flight, so there is only one deadline to describe):
+            # #697's probe body reads it to decide whether it can afford a cold
+            # device-global VRAM source without overrunning this deadline. See
+            # _apply_device_global_free.
+            _probe_deadline_at = time.monotonic() + deadline
+            # Captured under the SAME lock that claims the in-flight slot: an
+            # unlocked read here could pair this probe with an epoch a concurrent
+            # reset has already retired, which is the exact race the epoch exists to
+            # close.
+            my_epoch = _gpu_probe_epoch
+            # Created and PUBLISHED under the lock, atomically with the in-flight
+            # slot, so any joiner that sees inflight=True also sees these handles
+            # (never a half-published state). Cleared by _run when the probe lands.
+            result: dict = {}
+            done = threading.Event()
+            _gpu_probe_done = done
+            _gpu_probe_result = result
+
+    # JOIN path: we did not start a probe; wait on the one already running.
+    if join_done is not None:
+        if join_done.wait(deadline):
+            # The joined probe landed. Its result carries a "value" key iff its
+            # thread actually ran to completion; the key is ABSENT only when the
+            # starting caller could not spawn the thread and woke joiners via
+            # done.set() so they would not hang - that is a BUSY, not a fresh OK.
+            if "value" in join_result:
+                v = join_result["value"]
+                return (list(v) if v is not None else []), GPU_PROBE_OK
+            with _gpu_probe_lock:
+                served = list(_gpu_last_good) if _gpu_last_good is not None else []
             return served, GPU_PROBE_BUSY
-        _gpu_probe_inflight = True
-        # Published under the SAME lock that claims the in-flight slot (only one
-        # probe is ever in flight, so there is only one deadline to describe): the
-        # probe body reads it to decide whether it can afford a cold device-global
-        # source without overrunning this deadline. See _apply_device_global_free.
-        global _probe_deadline_at
-        _probe_deadline_at = time.monotonic() + deadline
-        # Captured under the SAME lock that claims the in-flight slot: an unlocked
-        # read here could pair this probe with an epoch a concurrent reset has
-        # already retired, which is the exact race the epoch exists to close.
-        my_epoch = _gpu_probe_epoch
+        # Our own deadline expired while waiting on the in-flight probe: same
+        # outcome as starting one that overran - the driver is stuck, serve
+        # last-known-good and report TIMEOUT (never mistaken for "no GPU"). We
+        # spawned nothing, so this never piled onto the wedge.
+        logger.debug("list_gpus: waited %.1fs on an in-flight GPU probe that did "
+                     "not complete; returning last-known GPU info", deadline)
+        with _gpu_probe_lock:
+            served = list(_gpu_last_good) if _gpu_last_good is not None else []
+            return served, GPU_PROBE_TIMEOUT
 
-    result: dict = {}
-    done = threading.Event()
-
+    # START path: we own the in-flight slot.
     def _run() -> None:
-        global _gpu_last_good, _gpu_probe_inflight, _probe_deadline_at
+        global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_done, _gpu_probe_result
+        global _probe_deadline_at
         value = None
         try:
             value = _list_gpus_probe()
@@ -446,16 +530,22 @@ def _list_gpus_with_status(deadline: float) -> tuple:
                 if value is not None:
                     _gpu_last_good = value
                 _gpu_probe_inflight = False
-                # Cleared with the in-flight slot: the budget describes THIS probe
-                # and nothing else. Leaving it set would hand a later reader an
-                # expired deadline, which reads as "no budget left" and would skip a
-                # cold source that in fact had all the time in the world.
+                # Unpublish alongside the in-flight slot: a NEW caller must start a
+                # fresh probe, not join one that has already landed. A joiner that
+                # already captured its local handle is unaffected - it waits on that
+                # same `done`, which is set unconditionally just below.
+                _gpu_probe_done = None
+                _gpu_probe_result = None
+                # Cleared with the in-flight slot too (#697): the budget describes
+                # THIS probe and nothing else. Leaving it set would hand a later
+                # reader an expired deadline, which reads as "no budget left" and
+                # would skip a cold source that in fact had all the time in the world.
                 _probe_deadline_at = None
         # Deliberately OUTSIDE the epoch gate and unconditional: a caller still
-        # inside its deadline is waiting on `done`, and withholding it would make
-        # it wait out the full deadline and report a COMPLETED probe as a TIMEOUT -
-        # manufacturing the very "no GPU"/inconclusive lie the status contract
-        # above exists to prevent.
+        # inside its deadline - the starter OR any joiner - is waiting on `done`,
+        # and withholding it would make it wait out the full deadline and report a
+        # COMPLETED probe as a TIMEOUT, manufacturing the very "no GPU"/inconclusive
+        # lie the status contract above exists to prevent.
         result["value"] = value
         done.set()
 
@@ -472,6 +562,13 @@ def _list_gpus_with_status(deadline: float) -> tuple:
         with _gpu_probe_lock:
             if _gpu_probe_epoch == my_epoch:
                 _gpu_probe_inflight = False
+                _gpu_probe_done = None
+                _gpu_probe_result = None
+        # Wake any caller that joined between our publish above and this failure, so
+        # it does not wait out its full deadline on a probe that will never run.
+        # `result` has no "value" key (the thread never set it), which the join
+        # path reads as BUSY - the honest status here.
+        done.set()
         logger.debug("list_gpus: could not start probe thread: %s", e)
         served = list(_gpu_last_good) if _gpu_last_good is not None else []
         return served, GPU_PROBE_BUSY
