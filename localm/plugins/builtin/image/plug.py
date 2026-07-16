@@ -126,7 +126,8 @@ async def imagine(req: ImagineRequest, request: Request):
     images_dir.mkdir(parents=True, exist_ok=True)
     out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
     from localm.config import load_config
-    s = _backend.settings(load_config())
+    _cfg = load_config()
+    s = _backend.settings(_cfg)
     owner = principal_id(request)
 
     def _generate(job):
@@ -139,16 +140,21 @@ async def imagine(req: ImagineRequest, request: Request):
         if not ok:
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
-                                 media_split_notice, unload_chat_for_media)
-        notice = media_split_notice()
+                                 unload_chat_for_media)
+        from localm.media.comfy_client import resolve_media_placement
+        # Per-component GPU placement (opt-in) plus the user-facing notice, in one shared
+        # helper (image/music/video share this preamble). placement is applied inside
+        # generate_image; notice is what to tell the user.
+        placement, notice = resolve_media_placement(_cfg, s["api_url"])
         if notice:
             job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
-        # REG-532: the gate above reads COMBINED free VRAM across a configured GPU
-        # split, but ComfyUI masks devices and loads the WHOLE model onto ONE card.
-        # 2x4 GB free reads as 8 GB and "fits" a 4 GB job that then OOMs on one 4 GB
-        # card. When the card actually chosen cannot hold it, swap anyway: unloading
-        # the chat model frees VRAM on every split card, including that one.
+        # REG-532: the gate above reads COMBINED free VRAM across a configured GPU split,
+        # but each media model component loads WHOLE onto ONE card (localm ORDERS the
+        # cards via --default-device, never masks - the model still lands on one). 2x4 GB
+        # free reads as 8 GB and "fits" a 4 GB job that then OOMs on one 4 GB card. When
+        # the card actually chosen cannot hold it, swap anyway: unloading the chat model
+        # frees VRAM on every split card, including that one.
         shortfall = media_single_device_shortfall(s)
         if shortfall and not swap:
             swap = True
@@ -187,6 +193,8 @@ async def imagine(req: ImagineRequest, request: Request):
             swap=gen_swap,
             delete_outputs=delete_outputs,
             cancel_check=lambda: job.cancel_requested,
+            placement=placement,
+            on_progress=lambda t: job.push({"type": "line", "text": t}),
         )
         job.push({"type": "line", "text": message})
         if ok:

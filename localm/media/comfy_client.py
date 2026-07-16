@@ -143,6 +143,145 @@ def next_node_id(workflow: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+#  Per-component GPU placement: inject core Select*Device nodes by class
+# ---------------------------------------------------------------------------
+#
+#  On a box ComfyUI sees as 2+ GPUs, ComfyUI core's SelectModelDevice /
+#  SelectCLIPDevice / SelectVAEDevice nodes rehome a component onto another card
+#  (deepclone_multigpu -> the loader's cached_patcher_init factory -> independent
+#  weights on the target). We inject them so the second card carries real work.
+#
+#  Located BY CLASS, never by id: the existing template transforms hardcode ids
+#  ("6","31",...) and KeyError on a user's arbitrary exported graph. A loader may
+#  emit several components (CheckpointLoaderSimple: model=slot0, clip=slot1,
+#  vae=slot2); a dedicated loader emits its one component at slot 0.
+
+# Component -> ordered (loader class_type, output slot) candidates. First match in
+# the graph wins, so a checkpoint's own clip/vae outputs are preferred over a
+# separate loader only when both somehow exist (the shipped graphs never do).
+_COMPONENT_LOADERS = {
+    "model": (("CheckpointLoaderSimple", 0), ("UNETLoader", 0),
+              ("UnetLoaderGGUF", 0), ("UnetLoaderGGUFAdvanced", 0)),
+    "clip": (("CheckpointLoaderSimple", 1), ("CLIPLoader", 0), ("DualCLIPLoader", 0),
+             ("DualCLIPLoaderGGUF", 0), ("CLIPLoaderGGUF", 0)),
+    "vae": (("CheckpointLoaderSimple", 2), ("VAELoader", 0)),
+}
+
+# Component -> the core placement node and the input name that carries the component.
+_SELECT_NODE = {"model": "SelectModelDevice", "clip": "SelectCLIPDevice",
+                "vae": "SelectVAEDevice"}
+
+
+def find_component_producer(workflow: dict, component: str):
+    """The ``(node_id, output_slot)`` producing *component*'s output, located BY CLASS
+    (so a user's arbitrary graph works), or ``None`` when no such loader is present."""
+    for class_type, slot in _COMPONENT_LOADERS.get(component, ()):  # noqa: E501
+        nid, _node = find_node_by_class(workflow, class_type)
+        if nid is not None:
+            return (nid, slot)
+    return None
+
+
+def _reroute_output(workflow: dict, producer_id, slot: int, new_producer_id: str) -> None:
+    """Repoint every input wired to ``[producer_id, slot]`` onto ``[new_producer_id, 0]``.
+
+    Called BEFORE the new node is inserted, so the new node's own input (which will read
+    from the loader) is never itself rewired. Id comparison is str-tolerant because a
+    link source id may be int or str across hand-written vs exported graphs."""
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        for name, val in node.get("inputs", {}).items():
+            if _is_link(val) and str(val[0]) == str(producer_id) and val[1] == slot:
+                node["inputs"][name] = [new_producer_id, 0]
+
+
+def inject_device_placement(workflow: dict, plan: Optional[dict]) -> list:
+    """Inject the core ``Select*Device`` nodes to place each component named in *plan* on
+    its target ``gpu:N``, rewiring the loader's consumers through the new node.
+
+    *plan* is ``{"model": "gpu:N"|None, "clip": ..., "vae": ...}``
+    (:func:`localm.discover.plan_media_placement`); a ``None``/empty target keeps that
+    component on its loader default (no injection). Returns human-readable notes: a
+    component that could NOT be placed (no matching loader in this graph) is surfaced in
+    the notes, never silently dropped (AGENTS rule 5). The caller pushes these to the
+    user so a requested-but-skipped placement is visible."""
+    notes = []
+    for component, target in (plan or {}).items():
+        if not target:
+            continue
+        select_class = _SELECT_NODE.get(component)
+        if select_class is None:
+            continue
+        producer = find_component_producer(workflow, component)
+        if producer is None:
+            notes.append(f"could not place {component} on {target}: no {component} loader "
+                         "in this workflow (left on the default card)")
+            continue
+        pid, slot = producer
+        new_id = next_node_id(workflow)  # reserved; not yet in workflow, so reroute skips it
+        _reroute_output(workflow, pid, slot, new_id)
+        workflow[new_id] = {
+            "class_type": select_class,
+            "inputs": {component: [pid, slot], "device": target},
+        }
+        notes.append(f"placing {component} on {target}")
+    return notes
+
+
+def resolve_media_placement(config: Optional[dict], api_url: str):
+    """Decide per-component GPU placement for one media job: ``(plan, notice)``.
+
+    The single DRY entry point the image/music/video plugins share (their VRAM/placement
+    preamble is otherwise byte-identical). ``plan`` is passed to ``generate_*`` to inject
+    the ``Select*Device`` nodes; ``notice`` is the user-facing line the plugin pushes.
+
+    Three outcomes, all honest (rule 5 - a requested capability that is not delivered is
+    stated, never silently dropped):
+
+    - **Placement disabled** (the default until the 2-GPU mechanism is proven on real
+      hardware - the experimental ``comfy_gpu_placement`` toggle is off, or no 2+ card
+      split is configured): returns ``(None, <legacy notice>)`` - behaviour is exactly as
+      before, the single-card notice on a configured split and nothing on a plain box.
+    - **Enabled and the running ComfyUI can place** (probe finds the Select*Device nodes
+      and 2+ GPUs): returns ``(plan, <placement notice>)`` - the second card carries the
+      text encoder + VAE.
+    - **Enabled but the running ComfyUI cannot** (old ComfyUI without the nodes - e.g.
+      localm's own managed pin v0.9.2 - or only one GPU visible): returns ``(None, <honest
+      reason notice>)`` so the user learns WHY placement did not happen.
+
+    Best-effort and never raises: the probe swallows its own errors and any doubt yields
+    no plan (single-card floor). ``api_url`` must point at a ComfyUI already confirmed
+    alive (call after ``ensure_available`` / ``ensure_comfy``) so ``/object_info`` reflects
+    the running device set."""
+    from localm.vram import media_split_notice
+    cfg = config or {}
+    # Gate 1 - the experimental toggle (default off, maintainer decision 2026-07-16).
+    # Off -> byte-identical to today: single-card floor, legacy notice.
+    if not cfg.get("comfy_gpu_placement"):
+        return None, media_split_notice(cfg)
+    # Gate 2 - only when a 2+ card split is actually applied (maintainer decision). A
+    # cheap pre-check before the /object_info probe that ties placement to a deliberate
+    # multi-GPU setup. Uses applied_split_device_count (the loader-truth count that
+    # mirrors apply_gpu_split's own gate, added in #704), NOT split_device_count: the
+    # latter filters against a list_gpus() that is structurally blind to Vulkan-only
+    # devices, so on the vulkan build a live 2-way split collapses to <2 and would
+    # wrongly decline placement (GPU-SPLIT-VKINDEX). applied_split_device_count is
+    # Vulkan-sound. The probe in Gate 3 is the authoritative "how many cards does
+    # ComfyUI see" check either way.
+    from localm.discover import applied_split_device_count, plan_media_placement
+    if applied_split_device_count(cfg) < 2:
+        return None, media_split_notice(cfg)
+    # Gate 3 - the running ComfyUI must actually offer the Select*Device nodes AND
+    # enumerate 2+ GPUs (probe /object_info). An older ComfyUI (including localm's own
+    # managed pin) or a single visible card declines with a stated reason, never a
+    # graph ComfyUI would reject.
+    cap = probe_placement_capability(api_url)
+    plan = plan_media_placement(cfg, gpu_options=cap.gpu_options) if cap.available else None
+    return plan, media_split_notice(cfg, placement=plan, capability=cap)
+
+
+# ---------------------------------------------------------------------------
 #  Pre-submit model validation (/object_info) - fail BEFORE the LLM unload
 # ---------------------------------------------------------------------------
 #
@@ -178,9 +317,22 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
     """The list of literal choices for a combo input of an /object_info node spec,
     or None when the input is not a combo.
 
-    Shape: ``spec["input"]["required"|"optional"][name] == [choices, meta?]`` where
-    ``choices`` is a list of strings for a dropdown. A non-combo input's first element
-    is a type-name string ("INT", "MODEL", ...), not a list."""
+    ComfyUI serves TWO combo shapes and both are live, so both must be parsed:
+
+    - **v1 nodes** (the classic ``INPUT_TYPES`` dict, e.g. CheckpointLoaderSimple):
+      ``[choices_list, meta?]`` - the choices ARE the first element. A non-combo v1
+      input's first element is a type-name string ("INT", "MODEL", ...), not a list.
+    - **v3 nodes** (the ``comfy_api`` schema, e.g. the Select*Device multigpu nodes):
+      ``["COMBO", {"options": choices_list, ...}]`` - the first element is the io_type
+      string "COMBO" and the choices live under ``meta["options"]``. Verified against
+      the real serialization: server.py serves ``INPUT_TYPES()`` -> ``get_v1_info`` ->
+      ``add_to_dict_v1`` emits ``(input.get_io_type(), input.as_dict())`` and
+      ``Combo.get_io_type()`` is "COMBO" with the choices inside ``as_dict()``
+      (comfy_api/latest/_io.py, ComfyUI git 867404b). Missing this shape is why a
+      naive reader silently finds zero options on a v3 node and declines placement.
+
+    A non-combo input (v1 or v3) returns None either way: its meta dict has no
+    ``options`` list."""
     if not isinstance(spec, dict):
         return None
     io = spec.get("input")
@@ -190,9 +342,70 @@ def _combo_options(spec: dict, input_name: str) -> Optional[list]:
         sec = io.get(section)
         if isinstance(sec, dict) and input_name in sec:
             entry = sec[input_name]
-            if isinstance(entry, list) and entry and isinstance(entry[0], list):
+            if not (isinstance(entry, list) and entry):
+                continue
+            # v1: the first element is the choices list.
+            if isinstance(entry[0], list):
                 return [o for o in entry[0] if isinstance(o, str)]
+            # v3: first element is the io_type string, choices under meta["options"].
+            if (isinstance(entry[0], str) and len(entry) > 1
+                    and isinstance(entry[1], dict)):
+                opts = entry[1].get("options")
+                if isinstance(opts, list):
+                    return [o for o in opts if isinstance(o, str)]
     return None
+
+
+@dataclass(frozen=True)
+class PlacementCapability:
+    """Whether the RUNNING ComfyUI can do per-component GPU placement, and onto which
+    positions. ``gpu_options`` are the live ``gpu:N`` strings the ``SelectModelDevice``
+    device combo offers (ComfyUI's OWN index space); ``reason`` is set (and human-
+    readable) whenever ``available`` is False, so a decline is never a silent mystery."""
+    available: bool
+    gpu_options: list
+    reason: str = ""
+
+
+# The three core placement nodes. All three must be present for a complete plan; the
+# device combo is read from the model node (all three carry the same options set).
+_PLACEMENT_NODES = ("SelectModelDevice", "SelectCLIPDevice", "SelectVAEDevice")
+
+
+def probe_placement_capability(api_url: str, *,
+                               timeout: float = 10.0) -> PlacementCapability:
+    """Ask the LIVE ComfyUI (``/object_info``) whether it offers per-component placement
+    and how many GPUs it enumerates. This is what makes placement SAFE by construction:
+
+    - localm's MANAGED ComfyUI is pinned at v0.9.2, which PREDATES the multigpu nodes
+      (first added upstream 2026-05-25). There the probe returns unavailable and
+      placement declines cleanly, rather than injecting a node ComfyUI would reject.
+    - It reads ComfyUI's OWN device enumeration (the ``gpu:N`` combo), which is
+      authoritative about how many cards ComfyUI actually sees. (The caller's Gate 2
+      uses ``applied_split_device_count`` as a cheap Vulkan-sound pre-filter; this probe
+      is the authoritative device count either way.)
+
+    Unavailable (with a named reason) when: ``/object_info`` cannot be read; any of the
+    three ``Select*Device`` nodes is missing (old ComfyUI); or the device combo offers
+    fewer than two ``gpu:N`` options (ComfyUI sees one card - nothing to place onto).
+    Best-effort: on any doubt it returns unavailable, and the caller falls back to the
+    single-card floor."""
+    info = comfy_object_info(api_url, timeout=timeout)
+    if not isinstance(info, dict):
+        return PlacementCapability(False, [], "could not read ComfyUI /object_info")
+    missing = [n for n in _PLACEMENT_NODES if n not in info]
+    if missing:
+        return PlacementCapability(
+            False, [],
+            "this ComfyUI does not offer per-component GPU placement (needs a ComfyUI "
+            "with the multigpu nodes, upstream 2026-05-25 or newer)")
+    options = _combo_options(info["SelectModelDevice"], "device") or []
+    gpu_options = [o for o in options if isinstance(o, str) and o.startswith("gpu:")]
+    if len(gpu_options) < 2:
+        return PlacementCapability(
+            False, gpu_options,
+            "ComfyUI sees fewer than two GPUs, so there is no second card to place onto")
+    return PlacementCapability(True, gpu_options)
 
 
 def _looks_like_model_files(options: list, current: Optional[str] = None) -> bool:
