@@ -91,6 +91,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   which previously told you "VRAM has not dropped yet" on the strength of a
   reading it could not stand behind. A machine with no GPU telemetry at all is
   unaffected and stays quiet, as before.
+- **A multi-GPU split load is no longer refused on the strength of a VRAM reading
+  localm never took.** Before placing a model onto a configured GPU split, localm
+  checks that each card has room for its share, reading free VRAM from the driver
+  with a time limit. A slow or busy driver - a cold GPU right after the server
+  starts is the common case - could not always answer in time, and localm quietly
+  reused an older reading, then refused the load and quoted a "MB free" figure from
+  that stale reading on a machine that in fact had room. It now tells a reading it
+  just took apart from a reused one: when it cannot get a fresh per-device reading
+  it lets the load proceed rather than refusing on a number it cannot stand behind
+  (the load is sandboxed, so a genuine over-commit fails safely on its own) and it
+  never shows a stale VRAM figure as the reason. The embedding model's split
+  preflight is covered the same way.
 - **Your own saved facts come back when you ask about yourself.** Without an
   embedding model installed, memory could only match facts that shared an exact
   word with your question, so asking "what is my name" never surfaced "User is
