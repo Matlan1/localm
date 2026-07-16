@@ -10,6 +10,10 @@ localm.discover.list_gpus (their shared device-detection dependency) and
 torch.cuda.mem_get_info are faked, mirroring the style in tests/test_hf_device_xpu.py
 and tests/test_discover.py."""
 
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +21,31 @@ import pytest
 from localm.inference.backends.hf import _cuda_device_map
 
 _HEADROOM = int(0.5e9)   # must match the headroom baked into _cuda_device_map
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _skip_unless_torch_and_accelerate_available() -> None:
+    """Skip (without ever importing torch/accelerate IN THIS PROCESS) when
+    either is not installed at all.
+
+    Deliberately NOT ``pytest.importorskip("torch")``: that helper's
+    try/except only catches ``ImportError``, so if ``import torch`` instead
+    raises ``OSError: [WinError 127] ...`` (issue #698's cross-contamination -
+    see _run_isolated_script's docstring below), importorskip does not turn
+    that into a skip, it lets the OSError propagate as a test failure. Worse,
+    since importorskip's ``__import__`` call runs right here in the (possibly
+    already-contaminated) parent pytest worker process, it would ALSO be the
+    thing that reintroduces the very in-process import this whole file exists
+    to avoid. ``importlib.util.find_spec`` with a bare (non-dotted) module
+    name locates the module via the path finders without executing its code
+    at all (confirmed: torch never lands in sys.modules from this call, even
+    right after loading llama.cpp's native runtime in-process) - so it can
+    answer "is torch installed" safely regardless of what else has run in
+    this process."""
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch not installed")
+    if importlib.util.find_spec("accelerate") is None:
+        pytest.skip("accelerate not installed")
 
 
 def _fake_torch(mem_by_device=None):
@@ -175,6 +204,110 @@ class TestGpuSplitSuccess:
         assert result["max_memory"].get("cpu", 0) > 0
 
 
+def _run_isolated_script(script: str) -> "subprocess.CompletedProcess[str]":
+    """Run *script* in a genuinely FRESH child ``python.exe`` process (the
+    same interpreter/venv as this test run, via ``sys.executable``) and
+    return the completed process so callers can assert on
+    returncode/stdout/stderr.
+
+    WHY a subprocess, not an in-process call (issue #698) - same pattern as
+    tests/test_mp_spawn_fix.py, and for an analogous reason: a real, unmocked
+    LlamaCpp construction (tests/test_gpu_split_wiring.py's
+    TestLlamaCppGpuSplitWiring) loads llama.cpp's bundled HIP/ROCm native
+    runtime into whatever process runs it, via
+    localm.inference.backends.llamacpp._loader.load_lib(). Once that native
+    runtime is resident, a LATER ``import torch`` in the SAME process faults
+    with ``OSError: [WinError 127] The specified procedure could not be
+    found`` loading torch's own separate rocm_sdk package's hipsolver.dll -
+    two incompatible native ROCm/HIP runtimes cannot coexist in one process
+    on this box (reproduced directly while diagnosing this issue). This is
+    the exact mechanism ``VramSizingMixin._free_total_vram_bytes``
+    (localm/inference/backends/llamacpp/_sizing.py) already documents and
+    guards against for a different call site (its ``_torch_rocm_init_broken``
+    cache). Running the real accelerate exercise in a fresh child interpreter
+    sidesteps the collision entirely - proving real accelerate behavior
+    without depending on what else has run in this pytest worker process -
+    instead of skipping or hiding it."""
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, cwd=str(_REPO_ROOT), timeout=120,
+    )
+
+
+def _assert_subprocess_ok(result: "subprocess.CompletedProcess[str]") -> None:
+    assert result.returncode == 0, (
+        f"isolated accelerate check subprocess failed (returncode="
+        f"{result.returncode}):\n--- stdout ---\n{result.stdout}\n"
+        f"--- stderr ---\n{result.stderr}")
+
+
+# Self-contained (no imports from this test module - it runs in a separate
+# interpreter, see _run_isolated_script above): builds the same over-budget
+# model and _cuda_device_map-derived max_memory as the old in-process version,
+# then drives the REAL accelerate.infer_auto_device_map against it and asserts
+# the overflow lands on CPU, not disk.
+_CPU_OFFLOAD_CHILD_SCRIPT = """
+from unittest.mock import MagicMock
+
+from localm.inference.backends.hf import _cuda_device_map
+import localm.discover as discover
+from torch import nn
+from accelerate.utils import infer_auto_device_map
+
+_HEADROOM = int(0.5e9)   # must match the headroom baked into _cuda_device_map
+
+
+def _fake_torch(mem_by_device):
+    fake = MagicMock()
+
+    def _mem_get_info(idx):
+        val = mem_by_device[idx]
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    fake.cuda.mem_get_info.side_effect = _mem_get_info
+    return fake
+
+
+model = nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512),
+                       nn.Linear(512, 512), nn.Linear(512, 512))
+total = sum(p.numel() * p.element_size() for p in model.parameters())
+gpu_budget = int(total // 4 * 1.5)   # room for roughly one block
+
+discover.list_gpus = lambda: [{"index": 0}]
+# Free VRAM chosen so the resulting budget only fits part of the model.
+mem = {0: (gpu_budget + _HEADROOM, 16_000_000_000)}
+kwargs = _cuda_device_map(_fake_torch(mem), config={"main_gpu_index": 0})
+
+device_map = infer_auto_device_map(model, max_memory=kwargs["max_memory"])
+placements = set(device_map.values())
+assert "cpu" in placements, f"overflow did not reach CPU: {dict(device_map)}"
+assert "disk" not in placements, (
+    "overflow went to disk, which needs an offload_folder; a cpu budget "
+    f"should absorb it first: {dict(device_map)}")
+print("CPU_OFFLOAD_OK", dict(device_map))
+"""
+
+# The negative control: the identical over-budget model, but WITHOUT the
+# "cpu" max_memory entry - proves the entry above is what does the work (and
+# that this check could fail).
+_DISK_CONTROL_CHILD_SCRIPT = """
+from torch import nn
+from accelerate.utils import infer_auto_device_map
+
+model = nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512),
+                       nn.Linear(512, 512), nn.Linear(512, 512))
+total = sum(p.numel() * p.element_size() for p in model.parameters())
+gpu_budget = int(total // 4 * 1.5)
+
+device_map = infer_auto_device_map(model, max_memory={0: gpu_budget})   # no "cpu" key
+placements = set(device_map.values())
+assert "disk" in placements, dict(device_map)
+print("DISK_CONTROL_OK", dict(device_map))
+"""
+
+
 class TestRealAccelerateHonoursTheMapping:
     """The shape assertions above cannot see what accelerate DOES with the
     mapping - which is exactly why the suite missed REG-528 (it validated
@@ -183,44 +316,75 @@ class TestRealAccelerateHonoursTheMapping:
     the function transformers calls for device_map="auto" - against a real
     module too big for the GPU budget, and asserts the overflow actually lands
     on CPU. No GPU needed: max_memory is supplied, so nothing is probed.
+
+    Both bodies run the exercise in a FRESH CHILD python.exe process (see
+    _run_isolated_script above), not in-process (issue #698): this pytest
+    worker process may also run tests/test_gpu_split_wiring.py, which loads
+    llama.cpp's own native ROCm/HIP runtime, and a LATER in-process
+    ``import torch`` then faults - see _run_isolated_script's docstring for
+    the full mechanism. Isolating the exercise keeps these tests proving REAL
+    accelerate behavior regardless of what else has run in this process. See
+    TestSurvivesPriorLlamaCppNativeLoad below for the regression proof that
+    this isolation is what makes that true.
     """
 
-    def _model_and_budgets(self, torch, nn):
-        model = nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512),
-                              nn.Linear(512, 512), nn.Linear(512, 512))
-        total = sum(p.numel() * p.element_size() for p in model.parameters())
-        return model, int(total // 4 * 1.5)   # room for roughly one block
+    def test_our_max_memory_actually_offloads_overflow_to_cpu(self):
+        _skip_unless_torch_and_accelerate_available()
 
-    def test_our_max_memory_actually_offloads_overflow_to_cpu(self, monkeypatch):
-        torch = pytest.importorskip("torch")
-        nn = pytest.importorskip("torch.nn")
-        infer = pytest.importorskip("accelerate.utils").infer_auto_device_map
-
-        model, gpu_budget = self._model_and_budgets(torch, nn)
-        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
-        # Free VRAM chosen so the resulting budget only fits part of the model.
-        mem = {0: (gpu_budget + _HEADROOM, 16_000_000_000)}
-        kwargs = _cuda_device_map(_fake_torch(mem), config={"main_gpu_index": 0})
-
-        device_map = infer(model, max_memory=kwargs["max_memory"])
-        placements = set(device_map.values())
-        assert "cpu" in placements, (
-            f"overflow did not reach CPU: {dict(device_map)}")
-        assert "disk" not in placements, (
-            "overflow went to disk, which needs an offload_folder; a cpu budget "
-            f"should absorb it first: {dict(device_map)}")
+        result = _run_isolated_script(_CPU_OFFLOAD_CHILD_SCRIPT)
+        _assert_subprocess_ok(result)
+        assert "CPU_OFFLOAD_OK" in result.stdout
 
     def test_a_cpu_less_budget_would_send_overflow_to_disk(self):
         """The negative control proving the 'cpu' entry is what does the work
         (and that this test could fail): the same budget WITHOUT it maps the
         overflow to disk instead."""
-        torch = pytest.importorskip("torch")
-        nn = pytest.importorskip("torch.nn")
-        infer = pytest.importorskip("accelerate.utils").infer_auto_device_map
+        _skip_unless_torch_and_accelerate_available()
 
-        model, gpu_budget = self._model_and_budgets(torch, nn)
-        device_map = infer(model, max_memory={0: gpu_budget})   # no "cpu" key
-        assert "disk" in set(device_map.values()), dict(device_map)
+        result = _run_isolated_script(_DISK_CONTROL_CHILD_SCRIPT)
+        _assert_subprocess_ok(result)
+        assert "DISK_CONTROL_OK" in result.stdout
+
+
+class TestSurvivesPriorLlamaCppNativeLoad:
+    """Negative-oracle regression proof for issue #698: loading llama.cpp's
+    bundled native runtime into THIS test process (the same load
+    tests/test_gpu_split_wiring.py triggers, via a real, unmocked LlamaCpp
+    construction) must not break the isolated accelerate check above.
+
+    Verified by literal before/after while developing this fix: with the
+    accelerate exercise running IN-PROCESS (the pre-fix code this class
+    replaces), loading the native runtime first and then doing
+    ``import torch`` in the very same process raises ``OSError: [WinError
+    127] The specified procedure could not be found`` - reproduced directly
+    on this box. With the exercise isolated into a fresh child subprocess
+    (the fix, exercised via _run_isolated_script above), the same in-process
+    contamination has no effect on the child at all, since a separate process
+    never shares the parent's already-loaded native libraries. This test
+    performs exactly that contamination step and then asserts the isolated
+    check still passes - the same file's cross-contamination that issue #698
+    reports, reproduced and proven fixed in one deterministic test."""
+
+    def test_survives_prior_llamacpp_native_load(self):
+        _skip_unless_torch_and_accelerate_available()
+
+        from localm.inference.backends.llamacpp import _loader
+        try:
+            _loader.load_lib()
+        except RuntimeError as e:
+            pytest.skip(
+                f"native llama.cpp runtime not provisioned on this box: {e}")
+
+        # Also import LlamaCpp itself, matching exactly what
+        # tests/test_gpu_split_wiring.py imports at module scope (harmless
+        # here since the lib is already loaded above by the explicit
+        # load_lib() call - this line documents that the same code path is
+        # exercised, not just an equivalent one).
+        from localm.inference.backends.llamacpp.llama import LlamaCpp  # noqa: F401
+
+        result = _run_isolated_script(_CPU_OFFLOAD_CHILD_SCRIPT)
+        _assert_subprocess_ok(result)
+        assert "CPU_OFFLOAD_OK" in result.stdout
 
 
 class TestGpuSplitMemGetInfoFailures:
