@@ -1021,6 +1021,33 @@ export async function buildMediaSection(form, fields) {
   panel.appendChild(managed);
   renderManagedComfyPanel(managed, { targetField });
 
+  // EXPERIMENTAL per-component GPU placement toggle (comfy_gpu_placement). Unlike
+  // the managed box's comfy_target - which only matters once a managed instance is
+  // installed - this applies to a user's OWN ComfyUI too, so it renders
+  // UNCONDITIONALLY (not gated on the managed-status fetch). Saved through the
+  // Media section's generic PATCH /v1/config path, exactly like comfy_target; the
+  // control shows its own help (why it is experimental and default-off).
+  const placementField = (fields || []).find(f => f.key === "comfy_gpu_placement");
+  if (placementField) {
+    const box = el("div", "media-comfy-box");
+    box.appendChild(el("h4", "media-sub-head", "Experimental"));
+    const ctrl = buildSettingControl(placementField);
+    if (ctrl) {
+      box.appendChild(ctrl.node);
+      // Same de-dup-then-register dance as renderManagedComfyPanel: a re-render
+      // must not pile up stale detached entries for this key in the shared list.
+      _settingsControls = _settingsControls.filter(c => c.field.key !== placementField.key);
+      _settingsControls.push(ctrl);
+      const actions = el("div", "actions");
+      const save = el("button", "btn-primary", "Save");
+      save.type = "button";
+      save.onclick = () => saveSettingsSection("media");
+      actions.appendChild(save);
+      box.appendChild(actions);
+    }
+    panel.appendChild(box);
+  }
+
   // R11/R12: register every subsection's node + label first (empty), so that when
   // we render each, its "Copy from <other>" buttons can see the other subsections,
   // and a later single-subsection re-render (R12) can find its node.

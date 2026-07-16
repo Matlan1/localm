@@ -54,7 +54,10 @@
 // v59: pages/knowledge.js changed (reindex paths are batched in groups of 50 to
 // respect the server's request size cap) - a stale-cached client would keep
 // failing to re-index collections with more than 50 documents.
-const CACHE = "localm-shell-v59";
+// v60: pages/settings.js changed (the experimental "Split media across GPUs"
+// toggle in the Media section) - a stale-cached client would keep lacking the
+// control.
+const CACHE = "localm-shell-v60";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

@@ -510,6 +510,18 @@ CORE_FIELDS: list = [
                  "install and never patches a ComfyUI it did not start. The patch "
                  "self-expires once ComfyUI ships its own fix.",
                  group="Media", owner="image"),
+    SettingField("comfy_gpu_placement", Widget.TOGGLE,
+                 "Split media across GPUs (experimental)",
+                 "EXPERIMENTAL, off by default. On a machine with two or more "
+                 "GPUs, put the text encoder and VAE on a second card so the "
+                 "diffusion model has more room on the first - only if the running "
+                 "ComfyUI is new enough to offer per-component placement (upstream "
+                 "2026-05-25 or newer; localm's own managed ComfyUI is older and "
+                 "declines cleanly). This does NOT split one model across cards "
+                 "(no ComfyUI feature does that). Unproven on real multi-GPU "
+                 "hardware, so it stays off until you turn it on; with it off, or "
+                 "on a single-GPU box, media generation is unchanged.",
+                 group="Media", owner="image", applies=Applies.RESTART),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  "Free the media model's VRAM and reload the chat model after a "

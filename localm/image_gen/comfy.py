@@ -67,6 +67,7 @@ from localm.media.comfy_client import (
     find_nodes_by_class,
     free_comfy_vram,
     history_execution_error,
+    inject_device_placement,
     interrupt_comfy,
     next_node_id,
     POLL_CANCELLED,
@@ -475,6 +476,8 @@ def generate_image(
     swap: bool = True,
     fast_dequant: bool = True,
     cancel_check: Optional[callable] = None,
+    placement: Optional[dict] = None,
+    on_progress: Optional[callable] = None,
 ) -> tuple[bool, str]:
     """
     Generate an image from *prompt* and save it to *output_path*.
@@ -618,6 +621,18 @@ def generate_image(
         workflow, api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
     if not pf_ok:
         return False, pf_msg
+
+    # 8c. Per-component GPU placement (opt-in, multi-GPU only). The plan was decided by
+    # comfy_client.resolve_media_placement() after the capability probe; here we apply it
+    # to the built graph by injecting the core Select*Device nodes. Injected AFTER
+    # preflight (the Select nodes carry no model-file inputs, so validation is unaffected)
+    # and just before submit, so it is the last mutation. A component whose loader is
+    # absent from this graph is surfaced to the user, never silently dropped (rule 5); the
+    # happy-path summary already went out via the placement notice.
+    if placement:
+        for _note in inject_device_placement(workflow, placement):
+            if on_progress and "could not place" in _note:
+                on_progress(_note)
 
     # 9b. Unload the chat LLM to free VRAM for FLUX, now that the workflow is valid.
     # Skipped when the caller decided the media model fits alongside the chat model
