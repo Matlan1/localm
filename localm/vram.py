@@ -172,10 +172,16 @@ def media_single_device_shortfall(settings: dict, *,
     if not isinstance(need, int) or need <= 0:
         return None
     from localm.config import load_config
-    from localm.discover import (list_gpus, resolve_preferred_device,
-                                 split_device_count)
+    from localm.discover import (applied_split_device_count, list_gpus,
+                                 resolve_preferred_device)
     cfg = config if config is not None else load_config()
-    if split_device_count(cfg) < 2:
+    # applied_split_device_count (loader truth), NOT split_device_count: whether a
+    # split is ACTIVE for chat/embeddings is a load-time fact, and on vulkan the
+    # detected count would wrongly report < 2 for a live split (GPU-SPLIT-VKINDEX).
+    # On a torch-blind box resolve_preferred_device() below still returns None, so
+    # this stays a no-op there; on a mixed box it measures torch space, which is
+    # where media actually runs.
+    if applied_split_device_count(cfg) < 2:
         return None
     gpus = list_gpus()
     idx = resolve_preferred_device(cfg, gpus=gpus)
@@ -206,9 +212,14 @@ def media_split_notice(config: Optional[dict] = None) -> Optional[str]:
     never nagged about a shortfall that does not exist.
     """
     from localm.config import load_config
-    from localm.discover import resolve_preferred_device, split_device_count
+    from localm.discover import applied_split_device_count, resolve_preferred_device
     cfg = config if config is not None else load_config()
-    n = split_device_count(cfg)
+    # applied_split_device_count (loader truth), NOT split_device_count: the user
+    # CONFIGURED this split and it IS active for chat/embeddings, so the notice must
+    # fire even on the vulkan build, where the detected count wrongly collapses to
+    # < 2 and would suppress the notice entirely (GPU-SPLIT-VKINDEX) - the exact
+    # user-visible Q2 miss this fix closes.
+    n = applied_split_device_count(cfg)
     if n < 2:
         return None
     idx = resolve_preferred_device(cfg)
