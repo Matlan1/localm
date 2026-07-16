@@ -27,7 +27,12 @@ class _FakeJob:
 
 def _run_generate(monkeypatch, *, gen_result, cancelled):
     """Drive the plug's inner _generate closure and return (reload_called, job)."""
-    s = {"reload_after": True, "warning": ""}
+    # api_url is read unconditionally by #709's placement resolver
+    # (resolve_media_placement(_cfg, s["api_url"])) before the reload logic
+    # under test runs; the real settings loader always supplies it, so this
+    # fake must too or the closure dies on KeyError before reaching the code
+    # under test. Placement itself stays off (no comfy_gpu_placement config).
+    s = {"reload_after": True, "warning": "", "api_url": "http://127.0.0.1:8188"}
     monkeypatch.setattr(plug._backend, "settings", lambda cfg: s)
     monkeypatch.setattr(plug._backend, "ensure_available",
                         lambda s, on_progress=None: (True, "ComfyUI is up."))
