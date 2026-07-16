@@ -129,7 +129,8 @@ def test_stt_cache_dir_is_contained_in_the_data_dir(monkeypatch, tmp_path):
     root = voice.stt_cache_dir()
     assert root == tmp_path / "cache" / "whisper"
     assert tmp_path in root.parents                      # inside the data dir
-    assert Path.home() not in root.parents               # NOT the home profile
+    if Path.home() not in tmp_path.parents:
+        assert Path.home() not in root.parents               # NOT the home profile
 
 
 def test_stt_request_carries_the_contained_download_root(monkeypatch, tmp_path):

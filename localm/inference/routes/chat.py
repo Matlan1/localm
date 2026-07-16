@@ -171,7 +171,53 @@ def register(app: FastAPI, ctx) -> None:
     async def embeddings(req: EmbeddingRequest):
         if not req.model:
             raise HTTPException(400, "Model parameter is required and cannot be empty")
-            
+
+        # If the requested model is registered as model_type="embedding", it is the
+        # dedicated on-device embedder (e.g. Qwen3-Embedding, bge-small). Route
+        # directly to embed_texts() - no chat engine lookup needed or wanted.
+        # This is the primary path when the user has an embedding model selected but
+        # no chat model loaded: get_engine would 503, and every indexing job would
+        # silently fall back to BM25 (AGENTS.md rule 5).
+        try:
+            from localm.config import load_registry
+            _reg = load_registry()
+            _entry = _reg.get((req.model or "").strip()) if _reg else None
+        except Exception:
+            _entry = None
+        if isinstance(_entry, dict) and _entry.get("model_type") == "embedding":
+            from localm.inference.embedder import embed_texts, last_error
+            loop = asyncio.get_running_loop()
+            texts_emb = [req.input] if isinstance(req.input, str) else req.input
+            fmt_emb = (req.encoding_format or "float").lower()
+            if fmt_emb not in ("float", "base64"):
+                raise HTTPException(
+                    400,
+                    f"Unsupported encoding_format {req.encoding_format!r}: "
+                    "expected 'float' or 'base64'.")
+            vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
+            if vecs_emb is None:
+                why = last_error() or "embedding model unavailable"
+                raise HTTPException(422, f"Embedding model unavailable ({why}). "
+                                    "Run 'localm setup-embeddings'.")
+
+            def _enc_emb(vec):
+                if fmt_emb == "base64":
+                    import base64
+                    import struct
+                    buf = struct.pack("<%df" % len(vec), *(float(x) for x in vec))
+                    return base64.b64encode(buf).decode("ascii")
+                return vec
+
+            return {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "index": i, "embedding": _enc_emb(vec)}
+                    for i, vec in enumerate(vecs_emb)
+                ],
+                "model": req.model,
+                "usage": {"prompt_tokens": 0, "total_tokens": 0},
+            }
+
         # Resolve WITHOUT forcing a chat-model load. A GGUF backend
         # (can_embed=False) embeds via the dedicated small embedder, so loading the
         # multi-GB chat model (and, under VRAM pressure, evicting the active one) is
