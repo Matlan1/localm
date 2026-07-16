@@ -216,6 +216,28 @@ def _format_chatml(messages: List[Dict]) -> str:
     return "\n".join(parts)
 
 
+def _warn_chatml_fallback(reason: str) -> None:
+    """RAG-VISION-1: `llama_chat_apply_template` is not a real Jinja engine - it
+    pattern-matches the model's template string against a fixed list of ~54
+    hardcoded signatures in llama.cpp's own `llm_chat_apply_template` and
+    returns -1 for anything it does not recognize (confirmed against upstream
+    llama-chat.cpp). A model whose real dialect is not among those - most
+    non-mainstream VLMs, e.g. moondream2 - previously fell back to generic
+    ChatML SILENTLY: no log line, no error, just an out-of-distribution prompt
+    the model was never fine-tuned on, feeding chat AND vision requests alike.
+    Confirmed root cause of moondream2 producing degenerate/hallucinated
+    "descriptions" during a RAG image-description live test - the model itself
+    was never actually asked in a format it understands. Surfacing this
+    (AGENTS.md rule 5) does not fix that model's output quality (the real fix
+    is routing through llama.cpp's own full chat-template engine, a larger
+    change), but it stops the mismatch from being invisible."""
+    from localm.debuglog import logger
+    logger.warning(
+        "chat template not recognized by llama.cpp's built-in matcher (%s) - "
+        "falling back to a generic ChatML prompt this model may not "
+        "understand; chat and vision output quality may be degraded", reason)
+
+
 def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     """
     Format *messages* using the model's own embedded Jinja chat template.
@@ -226,6 +248,7 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     """
     tmpl_str = api.llama_model_chat_template(model_ptr)
     if not tmpl_str:
+        _warn_chatml_fallback("model has no embedded chat template")
         return _format_chatml(messages)
 
     tmpl_bytes = tmpl_str.encode()
@@ -245,6 +268,7 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     if needed <= 0:
         # Template not supported (< 0) or it rendered nothing (== 0): an empty
         # prompt would silently generate from thin air - fall back
+        _warn_chatml_fallback("embedded template not recognized/rendered nothing")
         return _format_chatml(messages)
 
     if needed > buf_size:
@@ -253,6 +277,7 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
         needed = api.llama_chat_apply_template(tmpl_bytes, chat_arr, n, True, buf, len(buf))
         if needed <= 0:
             # Same guard as above: a failed or empty render falls back
+            _warn_chatml_fallback("embedded template not recognized/rendered nothing")
             return _format_chatml(messages)
 
     return buf.raw[:needed].decode("utf-8", errors="replace")

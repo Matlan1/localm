@@ -119,3 +119,49 @@ class TestApplyTemplateEmptyRenderGuard:
             out = _apply_model_template(1, self._MSGS)
         assert out == _format_chatml(self._MSGS)
         mock_api.llama_chat_apply_template.assert_not_called()
+
+
+class TestApplyTemplateFallbackIsSurfaced:
+    """RAG-VISION-1: llama_chat_apply_template is not a real Jinja engine - it
+    pattern-matches against ~54 hardcoded template signatures in llama.cpp and
+    returns -1 for anything it does not recognize (e.g. moondream2 and other
+    non-mainstream VLMs). The ChatML fallback used to be completely silent -
+    no log, no error - so a model fed an out-of-distribution prompt it was
+    never fine-tuned on gave no signal why its output degenerated. Confirmed
+    root cause of moondream2 producing garbage/hallucinated RAG image
+    descriptions during a RELEASE.md verification pass."""
+
+    _MSGS = [{"role": "user", "content": "hi"}]
+
+    def test_no_embedded_template_logs_a_warning(self, caplog):
+        mock_api = MagicMock()
+        mock_api.llama_model_chat_template.return_value = None
+        with caplog.at_level("WARNING", logger="localm"):
+            with patch(_LLAMA_API, mock_api):
+                _apply_model_template(1, self._MSGS)
+        assert any("chat template not recognized" in r.message for r in caplog.records)
+
+    def test_unrecognized_template_logs_a_warning(self, caplog):
+        mock_api = MagicMock()
+        mock_api.llama_model_chat_template.return_value = "{{ some unrecognized template }}"
+        mock_api.llama_chat_apply_template.return_value = -1
+        with caplog.at_level("WARNING", logger="localm"):
+            with patch(_LLAMA_API, mock_api):
+                _apply_model_template(1, self._MSGS)
+        assert any("chat template not recognized" in r.message for r in caplog.records)
+
+    def test_a_recognized_template_logs_nothing(self, caplog):
+        mock_api = MagicMock()
+        mock_api.llama_model_chat_template.return_value = "{{ chatml }}"
+
+        def fake_apply(tmpl, arr, n, add_assistant, buf, size):
+            rendered = b"RENDERED PROMPT"
+            buf[:len(rendered)] = rendered
+            return len(rendered)
+
+        mock_api.llama_chat_apply_template.side_effect = fake_apply
+        with caplog.at_level("WARNING", logger="localm"):
+            with patch(_LLAMA_API, mock_api):
+                out = _apply_model_template(1, self._MSGS)
+        assert out == "RENDERED PROMPT"
+        assert not any("chat template not recognized" in r.message for r in caplog.records)
