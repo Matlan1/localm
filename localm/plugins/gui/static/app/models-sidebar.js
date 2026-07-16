@@ -25,21 +25,39 @@ export function renderHwStats(data) {
   const el = $("hw-stats");
   if (!el) return;
   const gib = (b) => (b / GIB).toFixed(1);
-  const parts = [];
+  // Each metric is its own <span> so the VRAM figure can carry a subtle fullness
+  // colour. The colour rides ONLY on a trustworthy used/total (the backend sends
+  // `used` only for a fresh, device-global reading - see sysstats._vram); a
+  // total-only reading gets no colour, since there is nothing to be "full" of.
+  const spans = [];
+  const add = (text, cls) => {
+    const s = document.createElement("span");
+    s.textContent = text;
+    if (cls) s.className = cls;
+    spans.push(s);
+  };
   if (data && data.cpu && typeof data.cpu.percent === "number")
-    parts.push(`CPU ${Math.round(data.cpu.percent)}%`);
+    add(`CPU ${Math.round(data.cpu.percent)}%`);
   if (data && data.ram && typeof data.ram.percent === "number")
-    parts.push(`RAM ${Math.round(data.ram.percent)}%`);
+    add(`RAM ${Math.round(data.ram.percent)}%`);
   if (data && data.vram && data.vram.total) {
     const v = data.vram;
-    parts.push(v.used != null
-      ? `VRAM ${gib(v.used)}/${gib(v.total)} GB`
-      : `VRAM ${gib(v.total)} GB`);
+    if (v.used != null) {
+      const frac = v.total ? v.used / v.total : 0;
+      const band = frac >= 0.9 ? "vram-full" : frac >= 0.7 ? "vram-busy" : "vram-ok";
+      add(`VRAM ${gib(v.used)}/${gib(v.total)} GB`, `vram-usage ${band}`);
+    } else {
+      add(`VRAM ${gib(v.total)} GB`);
+    }
   }
   if (data && data.gpu && typeof data.gpu.percent === "number")
-    parts.push(`GPU ${Math.round(data.gpu.percent)}%`);
-  if (parts.length) {
-    el.textContent = parts.join(" · ");
+    add(`GPU ${Math.round(data.gpu.percent)}%`);
+  el.textContent = "";
+  if (spans.length) {
+    spans.forEach((s, i) => {
+      if (i) el.appendChild(document.createTextNode(" · "));
+      el.appendChild(s);
+    });
     el.hidden = false;
   } else {
     el.hidden = true;

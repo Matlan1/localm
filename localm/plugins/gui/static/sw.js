@@ -57,7 +57,12 @@
 // v60: pages/settings.js changed (the experimental "Split media across GPUs"
 // toggle in the Media section) - a stale-cached client would keep lacking the
 // control.
-const CACHE = "localm-shell-v60";
+// v61: app/models-sidebar.js's renderHwStats() now renders the status-bar VRAM
+// figure as a span with a subtle fullness colour, shown ONLY when the reading is
+// a fresh, device-global measurement (the backend withholds used/free for a stale
+// or process-blind one) - a stale-cached client would keep presenting an
+// untrustworthy VRAM number as live and lack the fullness colour.
+const CACHE = "localm-shell-v61";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
