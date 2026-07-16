@@ -132,8 +132,18 @@ class EngineCache:
             return self._engine
         if self._engine is not None:
             _log(f"switching model {self._loaded_name} -> {name}")
-            from localm.discover import vram_capacity
-            before_free = vram_capacity().get("free")
+            from localm.vram import _live_free_vram_bytes, _vram_free_reading
+            # SEED the wait with the reading even when the probe was not fresh,
+            # and poll with the live-only reader - exactly as the three
+            # http_server unload paths do, and NOT the other way round. The two
+            # ends need opposite things from a stale probe: for the 'before'
+            # SEED, None means "do not wait at all" (wait_for_vram_release
+            # short-circuits on before_bytes=None), so seeding it from the
+            # live-only reader would silently drop the driver-hang guard below to
+            # a 0-second no-op on any box whose probe merely ran slow. For the
+            # 'after' POLL, None correctly means "cannot verify". Freshness is
+            # carried separately, for the REPORT, not the wait.
+            before_free, before_fresh = _vram_free_reading()
             try:
                 self._engine.unload()
             except Exception as e:
@@ -143,15 +153,24 @@ class EngineCache:
             # The native unload's VRAM free is asynchronous - loading the next
             # model before it lands can exceed total VRAM and hang the GPU
             # driver (the same TDR risk the /v1/models/unload endpoint guards
-            # against; see vram.wait_for_vram_release). before_free is None
-            # when VRAM is not measurable at all, in which case this is a
-            # no-op and behaves as before.
+            # against; see vram.wait_for_vram_release). before_free is None only
+            # when VRAM is not measurable AT ALL (a CPU-only box), in which case
+            # there is nothing to wait for and this is a no-op, as before.
             from localm.vram import wait_for_vram_release
             released, _final = wait_for_vram_release(
-                lambda: vram_capacity().get("free"), before_bytes=before_free)
-            if released is False:
+                _live_free_vram_bytes, before_bytes=before_free)
+            if released is False and before_fresh:
+                # Both ends read live: "did not rise" is a claim we can back.
                 _log(f"warning: VRAM free did not rise after unloading "
                      f"{self._loaded_name} within the timeout - loading {name} anyway")
+            elif before_free is not None and (released is None or not before_fresh):
+                # Either end came off a timed-out/busy probe, so whether the free
+                # landed is unknown. Say that rather than the "did not rise" claim
+                # above, which a reading we never took cannot support (rule 5).
+                # The wait still ran; only the verdict is withheld.
+                _log(f"warning: could not confirm the VRAM free after unloading "
+                     f"{self._loaded_name} (no live GPU reading) - loading "
+                     f"{name} anyway")
         _log(f"loading model {name}")
         self._engine = self._factory(name)
         self._loaded_name = name
