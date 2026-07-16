@@ -40,21 +40,49 @@ def _cpu_ram() -> dict:
     return out
 
 
+def _vram_reading_trusted(info: dict, status) -> bool:
+    """Whether a ``vram_capacity``/``vram_info`` reading's ``free`` may be shown as
+    the board's CURRENT free VRAM. True only when the reading is BOTH:
+
+      * fresh - ``status`` is GPU_PROBE_OK, i.e. a probe actually completed. A
+        GPU_PROBE_TIMEOUT/BUSY reading is a served last-known-good value (possibly
+        frozen from an earlier state), not a current measurement.
+      * device-global - ``free_scope`` is FREE_SCOPE_DEVICE, i.e. it counts every
+        process's VRAM. On Windows + an AMD ROCm/HIP torch build the driver query is
+        blind to other processes (FREE_SCOPE_PROCESS); since every GGUF loads in an
+        isolated worker (#606) the model's own VRAM is invisible, so a process-scoped
+        ``free`` overstates what is available - a fresh reading can still be wrong.
+
+    Presenting a stale or process-scoped ``free`` as the board's live figure is
+    exactly the "report success when the measurement did not hold" that AGENTS.md
+    rule 5 forbids, so those readings show total-only instead (board capacity is
+    always true). Linux/NVIDIA tag every live reading FREE_SCOPE_DEVICE by
+    documentation, so this never withholds there."""
+    from localm.discover import FREE_SCOPE_DEVICE, GPU_PROBE_OK
+    return (status == GPU_PROBE_OK
+            and info.get("free_scope") == FREE_SCOPE_DEVICE
+            and info.get("free") is not None)
+
+
 def _vram() -> dict:
     """{"vram": {"used"?, "total", "percent"?}} - combined across a configured
-    multi-GPU split, else the single main GPU, or {} when unmeasurable."""
+    multi-GPU split, else the single main GPU, or {} when unmeasurable.
+
+    ``used``/``percent`` are included ONLY when the free reading is trustworthy
+    (see :func:`_vram_reading_trusted`); a stale or process-blind reading shows
+    ``total`` alone rather than a wrong used/free, so the status bar never presents
+    a number localm cannot stand behind as current fact."""
     try:
         from localm.discover import vram_capacity
-        info = vram_capacity()
+        info, status = vram_capacity(return_status=True)
     except Exception:
         return {}
     total = info.get("total")
     if not total:
         return {}
     vram: dict = {"total": int(total)}
-    free = info.get("free")
-    if free is not None:
-        used = max(0, int(total) - int(free))
+    if _vram_reading_trusted(info, status):
+        used = max(0, int(total) - int(info["free"]))
         vram["used"] = used
         vram["percent"] = round(used / int(total) * 100, 1)
     return {"vram": vram}

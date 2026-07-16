@@ -235,9 +235,17 @@ def register(app: FastAPI, ctx) -> None:
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it OFF the
         # event loop (it is safe-by-construction but still may take up to its
         # deadline on a wedged driver) so a stats read never stalls the WebUI.
+        # return_status=True so a stale (timed-out) or process-blind (Windows/AMD,
+        # see _vram_reading_trusted) free is not weighed as if it were current: it
+        # would make a too-big model read as "fits". When the reading is untrusted,
+        # free is withheld (fits -> None) and the UI shows "free VRAM unknown"
+        # rather than a confident wrong verdict.
+        from localm.sysstats import _vram_reading_trusted
         loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
-        free, total = info.get("free"), info.get("total")
+        info, status = await loop.run_in_executor(
+            get_plugin_executor(), lambda: vram_capacity(return_status=True))
+        total = info.get("total")
+        free = info.get("free") if _vram_reading_trusted(info, status) else None
         fits = (est["needed"] <= free) if isinstance(free, int) else None
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "total": total, "fits": fits, "approximate": True}

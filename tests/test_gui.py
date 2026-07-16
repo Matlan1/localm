@@ -535,6 +535,28 @@ class TestLogExportEndpoint:
         assert "warning" in body and "bad.log" in body["warning"]
 
 
+from localm.discover import GPU_PROBE_BUSY, GPU_PROBE_OK, GPU_PROBE_TIMEOUT
+
+_GB = 1024 ** 3
+
+# A live GPU reading in the post-#697 shape: every real list_gpus reading carries
+# free_scope, and a completed probe is GPU_PROBE_OK. The GUI readouts present free
+# as current fact ONLY for a fresh (OK) + device-global reading.
+_DEVICE_GPU = {"index": 0, "name": "GPU", "total": 24 * _GB, "free": 20 * _GB,
+               "free_scope": "device"}
+
+
+def _list_gpus_double(gpus, status):
+    """Faithful double of list_gpus()'s two-shape contract: a bare list, or
+    ``(gpus, status)`` when return_status=True. Drives the freshness (status) and
+    scope (free_scope) the readouts gate on THROUGH the real vram_info/vram_capacity
+    aggregation, rather than mocking capacity (which would test the test)."""
+    def _inner(*, deadline=None, return_status=False):
+        served = [dict(g) for g in gpus]
+        return (served, status) if return_status else served
+    return _inner
+
+
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 
@@ -590,8 +612,8 @@ class TestVramEstimate:
         app, _ = gui_app
         reg = {"m": {"path": "C:/nonexistent/m.gguf", "source": "local"}}
         with patch("localm.config.load_registry", return_value=reg), \
-             patch("localm.discover.vram_info",
-                   return_value={"free": 20 * 1024 ** 3, "total": 24 * 1024 ** 3}):
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
             with TestClient(app) as client:
                 r = client.get("/api/vram-estimate",
                                params={"model": "m", "n_ctx": 4096, "n_gpu_layers": 99})
@@ -599,13 +621,17 @@ class TestVramEstimate:
         data = r.json()
         assert data["approximate"] is True
         assert {"weights", "kv_cache", "overhead", "needed", "free", "total", "fits"} <= data.keys()
-        # 20 GB free, a (missing -> 0-byte) model: trivially fits.
+        # 20 GB free (fresh + device-global), a (missing -> 0-byte) model: trivially fits.
+        assert data["free"] == 20 * _GB
         assert data["fits"] is True
 
     def test_estimate_fit_unknown_when_no_vram_reading(self, gui_app):
         app, _ = gui_app
+        # A total-known but free-less reading (e.g. the Windows registry tier): fit
+        # cannot be claimed without a free figure, so fits must be None.
         with patch("localm.config.load_registry", return_value={}), \
-             patch("localm.discover.vram_info", return_value={}):
+             patch("localm.discover.list_gpus", side_effect=_list_gpus_double(
+                 [{"index": 0, "name": "GPU", "total": 8 * _GB}], GPU_PROBE_OK)):
             with TestClient(app) as client:
                 r = client.get("/api/vram-estimate")
         assert r.status_code == 200
@@ -625,17 +651,19 @@ class TestVramEstimate:
         with patch("localm.config.load_registry", return_value=reg), \
              patch("localm.config.load_config",
                    return_value={**base_cfg, "gpu_split_indices": [0, 1]}), \
-             patch("localm.discover.list_gpus", return_value=[
-                 {"index": 0, "name": "A", "total": 8 * 1024 ** 3, "free": 4 * 1024 ** 3},
-                 {"index": 1, "name": "B", "total": 8 * 1024 ** 3, "free": 4 * 1024 ** 3},
-             ]):
+             patch("localm.discover.list_gpus", side_effect=_list_gpus_double([
+                 {"index": 0, "name": "A", "total": 8 * _GB, "free": 4 * _GB,
+                  "free_scope": "device"},
+                 {"index": 1, "name": "B", "total": 8 * _GB, "free": 4 * _GB,
+                  "free_scope": "device"},
+             ], GPU_PROBE_OK)):
             with TestClient(app) as client:
                 r = client.get("/api/vram-estimate",
                                params={"model": "m", "n_ctx": 4096, "n_gpu_layers": 99})
         assert r.status_code == 200
         data = r.json()
-        assert data["total"] == 16 * 1024 ** 3   # 8+8 GiB combined, not one 8 GiB GPU
-        assert data["free"] == 8 * 1024 ** 3      # 4+4 GiB combined, not one 4 GiB GPU
+        assert data["total"] == 16 * _GB   # 8+8 GiB combined, not one 8 GiB GPU
+        assert data["free"] == 8 * _GB      # 4+4 GiB combined, not one 4 GiB GPU
 
     def test_estimate_uses_cached_layer_count_for_partial_offload(self, gui_app, tmp_path):
         """A model's true layer count, cached by a prior load (localm.model_meta),
@@ -649,8 +677,8 @@ class TestVramEstimate:
         reg = {"m": {"path": str(model_file), "source": "local"}}
         with patch("localm.config.load_registry", return_value=reg), \
              patch("localm.model_meta.cached_n_layers", return_value=32), \
-             patch("localm.discover.vram_info",
-                   return_value={"free": 20 * 1024 ** 3, "total": 24 * 1024 ** 3}):
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
             with TestClient(app) as client:
                 full = client.get("/api/vram-estimate",
                                   params={"model": "m", "n_gpu_layers": 99}).json()
@@ -660,6 +688,76 @@ class TestVramEstimate:
         # the cached count this would hit the /99 fallback (16/99) and be ~0.16x.
         assert half["weights"] < full["weights"]
         assert half["weights"] == pytest.approx(full["weights"] / 2, rel=0.02)
+
+    def test_estimate_withholds_free_on_stale_probe(self, gui_app):
+        """A timed-out probe serves a last-known-good (possibly frozen) reading. Its
+        free must NOT be weighed as if current: free -> None, fits -> None, so a
+        too-big model never reads as 'fits'. total (capacity) stays honest."""
+        app, _ = gui_app
+        with patch("localm.config.load_registry", return_value={}), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_TIMEOUT)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate").json()
+        assert data["free"] is None
+        assert data["fits"] is None
+        assert data["total"] == 24 * _GB
+
+    def test_estimate_withholds_free_on_process_scoped_reading(self, gui_app):
+        """A FRESH but process-local reading (Windows/AMD blindness) overstates free
+        - it cannot see other processes' VRAM, including the isolated GGUF worker.
+        It must be withheld exactly like a stale one: fresh does not imply true."""
+        app, _ = gui_app
+        blind = {**_DEVICE_GPU, "free_scope": "process"}
+        with patch("localm.config.load_registry", return_value={}), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([blind], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate").json()
+        assert data["free"] is None
+        assert data["fits"] is None
+
+
+class TestStatsVramTrust:
+    """The status-bar VRAM figure (/api/stats -> sysstats._vram) shows used/percent
+    ONLY when the reading is a FRESH, DEVICE-GLOBAL measurement. A stale or
+    process-blind reading shows total alone - never a wrong used presented as live
+    (AGENTS.md rule 5). Mutation check: drop either gate in _vram_reading_trusted
+    and the total-only cases below go red (used reappears)."""
+
+    def _stats_vram(self, app, reading, status):
+        with patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([reading], status)):
+            with TestClient(app) as client:
+                r = client.get("/api/stats")
+        assert r.status_code == 200
+        return r.json().get("vram", {})
+
+    def test_fresh_device_reading_shows_used(self, gui_app):
+        app, _ = gui_app
+        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_OK)
+        assert vram.get("total") == 24 * _GB
+        assert vram.get("used") == 4 * _GB          # 24 - 20 GiB
+        assert vram.get("percent") is not None
+
+    def test_stale_timeout_shows_total_only(self, gui_app):
+        app, _ = gui_app
+        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_TIMEOUT)
+        assert vram.get("total") == 24 * _GB
+        assert "used" not in vram and "percent" not in vram
+
+    def test_busy_shows_total_only(self, gui_app):
+        app, _ = gui_app
+        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_BUSY)
+        assert vram.get("total") == 24 * _GB
+        assert "used" not in vram
+
+    def test_process_scoped_shows_total_only(self, gui_app):
+        app, _ = gui_app
+        blind = {**_DEVICE_GPU, "free_scope": "process"}
+        vram = self._stats_vram(app, blind, GPU_PROBE_OK)
+        assert vram.get("total") == 24 * _GB
+        assert "used" not in vram
 
 
 class TestGpusEndpoint:

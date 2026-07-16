@@ -89,6 +89,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   cannot be read on Vulkan, localm now notes that in the log and leans on the
   isolated loader to fail safely, instead of silently skipping the check. Single-
   GPU machines and the CUDA/ROCm backends are unaffected.
+- **The status-bar VRAM figure and the performance-page fit estimate no longer
+  present a VRAM number localm cannot stand behind.** The free-VRAM reading behind
+  both can be stale (a slow GPU driver makes localm reuse an older figure) or, on
+  Windows with an AMD GPU, blind to other processes: it counts only this program's
+  own VRAM and misses a model loaded in localm's separate worker (or a game holding
+  VRAM), so "free" reads far too high. The status bar could show that stale or
+  inflated number, and the performance estimate could call a model a "fit" when it
+  would not be. Both now show a used/free figure ONLY when the reading is current
+  and whole-GPU; otherwise the status bar shows total VRAM alone (always correct)
+  and the estimate reports "free VRAM unknown" rather than guess. The status bar
+  also tints the VRAM figure by how full it is.
 - **Unloading a model no longer presents a VRAM reading it never took as fact.**
   localm reads free VRAM from the GPU driver with a time limit, and a slow or busy
   driver could not always answer in time. When that happened it quietly reused the
