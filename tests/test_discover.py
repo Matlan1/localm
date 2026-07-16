@@ -1154,6 +1154,81 @@ class TestVramCapacitySplitAware:
         assert vram_capacity() == {"total": 16_000_000_000}
 
 
+class TestVramInfoReturnStatus:
+    """vram_info(return_status=True) must propagate list_gpus()'s own probe
+    status, so a caller reporting a specific VRAM number as CURRENT FACT (not
+    just a fit ceiling) can tell a fresh reading from a timed-out/stale one -
+    the gap a release-verify pass found in /v1/models/unload's vram_before/
+    after_bytes reporting."""
+
+    def test_default_call_keeps_plain_dict_contract(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe",
+                             lambda: [{"index": 0, "name": "A", "total": 8, "free": 4}])
+        assert vram_info() == {"total": 8, "free": 4}
+
+    def test_return_status_true_reports_ok_on_a_fresh_probe(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe",
+                             lambda: [{"index": 0, "name": "A", "total": 8, "free": 4}])
+        info, status = vram_info(return_status=True)
+        assert info == {"total": 8, "free": 4}
+        assert status == GPU_PROBE_OK
+
+    def test_return_status_true_reports_timeout_on_a_wedged_probe(self, monkeypatch):
+        import threading
+        release = threading.Event()
+
+        def _slow():
+            release.wait(10)
+            return [{"index": 0, "name": "A", "total": 8, "free": 4}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        info, status = vram_info(return_status=True)
+        release.set()
+        assert status == GPU_PROBE_TIMEOUT
+        # No last-known-good reading yet in this test, so info is the genuinely
+        # empty ({} via the no-torch/no-devices tail) - the point being asserted
+        # here is the STATUS, not this incidental value.
+        assert isinstance(info, dict)
+
+
+class TestVramCapacityReturnStatus:
+    """vram_capacity(return_status=True) must propagate probe status through
+    BOTH the single-GPU short-circuit (delegates to vram_info) and the
+    multi-GPU split-summed path, not just one of them."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+    ]
+
+    def test_no_split_configured_propagates_status_via_vram_info(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": None})
+        info, status = vram_capacity(return_status=True)
+        assert info == {"total": 24_000_000_000, "free": 20_000_000_000}
+        assert status == GPU_PROBE_OK
+
+    @pytest.mark.usefixtures("_non_vulkan_host")
+    def test_split_configured_propagates_status(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": [0, 1]})
+        info, status = vram_capacity(return_status=True)
+        assert info == {"total": 36_000_000_000, "free": 30_000_000_000}
+        assert status == GPU_PROBE_OK
+
+    def test_default_call_keeps_plain_dict_contract_regardless_of_split(self, monkeypatch):
+        """The ~28 test files that patch list_gpus()/vram_capacity() with a
+        plain no-kwarg stand-in must never see the new kwarg emitted unless
+        they opted in - this is what a release-verify-pass fix accidentally
+        broke on the first attempt (TypeError: unexpected keyword argument)."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity() == {"total": 36_000_000_000, "free": 30_000_000_000}
+
+
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestSplitDeviceCount:
     """split_device_count(): the DETECTED split size vram_capacity() uses to decide

@@ -837,15 +837,34 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None):
     return arr
 
 
-def vram_info() -> dict:
+def vram_info(*, return_status: bool = False):
     """{"total": bytes, "free"?: bytes} for the CONFIGURED main GPU device (see
     main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is
     configured, or {} when not measurable. Tries torch (CUDA/ROCm) then
     nvidia-smi (both via list_gpus()), then the Windows display-adapter
     registry - the GGUF-only install has no torch, and the fit badges must
-    still work there (total is all fit_label needs)."""
+    still work there (total is all fit_label needs).
+
+    When ``return_status`` is True, returns ``(info, status)`` where ``status``
+    is list_gpus()'s own GPU_PROBE_OK/GPU_PROBE_TIMEOUT/GPU_PROBE_BUSY - a
+    caller that will present a specific number as CURRENT FACT (not just a fit
+    ceiling) must check this rather than trust a timed-out probe's stale
+    last-known-good fallback (AGENTS.md rule 5; see the vram_before/after
+    bytes this fed into /v1/models/unload, which is exactly that case).
+    ``return_status`` defaults to False, preserving the plain-dict contract
+    (AND the plain, no-kwarg list_gpus() call) every existing caller and test
+    double relies on - the status-aware call is made ONLY when a caller opts
+    in, never unconditionally."""
     from localm.config import load_config
-    gpus = list_gpus()
+    if return_status:
+        gpus, status = list_gpus(return_status=True)
+    else:
+        gpus = list_gpus()
+        status = None   # unused: _ret() never reads it when return_status=False
+
+    def _ret(info: dict):
+        return (info, status) if return_status else info
+
     if gpus:
         configured = load_config().get("main_gpu_index")
         idx = resolve_main_gpu_index(configured, gpus=gpus)
@@ -857,7 +876,7 @@ def vram_info() -> dict:
         out = {"total": g["total"]}
         if g.get("free") is not None:
             out["free"] = g["free"]
-        return out
+        return _ret(out)
 
     import sys
     if sys.platform == "win32":
@@ -891,13 +910,13 @@ def vram_info() -> dict:
                                      sub, e)
                         continue
             if best:
-                return {"total": int(best)}
+                return _ret({"total": int(best)})
         except Exception:
             pass
-    return {}
+    return _ret({})
 
 
-def vram_capacity(config: Optional[dict] = None) -> dict:
+def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False):
     """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
     right ceiling for any "will this model fit" decision (a pre-load refusal
     gate, a fit badge, a VRAM-estimate readout).
@@ -920,6 +939,14 @@ def vram_capacity(config: Optional[dict] = None) -> dict:
     resolve_gpu_split already warns and degrades a stale/invalid split to
     single-GPU (rule 5, do-not-hide-problems); this reuses that same
     validation rather than duplicating it.
+
+    ``return_status``: see :func:`vram_info` - propagated through both the
+    single-GPU short-circuit and the split-summed path, so a caller weighing
+    whether to trust a specific number as CURRENT fact (not just a fit
+    ceiling) can tell a fresh reading from a timed-out/stale one. Made ONLY
+    when a caller opts in (never unconditionally), so every existing caller
+    and test double that patches vram_info()/list_gpus() with a plain, no-kwarg
+    stand-in keeps working exactly as before.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -928,21 +955,29 @@ def vram_capacity(config: Optional[dict] = None) -> dict:
     # (list_gpus() -> torch/nvidia-smi) on every request for the vast majority
     # of single-GPU installs that never configured a split.
     if not cfg.get("gpu_split_indices"):
-        return vram_info()
+        return vram_info(return_status=True) if return_status else vram_info()
 
-    gpus = list_gpus()
+    if return_status:
+        gpus, status = list_gpus(return_status=True)
+    else:
+        gpus = list_gpus()
+        status = None
+
+    def _ret(info: dict):
+        return (info, status) if return_status else info
+
     pairs = resolve_gpu_split(
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
     by_index = {g.get("index"): g for g in gpus}
     split_gpus = [by_index[idx] for idx, _ in pairs if idx in by_index]
     if len(split_gpus) < 2:
-        return vram_info()
+        return vram_info(return_status=True) if return_status else vram_info()
 
     out = {"total": sum(g["total"] for g in split_gpus)}
     frees = [g.get("free") for g in split_gpus]
     if all(f is not None for f in frees):
         out["free"] = sum(frees)
-    return out
+    return _ret(out)
 
 
 def split_device_count(config: Optional[dict] = None) -> int:
