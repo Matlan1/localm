@@ -699,6 +699,56 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
     return _engines[name]
 
 
+def _vram_before_reading() -> tuple:
+    """The 'before' free-VRAM reading used to seed wait_for_vram_release(),
+    plus whether the probe behind it was fresh (list_gpus() completed inside
+    its deadline) rather than a timed-out/busy fallback to a stale
+    last-known-good value.
+
+    A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to
+    the user must know this: presenting a stale fallback as the CURRENT state
+    is exactly the rule-5 gap a release-verify pass caught - /v1/models/unload
+    reported byte-identical before/after readings, and vram_freed: false,
+    across two calls made minutes apart with genuinely different real GPU
+    states (confirmed stale via an OS-level VRAM counter showing the actual
+    free/use cycle worked correctly the whole time).
+
+    Defensive against a test double that patches vram_capacity()/vram_info()/
+    list_gpus() with a plain no-kwarg callable or a fixed dict return_value
+    (neither accepts/implements return_status): such a double is treated as
+    "status unknown, assume fresh" (permissive, matching this reading's
+    behavior before return_status existed) rather than raising on a rejected
+    kwarg or an unexpected shape - only a REAL probe chain needs to prove
+    itself stale."""
+    from localm.discover import GPU_PROBE_OK, vram_capacity
+    try:
+        result = vram_capacity(return_status=True)
+    except TypeError:
+        result = vram_capacity()
+    if isinstance(result, tuple) and len(result) == 2:
+        info, probe_status = result
+        fresh = probe_status == GPU_PROBE_OK
+    else:
+        info, fresh = result, True
+    return info.get("free"), fresh
+
+
+def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool) -> None:
+    """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
+    measurable (unchanged from before), plus an honest flag when the 'before'
+    reading may be stale rather than presenting a timed-out probe's fallback
+    value as current fact (see _vram_before_reading)."""
+    if before is None:
+        return
+    result.update(vram_freed=released, vram_before_bytes=before, vram_after_bytes=after)
+    if not before_fresh:
+        result["vram_reading_uncertain"] = True
+        result["vram_note"] = (
+            "the GPU probe timed out or was busy when this reading was "
+            "taken; vram_before_bytes/vram_after_bytes/vram_freed may "
+            "reflect a stale cached value rather than the current state")
+
+
 async def unload_all_models() -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
@@ -721,7 +771,7 @@ async def unload_all_models() -> dict:
     def _free():
         return vram_capacity().get("free")
 
-    before = _free()
+    before, before_fresh = _vram_before_reading()
     unloaded_models = []
     skipped_in_use = []
 
@@ -815,9 +865,8 @@ async def unload_all_models() -> dict:
     }
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
-    if before is not None:
-        result.update(vram_freed=released,
-                      vram_before_bytes=before, vram_after_bytes=after)
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh)
     # Cross-install GPU coordination: reflect the now-empty/changed state for a
     # sibling's next eviction decision. No-op when not registered. Offloaded:
     # registry file I/O plus, with a non-zero main_gpu_index, a GPU driver probe.
@@ -881,7 +930,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     def _free():
         return vram_capacity().get("free")
 
-    before = _free()
+    before, before_fresh = _vram_before_reading()
     await loop.run_in_executor(None, _embedder_mod.reset_embedder)
     if before is not None:
         released, after = await loop.run_in_executor(
@@ -889,9 +938,8 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     else:
         released, after = 0, before
     result = {"status": "unloaded", "model": name, "was_active": False}
-    if before is not None:
-        result.update(vram_freed=released,
-                      vram_before_bytes=before, vram_after_bytes=after)
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh)
     # Offloaded for the same reason as this function's other executor hops above.
     await loop.run_in_executor(None, _gpu_registry_sync)
     return result
@@ -930,7 +978,7 @@ async def unload_one_model(name: str) -> dict:
     def _free():
         return vram_capacity().get("free")
 
-    before = _free()
+    before, before_fresh = _vram_before_reading()
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
     # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
     # check above can fast-path-pin this engine while we free it (the pin-arrives-
@@ -959,9 +1007,8 @@ async def unload_one_model(name: str) -> dict:
         released, after = 0, before
 
     result = {"status": "unloaded", "model": name, "was_active": was_active}
-    if before is not None:
-        result.update(vram_freed=released,
-                      vram_before_bytes=before, vram_after_bytes=after)
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh)
     # Offloaded: registry file I/O plus, with a non-zero main_gpu_index, a GPU
     # driver probe - keep it OFF the event loop (same as the heartbeat).
     await loop.run_in_executor(None, _gpu_registry_sync)

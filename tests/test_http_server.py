@@ -113,6 +113,50 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertEqual(body["vram_before_bytes"], 10 * GB)
         self.assertEqual(body["vram_after_bytes"], 20 * GB)
 
+    def test_unload_vram_reading_marked_uncertain_on_a_stale_probe(self):
+        """Release-verify-pass bug: /v1/models/unload reported a specific
+        vram_before/after_bytes + vram_freed as fact even when the underlying
+        GPU probe had timed out and fallen back to a stale last-known-good
+        reading (confirmed via an OS-level VRAM counter that the real
+        free/use cycle worked correctly the whole time - the endpoint's OWN
+        reporting was the only thing wrong). The response must now say so."""
+        # A real vram_capacity() only returns a tuple when EXPLICITLY asked
+        # (return_status=True) - the bare-call polling _free() closure inside
+        # wait_for_vram_release still expects (and must keep getting) a plain
+        # dict, so the mock mirrors the real contract rather than fixing one
+        # shape regardless of how it is called.
+        from localm.discover import GPU_PROBE_TIMEOUT
+
+        def _capacity(*, return_status=False):
+            info = {"free": 10 * GB}
+            return (info, GPU_PROBE_TIMEOUT) if return_status else info
+
+        with patch("localm.discover.vram_capacity", side_effect=_capacity):
+            r = self.client.post("/v1/models/unload")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "unloaded")
+        # The byte numbers are still reported (best-effort, still informative)...
+        self.assertIn("vram_before_bytes", body)
+        # ...but now honestly flagged as unreliable, not presented as fact.
+        self.assertTrue(body["vram_reading_uncertain"])
+        self.assertIn("stale", body["vram_note"])
+
+    def test_unload_vram_reading_not_flagged_on_a_fresh_probe(self):
+        """The common case: a fresh probe must NOT carry the uncertainty
+        flag - only a demonstrably stale/timed-out one should."""
+        from localm.discover import GPU_PROBE_OK
+
+        def _capacity(*, return_status=False):
+            info = {"free": 10 * GB}
+            return (info, GPU_PROBE_OK) if return_status else info
+
+        with patch("localm.discover.vram_capacity", side_effect=_capacity):
+            r = self.client.post("/v1/models/unload")
+        body = r.json()
+        self.assertNotIn("vram_reading_uncertain", body)
+        self.assertNotIn("vram_note", body)
+
     def test_unload_release_detected_via_combined_split_capacity(self):
         """AUDIT-GPU-SPLIT-1: the C4 release-guard's before/after free-VRAM
         delta must be measured against discover.vram_capacity() (combined
