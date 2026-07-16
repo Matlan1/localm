@@ -143,7 +143,10 @@ class EngineCache:
             # a 0-second no-op on any box whose probe merely ran slow. For the
             # 'after' POLL, None correctly means "cannot verify". Freshness is
             # carried separately, for the REPORT, not the wait.
-            before_free, before_fresh = _vram_free_reading()
+            # scope unused here: this path only LOGS whether the free could be
+            # confirmed, it does not surface a before/after figure a process-scoped
+            # reading would mislead (that is the /v1/models/unload report's concern).
+            before_free, before_fresh, _scope = _vram_free_reading()
             try:
                 self._engine.unload()
             except Exception as e:

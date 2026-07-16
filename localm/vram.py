@@ -300,13 +300,15 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
 
 
 def _vram_free_reading() -> tuple:
-    """``(free_bytes, fresh)``: a free-VRAM reading, plus whether the probe behind
+    """``(free_bytes, fresh, scope)``: a free-VRAM reading, whether the probe behind
     it was fresh (list_gpus() completed inside its deadline) rather than a
-    timed-out/busy fallback to a stale last-known-good value.
+    timed-out/busy fallback to a stale last-known-good value, and the reading's
+    ``free_scope``.
 
     Used for BOTH ends of the before/after delta (hence the name: it was
-    _vram_before_reading when only the 'before' end checked freshness). The
-    'after' end needs it just as much - see _live_free_vram_bytes below.
+    ``_vram_before_reading`` when only the 'before' end checked freshness, before
+    #694 moved it here and #697 added ``scope``). The 'after' end needs it just as
+    much - see _live_free_vram_bytes below.
 
     A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to
     the user must know this: presenting a stale fallback as the CURRENT state
@@ -315,6 +317,13 @@ def _vram_free_reading() -> tuple:
     across two calls made minutes apart with genuinely different real GPU
     states (confirmed stale via an OS-level VRAM counter showing the actual
     free/use cycle worked correctly the whole time).
+
+    ``scope`` is the reading's ``free_scope`` (see
+    discover._apply_device_global_free): FREE_SCOPE_PROCESS means the number counts
+    only THIS process's allocations, so on that platform it cannot see a model the
+    isolated GGUF worker loaded - a SECOND, independent way this same before/after
+    report can be wrong while the probe is perfectly fresh (not the staleness the
+    'fresh' flag guards). None when the double/fallback did not say.
 
     Defensive against a test double that patches vram_capacity()/vram_info()/
     list_gpus() with a plain no-kwarg callable or a fixed dict return_value
@@ -333,7 +342,7 @@ def _vram_free_reading() -> tuple:
         fresh = probe_status == GPU_PROBE_OK
     else:
         info, fresh = result, True
-    return info.get("free"), fresh
+    return info.get("free"), fresh, info.get("free_scope")
 
 
 def _live_free_vram_bytes():
@@ -371,7 +380,7 @@ def _live_free_vram_bytes():
     None of these is self-correcting: once a probe overruns,
     discover._gpu_probe_inflight stays True until the abandoned thread returns,
     so every later call keeps serving the same frozen value."""
-    free, fresh = _vram_free_reading()
+    free, fresh, _scope = _vram_free_reading()
     return free if fresh else None
 
 
