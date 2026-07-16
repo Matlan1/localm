@@ -514,7 +514,7 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
             # for exactly that reason (rule 5).
             job.push({"type": "line", "text":
                       "Chat model unloaded - could not confirm how much VRAM was "
-                      "freed (no live GPU reading) - continuing."})
+                      "freed - continuing."})
         elif data.get("vram_freed") and before is not None and after is not None:
             gb = max(0.0, (after - before) / 1024 ** 3)
             job.push({"type": "line", "text":
