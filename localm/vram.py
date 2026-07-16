@@ -513,7 +513,10 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
     unauthenticated call is rejected and the chat model stays resident - the
     media model then loads on top of it and hangs the GPU driver. Logs the
     outcome (and the VRAM freed) on *job* so a failure is visible instead of
-    silent. Returns True when the server confirmed the chat model is unloaded.
+    silent. Returns True only when the server reports NOTHING left resident
+    and in use; any pinned model (the chat engine or a sibling) yields False,
+    because what matters to this caller is resident VRAM, and the caller then
+    falls back to its own conservative swap handling.
     *media_label* names the caller ("image"/"music"/"video") for the messages."""
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:
@@ -552,6 +555,23 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
                       "Chat model is busy (still generating a reply) and could "
                       f"not be unloaded - the {media_label} backend may run low "
                       "on VRAM."})
+            return False
+        skipped = [str(m) for m in (data.get("skipped_in_use") or [])]
+        if skipped:
+            # "unloaded" means SOMETHING was freed (an idle sibling engine, the
+            # embedding model), not that the chat model was: released_anything
+            # wins the status in unload_all_models(), so a pinned chat engine
+            # still lands in skipped_in_use under status "unloaded". For this
+            # caller only the chat model matters - falling through to "Chat
+            # model unloaded." here was the same rule-5 false success the
+            # "in_use" branch above closes for the nothing-freed shape, just
+            # hidden behind a freed bystander. Report what actually happened;
+            # the caller falls back to its conservative swap handling, exactly
+            # as for "in_use".
+            job.push({"type": "line", "text":
+                      "Freed what could be freed, but still in use and NOT "
+                      f"unloaded: {', '.join(skipped)} - the {media_label} "
+                      "backend may run low on VRAM."})
             return False
         before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
         uncertain = bool(data.get("vram_reading_uncertain"))
