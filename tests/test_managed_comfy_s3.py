@@ -148,6 +148,26 @@ def test_torch_spec_amd_gfx1030_is_rocm_wheels(monkeypatch):
     assert spec.extra_index_url == "https://repo.amd.com/rocm/whl/gfx103X-all/"
 
 
+def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
+    """Managed-ComfyUI-music-generation-broken bug: ComfyUI's own requirements.txt
+    lists torch/torchvision/torchaudio UNPINNED, and the later "install ComfyUI's
+    requirements" step runs plain `pip install -r requirements.txt` with no
+    --extra-index-url. torch/torchvision are already satisfied by the ROCm
+    wheels this spec installs first (pip does not reinstall an already-satisfied
+    bare requirement), but torchaudio had nothing to satisfy it and fell through
+    to a plain-PyPI build whose compiled C extension does not match this ROCm
+    torch's ABI - confirmed live: "OSError: Could not load this library:
+    ..._torchaudio.pyd" on import, disabling every audio-dependent ComfyUI node
+    (VAEDecodeAudio, MMAudio, Whisper-based audio encoders), not just ACE-Step
+    music specifically. Pinning a matching ROCm torchaudio build here (same
+    repo, same "2.9" series and rocm7.13.0 tag as the torch pin) makes that
+    later bare requirement already-satisfied too."""
+    from localm.media import managed_comfy_fresh as fresh
+    monkeypatch.setattr(sys, "platform", "win32")
+    spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6900 XT"))
+    assert "torchaudio==2.9.0+rocm7.13.0" in spec.packages
+
+
 def test_torch_spec_nvidia_is_cuda(monkeypatch):
     from localm.media import managed_comfy_fresh as fresh
     # cuda is platform-agnostic; pin the platform so the test is deterministic.

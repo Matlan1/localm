@@ -66,8 +66,25 @@ COMFYUI_PINNED_VERSION = "v0.9.2"
 # pyproject.toml pins. A fresh ComfyUI venv needs the identical stack. Keep these in
 # sync with pyproject's [gpu] extra (there is no runtime import of pyproject; this is
 # its ComfyUI-venv mirror).
+#
+# torchaudio is pinned here too (BUG: managed ComfyUI music generation broken):
+# ComfyUI's own requirements.txt lists torch/torchvision/torchaudio UNPINNED, and
+# _install_fresh's later "ComfyUI's own requirements" step runs plain
+# `pip install -r requirements.txt` with no --extra-index-url - so torch/torchvision
+# were already satisfied by the ROCm build above (pip does not reinstall a
+# satisfied bare requirement) and stayed correct, but torchaudio had no prior
+# install to satisfy it and resolved from PyPI's default index instead: a generic
+# build whose compiled C extension does not match this ROCm torch's ABI
+# (confirmed live: "OSError: Could not load this library: ..._torchaudio.pyd" on
+# import, disabling every audio-dependent ComfyUI node - VAEDecodeAudio, MMAudio,
+# the Whisper-based audio encoders - not just ACE-Step music specifically).
+# Pinning the matching ROCm build here (confirmed present on the same repo,
+# same "2.9" series and rocm7.13.0 tag as the torch pin above) makes the later
+# bare `torchaudio` requirement already-satisfied, the same way torch/torchvision
+# already are.
 _AMD_GFX103X_ROCM_INDEX = "https://repo.amd.com/rocm/whl/gfx103X-all/"
-_AMD_GFX103X_TORCH = ("torch==2.9.1+rocm7.13.0", "torchvision==0.24.0+rocm7.13.0")
+_AMD_GFX103X_TORCH = ("torch==2.9.1+rocm7.13.0", "torchvision==0.24.0+rocm7.13.0",
+                      "torchaudio==2.9.0+rocm7.13.0")
 _AMD_GFX103X_ROCM_SDK = ("rocm", "rocm-sdk-core", "rocm-sdk-libraries-gfx103x-all")
 
 
