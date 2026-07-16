@@ -513,7 +513,10 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
     unauthenticated call is rejected and the chat model stays resident - the
     media model then loads on top of it and hangs the GPU driver. Logs the
     outcome (and the VRAM freed) on *job* so a failure is visible instead of
-    silent. Returns True when the server confirmed the chat model is unloaded.
+    silent. Returns True only when the server reports NOTHING left resident
+    and in use; any pinned model (the chat engine or a sibling) yields False,
+    because what matters to this caller is resident VRAM, and the caller then
+    falls back to its own conservative swap handling.
     *media_label* names the caller ("image"/"music"/"video") for the messages."""
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:

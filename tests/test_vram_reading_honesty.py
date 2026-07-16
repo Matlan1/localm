@@ -552,7 +552,7 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
         job.push.side_effect = lambda d: lines.append(d.get("text", ""))
         with patch("localm.inference.embedder.loaded_dim", return_value=384), \
              patch("localm.inference.embedder.active_requests", return_value=0), \
-             patch("localm.inference.embedder.release_for_exit", return_value=True), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait), \
              patch("localm.selfclient.self_request", fake_self_request):
             ok = vram_mod.unload_chat_for_media(job, "http://x", "image")
 
@@ -563,6 +563,9 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
         self.assertNotIn("Chat model unloaded", joined,
                          f"claimed chat-model success off an embedder-only "
                          f"partial unload: {lines}")
+        self.assertIn("NOT unloaded", joined,
+                      "must hit the partial-unload branch specifically, not a "
+                      f"sibling failure path: {lines}")
 
 
 class TestMcpModelSwitchHonesty(unittest.TestCase):
