@@ -46,7 +46,17 @@ def _vram(free, total):
     genuine driver numbers, defeating a test that wants "VRAM is totally
     unmeasurable" (free=None). Both paths must be patched together, not just
     the torch one, or `_vram(None, None)` is not actually unmeasurable on a
-    GPU-equipped dev machine."""
+    GPU-equipped dev machine.
+
+    Since #706 there is a THIRD path with the same trap: ``_free_vram_bytes``
+    applies a device-global correction (``_device_global_free_bytes``) on a
+    Windows + ROCm/HIP box, reading the box's REAL adapter usage via ADL/PDH
+    and replacing the faked ``free`` with ``total - real_used`` - which
+    silently defeats both fakes above on exactly that hardware (measured live:
+    a faked 6/16 GB partial-fit scenario came back as ~15 GB free, so
+    _auto_gpu_layers returned 99 and six partial-offload tests went red).
+    Patched to None so the correction reports "not applicable" and the faked
+    reading stands deterministically on every box."""
     from contextlib import ExitStack
     from localm.inference.backends.llamacpp import _loader
 
@@ -56,6 +66,8 @@ def _vram(free, total):
     stack.enter_context(patch.object(
         _loader, "gpu_memory_isolated",
         return_value=(None if free is None else (free, total))))
+    stack.enter_context(patch.object(
+        GgufBackend, "_device_global_free_bytes", return_value=None))
     return stack
 
 
