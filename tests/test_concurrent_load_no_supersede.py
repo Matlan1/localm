@@ -17,6 +17,7 @@ import pytest
 
 from localm.inference import http_server as hs
 from localm.inference.backends.base import ModelLoadCancelled
+from tests.conftest import probe_double
 
 
 class FakeEngine:
@@ -56,7 +57,7 @@ def multi(monkeypatch):
     monkeypatch.setattr("localm.model_manager.get_model_info",
                         lambda n: (f"models/{n}.gguf", "h"))
     monkeypatch.setattr("localm.discover.vram_info",
-                        lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+                        probe_double({"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3}))
     for d in (hs._engines, hs._engines_lru, hs._inference_sems, hs._last_activity_per_model):
         d.clear()
     hs._active_model_name = None

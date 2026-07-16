@@ -33,6 +33,7 @@ import pytest
 
 from localm.inference import http_server as hs
 from localm.inference.backends.base import ModelLoadCancelled
+from tests.conftest import probe_double
 
 
 class CancelHonoringEngine:
@@ -99,8 +100,8 @@ def registered(monkeypatch):
     monkeypatch.setattr("localm.model_manager.get_model_info",
                         lambda n: (f"models/{n}.gguf", "hint"))
     monkeypatch.setattr("localm.discover.vram_capacity",
-                        lambda config=None: {"free": 32 * 1024 ** 3,
-                                             "total": 32 * 1024 ** 3})
+                        probe_double({"free": 32 * 1024 ** 3,
+                                      "total": 32 * 1024 ** 3}))
     monkeypatch.setattr("localm.discover.gpu_split_shortfall", lambda need: [])
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",

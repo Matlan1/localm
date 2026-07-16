@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
+from tests.conftest import probe_double
 
 
 class FakeEngine:
@@ -56,7 +57,8 @@ def setup_multi_model(monkeypatch):
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
     
     # Setup VRAM to have plenty of space initially (10 GB free)
-    monkeypatch.setattr("localm.discover.vram_info", lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+    monkeypatch.setattr("localm.discover.vram_info",
+                        probe_double({"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3}))
     
     # Set engine factory to return FakeEngines
     monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
@@ -135,7 +137,7 @@ def test_lru_eviction(setup_multi_model, monkeypatch):
         free = (10 * 1024 ** 3) - int(loaded_count * 4.8 * 1024 ** 3)
         return {"free": free, "total": 10 * 1024 ** 3}
         
-    monkeypatch.setattr("localm.discover.vram_info", dynamic_vram)
+    monkeypatch.setattr("localm.discover.vram_info", probe_double(dynamic_vram))
     
     # Load model-a
     r = client.post("/v1/chat/completions", json={
@@ -166,7 +168,7 @@ def test_active_requests_protection_from_eviction(setup_multi_model, monkeypatch
         free = (10 * 1024 ** 3) - int(loaded_count * 4.8 * 1024 ** 3)
         return {"free": free, "total": 10 * 1024 ** 3}
         
-    monkeypatch.setattr("localm.discover.vram_info", dynamic_vram)
+    monkeypatch.setattr("localm.discover.vram_info", probe_double(dynamic_vram))
     
     # Load model-a
     r = client.post("/v1/chat/completions", json={

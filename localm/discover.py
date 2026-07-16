@@ -1068,7 +1068,29 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None):
     return arr
 
 
-def vram_info(*, return_status: bool = False):
+def _list_gpus_kw(*, deadline: Optional[float] = None, return_status: bool = False,
+                  wait_for_inflight: bool = False):
+    """Call :func:`list_gpus` passing ONLY the kwargs the caller actually asked for.
+
+    Not a style nicety: ~22 test modules patch list_gpus() with a zero-arg double
+    (``lambda: gpus``), which its documented bare-list contract entitles them to.
+    Forwarding ``deadline=None`` unconditionally would hand those doubles a kwarg
+    they never agreed to accept and raise TypeError in tests with no stake in this
+    change. Omitting it keeps the default call byte-identical, so only a caller
+    that opts in pays for opting in. ``wait_for_inflight`` (#701) is forwarded the
+    same way - only when True."""
+    kw = {}
+    if deadline is not None:
+        kw["deadline"] = deadline
+    if return_status:
+        kw["return_status"] = True
+    if wait_for_inflight:
+        kw["wait_for_inflight"] = True
+    return list_gpus(**kw)
+
+
+def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
+              wait_for_inflight: bool = False):
     """{"total": bytes, "free"?: bytes} for the CONFIGURED main GPU device (see
     main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is
     configured, or {} when not measurable. Tries torch (CUDA/ROCm) then
@@ -1085,12 +1107,27 @@ def vram_info(*, return_status: bool = False):
     ``return_status`` defaults to False, preserving the plain-dict contract
     (AND the plain, no-kwarg list_gpus() call) every existing caller and test
     double relies on - the status-aware call is made ONLY when a caller opts
-    in, never unconditionally."""
+    in, never unconditionally.
+
+    ``deadline`` overrides list_gpus()'s default probe cap for callers that are
+    NOT on the event loop and can afford to wait out a slow COLD driver init
+    rather than be handed an inconclusive reading (see
+    :data:`_GPU_PROBE_CLI_DEADLINE`). None keeps list_gpus()'s own default, and
+    keeps the call byte-identical for every existing caller - the 4s default cap
+    exists to protect the single event loop (PR #541) and must stay the default
+    for anything that runs on it.
+
+    ``wait_for_inflight`` (opt-in, #701): when a probe is already running (e.g. the
+    GUI's 2.5s stats heartbeat holds it through a cold init), JOIN it and wait on its
+    result up to ``deadline`` instead of being handed an instant last-known-good/BUSY.
+    Only safe for a caller OFF the event loop. Forwarded, not defaulted, for the same
+    byte-identical-call reason as ``deadline``."""
     from localm.config import load_config
     if return_status:
-        gpus, status = list_gpus(return_status=True)
+        gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
+                                     wait_for_inflight=wait_for_inflight)
     else:
-        gpus = list_gpus()
+        gpus = _list_gpus_kw(deadline=deadline, wait_for_inflight=wait_for_inflight)
         status = None   # unused: _ret() never reads it when return_status=False
 
     def _ret(info: dict):
@@ -1152,7 +1189,8 @@ def vram_info(*, return_status: bool = False):
     return _ret({})
 
 
-def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False):
+def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
+                  deadline: Optional[float] = None, wait_for_inflight: bool = False):
     """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
     right ceiling for any "will this model fit" decision (a pre-load refusal
     gate, a fit badge, a VRAM-estimate readout).
@@ -1183,20 +1221,41 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
     when a caller opts in (never unconditionally), so every existing caller
     and test double that patches vram_info()/list_gpus() with a plain, no-kwarg
     stand-in keeps working exactly as before.
+
+    ``deadline`` / ``wait_for_inflight``: see :func:`vram_info` - forwarded through
+    ALL paths below (the no-split short-circuit, the split-summed path, and the
+    degrade-to-single-device fallback), so a blocking (non-event-loop) caller gets
+    the same longer probe budget and join behaviour whether or not a split is
+    configured. Defaults keep the 4s cap and no-join, which protect the event loop.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
+
+    def _vi():
+        # Forward ONLY the opt-in kwargs the caller supplied, so the call stays
+        # byte-identical to a bare vram_info() for the no-kwarg vram_info() doubles
+        # (~11 test modules patch it; same reason as _list_gpus_kw).
+        kw = {}
+        if return_status:
+            kw["return_status"] = True
+        if deadline is not None:
+            kw["deadline"] = deadline
+        if wait_for_inflight:
+            kw["wait_for_inflight"] = True
+        return vram_info(**kw)
+
     # Cheap short-circuit for the common (no split configured) case, mirroring
     # resolve_gpu_split's own early return - skips a real hardware probe
     # (list_gpus() -> torch/nvidia-smi) on every request for the vast majority
     # of single-GPU installs that never configured a split.
     if not cfg.get("gpu_split_indices"):
-        return vram_info(return_status=True) if return_status else vram_info()
+        return _vi()
 
     if return_status:
-        gpus, status = list_gpus(return_status=True)
+        gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
+                                     wait_for_inflight=wait_for_inflight)
     else:
-        gpus = list_gpus()
+        gpus = _list_gpus_kw(deadline=deadline, wait_for_inflight=wait_for_inflight)
         status = None
 
     def _ret(info: dict):
@@ -1207,7 +1266,10 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
     by_index = {g.get("index"): g for g in gpus}
     split_gpus = [by_index[idx] for idx, _ in pairs if idx in by_index]
     if len(split_gpus) < 2:
-        return vram_info(return_status=True) if return_status else vram_info()
+        # Split configured but degraded to a single detected device (the other
+        # vanished / was never present). Same forwarding as the no-split path, so a
+        # cold init on THIS path also completes / joins rather than timing out.
+        return _vi()
 
     out = {"total": sum(g["total"] for g in split_gpus)}
     frees = [g.get("free") for g in split_gpus]
