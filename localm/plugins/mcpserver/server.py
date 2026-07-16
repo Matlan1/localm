@@ -63,9 +63,17 @@ def _redirect_consoles_to_stderr() -> None:
     import localm.inference.engine as _engine_mod
     import localm.inference.backends.gguf as _gguf_mod
     import localm.model_manager as _mm_mod
+    import localm.inference.backends.llamacpp._sizing as _sizing_mod
     _engine_mod.console = err
     _gguf_mod.console = err
     _mm_mod.console = err
+    # BUG-11: _sizing's own module-level console (the "ctx auto" sizing note
+    # printed during GgufBackend's preflight, BEFORE the model process is even
+    # spawned - i.e. still in THIS process) was missing from this list, which
+    # is how chat/embed's first-load leak got past this redirect in the first
+    # place. The per-call _quiet_stdout() guards added at each risky call site
+    # are the belt; this is the suspenders.
+    _sizing_mod.console = err
     try:
         import localm.inference.backends.llamacpp.llama as _llama_mod
         if hasattr(_llama_mod, "console"):
@@ -184,7 +192,11 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     if the engine object is not yet instantiated/cached."""
     if getattr(engines, "_factory", None) != getattr(engines, "_build_engine", None):
         try:
-            backend = getattr(engines.get(None), "_backend", None)
+            # BUG-11: a custom factory can be a real engine builder (tests
+            # normally inject a stub, but nothing enforces that), so guard the
+            # same as chat()/embed()/pull_model() below.
+            with _quiet_stdout():
+                backend = getattr(engines.get(None), "_backend", None)
             return getattr(backend, "can_embed", True) is not False
         except Exception as e:
             # Probe failed: assume embeddable (do not hide the embed tool on a
@@ -244,7 +256,13 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
-        engine = engines.get(args.get("model"))
+        # BUG-11: engines.get() can trigger a fresh model load, and a GGUF load
+        # prints native sizing/context diagnostics (e.g. the "ctx auto" note)
+        # straight to stdout - the same stream the JSON-RPC frames travel on.
+        # Every other handler that can load a model already guards this; chat
+        # and embed (below) were the two that did not.
+        with _quiet_stdout():
+            engine = engines.get(args.get("model"))
         messages = []
         if args.get("system"):
             messages.append({"role": "system", "content": args["system"]})
@@ -340,7 +358,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(f"pulled and registered as {name!r} (not loaded)")
 
         try:
-            engines.get(name)
+            # BUG-11: this load, like chat()/embed()'s, can print native sizing
+            # diagnostics straight to stdout - the download above was already
+            # guarded, but this post-download load step was not.
+            with _quiet_stdout():
+                engines.get(name)
         except Exception as e:
             return _text_result(
                 f"pulled and registered as {name!r}, but loading it failed: {e}",
@@ -353,7 +375,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
-        engine = engines.get(args.get("model"))
+        # BUG-11: see chat() above - a fresh embedder load can print to stdout too.
+        with _quiet_stdout():
+            engine = engines.get(args.get("model"))
         try:
             vecs = engine.embed(texts)
         except NotImplementedError as e:
