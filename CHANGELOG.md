@@ -101,8 +101,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   just took apart from a reused one: when it cannot get a fresh per-device reading
   it lets the load proceed rather than refusing on a number it cannot stand behind
   (the load is sandboxed, so a genuine over-commit fails safely on its own) and it
-  never shows a stale VRAM figure as the reason. The embedding model's split
-  preflight is covered the same way.
+  never shows a stale VRAM figure as the reason. The same now applies to a reading
+  that is fresh but only partial: on Windows with an AMD card, a per-card
+  free-memory figure can count only localm's own use and miss another program's (or
+  a loaded model's own, since each runs sandboxed in its own process), so localm
+  leaves that card out of the per-card check rather than refuse or quote a number
+  that is not the whole card's. The embedding model's split preflight is covered the
+  same way.
 - **Your own saved facts come back when you ask about yourself.** Without an
   embedding model installed, memory could only match facts that shared an exact
   word with your question, so asking "what is my name" never surfaced "User is
