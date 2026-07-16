@@ -353,6 +353,72 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
             "vram_before_bytes": 10 * GB, "vram_after_bytes": 10 * GB})
         self.assertIn("has not dropped", " ".join(lines))
 
+    def test_in_use_is_not_reported_as_unloaded(self):
+        """Regression: a pinned chat engine (mid-generation) makes
+        unload_all_models() return {"status": "in_use", "vram_freed": 0} without
+        raising and without a non-2xx - so resp.ok is True and the old code fell
+        straight through the already_unloaded check into the generic "Chat model
+        unloaded." branch (0 is not False, so `vram_freed is False` never matched
+        either). That told the image/music/video caller VRAM was free when the
+        chat model was still fully resident - the exact driver-hang hazard this
+        module exists to prevent (see the module docstring)."""
+        ok, lines = self._push_lines({
+            "status": "in_use", "model": "none", "vram_freed": 0,
+            "vram_before_bytes": 10 * GB, "vram_after_bytes": 10 * GB,
+            "skipped_in_use": ["chat-model"]})
+        self.assertFalse(ok, "must report failure so the caller falls back to "
+                             "its own conservative swap handling")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed the chat model was unloaded while it was "
+                         f"still pinned: {lines}")
+        self.assertIn("busy", joined)
+
+
+class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
+    """The regression test above hand-crafts the {"status": "in_use", ...} body -
+    it pins the CONTRACT but not that unload_all_models() actually produces that
+    body for a genuinely pinned engine. This drives the REAL
+    ``POST /v1/models/unload`` route (via the same TestClient the other endpoint
+    tests in this file use) with an engine whose ``active_requests`` is set like
+    an in-flight request would, so both halves of the bug are exercised together:
+    the real server-side pin check AND unload_chat_for_media's consumption of
+    whatever it actually returns."""
+
+    class _Adapter:
+        """Wraps the TestClient's httpx response in the requests.Response shape
+        unload_chat_for_media actually touches (.ok/.status_code/.json())."""
+
+        def __init__(self, r):
+            self._r = r
+            self.ok = r.status_code < 400
+            self.status_code = r.status_code
+
+        def json(self):
+            return self._r.json()
+
+    def test_pinned_engine_is_reported_honestly_not_as_unloaded(self):
+        self.engine.active_requests = 1          # a request is mid-generation
+
+        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None):
+            return self._Adapter(self.client.post(f"/v1{path}"))
+
+        from localm import vram as vram_mod
+        job = MagicMock()
+        lines = []
+        job.push.side_effect = lambda d: lines.append(d.get("text", ""))
+        with patch("localm.selfclient.self_request", fake_self_request):
+            ok = vram_mod.unload_chat_for_media(job, "http://x", "image")
+
+        self.assertFalse(ok, "a pinned chat model was not actually unloaded")
+        self.assertTrue(self.engine.loaded,
+                        "the pinned engine must survive the media handover's unload")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed success while the real endpoint reported the "
+                         f"engine still pinned: {lines}")
+        self.assertIn("busy", joined)
+
 
 class TestMcpModelSwitchHonesty(unittest.TestCase):
     """The MCP server's model switch runs the same before/after cycle, and made
