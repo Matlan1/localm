@@ -1229,15 +1229,29 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
 
 
 def split_device_count(config: Optional[dict] = None) -> int:
-    """How many DETECTED devices the configured gpu_split resolves to.
+    """How many DETECTED devices the configured gpu_split resolves to - the
+    DETECTED/labelling signal, NOT a load-safety gate.
 
     This is the exact signal ``vram_capacity()`` uses to decide whether its total
     is COMBINED across a split (>= 2) or the single main GPU (< 2): the same
-    ``resolve_gpu_split`` + detected-device filter. Callers that LABEL a VRAM
+    ``resolve_gpu_split`` + detected-device re-filter. Callers that LABEL a VRAM
     number ("combined across N GPUs" vs "your main GPU's") must gate on this, not
     on the raw ``gpu_split_indices`` length - a stale/typo'd index or a GGUF-only
     box (no ``list_gpus``) leaves a 2-entry split resolving to one device, where
     the number is single-GPU and calling it "combined" would mislabel it.
+
+    Do NOT use this to decide "will the loader ACTUALLY apply a multi-device
+    split" (a VRAM preflight, a swap decision, a "your split spans N cards"
+    notice): on the ``vulkan`` build the real split devices live in ggml-vulkan's
+    own index space, which ``list_gpus()`` (torch.cuda / nvidia-smi) is
+    structurally blind to (GPU-SPLIT-VKINDEX), so the detected re-filter here
+    COLLAPSES a live, working 2-way vulkan split to < 2. That is the honest answer
+    for a LABEL (``vram_capacity()`` itself cannot sum a split it cannot measure,
+    so it too falls back to the single-GPU number, and calling that "combined"
+    would lie), but the WRONG answer for a load-safety gate. Use
+    :func:`applied_split_device_count` for the "will a split be applied at load
+    time" question - it mirrors :func:`apply_gpu_split`'s own gate and does not
+    apply the detected re-filter.
 
     Returns 0 when no split is configured (the common single-GPU path, with no
     hardware probe); otherwise the count of valid split devices (0/1 = effectively
@@ -1251,6 +1265,44 @@ def split_device_count(config: Optional[dict] = None) -> int:
     pairs = resolve_gpu_split(split, cfg.get("gpu_split_ratios"), gpus=gpus)
     by_index = {g.get("index") for g in gpus}
     return len([idx for idx, _ in pairs if idx in by_index])
+
+
+def applied_split_device_count(config: Optional[dict] = None) -> int:
+    """How many devices the loader will ACTUALLY tensor_split across for a
+    GGUF/llama.cpp load - the loader-truth counterpart to
+    :func:`split_device_count`'s DETECTED/labelling count.
+
+    Mirrors :func:`apply_gpu_split`'s own gate (``len(resolve_gpu_split(...)) < 2``
+    -> no split), so it answers "will a multi-device split be applied at load
+    time", NOT "can we MEASURE that split's combined VRAM". The two counts differ
+    on exactly one axis: the detected-device re-filter that
+    :func:`split_device_count` / :func:`vram_capacity` apply against
+    :func:`list_gpus` AFTER ``resolve_gpu_split``. That filter is CORRECT for a
+    VRAM LABEL (you cannot honestly call a number "combined across N GPUs" when
+    ``list_gpus()`` only measured one device), but WRONG for a load-safety gate on
+    the ``vulkan`` build, where ``resolve_gpu_split`` passes the configured indices
+    through UNVALIDATED in ggml-vulkan's own index space (GPU-SPLIT-VKINDEX) - a
+    real 2-way split ``list_gpus()`` (torch.cuda / nvidia-smi) is structurally
+    blind to. There this returns 2 while :func:`split_device_count` collapses to
+    < 2. On a NON-vulkan box with a detected device list the two are IDENTICAL
+    (``resolve_gpu_split`` already dropped unknown indices, so that later re-filter
+    is a proven no-op).
+
+    Deliberately does NOT pass ``gpus=`` (so ``resolve_gpu_split`` calls
+    ``list_gpus()`` itself) and does NOT re-filter the result - exactly what
+    :func:`apply_gpu_split` does, which is what makes this the loader truth rather
+    than a measurability check.
+
+    Returns 0 when no split is configured (the common path, no hardware probe);
+    otherwise the count ``resolve_gpu_split`` yields. Domain is {0} U {2, 3, ...}:
+    a single surviving index collapses to 0, same as ``apply_gpu_split`` leaving
+    the native single-GPU default untouched."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    if not cfg.get("gpu_split_indices"):
+        return 0
+    return len(resolve_gpu_split(
+        cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios")))
 
 
 def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
@@ -1362,6 +1414,36 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
 
     if not cfg.get("gpu_split_indices"):
         # No split configured: a conclusive answer that needs no hardware probe.
+        return _ret([], GPU_PROBE_OK)
+    if _native_backend_has_vulkan():
+        # GPU-SPLIT-VKINDEX honest-unknown: on the vulkan build the configured
+        # split indices live in ggml-vulkan's own index space at load time, which
+        # list_gpus() (torch.cuda / nvidia-smi) cannot see or order - torch index
+        # N is NOT ggml-vulkan index N (resolve_preferred_device documents exactly
+        # this hazard). A per-device share check here would measure the WRONG
+        # cards: a silent no-op when torch sees nothing, a wrong refusal/pass on a
+        # mixed box. We cannot honestly check per-device fit on this backend, so we
+        # do not - but we SURFACE the skip rather than present a check that never
+        # ran as "passed" (rule 5, do-not-hide-problems). INFO not debug: the
+        # always-on ring buffer is INFO+, so a debug line would never reach a bug
+        # report - the same reason vram.py's media_split_notice gives for not
+        # burying a user-configured-split shortfall at debug. Not WARNING: the skip
+        # is benign whenever the model fits (the common case), so WARNING would cry
+        # wolf every load. The GGUF load is subprocess-isolated, so an oversized
+        # model still fails as a catchable error, not a lost check - that isolation
+        # is the real backstop this defers to.
+        logger.info(
+            "gpu_split_shortfall: skipping the per-device split VRAM preflight on "
+            "the vulkan backend - the configured split indices are in ggml-vulkan's "
+            "index space, which list_gpus() cannot map to a card, so no per-device "
+            "check can name the right device (GPU-SPLIT-VKINDEX); relying on the "
+            "subprocess-isolated loader to catch an oversized load instead.")
+        # Conclusive skip with no probe, so it mirrors the no-split return above and
+        # reports GPU_PROBE_OK - NOT a non-OK "stale probe" status: nothing was
+        # probed, and (like the no-split branch) this is a deterministic routing
+        # decision, not an inconclusive reading. A future return_status consumer that
+        # needs to tell "checked-clear" from "vulkan-skip" apart would want a distinct
+        # status; flagged for the probe-status owner rather than overloaded here.
         return _ret([], GPU_PROBE_OK)
 
     gpus, status = _list_gpus_reading(deadline)
