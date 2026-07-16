@@ -1378,10 +1378,18 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     ``return_status=True`` to receive ``(shortfall, status)`` carrying the underlying
     :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY`.
 
-    This proves the reading is LIVE, not COMPLETE. On a backend/OS where ``free``
-    counts only this process's own allocations (blind to other processes' VRAM), a
-    fresh reading can still under-state usage; that completeness axis is orthogonal
-    and is carried per-device elsewhere, not by this probe status.
+    Completeness (the blindness axis, orthogonal to freshness). On a backend/OS where
+    a device's ``free`` counts only the server's own allocations - blind to other
+    processes' VRAM, measured on Windows + AMD, where an out-of-process model's VRAM
+    (#606) is invisible - the reading is FRESH yet OVER-states free. ``list_gpus`` tags
+    such a device :data:`FREE_SCOPE_PROCESS`; this gate OMITS it from the per-device
+    check rather than fabricate or quote a shortfall from a figure that is not the
+    board's truth (AGENTS.md rule 5) - the same "omit, do not fabricate" treatment a
+    stale probe gets, applied PER DEVICE so a :data:`FREE_SCOPE_DEVICE` sibling is
+    still checked. Unlike staleness the blindness is NOT retryable (a fresh read is
+    still blind); only a device-global source (the ``free_scope`` tag from
+    ``_apply_device_global_free``) cures it. A device carrying no ``free_scope`` tag is
+    treated as trustworthy - only an explicit PROCESS tag is omitted.
 
     Only meaningful for the GGUF/llama.cpp load path - callers should gate on that
     themselves (e.g. via ``inference.engine._is_gguf``); this function has no way to
@@ -1481,6 +1489,24 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
             # DROPS a non-reporting one (see :493/:525), so this branch is dead in
             # production; it only stops a None-free entry (e.g. test-injected) from
             # crashing the loop.
+            continue
+        if g.get("free_scope") == FREE_SCOPE_PROCESS:
+            # This device's "free" is a PROCESS-scoped (blind) reading: it counts only
+            # the server's own allocations, not a loaded model's out-of-process VRAM
+            # (#606) or another app's, so it OVER-states free and is a figure localm
+            # cannot stand behind in a refusal (AGENTS.md rule 5). Same "omit, do not
+            # fabricate/quote a shortfall" treatment as a stale probe (the status != OK
+            # branch), applied PER DEVICE so a FREE_SCOPE_DEVICE sibling is still
+            # checked. Unlike staleness this is NOT retryable (a fresh read is still
+            # blind); only a device-global source (the free_scope tag from
+            # _apply_device_global_free) cures it. A device with no free_scope tag is
+            # treated as trustworthy - only an EXPLICIT PROCESS tag is omitted, matching
+            # that function's own "never assert a blindness we cannot confirm" default.
+            # The isolated worker's contained abort (#606) is the backstop if an omitted
+            # device is in fact full.
+            logger.debug("gpu_split_shortfall: device %s free is PROCESS-scoped (blind "
+                         "to other processes' VRAM); omitting from the per-device check "
+                         "rather than quote a figure that is not the board's", idx)
             continue
         needed = int(vram_required * (ratio / total_ratio))
         free = g["free"]
