@@ -172,19 +172,39 @@ def register(app: FastAPI, ctx) -> None:
         if not req.model:
             raise HTTPException(400, "Model parameter is required and cannot be empty")
 
-        # If the requested model is registered as model_type="embedding", it is the
-        # dedicated on-device embedder (e.g. Qwen3-Embedding, bge-small). Route
-        # directly to embed_texts() - no chat engine lookup needed or wanted.
-        # This is the primary path when the user has an embedding model selected but
-        # no chat model loaded: get_engine would 503, and every indexing job would
+        # If the requested model is registered as model_type="embedding", OR it is
+        # exactly the configured ``embedding_model`` (the dedicated on-device
+        # embedder: Qwen3-Embedding, bge-small, ...), route directly to
+        # embed_texts() - no chat engine lookup needed or wanted. This is the
+        # primary path when the user has an embedding model selected but no chat
+        # model loaded: get_engine would 503, and every indexing job would
         # silently fall back to BM25 (AGENTS.md rule 5).
+        #
+        # The configured-name check is NOT redundant with the registry check:
+        # `setup-embeddings` registers a freshly downloaded known-key model (the
+        # default "bge-small-en-v1.5") under a PREFIXED alias
+        # ("embedding-bge-small-en-v1.5", cli/maintenance.py) to avoid clobbering
+        # a user's own naming, but leaves the `embedding_model` config value as the
+        # raw known-key string. `_make_self_embed` (rag/plug.py) always sends that
+        # raw config value as `model`, so a registry-name-only check never matches
+        # the default flow and 404s here - which is worse than the pre-fix
+        # behavior when a chat model WAS loaded (it used to work via the loaded
+        # engine's can_embed=False fallback). Matching on the configured name
+        # directly, independent of what alias (if any) the registry uses, is what
+        # actually fixes the "no chat model loaded" case for every setup, not only
+        # one where the user explicitly picked an embedding model "from your
+        # models" (which happens to already store the exact registry name).
         try:
-            from localm.config import load_registry
+            from localm.config import load_config, load_registry
             _reg = load_registry()
             _entry = _reg.get((req.model or "").strip()) if _reg else None
+            _emb_cfg_name = str(load_config().get("embedding_model") or "").strip()
         except Exception:
             _entry = None
-        if isinstance(_entry, dict) and _entry.get("model_type") == "embedding":
+            _emb_cfg_name = ""
+        _is_registered_embedder = isinstance(_entry, dict) and _entry.get("model_type") == "embedding"
+        _is_configured_embedder = bool(_emb_cfg_name) and (req.model or "").strip() == _emb_cfg_name
+        if _is_registered_embedder or _is_configured_embedder:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()
             texts_emb = [req.input] if isinstance(req.input, str) else req.input

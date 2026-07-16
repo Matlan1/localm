@@ -116,3 +116,48 @@ test("uploaded docs are skipped but server-path docs still reindex", async () =>
   assert.ok(body, "an /add POST was sent");
   assert.deepEqual(body.paths, ["/a/one.md"], "only the re-readable doc is sent");
 });
+
+// The server caps a single /add request at 50 paths ("Too many paths in one
+// request (max 50)", rag/plug.py). A collection with more documents than that
+// must be split into multiple <=50-path batches client-side, or reindexing a
+// large collection fails outright.
+test("reindexing more than 50 docs is split into batches of <=50 paths", async () => {
+  const calls = [];
+  const docs = Array.from({ length: 152 }, (_, i) => ({ path: `/a/doc${i}.md` }));
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return fetchFor(docs)(url, opts);
+  };
+  const window = setup(fetchImpl);
+  runScript(window, `kbConfirmReindex = () => Promise.resolve(true);`);
+  runScript(window, "kbReindexCollection('mycoll');");
+  for (let i = 0; i < 20; i++) await tick();
+
+  const addCalls = calls.filter((c) => c.url.includes("/add"));
+  assert.equal(addCalls.length, 4, "152 docs at 50/batch must be 4 requests (50+50+50+2)");
+  const batchSizes = addCalls.map((c) => JSON.parse(c.opts.body).paths.length);
+  assert.deepEqual(batchSizes, [50, 50, 50, 2]);
+  for (const c of addCalls)
+    assert.ok(JSON.parse(c.opts.body).paths.length <= 50, "no batch exceeds the server's 50-path cap");
+
+  const allPaths = addCalls.flatMap((c) => JSON.parse(c.opts.body).paths);
+  assert.deepEqual(allPaths.slice().sort(), docs.map((d) => d.path).sort(),
+    "every document is covered exactly once across batches");
+});
+
+test("reindexing 50 or fewer docs sends a single batch (no unnecessary split)", async () => {
+  const calls = [];
+  const docs = Array.from({ length: 50 }, (_, i) => ({ path: `/a/doc${i}.md` }));
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return fetchFor(docs)(url, opts);
+  };
+  const window = setup(fetchImpl);
+  runScript(window, `kbConfirmReindex = () => Promise.resolve(true);`);
+  runScript(window, "kbReindexCollection('mycoll');");
+  for (let i = 0; i < 8; i++) await tick();
+
+  const addCalls = calls.filter((c) => c.url.includes("/add"));
+  assert.equal(addCalls.length, 1, "exactly 50 docs must not be split into a 2nd empty batch");
+  assert.equal(JSON.parse(addCalls[0].opts.body).paths.length, 50);
+});
