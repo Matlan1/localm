@@ -77,22 +77,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
-- **Unloading a model no longer claims it freed nothing when it freed your
-  VRAM.** localm reads free VRAM from the GPU driver with a time limit, and a
-  slow or busy driver could not always answer in time. When that happened it
-  quietly reused the last reading it had - which on a server that had been
-  running a while was taken before your model ever loaded. The before and after
-  figures then came back identical, and unloading reported that no VRAM was
-  freed while your VRAM had in fact been freed. localm now tells a real reading
-  apart from a stale one: anything it could not actually measure is reported as
-  unknown and marked as such, and it will never claim VRAM went unfreed on the
-  strength of a measurement it never took. When the driver answers you get the
-  real numbers exactly as before, including an honest "not freed yet" when that
-  is genuinely what happened. This covers the per-model Unload button, the
-  embedding model, and the VRAM handover that image, music, and video generation
-  do before they run - which previously told you "VRAM has not dropped yet" on
-  the strength of a reading it could not stand behind. A machine with no GPU
-  telemetry at all is unaffected and stays quiet, as before.
+- **Unloading a model no longer presents a VRAM reading it never took as fact.**
+  localm reads free VRAM from the GPU driver with a time limit, and a slow or busy
+  driver could not always answer in time. When that happened it quietly reused the
+  last reading it had - which on a server that had been running a while was taken
+  before your model ever loaded. The before and after figures then came back
+  identical, and unloading reported that no VRAM was freed even though your VRAM
+  had been freed. localm now tells a reading it actually took apart from a reused
+  one: anything it could not measure is reported as unknown and marked as such,
+  and it will never claim VRAM went unfreed on the strength of a measurement it
+  never took. This covers the per-model Unload button, the embedding model, and
+  the VRAM handover that image, music, and video generation do before they run -
+  which previously told you "VRAM has not dropped yet" on the strength of a
+  reading it could not stand behind. A machine with no GPU telemetry at all is
+  unaffected and stays quiet, as before.
 - **Your own saved facts come back when you ask about yourself.** Without an
   embedding model installed, memory could only match facts that shared an exact
   word with your question, so asking "what is my name" never surfaced "User is

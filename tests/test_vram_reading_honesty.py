@@ -205,7 +205,24 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
         self.assertNotIn("vram_reading_uncertain", body)
 
     def test_live_probe_with_no_rise_still_reports_the_honest_false(self):
-        """A genuinely-not-freed result must survive the fix intact, unflagged."""
+        """A genuinely-not-freed result must survive the fix intact, unflagged.
+
+        READ THIS BEFORE RELYING ON THE NAME. What makes the false "honest" here is
+        the test's own fiction that a FRESH reading is an ACCURATE one. That holds
+        only where the driver's free-VRAM figure is device-global. It is NOT true on
+        Windows + AMD, where torch.cuda.mem_get_info reports `total - THIS process's
+        own allocations` and is blind to every other process - measured on an
+        RX 6900 XT: a child holding 1 GB moved the parent's reading by exactly 0
+        bytes while the OS counter moved 1.7 GB. Since every GGUF model loads in an
+        isolated worker subprocess (#606), a fresh reading taken in the SERVER
+        process cannot see the model's VRAM at all, so a real unload there produces
+        this same no-rise and the "false" is a LIE, not an honest negative.
+
+        So freshness (what this file guards) is necessary but NOT sufficient: fresh
+        does not imply true. The missing axis is the reading's SCOPE, which is being
+        added separately. When it lands, this test must be re-targeted to assert the
+        honest-negative only for a device-global reading rather than assuming one -
+        do not work around it."""
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([dict(_IDLE, free=10 * GB)],
                                                  GPU_PROBE_OK)):
