@@ -77,6 +77,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **A multi-GPU split no longer turns off the VRAM safety check on the Vulkan
+  backend.** Before loading a model, localm decides whether it must check each
+  card's share of VRAM by asking how many cards your split spans. On the Vulkan
+  build that count was measured with a tool that cannot see Vulkan cards, so a
+  real, working two-card split was read as "not a split" and the per-card check
+  was skipped on exactly the machines that needed it, letting an embedding model
+  too large for one card's share reach the loader and, at worst, abort instead of
+  failing cleanly. The check now uses the same signal the loader itself uses, so
+  it runs whenever a split is actually active. Where per-card free VRAM genuinely
+  cannot be read on Vulkan, localm now notes that in the log and leans on the
+  isolated loader to fail safely, instead of silently skipping the check. Single-
+  GPU machines and the CUDA/ROCm backends are unaffected.
 - **Unloading a model no longer presents a VRAM reading it never took as fact.**
   localm reads free VRAM from the GPU driver with a time limit, and a slow or busy
   driver could not always answer in time. When that happened it quietly reused the

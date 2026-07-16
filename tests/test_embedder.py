@@ -11,6 +11,7 @@ GGUF) + the real_gguf runtime gate, so it runs on a real machine and skips in CI
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import types
@@ -583,7 +584,9 @@ def _reset_stub_runner():
 
 def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None):
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
-    monkeypatch.setattr("localm.discover.split_device_count", lambda cfg: split_devices)
+    # The embedder gates on applied_split_device_count (loader truth), not the
+    # detected/labelling split_device_count - see GPU-SPLIT-VKINDEX.
+    monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: split_devices)
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram",
                         check_vram if check_vram is not None else (lambda self: None))
@@ -632,7 +635,7 @@ def test_isolated_embedder_multi_gpu_uses_split_shortfall_not_check_vram(monkeyp
 
     monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram", _check_vram)
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
-    monkeypatch.setattr("localm.discover.split_device_count", lambda cfg: 2)
+    monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: 2)
     monkeypatch.setattr("localm.discover.gpu_split_shortfall", _shortfall)
     monkeypatch.setattr("localm.config.load_config", lambda: {})
 
@@ -640,6 +643,49 @@ def test_isolated_embedder_multi_gpu_uses_split_shortfall_not_check_vram(monkeyp
     assert calls["shortfall"] == 1
     assert calls["check_vram"] == 0             # NOT called in the split path
     assert e.dim == 5
+
+
+def test_isolated_embedder_vulkan_split_skips_per_device_and_still_loads(
+        monkeypatch, tmp_path, caplog):
+    """On the vulkan build a CONFIGURED 2-way split must (a) route through the
+    split branch - applied_split_device_count is loader-truth so it does NOT
+    collapse the way split_device_count does when list_gpus() is Vulkan-blind
+    (GPU-SPLIT-VKINDEX) - and (b) SKIP the per-device VRAM preflight HONESTLY
+    (gpu_split_shortfall self-skips on vulkan, logging at INFO) instead of running
+    the wrong-index-space check or falling back to the single-GPU _check_vram().
+
+    Drives REAL discover (only _native_backend_has_vulkan / list_gpus / load_config
+    are stubbed), so it exercises the actual fix end to end, not a mock of it.
+
+    MUTATION A: revert the embedder gate to split_device_count -> the Vulkan-blind
+    list_gpus collapses it to < 2 -> the single-GPU _check_vram() branch runs ->
+    calls["check_vram"] != 0 -> RED.
+    MUTATION B: revert gpu_split_shortfall's vulkan guard -> the one tiny-free
+    device it CAN see is flagged -> RuntimeError -> the no-raise / dim==5 line RED."""
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x" * 100_000)
+    calls = {"check_vram": 0}
+
+    def _check_vram(self):
+        calls["check_vram"] += 1
+
+    # Vulkan-blind: list_gpus (torch/nvidia-smi) sees only ONE tiny-free device;
+    # the second split device is Vulkan-only and invisible to it. This single
+    # detected-but-starved device is what makes BOTH mutations above fire.
+    blind = [{"index": 0, "total": 16_000_000_000, "free": 100}]
+    monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram", _check_vram)
+    monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
+    monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
+    monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: list(blind))
+    monkeypatch.setattr("localm.config.load_config", lambda: {"gpu_split_indices": [0, 1]})
+
+    with caplog.at_level(logging.INFO, logger="localm"):
+        e = emb.IsolatedEmbedder(str(f), n_gpu_layers=99)   # must NOT raise
+    assert e.dim == 5                                        # child spawned + loaded
+    assert calls["check_vram"] == 0                          # split branch, not the single-GPU fallback
+    assert any(r.levelno == logging.INFO and "GPU-SPLIT-VKINDEX" in r.getMessage()
+               for r in caplog.records), \
+        "the honest-unknown per-device skip must be surfaced at INFO (reaches a bug report)"
 
 
 def test_isolated_embedder_embed_respawns_after_prior_crash(monkeypatch):

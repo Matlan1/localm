@@ -458,9 +458,19 @@ class IsolatedEmbedder(VramSizingMixin):
         for the full rationale. The single-GPU case (the common one) used to
         have NO real check at all; _check_vram() closes that gap."""
         from localm.config import load_config
-        from localm.discover import gpu_split_shortfall, split_device_count
+        from localm.discover import applied_split_device_count, gpu_split_shortfall
         cfg = load_config()
-        if split_device_count(cfg) >= 2:
+        # applied_split_device_count (loader truth), NOT split_device_count: on the
+        # vulkan build list_gpus() is blind to the real split devices, so the
+        # DETECTED count collapses a live 2-way split to < 2 and would wrongly send
+        # us down the single-GPU _check_vram() branch on exactly the split that is
+        # active (GPU-SPLIT-VKINDEX). On vulkan the gpu_split_shortfall() call below
+        # SELF-SKIPS the per-device check (honest-unknown: it cannot name the right
+        # card in torch's index space, so it logs the skip at INFO and the
+        # subprocess-isolated loader backstops an oversized load) - so this branch
+        # reads as "run the split-aware preflight" while being honest that the
+        # per-device step is deferred there on that one backend.
+        if applied_split_device_count(cfg) >= 2:
             try:
                 file_size = Path(self.model_path).stat().st_size
             except OSError:

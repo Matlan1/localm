@@ -3,6 +3,7 @@
 All HuggingFace calls are mocked; no real network."""
 
 import ctypes
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -14,7 +15,8 @@ from localm.discover import (
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _native_backend_has_vulkan,
-    _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
+    _quant_of, applied_split_device_count, apply_gpu_split, apply_main_gpu,
+    fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
     resolve_gpu_split, resolve_main_gpu_index, split_device_count, vram_capacity,
     vram_info,
@@ -1263,6 +1265,147 @@ class TestSplitDeviceCount:
     def test_gguf_only_box_no_gpus_is_below_two(self, monkeypatch):
         monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
         assert split_device_count({"gpu_split_indices": [0, 1]}) < 2
+
+
+class TestAppliedSplitDeviceCount:
+    """applied_split_device_count(): the LOADER-TRUTH count (mirrors
+    apply_gpu_split's own gate) vs split_device_count()'s DETECTED/labelling count.
+    The two AGREE on a non-vulkan box with a detected device list, and DIVERGE
+    exactly where the loader really splits but list_gpus() cannot measure it: a
+    GGUF-only box (no torch) and the vulkan build (GPU-SPLIT-VKINDEX)."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+    ]
+
+    def _vulkan(self, monkeypatch, on):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: on)
+
+    def test_no_split_is_zero_without_probing(self, monkeypatch):
+        # Mirrors split_device_count's no-probe contract: the common single-GPU
+        # path must not touch the hardware at all.
+        self._vulkan(monkeypatch, False)
+        called = {"n": 0}
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1) or self._GPUS)
+        assert applied_split_device_count({"gpu_split_indices": None}) == 0
+        assert called["n"] == 0, "no split configured -> no hardware probe"
+
+    def test_non_vulkan_two_valid_devices_counts_two(self, monkeypatch):
+        self._vulkan(monkeypatch, False)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS)
+        assert applied_split_device_count({"gpu_split_indices": [0, 1]}) == 2
+
+    def test_non_vulkan_stale_index_degrades_below_two(self, monkeypatch):
+        # Only device 0 detected: resolve_gpu_split drops the stale 5, the loader
+        # would NOT split -> 0, matching apply_gpu_split (single-GPU default) and
+        # split_device_count. The non-vulkan degrade reasoning is preserved.
+        self._vulkan(monkeypatch, False)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS[:1])
+        assert applied_split_device_count({"gpu_split_indices": [0, 5]}) == 0
+
+    @pytest.mark.parametrize("indices", [[0, 1], [0, 5]])
+    def test_matches_split_device_count_on_non_vulkan(self, monkeypatch, indices):
+        # The invariant: identical to the DETECTED count on a non-vulkan box with a
+        # detected device list (split_device_count's re-filter is a proven no-op
+        # there). Divergence is a vulkan / unmeasurable-only phenomenon.
+        self._vulkan(monkeypatch, False)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS)
+        cfg = {"gpu_split_indices": indices}
+        assert applied_split_device_count(cfg) == split_device_count(cfg)
+
+    def test_vulkan_split_is_two_even_though_detected_collapses(self, monkeypatch):
+        # LOAD-BEARING (GPU-SPLIT-VKINDEX): list_gpus() is Vulkan-blind and reports
+        # only device 0, but the loader really tensor_splits across [0, 1]. applied_
+        # must say 2 (loader truth) while split_device_count collapses to < 2 (the
+        # exact bug this fix closes). MUTATION: give applied_ the by_index re-filter
+        # split_device_count uses and it returns 1 here -> this goes RED.
+        self._vulkan(monkeypatch, True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS[:1])
+        cfg = {"gpu_split_indices": [0, 1]}
+        assert applied_split_device_count(cfg) == 2
+        assert split_device_count(cfg) < 2   # the DETECTED count still (correctly) collapses
+
+    def test_vulkan_split_two_when_list_gpus_blind_empty(self, monkeypatch):
+        self._vulkan(monkeypatch, True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: [])
+        assert applied_split_device_count({"gpu_split_indices": [0, 1]}) == 2
+
+    def test_vulkan_sanity_ceiling_still_enforced(self, monkeypatch):
+        # Passthrough on vulkan does NOT mean "trust any integer": an absurd index
+        # is still rejected (resolve_gpu_split's ceiling), so the loader is never
+        # handed an index past the end of its device array.
+        self._vulkan(monkeypatch, True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: [])
+        assert applied_split_device_count({"gpu_split_indices": [0, 500_000]}) == 0
+
+    @pytest.mark.parametrize("vulkan,gpus,indices", [
+        (False, _GPUS, [0, 1]),        # non-vulkan detected: both apply and applied split
+        (False, _GPUS[:1], [0, 5]),    # non-vulkan stale: neither splits
+        (True, _GPUS[:1], [0, 1]),     # vulkan blind: apply splits, applied agrees
+    ])
+    def test_agrees_with_apply_gpu_split_gate(self, monkeypatch, vulkan, gpus, indices):
+        # Graft (blast-radius judge): pin applied_ against apply_gpu_split's REAL
+        # gate, not a re-derivation. apply_gpu_split returns non-None iff it actually
+        # writes a 2+ device tensor_split; applied_ >= 2 must equal that exactly (it
+        # IS meant to be that gate). On the vulkan row this also demonstrates the
+        # divergence: split_device_count would say < 2 and disagree with the loader.
+        self._vulkan(monkeypatch, vulkan)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: list(gpus))
+        # Pin the tensor_split capacity to the documented fallback so this does not
+        # depend on whatever native runtime is provisioned (same guard
+        # TestApplyGpuSplit uses).
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._api.has_max_devices", lambda: False)
+        cfg = {"gpu_split_indices": indices}
+        mp = SimpleNamespace(main_gpu=0, tensor_split=None, split_mode=0)
+        applied_two_plus = applied_split_device_count(cfg) >= 2
+        assert (apply_gpu_split(mp, config=cfg) is not None) == applied_two_plus
+
+
+class TestGpuSplitShortfallVulkan:
+    """gpu_split_shortfall() honest-unknown on the vulkan build: the configured
+    split indices are in ggml-vulkan's index space, not torch's, so a per-device
+    free-VRAM check would name the WRONG card. It must SKIP the check (return the
+    'nothing to block on' sentinel []) and SURFACE the skip at INFO (discoverable
+    in a bug report), never presenting an un-run check as passed (AGENTS.md rule 5).
+    This one guard fixes both callers (the embedder AND http_server's chat path)."""
+
+    # A MIXED box where the UN-guarded check WOULD flag both devices (tiny free):
+    # this is what makes the mutation (revert the guard) go red instead of passing
+    # for the wrong reason.
+    _MIXED = [
+        {"index": 0, "total": 16_000_000_000, "free": 1_000_000_000},
+        {"index": 1, "total": 16_000_000_000, "free": 1_000_000_000},
+    ]
+
+    def test_vulkan_skips_per_device_check_and_logs_info(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._MIXED)
+        cfg = {"gpu_split_indices": [0, 1]}
+        with caplog.at_level(logging.INFO, logger="localm"):
+            result = gpu_split_shortfall(8_000_000_000, cfg)
+        # MUTATION: revert the vulkan guard -> the tiny-free mixed box flags BOTH
+        # devices -> result == [{index 0..}, {index 1..}] -> this assertion RED.
+        assert result == []
+        info = [r for r in caplog.records
+                if r.levelno == logging.INFO and "GPU-SPLIT-VKINDEX" in r.getMessage()]
+        # MUTATION: drop the log to debug (or remove it) -> no INFO record -> RED.
+        # Pins the honesty graft: the skip must reach a bug report, not hide at debug.
+        assert info, "the vulkan skip must be surfaced at INFO (reaches a bug report), not debug/silence"
+
+    def test_vulkan_skip_does_not_probe_torch(self, monkeypatch):
+        # The guard sits BEFORE the list_gpus() probe, so a torch-blind vulkan box
+        # pays no probe cost for a check it structurally cannot do.
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
+        called = {"n": 0}
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1) or self._MIXED)
+        gpu_split_shortfall(8_000_000_000, {"gpu_split_indices": [0, 1]})
+        assert called["n"] == 0
 
 
 @pytest.mark.usefixtures("_non_vulkan_host")
