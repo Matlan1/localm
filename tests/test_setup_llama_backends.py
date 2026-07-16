@@ -288,9 +288,25 @@ def test_provision_backend_verifies_default_sha256(monkeypatch):
     assert passed_sha256 == ["dummysha"]
 
 
-def test_custom_url_warning_printed(monkeypatch):
-    monkeypatch.setattr(sl, "_fetch_and_place", lambda url, target, sha256=None: 1)
+def test_custom_url_warning_printed(monkeypatch, tmp_path):
+    """A custom --url with no --sha256 must warn. The runtime-lib target is
+    isolated to tmp_path, not the real repo runtime dir: on a box that already
+    has a build provisioned there (the shared venv's editable install resolves
+    _repo_runtime_lib() to it), the exists() check would pass without this
+    test's own fetch ever writing anything, falling through to a REAL
+    `_install_runtime_wheel` (a real `uv pip install -e`) that dumps the
+    runtime wheel's native DLLs into this test's own tmp_path-scoped uv cache."""
+    target = tmp_path / "lib"
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+
+    def fake_fetch_and_place(url, target, sha256=None):
+        (target / sl._lib_name()).write_bytes(b"stub")
+        return 1
+
+    monkeypatch.setattr(sl, "_fetch_and_place", fake_fetch_and_place)
     monkeypatch.setattr(sl, "_clear_target", lambda target: None)
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg_dir: True)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
     monkeypatch.setattr(sl, "_verify", lambda: None)
 
     from click.testing import CliRunner
