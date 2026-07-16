@@ -132,8 +132,8 @@ class EngineCache:
             return self._engine
         if self._engine is not None:
             _log(f"switching model {self._loaded_name} -> {name}")
-            from localm.discover import vram_capacity
-            before_free = vram_capacity().get("free")
+            from localm.vram import _live_free_vram_bytes
+            before_free = _live_free_vram_bytes()
             try:
                 self._engine.unload()
             except Exception as e:
@@ -148,10 +148,18 @@ class EngineCache:
             # no-op and behaves as before.
             from localm.vram import wait_for_vram_release
             released, _final = wait_for_vram_release(
-                lambda: vram_capacity().get("free"), before_bytes=before_free)
+                _live_free_vram_bytes, before_bytes=before_free)
             if released is False:
                 _log(f"warning: VRAM free did not rise after unloading "
                      f"{self._loaded_name} within the timeout - loading {name} anyway")
+            elif released is None and before_free is not None:
+                # The GPU probe stopped answering mid-wait, so whether the free
+                # landed is unknown. Say that, rather than the "did not rise"
+                # claim above, which a reading we never took cannot support
+                # (AGENTS.md rule 5).
+                _log(f"warning: could not confirm the VRAM free after unloading "
+                     f"{self._loaded_name} (no live GPU reading) - loading "
+                     f"{name} anyway")
         _log(f"loading model {name}")
         self._engine = self._factory(name)
         self._loaded_name = name

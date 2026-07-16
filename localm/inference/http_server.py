@@ -699,49 +699,27 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
     return _engines[name]
 
 
-def _vram_before_reading() -> tuple:
-    """The 'before' free-VRAM reading used to seed wait_for_vram_release(),
-    plus whether the probe behind it was fresh (list_gpus() completed inside
-    its deadline) rather than a timed-out/busy fallback to a stale
-    last-known-good value.
-
-    A caller that reports vram_before_bytes/vram_after_bytes/vram_freed to
-    the user must know this: presenting a stale fallback as the CURRENT state
-    is exactly the rule-5 gap a release-verify pass caught - /v1/models/unload
-    reported byte-identical before/after readings, and vram_freed: false,
-    across two calls made minutes apart with genuinely different real GPU
-    states (confirmed stale via an OS-level VRAM counter showing the actual
-    free/use cycle worked correctly the whole time).
-
-    Defensive against a test double that patches vram_capacity()/vram_info()/
-    list_gpus() with a plain no-kwarg callable or a fixed dict return_value
-    (neither accepts/implements return_status): such a double is treated as
-    "status unknown, assume fresh" (permissive, matching this reading's
-    behavior before return_status existed) rather than raising on a rejected
-    kwarg or an unexpected shape - only a REAL probe chain needs to prove
-    itself stale."""
-    from localm.discover import GPU_PROBE_OK, vram_capacity
-    try:
-        result = vram_capacity(return_status=True)
-    except TypeError:
-        result = vram_capacity()
-    if isinstance(result, tuple) and len(result) == 2:
-        info, probe_status = result
-        fresh = probe_status == GPU_PROBE_OK
-    else:
-        info, fresh = result, True
-    return info.get("free"), fresh
-
-
 def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool) -> None:
     """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
-    measurable (unchanged from before), plus an honest flag when the 'before'
-    reading may be stale rather than presenting a timed-out probe's fallback
-    value as current fact (see _vram_before_reading)."""
+    measurable (unchanged from before), plus an honest flag when the reading may
+    be stale rather than presenting a timed-out probe's fallback value as current
+    fact (see _vram_free_reading).
+
+    ``before is None`` returns early and adds NOTHING - the benign case (a
+    CPU-only box, or the Windows registry tier, which reports total but never
+    free) where a completed probe simply has no free reading to give. That is not
+    the fault this guards, and must not be dressed up as one: no VRAM telemetry is
+    the normal, permanent state there, so saying nothing is the honest answer.
+
+    ``released is None`` means wait_for_vram_release() could not verify the
+    outcome (the 'after' reading went unmeasurable), so ``vram_freed`` is null
+    rather than a false "VRAM did not drop" - a claim a reading that never
+    refreshed cannot support. It is flagged uncertain exactly like a stale
+    'before'."""
     if before is None:
         return
     result.update(vram_freed=released, vram_before_bytes=before, vram_after_bytes=after)
-    if not before_fresh:
+    if not before_fresh or released is None:
         result["vram_reading_uncertain"] = True
         result["vram_note"] = (
             "the GPU probe timed out or was busy when this reading was "
@@ -764,14 +742,13 @@ async def unload_all_models() -> dict:
     original inline implementation."""
     global _active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
-    from localm.discover import vram_capacity
-    from localm.vram import wait_for_vram_release
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
     from localm.inference import embedder as _embedder_mod
 
-    def _free():
-        return vram_capacity().get("free")
+    _free = _live_free_vram_bytes
 
-    before, before_fresh = _vram_before_reading()
+    before, before_fresh = _vram_free_reading()
     unloaded_models = []
     skipped_in_use = []
 
@@ -924,13 +901,12 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     if embedder_active > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
-    from localm.discover import vram_capacity
-    from localm.vram import wait_for_vram_release
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
 
-    def _free():
-        return vram_capacity().get("free")
+    _free = _live_free_vram_bytes
 
-    before, before_fresh = _vram_before_reading()
+    before, before_fresh = _vram_free_reading()
     await loop.run_in_executor(None, _embedder_mod.reset_embedder)
     if before is not None:
         released, after = await loop.run_in_executor(
@@ -958,8 +934,8 @@ async def unload_one_model(name: str) -> dict:
     outright should check the registry themselves before calling this."""
     global _active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
-    from localm.discover import vram_capacity
-    from localm.vram import wait_for_vram_release
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
@@ -975,10 +951,9 @@ async def unload_one_model(name: str) -> dict:
     if isinstance(active, int) and active > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
-    def _free():
-        return vram_capacity().get("free")
+    _free = _live_free_vram_bytes
 
-    before, before_fresh = _vram_before_reading()
+    before, before_fresh = _vram_free_reading()
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
     # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
     # check above can fast-path-pin this engine while we free it (the pin-arrives-
