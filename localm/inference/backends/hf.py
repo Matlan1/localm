@@ -15,13 +15,10 @@ import threading
 from pathlib import Path
 from typing import Iterator, List, Optional
 
-from rich.console import Console
-
+from localm.console import console
 from localm.debuglog import logger
 
 from .base import BaseBackend
-
-console = Console()
 
 
 def _require_torch():
