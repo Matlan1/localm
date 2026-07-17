@@ -173,6 +173,21 @@ def _run_ids(runner, workflow, *, required=False):
         return set()
 
 
+def _actions_enabled(runner):
+    """The repo-level GitHub Actions switch (repos/{owner}/{repo}/actions/permissions
+    -> {"enabled": bool}), which is INDEPENDENT of a workflow's own enabled/disabled
+    `state` queried in require_ci_green() below. Returns True/False, or None if the
+    query itself failed or was unparseable - the caller treats None as 'could not
+    tell', distinct from either extreme."""
+    r = runner(["api", "repos/{owner}/{repo}/actions/permissions"])
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    try:
+        return bool(json.loads(r.stdout).get("enabled"))
+    except Exception:
+        return None
+
+
 def require_ci_green(ref: str = "master", *, workflow: str = "ci.yml", runner=_gh,
                      sleeper=time.sleep, poll_s: int = 15, appear_timeout_s: int = 180) -> None:
     """RULE: before a release is PUBLISHED, run ONE full CI pass over the whole repo and
@@ -184,6 +199,32 @@ def require_ci_green(ref: str = "master", *, workflow: str = "ci.yml", runner=_g
     unit-tested without any live GitHub call."""
     if shutil.which("gh") is None:
         raise SystemExit("release CI gate: the gh CLI (authenticated) is required to run CI before publishing.")
+    # 0. GitHub has TWO independent switches gating whether Actions can run: this
+    #    repo-level permission and the per-workflow `state` checked in step 1 below. A
+    #    workflow can report state == "active" while Actions is disabled for the WHOLE
+    #    repo, in which case `gh workflow run` exits 0, no run is ever created, and step
+    #    3's appear-timeout below fires ~3 minutes later blaming "the run did not
+    #    appear" - true, but not the real cause (verified live 2026-07-17 during the
+    #    0.1.2 release: the repo switch was {"enabled": false} while `gh workflow list`
+    #    reported ci.yml as "active" throughout). Check the repo-level switch FIRST so a
+    #    misconfigured repo fails immediately with the actual cause and the exact fix,
+    #    not a misdiagnosed timeout mid-publish. Unlike the workflow-level switch below,
+    #    this one is NOT auto-enabled here: it can gate ALL Actions repo-wide for a
+    #    maintainer's deliberate reason (cost, org policy), so flipping it is the
+    #    maintainer's call, not this script's - re-enabling one specific workflow is a
+    #    much smaller hammer than re-enabling Actions for the entire repo.
+    enabled = _actions_enabled(runner)
+    if enabled is False:
+        raise SystemExit(
+            "release CI gate: GitHub Actions is disabled for this repo at the repo level "
+            "(repos/{owner}/{repo}/actions/permissions -> enabled=false), independent of "
+            "the workflow's own enabled/disabled state. A triggered run would never "
+            "start. Re-enable it, then retry:\n"
+            "  gh api -X PUT repos/{owner}/{repo}/actions/permissions -f enabled=true")
+    if enabled is None:
+        print("release CI gate: could not read the repo-level Actions permission "
+              "(continuing - a genuinely disabled repo is still caught by the "
+              "appear-timeout below, just without this earlier diagnosis).")
     # 1. enable the CI workflow if it was disabled
     q = runner(["api", "repos/{owner}/{repo}/actions/workflows"])
     if getattr(q, "returncode", 1) != 0:
