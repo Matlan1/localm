@@ -630,6 +630,37 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model ready.") when the server declined it, and installing the global `localm`
   command tells you to add its folder to your PATH by hand when it could not do so
   itself, instead of claiming the folder "was already on PATH".
+- **Privacy mode no longer erases your message while you're still reading the
+  reply.** localm rechecks whether privacy mode is on roughly every 30 seconds so
+  the tab stays in sync with the server, and that recheck used to clear the
+  visible conversation every time it ran, not just the first time. If it fired
+  while your message was still being answered, or had just landed, the reply
+  disappeared from view even though the server had answered correctly, with no
+  error shown. The clear now only happens once, the first time privacy mode is
+  confirmed after opening the tab; the recurring check no longer touches a
+  conversation already in progress.
+- **The MCP server's `chat`, `embed`, and `pull_model` tools no longer risk
+  corrupting the connection.** MCP tools talk to your client over the same
+  channel used for low-level model-loading messages, and triggering a model load
+  through `chat`, `embed`, or the load step at the end of `pull_model` could
+  print diagnostic text onto that channel - which a strict MCP client reads as a
+  malformed response and may disconnect on. These three tools now get the same
+  protection the server's other tools already had, so a model load through them
+  no longer risks breaking your MCP session.
+- **Managed ComfyUI music and audio generation works again.** After `localm comfy
+  setup`, generating music (or using any audio-related ComfyUI node) could fail
+  outright with a native library load error, because setup installed a mismatched
+  build of one required audio library alongside the correctly matched ones. Setup
+  now installs a matching build, so music and audio generation load and run
+  normally.
+- **A rare VRAM-probe race that could crash the server on Windows + AMD ROCm is
+  fixed.** Two internal paths could each try to load the GPU driver library for
+  the very first time at the same moment - a background VRAM probe that had
+  timed out but kept quietly running, and a separate, unrelated VRAM check
+  landing right after it. Racing to load that native library could crash the
+  whole server. The second path now checks whether that background probe might
+  still be mid-load before touching the same library itself, rather than risking
+  the crash.
 
 ### Security
 - **Bug reports no longer leak your username in the fields you type or the issue

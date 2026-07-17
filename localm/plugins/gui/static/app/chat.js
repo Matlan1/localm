@@ -242,6 +242,15 @@ export async function refreshCtxLimit() {
             "not saved (here or on disk) and vanish on reload. Export still works.";
           h.after(hint);
         }
+      } else {
+        // GUI-LIVE-WIPE re-arm: privacyWiped only guards against re-wiping a LIVE
+        // conversation while privacy mode stays on for this page load (the 30s
+        // poll). Once the server leaves privacy mode, any leftovers painted here
+        // are non-privacy content the next privacy-mode confirmation is supposed
+        // to wipe (AUD-PRIV-2) - without this reset, a later restart back into
+        // privacy mode would suppress that wipe and leave them on screen for the
+        // rest of the tab's life.
+        chat.privacyWiped = false;
       }
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
