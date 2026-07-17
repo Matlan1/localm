@@ -38,7 +38,6 @@ import threading
 import time
 
 import pytest
-from fastapi.testclient import TestClient
 
 from localm.inference import embedder as emb
 import localm.inference.http_server as hs

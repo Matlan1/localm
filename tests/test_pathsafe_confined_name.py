@@ -10,6 +10,8 @@ legitimate names like a file literally called "con.txt"'s stem etc.)
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi import HTTPException
 
@@ -36,11 +38,35 @@ def test_device_names_are_accepted_and_confined(tmp_path, name):
     assert resolved.name == name
 
 
-@pytest.mark.parametrize("bad", ["..", ".", "", "a/b", "a\\b"])
+@pytest.mark.parametrize("bad", ["..", ".", "", "a/b"])
 def test_confinement_still_rejects_escapes(tmp_path, bad):
-    # Guard the property that actually matters and is genuinely enforced.
+    # Guard the property that actually matters and is genuinely enforced. These four
+    # mean the same thing on every platform; the backslash case does NOT, so it is
+    # asserted per-platform below rather than sitting in this list.
     with pytest.raises(HTTPException):
         confined_name(tmp_path, bad)
+
+
+# "a\b" used to live in the list above, which is why it failed on ubuntu CI: a
+# backslash is a path SEPARATOR on Windows but an ordinary, legal filename character
+# on POSIX, and confined_name() delegates to pathlib, which is platform-dependent by
+# design. So the SAME input is two segments (an escape) on Windows and one plain
+# basename on POSIX. Measured on 3.12: PureWindowsPath(r"a\b").name == "b", while
+# PurePosixPath(r"a\b").name == r"a\b". Assert each platform's real behavior instead
+# of dropping the case, so both stay covered and neither expectation is a guess.
+@pytest.mark.skipif(os.name != "nt", reason="a backslash only separates paths on Windows")
+def test_backslash_is_rejected_as_an_escape_on_windows(tmp_path):
+    with pytest.raises(HTTPException):
+        confined_name(tmp_path, "a\\b")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a backslash is a legal filename character on POSIX")
+def test_backslash_is_an_ordinary_basename_on_posix(tmp_path):
+    # Not an escape here, so it is accepted - but confinement must still hold, which
+    # is the property this file exists to guard.
+    resolved = confined_name(tmp_path, "a\\b")
+    assert resolved.parent == tmp_path.resolve()
+    assert resolved.name == "a\\b"
 
 
 if __name__ == "__main__":

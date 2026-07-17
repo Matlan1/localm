@@ -81,6 +81,12 @@ gpu = [
     # transformers 5.12 (tokenizers<=0.23.0,>=0.22.0) resolves to.
     "tokenizers==0.22.2",
     "accelerate>=1.14.0",
+    # hf.py's _cpu_budget() imports psutil directly to build the "cpu" entry of
+    # max_memory (REG-528: without that entry the overflow maps to "disk", which
+    # needs an offload_folder and errors without one). accelerate happens to depend
+    # on psutil today, so this path has been working on a transitive dep by luck;
+    # declare what we actually import so an accelerate change cannot break it.
+    "psutil>=7.2.2",
     "pillow>=12.3.0",
     "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.24.0+rocm7.13.0; sys_platform == 'win32'",
@@ -162,6 +168,14 @@ dev = [
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep
     # it here so the PDF path (incl. its hardening) is actually exercised in dev/CI.
     "pypdf>=6.14.2",
+    # Same rationale as pypdf, one step worse: these tests FAIL rather than skip
+    # without it. tests/test_hf_device_map.py drives hf.py's _cpu_budget() and
+    # tests/test_spawn_worker_dies_with_parent.py imports psutil at module scope, but
+    # CI installs .[dev,rag] (no gpu, no monitor), so psutil is absent there even
+    # though every real install path ships it (both installers use .[coder,voice,
+    # monitor], and the gpu extra pulls accelerate). Keep it here so CI exercises the
+    # device-map and worker-reaping paths instead of erroring on the import.
+    "psutil>=7.2.2",
 ]
 
 [project.scripts]

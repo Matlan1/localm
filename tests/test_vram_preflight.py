@@ -297,6 +297,23 @@ class TestFreeVramBytesDeviceSelection:
     """_free_vram_bytes() must read the CONFIGURED main GPU device, not always
     device 0, once a multi-GPU main_gpu_index is set."""
 
+    @pytest.fixture(autouse=True)
+    def _uncorrected_reading(self, monkeypatch):
+        # WHAT THIS ISOLATES: #706 added a cross-process correction on top of the raw
+        # torch reading (_sizing.py's _free_vram_bytes -> _device_global_free_bytes),
+        # which engages ONLY where the raw reading is known process-scoped, i.e. Windows
+        # + a ROCm/HIP torch. These tests are about WHICH DEVICE is read, not about that
+        # correction, and their fake torch inadvertently switched it on: the correction
+        # returns total-minus-all-process-used, and an idle box reports used=0, so the
+        # assertion saw the device's TOTAL instead of its free value (2000 not 1000).
+        # That is why they passed on ubuntu (correction early-returns off-win32) and
+        # failed on windows-latest. Pin it off so the assertion measures the reading path
+        # regardless of the ambient platform - same intent as the _native_backend_has_vulkan
+        # pin below. The correction itself is covered on its own (test_auto_gpu_layers.py,
+        # test_kv_bytes_offload.py, test_discover.py, and TestVramReport here).
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped",
+                            lambda: False)
+
     def _fake_torch(self, per_device_free_total):
         fake = MagicMock()
         fake.cuda.is_available.return_value = True
@@ -350,6 +367,18 @@ class TestFreeVramBytesUsesIsolatedNativeFallback:
     fallback path is the COMMON case for NVIDIA/Linux/macOS/Vulkan/Metal users,
     not a rare edge, which is why it must actually work (not just degrade to
     None) rather than simply avoiding the direct native call."""
+
+    @pytest.fixture(autouse=True)
+    def _uncorrected_reading(self, monkeypatch):
+        # Same isolation, same reason as TestFreeVramBytesDeviceSelection above: these
+        # tests assert the SOURCE and ORDER of the reading (torch first, isolated probe
+        # as fallback, direct native never), not #706's cross-process correction. Left
+        # live, that correction overwrites the fake's free value with total-minus-used on
+        # Windows, so the asserts saw 9000/5000 (totals) instead of 7000/3000 (frees) -
+        # green on ubuntu, red on windows-latest, for a reason unrelated to what these
+        # tests exist to guard.
+        monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped",
+                            lambda: False)
 
     def _fake_torch_ok(self):
         fake = MagicMock()
