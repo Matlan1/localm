@@ -345,7 +345,7 @@ class TestUnloadEmbedderEndpointHonesty(_UnloadCase):
         with patch.dict(hs._engines, {}, clear=False), \
              patch("localm.inference.embedder.loaded_path", lambda: self._EMB), \
              patch("localm.inference.embedder.active_requests", lambda: 0), \
-             patch("localm.inference.embedder.reset_embedder", lambda: None), \
+             patch("localm.inference.embedder.reset_embedder", lambda force=True: True), \
              patch("localm.config.load_registry",
                    return_value={"emb-model": {"path": self._EMB}}), \
              patch("localm.model_manager._entry_path", lambda entry: self._EMB), \
@@ -552,6 +552,7 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
         job.push.side_effect = lambda d: lines.append(d.get("text", ""))
         with patch("localm.inference.embedder.loaded_dim", return_value=384), \
              patch("localm.inference.embedder.active_requests", return_value=0), \
+             patch("localm.inference.embedder.reset_embedder", lambda force=True: True), \
              patch("localm.vram.wait_for_vram_release", _impatient_wait), \
              patch("localm.selfclient.self_request", fake_self_request):
             ok = vram_mod.unload_chat_for_media(job, "http://x", "image")

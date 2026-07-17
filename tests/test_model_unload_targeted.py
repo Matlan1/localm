@@ -273,7 +273,7 @@ def test_unload_all_releases_loaded_embedder(setup_multi_model, monkeypatch):
 
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+    monkeypatch.setattr(emb, "reset_embedder", lambda force=True: (calls.append(1), True)[1])
 
     r = client.post("/v1/models/unload")
     assert r.status_code == 200
@@ -293,7 +293,7 @@ def test_unload_all_status_unloaded_when_only_embedder_loaded(setup_multi_model,
 
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+    monkeypatch.setattr(emb, "reset_embedder", lambda force=True: (calls.append(1), True)[1])
 
     r = client.post("/v1/models/unload")
     assert r.status_code == 200
@@ -328,7 +328,7 @@ def test_unload_one_model_releases_matching_embedder(setup_multi_model, monkeypa
 
     monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/model-a.gguf")
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+    monkeypatch.setattr(emb, "reset_embedder", lambda force=True: (calls.append(1), True)[1])
 
     r = client.post("/v1/models/unload", params={"model": "model-a"})
     assert r.status_code == 200
@@ -348,7 +348,7 @@ def test_unload_one_model_leaves_non_matching_registered_model_alone(setup_multi
 
     monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/some-other-embedder.gguf")
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+    monkeypatch.setattr(emb, "reset_embedder", lambda force=True: (calls.append(1), True)[1])
 
     r = client.post("/v1/models/unload", params={"model": "model-a"})
     assert r.status_code == 200
