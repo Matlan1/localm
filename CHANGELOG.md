@@ -31,7 +31,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm setup-llama --force` to pick up the fix on an already-provisioned
   install. As a safety net for installs that have not yet reprovisioned, the
   embedder now automatically retries once on CPU after a GPU crash and says so
-  in the Knowledge page instead of just failing.
+  in the Knowledge page instead of just failing - and that retry genuinely
+  hides the GPU from the runtime rather than only skipping weight offload, so
+  it recovers regardless of which embedding model is selected, not only small
+  ones.
 - **A collection with no documents no longer shows "reindex needed."** The badge
   meant "this collection predates your embedding model," but an empty,
   freshly-created collection triggered it too, even though there was nothing to

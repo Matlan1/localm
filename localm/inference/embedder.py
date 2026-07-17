@@ -497,11 +497,18 @@ class IsolatedEmbedder(VramSizingMixin):
     def _reload(self) -> None:
         """(Re)run preflight and spawn a fresh child that loads the model.
         Used both by __init__ and by embed()'s auto-respawn after a crash -
-        VRAM may have changed since the last load, so preflight re-runs too."""
+        VRAM may have changed since the last load, so preflight re-runs too.
+
+        cpu_only is passed once gpu_fallback_reason is set (a prior crash
+        already forced n_gpu_layers to 0 - see embed()): n_gpu_layers=0 alone
+        does not guarantee no GPU backend involvement (see
+        _embedder_runner.py's cpu_only handling), so every reload from that
+        point on re-asserts the guarantee, not just the first one."""
         self._preflight_vram()
         from ._embedder_runner import EmbedderRunner
         params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
-                      n_ctx=self.n_ctx, pooling_type=self._pooling_type)
+                      n_ctx=self.n_ctx, pooling_type=self._pooling_type,
+                      cpu_only=self.gpu_fallback_reason is not None)
         self._runner = EmbedderRunner()
         meta = self._runner.spawn_and_load(params)
         self.dim = meta["dim"]

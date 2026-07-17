@@ -96,6 +96,33 @@ def _runner_main(req_q, resp_q) -> None:
             return
 
         if name == "load":
+            payload = dict(payload)
+            # cpu_only: n_gpu_layers=0 alone only controls WEIGHT placement -
+            # ggml's scheduler still considers a REGISTERED GPU backend for
+            # individual ops (a large enough matmul dispatches to vendor BLAS
+            # regardless of how many layers were offloaded; confirmed live:
+            # a small model like bge-small never crosses that threshold and
+            # is unaffected either way, but a multi-billion-parameter model
+            # like Qwen3-Embedding-4B does, and hits the identical rocBLAS/
+            # Tensile crash on a "CPU-only" n_gpu_layers=0 load - issue #749).
+            # Clearing the vendor-visible-device env vars BEFORE importing
+            # anything native makes the HIP/ROCm/CUDA runtime itself report
+            # ZERO devices, so ggml's backend registration finds none and the
+            # scheduler has only CPU to dispatch to - a guarantee, not a
+            # heuristic, independent of model size. Set in THIS child process
+            # only (freshly spawned, isolated) - never touches the parent's
+            # environment or a concurrently-loading chat model.
+            if payload.pop("cpu_only", False):
+                # "-1" (not "") - Windows' CRT putenv("VAR=") with nothing
+                # after '=' REMOVES the variable rather than setting it empty
+                # (confirmed live: an empty string left the device visible,
+                # "llama_prepare_model_devices: using device ROCm0" still
+                # fired). "-1" is the standard CUDA/HIP convention for "no
+                # valid device index", which the runtime cannot silently
+                # treat as "unset".
+                os.environ["HIP_VISIBLE_DEVICES"] = "-1"
+                os.environ["ROCR_VISIBLE_DEVICES"] = "-1"
+                os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
             from localm.inference.embedder import GGUFEmbedder
             try:
                 embedder = GGUFEmbedder(**payload)

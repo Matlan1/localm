@@ -791,6 +791,11 @@ def test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline(monkeypatch):
     assert e.n_gpu_layers == 0                   # dropped to CPU
     assert e.gpu_fallback_reason is not None
     assert "CPU" in e.gpu_fallback_reason
+    # n_gpu_layers=0 alone does not guarantee no GPU backend involvement (a
+    # large enough model's matmul can still dispatch to a REGISTERED vendor
+    # backend regardless - issue #749) - the respawned child must be told to
+    # hide GPU devices from the runtime entirely, not just skip weight offload.
+    assert _StubRunner.instances[-1].loaded_params.get("cpu_only") is True
 
     # A SECOND crash (now already on CPU) must NOT try to fall back again -
     # it propagates normally, matching the generic dead-worker contract.
