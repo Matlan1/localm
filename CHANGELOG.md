@@ -24,6 +24,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is no longer a recognized extra.
 
 ### Fixed
+- **An explicit `--port` that is busy now errors instead of silently moving you
+  onto the default port.** `localm gui`/`serve --port N` resolved a busy port by
+  scanning localm's range from the start, so a deliberately chosen high port (e.g.
+  `--port 8903`, picked to stay clear of other instances) that was in use dropped
+  you back onto the shared default 8642 - the opposite of what you asked for. An
+  explicit port is now honored exactly or refused with a clear "Port N is already
+  in use" message and a non-zero exit; only the default port (when no `--port` is
+  given) still auto-bumps through the range. The `--port` help text, which
+  promised "auto-bumps when busy", is corrected to match.
 - **`localm bug-report` now bundles the server-hang trace too.** The 0.1.2
   automatic server-hang diagnostics attached the captured freeze trace when you
   filed from the app or when a crash was recovered on the next start, but a report
