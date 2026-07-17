@@ -202,9 +202,18 @@ def bug_report_cmd(message: str, send: bool) -> None:
     to skip the menu and send it immediately. No GitHub account is ever
     needed."""
     from localm import bugreport
+    context = {"operation": "bug-report"}
+    # The reporter's server may have hung in a DIFFERENT process (this CLI is not
+    # it), so its captured freeze trace can only be found via the live instance
+    # registry, not this process's pid. Attach it here so a `localm bug-report`
+    # filed after "it just hung" carries the diagnosis - the automatic in-app and
+    # crash-recovery paths already do; the CLI silently did not (REG-736).
+    hang = bugreport.live_server_hang_trace()
+    if hang:
+        context["hang_traces"] = hang
     bugreport.report_failure(
         summary=message or "user-reported issue",
-        context={"operation": "bug-report"},
+        context=context,
         as_failure=False,
         auto_send=send,
         interactive=bool(getattr(sys.stdin, "isatty", lambda: False)()))
