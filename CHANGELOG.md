@@ -77,6 +77,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   visible no matter which tab is active.
 
 ### Fixed
+- **GPU detection no longer mistakes a slow driver start for "no GPU".** The
+  first GPU check after a machine or driver cold start can legitimately take a
+  few seconds, but localm gave it only 4 - so on many boxes the first look at
+  your hardware "timed out" and everything downstream treated that as a machine
+  without a GPU: `localm gpus` and doctor could report nothing found, and the
+  Settings GPU controls (Main GPU, Split across GPUs) could silently vanish on
+  a multi-GPU box. The time limit was guarding against a server freeze that can
+  no longer happen (GPU checks moved off the serving thread long ago), so it
+  now simply allows a cold start to finish. If the driver is genuinely stuck,
+  the Settings page also no longer concludes "single GPU" from a check that
+  never completed - it keeps your GPU controls as they were and retries next
+  time, instead of hiding them.
 - **A multi-GPU split no longer turns off the VRAM safety check on the Vulkan
   backend.** Before loading a model, localm decides whether it must check each
   card's share of VRAM by asking how many cards your split spans. On the Vulkan

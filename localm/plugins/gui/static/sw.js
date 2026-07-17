@@ -62,7 +62,11 @@
 // a fresh, device-global measurement (the backend withholds used/free for a stale
 // or process-blind one) - a stale-cached client would keep presenting an
 // untrustworthy VRAM number as live and lack the fullness colour.
-const CACHE = "localm-shell-v61";
+// v62: app/settings-perf.js no longer hides the Main GPU / Split rows on an
+// INCONCLUSIVE /api/gpus probe (probe_status timeout/busy) - a stale-cached
+// client would keep concluding "single GPU" from a wedged driver and hide
+// controls a multi-GPU box owns.
+const CACHE = "localm-shell-v62";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

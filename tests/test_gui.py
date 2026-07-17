@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from localm.plugins.coder.sessions import CoderSession, SessionManager
 from localm.plugins.gui.web import attach_gui
+from tests.conftest import probe_double
 
 
 # ------------------------------------------------------------------ #
@@ -769,7 +770,7 @@ class TestGpusEndpoint:
             {"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3, "free": 20 * 1024 ** 3},
             {"index": 1, "name": "RTX 3060", "total": 12 * 1024 ** 3, "free": 10 * 1024 ** 3},
         ]
-        with patch("localm.discover.list_gpus", return_value=fake_gpus), \
+        with patch("localm.discover.list_gpus", new=probe_double(fake_gpus)), \
              patch("localm.config.load_config", return_value={"main_gpu_index": 1}):
             with TestClient(app) as client:
                 r = client.get("/api/gpus")
@@ -777,10 +778,13 @@ class TestGpusEndpoint:
         data = r.json()
         assert data["gpus"] == fake_gpus
         assert data["main_gpu_index"] == 1
+        # A patched reading IS a completed probe: the payload must say so, so the
+        # JS can trust an empty/short list as a real "that is all there is".
+        assert data["probe_status"] == GPU_PROBE_OK
 
     def test_empty_when_nothing_detected(self, gui_app):
         app, _ = gui_app
-        with patch("localm.discover.list_gpus", return_value=[]), \
+        with patch("localm.discover.list_gpus", new=probe_double([])), \
              patch("localm.config.load_config", return_value={"main_gpu_index": None}):
             with TestClient(app) as client:
                 r = client.get("/api/gpus")
@@ -788,6 +792,25 @@ class TestGpusEndpoint:
         data = r.json()
         assert data["gpus"] == []
         assert data["main_gpu_index"] is None
+        assert data["probe_status"] == GPU_PROBE_OK
+
+    def test_inconclusive_probe_is_labelled_never_conflated_with_no_gpu(self, gui_app):
+        """A timed-out/contended probe serves [] - which is NOT "no GPUs", it is
+        "could not look". The payload must carry that status so the Settings JS
+        can refrain from hiding the GPU controls: concluding "single GPU" from a
+        wedged driver made a multi-GPU box silently render as single-GPU
+        (AGENTS.md rule 5). Mutation guard: reverting the route to the bare
+        list_gpus() call drops the key and turns this red."""
+        app, _ = gui_app
+        with patch("localm.discover.list_gpus",
+                   new=probe_double([], status=GPU_PROBE_TIMEOUT)), \
+             patch("localm.config.load_config", return_value={"main_gpu_index": None}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == []
+        assert data["probe_status"] == GPU_PROBE_TIMEOUT
 
     def test_gpu_split_indices_none_by_default(self, gui_app, tmp_path):
         """Multi-GPU tensor-split wiring: with no config file at all (a fresh
@@ -801,7 +824,7 @@ class TestGpusEndpoint:
         with patch("localm.config.CONFIG_FILE", cfg_file), \
              patch("localm.config.HOME_DIR", tmp_path), \
              patch("localm.config.MODELS_DIR", tmp_path / "models"), \
-             patch("localm.discover.list_gpus", return_value=[]):
+             patch("localm.discover.list_gpus", new=probe_double([])):
             with TestClient(app) as client:
                 r = client.get("/api/gpus")
         assert r.status_code == 200
@@ -827,7 +850,7 @@ class TestGpusEndpoint:
         with patch("localm.config.CONFIG_FILE", cfg_file), \
              patch("localm.config.HOME_DIR", tmp_path), \
              patch("localm.config.MODELS_DIR", tmp_path / "models"), \
-             patch("localm.discover.list_gpus", return_value=fake_gpus):
+             patch("localm.discover.list_gpus", new=probe_double(fake_gpus)):
             from localm.config import load_config, save_config
             from localm.settings_schema import validate_update
             validated = validate_update({"gpu_split_indices": [0, 1]})

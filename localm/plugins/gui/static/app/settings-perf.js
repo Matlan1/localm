@@ -91,8 +91,11 @@ export function setupPerfCard() {
  *  device (name + total VRAM), pre-selected on the currently configured index.
  *  Hidden entirely on a single-GPU box (the common case) - there is nothing
  *  useful to choose there, and showing a one-option dropdown would just be
- *  noise. Also hidden when the endpoint is unreachable or detection found
- *  nothing (same "no GPU visible" case). */
+ *  noise. Also hidden when the endpoint is unreachable or a FRESH probe found
+ *  nothing (a genuine "no GPU visible" reading). An INCONCLUSIVE probe
+ *  (probe_status "timeout"/"busy": driver wedged or contended) proves nothing
+ *  about the box, so it never hides the row - concluding "single GPU" from it
+ *  made a multi-GPU box silently render as single-GPU. */
 export async function refreshMainGpuSelector() {
   const row = $("perf-gpu-select-row"), sel = $("perf-main-gpu");
   if (!row || !sel) return;
@@ -101,7 +104,10 @@ export async function refreshMainGpuSelector() {
     if (!r.ok) { row.hidden = true; return; }
     const data = await r.json();
     const gpus = data.gpus || [];
-    if (gpus.length < 2) { row.hidden = true; return; }
+    if (gpus.length < 2) {
+      if (data.probe_status && data.probe_status !== "ok") return;
+      row.hidden = true; return;
+    }
     sel.replaceChildren();
     for (const g of gpus) {
       const opt = document.createElement("option");
@@ -141,7 +147,8 @@ export function setupMainGpuSelector() {
 /** Populate the "Split across GPUs" checkbox list from GET /api/gpus: one
  *  checkbox per detected device, pre-checked for whatever gpu_split_indices
  *  currently holds. Hidden entirely on a single-GPU box, or when the
- *  endpoint is unreachable/empty - same gate as the Main GPU selector. */
+ *  endpoint is unreachable/empty - same gate (including the inconclusive-probe
+ *  exception) as the Main GPU selector above. */
 export async function refreshGpuSplitCheckboxes() {
   const row = $("perf-gpu-split-row"), list = $("perf-gpu-split-list");
   if (!row || !list) return;
@@ -150,7 +157,10 @@ export async function refreshGpuSplitCheckboxes() {
     if (!r.ok) { row.hidden = true; return; }
     const data = await r.json();
     const gpus = data.gpus || [];
-    if (gpus.length < 2) { row.hidden = true; return; }
+    if (gpus.length < 2) {
+      if (data.probe_status && data.probe_status !== "ok") return;
+      row.hidden = true; return;
+    }
     const current = new Set(Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : []);
     list.replaceChildren();
     for (const g of gpus) {

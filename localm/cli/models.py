@@ -551,9 +551,11 @@ def gpus_cmd():
     cfg = load_config()
     configured = cfg.get("main_gpu_index")
     split = cfg.get("gpu_split_indices") or []
-    # A one-shot CLI is NOT on the server event loop, so it can wait out a slow
-    # COLD GPU driver init (the first torch.cuda / HIP call, measured ~6.5s)
-    # instead of the 4s server cap misreporting it as "no GPU". The status tells a
+    # A one-shot CLI must wait out a slow COLD GPU driver init (the first
+    # torch.cuda / HIP call, measured up to ~6.5s) rather than misreport it as
+    # "no GPU" - the retired 4.0s default did exactly that (#581). The deadline
+    # is passed explicitly (an alias of today's cold-init-tolerant default) to
+    # pin that tolerance against any future default change. The status tells a
     # genuine empty result apart from a timeout so the message never blames "no
     # torch" for a probe that simply had not finished (AGENTS.md rule 5).
     gpus, status = discover.list_gpus(

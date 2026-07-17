@@ -287,17 +287,36 @@ def _quant_of(name: str) -> str:
 # _list_gpus_probe() calls the GPU driver: torch.cuda.mem_get_info (which, on a
 # torch ROCm build, calls into HIP) has NO timeout, and nvidia-smi is a
 # subprocess. A busy or wedged driver call would block the CALLER for as long as
-# the driver takes. Several callers run on the server's single asyncio event loop
-# (GET /api/gpus, GET /api/vram-estimate, the GPU-registry heartbeat), so a stuck
-# probe there freezes the WHOLE WebUI while the machine sits idle (diagnosed
-# 2026-07). The public list_gpus() below makes the probe safe by construction, so
-# NO caller can be frozen regardless of whether the call site remembered to
-# offload it: the probe runs on a helper thread with a hard DEADLINE; if it
-# overruns, the caller gets the last-known-good reading (or []) and moves on. A
-# wedged NATIVE call cannot be interrupted from Python, so that one helper thread
-# is abandoned; the in-flight guard means at most ONE such thread ever exists,
-# and the overrun is surfaced at debug level (AGENTS.md rule 5), never silently
+# the driver takes. The public list_gpus() below makes the probe safe by
+# construction: it runs on a helper thread with a hard DEADLINE; if it overruns,
+# the caller gets the last-known-good reading (or []) and moves on. A wedged
+# NATIVE call cannot be interrupted from Python, so that one helper thread is
+# abandoned; the in-flight guard means at most ONE such thread ever exists, and
+# the overrun is surfaced at debug level (AGENTS.md rule 5), never silently
 # eaten.
+#
+# WHAT THE DEADLINE IS FOR (and what it is NOT for). PR #541 diagnosed GUI
+# routes running this probe inline on the server's single asyncio loop, which
+# froze the whole WebUI while a probe was busy - and fixed that by OFFLOADING
+# every server call site to an executor. As of that PR no production caller
+# probes on the event loop (re-verified 2026-07-17: the GUI routes all
+# run_in_executor, and the GPU-registry heartbeat does not probe at all), so
+# the deadline does NOT protect the loop; it only bounds how long one worker
+# thread (or a blocking CLI call) waits on a wedged driver before degrading.
+#
+# That is why the default is COLD-INIT-TOLERANT. The first torch.cuda / HIP
+# call of a process initializes the ROCm/CUDA driver: measured 2.6-3.1s on a
+# warm system, 4.63s observed on a genuinely cold driver, ~6.5s historically.
+# The original 4.0s default sat INSIDE that range, so a legitimate cold init
+# "timed out" - and a timeout is served as [] / a frozen last-known-good, which
+# a bare-list caller cannot tell apart from "no GPU at all". That one thin
+# margin manufactured a whole bug class ("no torch / no GPU" misreports #581,
+# a silently skipped pre-load VRAM gate #722). The deadline must sit ABOVE any
+# legitimate cold init; 15.0 is the value blocking callers have used since
+# #581. The cost on a truly wedged driver is one worker thread parked for 15s
+# ONCE - the in-flight guard hands every concurrent caller an instant BUSY,
+# and after the overrun the last-known-good path takes over - so nothing
+# user-facing ever freezes for it.
 #
 # NOTE - deliberately NO freshness/TTL cache: every call re-probes. A TTL cache
 # would hand a STALE "free" reading to callers that need a live one, most
@@ -305,15 +324,14 @@ def _quant_of(name: str) -> str:
 # free-VRAM to confirm a native free has landed before re-checking (AUDIT-MED-11);
 # a stale value there would defeat that guard and over-evict. The last-known-good
 # value is kept ONLY as the wedge fallback, never to short-circuit a live probe.
-_GPU_PROBE_DEADLINE = 4.0     # seconds: hard cap a single probe may block a caller
-# A BLOCKING, non-event-loop caller (the one-shot `localm gpus` CLI) is not on the
-# server's single asyncio loop, so it can afford to wait out a slow COLD driver
-# init instead of misreporting it as "no GPU": the FIRST torch.cuda / HIP call
-# initializes the ROCm/CUDA driver and was measured at ~6.5s on a cold box,
-# overrunning the 4s server cap. This longer deadline is ONLY for such blocking
-# callers; the server-loop path keeps _GPU_PROBE_DEADLINE so a wedged driver can
-# never freeze the WebUI (PR #541).
-_GPU_PROBE_CLI_DEADLINE = 15.0
+_GPU_PROBE_DEADLINE = 15.0    # seconds a probe may block its caller; must exceed
+                              # a legitimate COLD driver init (see above)
+# Historical alias, kept for the call sites and tests that opt into it by name
+# (doctor, `localm gpus`, switch_engine). #541 split a short 4.0s "server" cap
+# from this longer blocking-caller deadline; the short cap guarded an event loop
+# that (per the same PR) no longer runs probes, while turning every cold driver
+# init into a timeout->[]->"no GPU" misreport. Unified 2026-07-17.
+_GPU_PROBE_CLI_DEADLINE = _GPU_PROBE_DEADLINE
 
 # Outcome of a probe, surfaced by list_gpus(..., return_status=True) so a caller
 # can tell a slow / timed-out probe apart from a genuine "nothing here" reading
@@ -333,11 +351,11 @@ _gpu_probe_inflight = False
 # already being probed (BUSY) - that instant answer is what keeps the WebUI
 # responsive on a permanent wedge. Joining is strictly opt-in (list_gpus'
 # wait_for_inflight), for a caller already OFF the event loop that can afford to
-# wait out a cold driver init: it is the ONLY thing that lets a long deadline
-# actually help on a cold box, because there the first probe (often a 4s
-# event-loop heartbeat) holds the in-flight slot for the whole ~4.6s cold init,
-# so every other caller in that window would otherwise short-circuit on BUSY
-# without ever probing - the exact 0.0000s no-op a deadline-15 RETRY hits.
+# wait out a cold driver init: it is the ONLY thing that lets a generous deadline
+# actually help on a cold box, because there the first probe (typically the
+# /api/stats heartbeat's) holds the in-flight slot for the whole cold init, so
+# every other caller in that window would otherwise short-circuit on BUSY
+# without ever probing - the exact 0.0000s no-op a RETRY at any deadline hits.
 _gpu_probe_done: Optional[threading.Event] = None
 _gpu_probe_result: Optional[dict] = None
 # Bumped by _reset_gpu_probe_cache() to ORPHAN any probe thread still in flight.
@@ -382,13 +400,14 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
 
     Safe by construction: the real driver probe (:func:`_list_gpus_probe`) runs on
     a helper thread with a hard ``deadline``-second timeout, so this call NEVER
-    blocks its caller for longer than ``deadline`` even if the GPU driver wedges -
-    critical because several callers run on the server's single event loop. Every
-    call re-probes (see the module note above: no TTL cache, so a live "free"
-    reading is never stale); on an overrun the last-known-good value (or ``[]``) is
-    returned and the stuck probe thread is abandoned. ``deadline`` is overridable
-    for tests and for blocking (non-loop) callers that can wait out a slow cold
-    driver init (:data:`_GPU_PROBE_CLI_DEADLINE`).
+    blocks its caller for longer than ``deadline`` even if the GPU driver wedges.
+    Every call re-probes (see the module note above: no TTL cache, so a live
+    "free" reading is never stale); on an overrun the last-known-good value (or
+    ``[]``) is returned and the stuck probe thread is abandoned. The default
+    ``deadline`` is deliberately generous enough to wait out a legitimate COLD
+    driver init rather than misreport it (see the module note above); override it
+    only in tests, or where a caller genuinely wants a faster degraded answer
+    (:data:`_GPU_PROBE_CLI_DEADLINE` is a historical alias of the default).
 
     When ``return_status`` is True, returns ``(gpus, status)`` where ``status`` is
     :data:`GPU_PROBE_OK` (a fresh probe completed - an empty ``gpus`` then means
@@ -717,17 +736,17 @@ def _apply_device_global_free(gpus: list) -> None:
         from localm.gpu_usage import device_global_used_bytes, source_is_warm
         # This runs INSIDE the deadline-bounded probe, so it spends the SAME budget
         # the driver call already spent. Opening the source costs ~750ms ONCE per
-        # process (a driver init); a warm read costs ~0.02ms. Measured, that cold
-        # 750ms was enough to push cold probes from a comfortable 2.9-3.5s to
-        # 3.6-4.0s against the 4.0s cap and start timing them out - and a timeout
-        # costs the caller its free reading ENTIRELY (list_gpus serves [] and
-        # vram_info falls to the registry tier, which has no "free" at all). A
-        # correct number is not worth trading for no number, so a COLD source is
-        # skipped when the remaining budget is too thin to absorb it; the reading is
-        # then tagged with the uncorrected scope instead of silently uncorrected. A
-        # warm source is free and always runs, so a long-lived server pays this at
-        # most once, and a CLI caller passing the longer _GPU_PROBE_CLI_DEADLINE has
-        # room for it on the first go.
+        # process (a driver init); a warm read costs ~0.02ms. Measured under the
+        # old 4.0s default, that cold 750ms pushed cold probes from a comfortable
+        # 2.9-3.5s to 3.6-4.0s and started timing them out - and a timeout costs
+        # the caller its free reading ENTIRELY (list_gpus serves [] and vram_info
+        # falls to the registry tier, which has no "free" at all). A correct
+        # number is not worth trading for no number, so a COLD source is skipped
+        # when the remaining budget is too thin to absorb it; the reading is then
+        # tagged with the uncorrected scope instead of silently uncorrected. The
+        # cold-tolerant default deadline has room for it on the first go, so this
+        # guard now matters only to callers that pass a deliberately short
+        # deadline; a warm source is free and always runs.
         if not source_is_warm():
             remaining = None
             if _probe_deadline_at is not None:
@@ -1109,13 +1128,12 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
     double relies on - the status-aware call is made ONLY when a caller opts
     in, never unconditionally.
 
-    ``deadline`` overrides list_gpus()'s default probe cap for callers that are
-    NOT on the event loop and can afford to wait out a slow COLD driver init
-    rather than be handed an inconclusive reading (see
-    :data:`_GPU_PROBE_CLI_DEADLINE`). None keeps list_gpus()'s own default, and
-    keeps the call byte-identical for every existing caller - the 4s default cap
-    exists to protect the single event loop (PR #541) and must stay the default
-    for anything that runs on it.
+    ``deadline`` overrides list_gpus()'s default probe deadline (which is already
+    cold-init-tolerant - see :data:`_GPU_PROBE_DEADLINE`; the short 4.0s cap it
+    replaced was retired 2026-07-17). None keeps list_gpus()'s own default, and
+    keeps the call byte-identical for every existing caller. Callers that pass
+    :data:`_GPU_PROBE_CLI_DEADLINE` explicitly do so to PIN their cold-init
+    tolerance against any future default change, not to get a different value.
 
     ``wait_for_inflight`` (opt-in, #701): when a probe is already running (e.g. the
     GUI's 2.5s stats heartbeat holds it through a cold init), JOIN it and wait on its
@@ -1226,7 +1244,8 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
     ALL paths below (the no-split short-circuit, the split-summed path, and the
     degrade-to-single-device fallback), so a blocking (non-event-loop) caller gets
     the same longer probe budget and join behaviour whether or not a split is
-    configured. Defaults keep the 4s cap and no-join, which protect the event loop.
+    configured. Defaults keep list_gpus()'s own cold-init-tolerant deadline and
+    no-join.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -1428,9 +1447,11 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     merely a warning.
 
     Probe freshness (AGENTS.md rule 5). ``list_gpus()`` is deadline-bounded: on a
-    TIMEOUT/BUSY it serves a FROZEN last-known-good reading, and a cold driver init
-    overruns that cap on a healthy box (~6.5s vs the 4s cap, see
-    ``_GPU_PROBE_DEADLINE``), so an overrun is normal, not a fault. This gate
+    TIMEOUT/BUSY it serves a FROZEN last-known-good reading. The default deadline
+    now waits out a legitimate cold driver init (see ``_GPU_PROBE_DEADLINE``), but
+    a wedged/contended driver can still overrun it, and a caller passing a short
+    deadline still times out a cold init, so a non-OK status here is possible and
+    is handled, not treated as a fault. This gate
     therefore does NOT compute a shortfall from a stale reading and does NOT refuse
     on one (refusing would break every working box's first load); on a non-OK probe
     it returns ``[]`` (best-effort admit, logged at debug), relying on the isolated
@@ -1476,14 +1497,13 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     ``shortfall`` list (the historical shape every existing caller relies on).
 
     *deadline* is forwarded to the underlying ``list_gpus`` probe (None leaves its
-    default cap). It is a KNOB an OFF-event-loop caller that runs this via
-    ``run_in_executor`` (e.g. ``switch_engine``) can opt into by passing
-    :data:`_GPU_PROBE_CLI_DEADLINE`, so a cold driver init that overruns the short
-    server cap still completes and yields a FRESH per-device reading instead of
-    timing out into the best-effort admit above. Passing nothing keeps the short cap
-    (the current caller behaviour): such a caller simply falls into that admit on a
-    cold first load. An on-loop caller must NOT pass a long deadline (a long block
-    would freeze the loop, PR #541).
+    default). The default is cold-init-tolerant (see ``_GPU_PROBE_DEADLINE``), so a
+    cold driver init completes and yields a FRESH per-device reading instead of
+    timing out into the best-effort admit above; :data:`_GPU_PROBE_CLI_DEADLINE` is
+    a historical alias of it kept for the callers that pass it explicitly. The knob
+    remains for a caller that wants a deliberately shorter wait (it then falls into
+    that admit on a cold first load). An on-loop caller must not probe inline at
+    all - every server call site offloads via ``run_in_executor`` (PR #541).
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -1530,9 +1550,10 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
         # No FRESH reading this call: list_gpus served a frozen last-known-good value
         # (or []) after a probe TIMEOUT/BUSY. This gate's whole contract is a LIVE
         # per-device check, so it neither quotes that stale "free" as a current figure
-        # (AGENTS.md rule 5) NOR refuses on it: a cold ROCm/CUDA driver init overruns
-        # the 4s probe cap on a HEALTHY box (~6.5s, see _GPU_PROBE_DEADLINE), so
-        # refusing would break working setups on every first load. The check could not
+        # (AGENTS.md rule 5) NOR refuses on it: a non-OK probe can be a healthy box
+        # whose driver is merely busy/contended (or a caller-shortened deadline on a
+        # cold init - see _GPU_PROBE_DEADLINE), so refusing would break working
+        # setups on a routine slow probe. The check could not
         # run this call -> admit best-effort, surfaced via debug + the returned status,
         # never a silent success. The GGUF/embedder load runs in an isolated worker
         # whose native abort is contained to that child (PR #606) - the backstop a
