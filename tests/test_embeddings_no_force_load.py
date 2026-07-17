@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
+from tests.conftest import probe_double
 
 
 class FakeBackend:
@@ -57,7 +58,7 @@ def setup(monkeypatch):
                         lambda n: (f"models/{n}.gguf", "h"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda n: None)
     monkeypatch.setattr("localm.discover.vram_info",
-                        lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+                        probe_double({"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3}))
     engines = {"model-y": FakeEngine("model-y")}
     monkeypatch.setattr(hs, "_engine_factory", lambda n: engines[n])
     for d in (hs._engines, hs._engines_lru, hs._inference_sems, hs._last_activity_per_model):

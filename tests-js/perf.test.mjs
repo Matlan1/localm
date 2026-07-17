@@ -20,7 +20,8 @@ async function waitFor(fn, timeout = 800) {
 }
 
 // Records calls; serves config + estimate + the bootstrap endpoints.
-function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null } = {}) {
+function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
+                            free = 11 * GIB } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
@@ -31,7 +32,7 @@ function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null } = {
     if (u.includes("/api/vram-estimate"))
       return { ok: true, status: 200, json: async () => ({
         model: "m", model_bytes: 4 * GIB, weights: 4 * GIB, kv_cache: 0.6 * GIB,
-        overhead: 1.5 * GIB, needed: 6.1 * GIB, free: 11 * GIB, total: 16 * GIB,
+        overhead: 1.5 * GIB, needed: 6.1 * GIB, free, total: 16 * GIB,
         fits, approximate: true }) };
     if (u.includes("/api/models/load") && method === "POST") {
       const body = JSON.parse(opts.body || "{}");
@@ -120,6 +121,20 @@ test("estimate flags a model that may not fit (negative)", async () => {
   assert.ok(await waitFor(() => /may not fit/.test(est.textContent)),
     "a non-fitting model is flagged");
   assert.ok(est.classList.contains("perf-warn"), "warn styling applied");
+});
+
+test("estimate shows 'free VRAM unknown' and no fit verdict when free is withheld", async () => {
+  // free:null + fits:null is what the backend returns when the VRAM reading is
+  // stale or process-blind: an untrustworthy free must not drive a fit verdict.
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { free: null, fits: null }) });
+  const est = window.document.getElementById("perf-estimate");
+  assert.ok(await waitFor(() => /free VRAM unknown/.test(est.textContent)),
+    "a withheld free renders as 'free VRAM unknown', not a number");
+  assert.doesNotMatch(est.textContent, /fits|may not fit/,
+    "no fit verdict is claimed without a trustworthy free");
+  assert.equal(est.classList.contains("perf-warn"), false,
+    "no warn styling when fit is genuinely unknown");
 });
 
 test("two detected GPUs with a configured split: the checkbox row shows, both boxes pre-checked", async () => {

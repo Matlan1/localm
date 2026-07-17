@@ -307,6 +307,19 @@ DEFAULT_CONFIG: dict = {
     # (provisioning is stages S2/S3) and never modifies the user's own ComfyUI.
     # See localm/media/managed_comfy.py.
     "comfy_target": "own",
+    # EXPERIMENTAL, default OFF: per-component GPU placement for media generation.
+    # When on, and the running ComfyUI offers the multigpu Select*Device nodes
+    # (upstream 2026-05-25 or newer) AND a 2+ card split is configured, localm
+    # injects those nodes so the text encoder + VAE load on a second card while
+    # the heavy diffusion model stays on the preferred one. OFF by default even
+    # on a multi-GPU box: the second-card behaviour is UNPROVEN on real multi-GPU
+    # hardware (the dev box has one card), and ComfyUI's gpu:N is a POSITION in a
+    # reordered visible list, so an off-by-one would land a component on the wrong
+    # card and STILL RENDER (a silent wrong result, not a crash). Users opt in
+    # knowingly; the default flips to on only after a 2-GPU hardware proof lands,
+    # as a separate deliberate change. On one card, or an older ComfyUI, or with
+    # the toggle off, media generation is byte-identical to today (single card).
+    "comfy_gpu_placement": False,
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
     #   log     = JSONL audit trail in ~/.localm/sessions/

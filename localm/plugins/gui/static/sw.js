@@ -51,11 +51,22 @@
 // in-memory conversation only once per page load, not on every 30s poll tick
 // (GUI-LIVE-WIPE) - a stale-cached client would keep erasing a user's own
 // first message every 30 seconds in privacy mode.
-// v59: the v58 privacyWiped latch is now reset when the poll sees the server
+// v59: pages/knowledge.js changed (reindex paths are batched in groups of 50 to
+// respect the server's request size cap) - a stale-cached client would keep
+// failing to re-index collections with more than 50 documents.
+// v60: pages/settings.js changed (the experimental "Split media across GPUs"
+// toggle in the Media section) - a stale-cached client would keep lacking the
+// control.
+// v61: app/models-sidebar.js's renderHwStats() now renders the status-bar VRAM
+// figure as a span with a subtle fullness colour, shown ONLY when the reading is
+// a fresh, device-global measurement (the backend withholds used/free for a stale
+// or process-blind one) - a stale-cached client would keep presenting an
+// untrustworthy VRAM number as live and lack the fullness colour.
+// v62: the v58 privacyWiped latch is now reset when the poll sees the server
 // leave privacy mode, so a LATER restart back into privacy mode wipes newly-
 // accumulated non-privacy leftovers again instead of leaving them painted in
 // the sidebar (AUD-PRIV-2) - a stale-cached client would suppress that wipe.
-const CACHE = "localm-shell-v59";
+const CACHE = "localm-shell-v62";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

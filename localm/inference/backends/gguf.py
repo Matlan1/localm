@@ -248,8 +248,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         #
         # _vram_levels() reads torch directly and is NOT routed through
         # discover.list_gpus()'s device-global correction, so this console line is
-        # still subject to the above; it is a dim informational line, not a fit
-        # decision. See dev-notes/vram-cross-process-blindness.md.
+        # still subject to the above. That is deliberate and safe HERE because it is
+        # a dim informational line, not a fit decision: the load DECISIONS
+        # (_free_vram_bytes -> _auto_gpu_layers / _auto_ctx_max / _check_vram) DO now
+        # apply the correction, so a blind reading can no longer drive an overcommit -
+        # only this cosmetic per-device delta stays uncorrected (correcting it would
+        # add a second per-device device-global probe for a log line no decision
+        # reads). See dev-notes/vram-cross-process-blindness.md.
         #
         # torch's allocator counters (memory_allocated/reserved) are a different
         # thing again: they see only torch's own allocations and always read 0.00 for

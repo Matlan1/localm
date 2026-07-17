@@ -15,6 +15,7 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -357,6 +358,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         # Perform VRAM check and eviction
         from pathlib import Path
+        from localm import discover
+        # By-symbol AND by-module deliberately: the by-symbol names are re-read from
+        # the module on every call (this import is function-scoped), which is what
+        # lets tests patch localm.discover.vram_capacity; the module handle is for the
+        # constants, which no test patches.
         from localm.discover import gpu_split_shortfall, vram_capacity
         from localm.model_manager import get_model_info
         from localm.config import load_registry
@@ -410,29 +416,114 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # the exact class of hang #541 fixed for the GUI routes and the
                 # GPU-registry heartbeat. This loop can iterate (and re-probe)
                 # multiple times per eviction, so it is just as exposed.
-                v_info = await loop.run_in_executor(None, vram_capacity)
+                # _GPU_PROBE_CLI_DEADLINE, not the 4s default: the 4s cap exists so a
+                # wedged driver can never freeze the single event loop (PR #541), and
+                # THIS probe is executor-offloaded (right here), so that constraint
+                # does not apply to it - it inherited the cap by accident. It matters
+                # because a COLD ROCm/CUDA driver init is MEASURED at 4.63s on this
+                # box and ~6.5s per discover.py's own comment, i.e. RELIABLY OVER the
+                # 4s cap. So the first load after every server start was guaranteed to
+                # time out, and a timed-out probe on a fresh process has no
+                # last-known-good to serve, which left free_vram None -> "unmeasurable"
+                # -> the gate SKIPPED ENTIRELY (see the state split below). Waiting out
+                # the cold init instead turns the most common load there is - the first
+                # one - from unguarded into properly checked. Retrying at a longer
+                # deadline AFTER a timeout cannot do this: an overrun probe is
+                # abandoned, not cancelled, so _gpu_probe_inflight stays True and every
+                # retry short-circuits to (last-known-good, GPU_PROBE_BUSY) in 0.0s
+                # without probing at all - measured. The budget must be spent on the
+                # FIRST call or not at all.
+                #
+                # wait_for_inflight=True (#701) closes the remaining window: when a
+                # CONCURRENT probe already holds the slot - the GUI polls /api/stats
+                # every 2500ms, whose probe holds _gpu_probe_inflight through the cold
+                # init - this call would otherwise get an instant BUSY + stale reading
+                # and (nothing to evict on a fresh server) refuse spuriously. Instead
+                # it JOINS that in-flight probe and waits on ITS result, up to our
+                # deadline. Safe only because we are executor-offloaded here. So "open
+                # GUI, click a model" on a cold box now gets a real reading, not a
+                # spurious 503.
+                v_info, probe_status = await loop.run_in_executor(
+                    None, functools.partial(
+                        vram_capacity, return_status=True,
+                        deadline=discover._GPU_PROBE_CLI_DEADLINE,
+                        wait_for_inflight=True))
                 free_vram = v_info.get("free")
+                # v_info may also carry a "free_scope" tag (FREE_SCOPE_DEVICE vs
+                # FREE_SCOPE_PROCESS, PR #697/#700): whether `free` counts all
+                # processes or only this one. This gate DELIBERATELY keys only on
+                # probe_status, not free_scope, for THIS change's scope. The asymmetry:
+                #  - REFUSE direction: ignoring it is unconditionally safe.
+                #  - PERMIT direction: a PROCESS-scoped `free` OVER-reports (blind to
+                #    other processes), so permitting on it can OOM. As of #700 the label
+                #    is accurate (PROCESS means genuinely process-local, no longer
+                #    over-firing onto correct multi-NVIDIA), so a future permit-side
+                #    caution on a PROCESS reading (prefer single-resident) is POSSIBLE -
+                #    left out here deliberately, not because the signal is unusable. See
+                #    dev-notes/pr697-followup-review.md.
+                # Residual permit-on-PROCESS OOM risk, and why it is small and accepted:
+                # when this gate STARTS the probe (no concurrent heartbeat), deadline=
+                # _GPU_PROBE_CLI_DEADLINE funds #697's cold device-global source, so
+                # `free` is DEVICE-scoped and correct. When it JOINS a concurrent probe
+                # (the 2500ms /api/stats heartbeat, wait_for_inflight below), it
+                # inherits the STARTER's thinner 4s budget, under which the cold ADL
+                # source is skipped - so for ONE cold cycle the joined reading can be
+                # PROCESS-scoped and the gate may permit on a blind number. It self-
+                # heals: once the ADL source is warm every later reading is DEVICE. This
+                # one-cycle window is an accepted transient (surfaced as a known gap in
+                # the PR), not silently assumed away.
+                # Two states that master conflated under one `measurable` flag, and
+                # they want OPPOSITE handling (AGENTS.md rule 5 - do not collapse a
+                # benign case into an unknown one):
+                #   probe_ok and free is None -> this BOX cannot report free VRAM at
+                #       all (CPU-only, GGUF-only without nvidia-smi, the Windows
+                #       registry tier). PERMANENT. Best-effort single-resident load is
+                #       correct and is the shipped behaviour - refusing would brick it.
+                #   not probe_ok            -> THIS PROBE was inconclusive; the box may
+                #       well be measurable. TRANSIENT. NOT a licence to skip the gate.
+                probe_ok = probe_status == discover.GPU_PROBE_OK
                 measurable = free_vram is not None
+                cannot_measure = probe_ok and not measurable
+                inconclusive = not probe_ok
                 # + headroom for consistency with the aggregate check just
                 # below, which also demands vram_required + headroom, not
                 # bare vram_required - a per-device share should not be held
                 # to a thinner margin than the aggregate ceiling it composes
                 # with (see gpu_split_shortfall's own docstring: it does not
                 # bake in headroom itself, that is the caller's decision).
+                # Bare call, and it is SAFE to be bare as of #699: gpu_split_shortfall
+                # is now status-aware and admits-on-non-OK (a stale/timed-out per-device
+                # probe yields an EMPTY shortfall, never a fabricated one), and it omits
+                # a device whose reading is blind/stale rather than quoting it. So a bare
+                # call can no longer turn a stale reading into a spurious refusal or a
+                # quoted figure. It also runs WARM here: the vram_capacity probe above
+                # already paid the cold-init cost, so gpu_split_shortfall's own probe
+                # completes fast. The one thing a bare call does NOT get is #701's
+                # in-flight JOIN (wait_for_inflight) - a tiny follow-up owned by the
+                # gpu_split_shortfall session, and moot in practice given the warm-driver
+                # ordering. Passing the deadline/status through is therefore unnecessary.
                 shortfall = (
                     await loop.run_in_executor(
                         None, gpu_split_shortfall, vram_required + headroom)
                     if check_split_fit else [])
-                if measurable and free_vram >= vram_required + headroom and not shortfall:
+                # PERMIT only on a reading that was actually taken. A frozen
+                # last-known-good that happens to read HIGH would otherwise pass here
+                # and admit a load with ZERO eviction on top of resident peers - the
+                # same stale int that produces a dishonest 503 in the LOW direction
+                # produces a native OOM / driver TDR in the HIGH one.
+                if (probe_ok and measurable
+                        and free_vram >= vram_required + headroom and not shortfall):
                     break
 
                 # Make room. Measurable VRAM: evict idle models until the new one
                 # fits (also satisfying any configured split device's own share
-                # - see check_split_fit above). NOT measurable (default GGUF-only
-                # / non-NVIDIA, no "free" from discover.vram_info): cannot prove
-                # it fits alongside others, so fall back to single-resident
-                # (evict every idle model first) rather than stacking until the
-                # driver OOMs (AUDIT-CRIT-2).
+                # - see check_split_fit above). Cannot measure (default GGUF-only
+                # / non-NVIDIA, no "free" from discover.vram_info) or inconclusive:
+                # cannot prove it fits alongside others, so fall back to
+                # single-resident (evict every idle model first) rather than stacking
+                # until the driver OOMs (AUDIT-CRIT-2). The two diverge only once
+                # eviction is exhausted, below: cannot-measure loads best-effort,
+                # inconclusive refuses.
                 evict_name = None
                 for candidate in _engines_lru:
                     if candidate == name:
@@ -453,11 +544,47 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
                 if evict_name is None:
                     # Nothing idle left to evict.
-                    if not measurable:
-                        # Unmeasurable and every remaining model is busy (or none
-                        # loaded): freed what we safely can, load best-effort (the
-                        # pre-multi-model behaviour).
+                    if cannot_measure:
+                        # This BOX cannot report free VRAM at all, and every remaining
+                        # model is busy (or none loaded): freed what we safely can,
+                        # load best-effort (the pre-multi-model behaviour). Correct and
+                        # unchanged - refusing here would brick every CPU-only /
+                        # GGUF-only / registry-tier box, which can NEVER measure.
                         break
+                    if inconclusive:
+                        # The probe did not complete, so we do not know. Master reached
+                        # this line with free_vram None and took the break above,
+                        # loading with NO VRAM CHECK AT ALL - and because a cold driver
+                        # init reliably overruns the old 4s cap, that was the FIRST
+                        # load after every server start on such a box, silent but for a
+                        # logger.debug. Refuse instead: the failure modes are not
+                        # symmetric. A wrong permit hands a too-big model to the native
+                        # loader, which "can hard-abort the process rather than return
+                        # NULL" (gpu_split_shortfall's docstring) - unrecoverable. A
+                        # wrong refusal is a 503 the user can retry, and by then the
+                        # abandoned probe has usually landed and the driver is warm.
+                        # Quotes no figure: we have none we measured (rule 5).
+                        #
+                        # RARE now. Two ways the probe fails to complete, and both the
+                        # long deadline and wait_for_inflight=True above are aimed at
+                        # them: (1) a cold init on a fresh process - the deadline waits
+                        # it out; (2) a CONCURRENT probe holding the slot (the GUI's
+                        # 2500ms /api/stats heartbeat through a cold init) - the join
+                        # waits on ITS result instead of taking an instant BUSY. So
+                        # reaching here needs the probe to blow the FULL deadline even
+                        # after joining - a genuinely stuck/wedged driver, not the
+                        # ordinary cold-init or heartbeat-collision cases. Refusing
+                        # there is correct: we truly cannot measure, and loading blind
+                        # onto a possibly-wedged GPU is the OOM/TDR risk this gate
+                        # exists to prevent.
+                        raise HTTPException(
+                            503, f"Cannot load '{name}': free VRAM could not be "
+                            f"measured (the GPU probe did not complete within "
+                            f"{discover._GPU_PROBE_CLI_DEADLINE:.0f}s, so the driver "
+                            f"may be stuck), and no idle model could be unloaded to "
+                            f"make room. Refusing rather than load a model that may "
+                            f"not fit. Retry shortly; if this persists, restart the "
+                            f"GPU app holding the driver, or unload another model.")
                     # Local eviction exhausted: before giving up, best-effort ask a
                     # sibling localm instance to release ITS VRAM (multi-instance
                     # coordination, see localm.gpu_registry). Off the event loop (it
@@ -478,10 +605,15 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). "
                                             "All other loaded models are busy.")
                     if shortfall:
-                        # Aggregate may well be enough (or unmeasurable) - it is
-                        # specifically the configured split's per-device share
-                        # that is short, so name the device(s), not a generic
-                        # aggregate message.
+                        # Aggregate may well be enough - it is specifically the
+                        # configured split's per-device share that is short, so name
+                        # the device(s), not a generic aggregate message. (Said "or
+                        # unmeasurable" until it was shown unreachable: shortfall is
+                        # always [] when free is unmeasurable, because list_gpus()
+                        # DROPS a device that fails to report rather than emitting
+                        # free=None, so the per-device `free is None` skip above and an
+                        # unmeasurable aggregate cannot coexist. Also unreachable now
+                        # via the inconclusive branch, which empties shortfall.)
                         detail = "; ".join(
                             f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
                             f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
@@ -496,7 +628,13 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     # same signal vram_capacity() used, and only suggest a split when
                     # one is not already active (do not tell a split user to make one).
                     from localm.discover import split_device_count
-                    free_mb = (free_vram or 0) // 1024 ** 2
+                    # No `or 0` fallback: reaching here requires probe_ok and
+                    # measurable (cannot_measure and inconclusive both broke or raised
+                    # above), so free_vram is a real int from a probe that completed.
+                    # A fabricated 0 would print "0 MB free" - a figure nobody
+                    # measured, reading as "no VRAM free" - which is exactly what this
+                    # message must never do (AGENTS.md rule 5).
+                    free_mb = free_vram // 1024 ** 2
                     need_mb = vram_required // 1024 ** 2
                     if split_device_count() >= 2:
                         raise HTTPException(503, f"Not enough VRAM to load '{name}' "

@@ -510,6 +510,18 @@ CORE_FIELDS: list = [
                  "install and never patches a ComfyUI it did not start. The patch "
                  "self-expires once ComfyUI ships its own fix.",
                  group="Media", owner="image"),
+    SettingField("comfy_gpu_placement", Widget.TOGGLE,
+                 "Split media across GPUs (experimental)",
+                 "EXPERIMENTAL, off by default. On a machine with two or more "
+                 "GPUs, put the text encoder and VAE on a second card so the "
+                 "diffusion model has more room on the first - only if the running "
+                 "ComfyUI is new enough to offer per-component placement (upstream "
+                 "2026-05-25 or newer; localm's own managed ComfyUI is older and "
+                 "declines cleanly). This does NOT split one model across cards "
+                 "(no ComfyUI feature does that). Unproven on real multi-GPU "
+                 "hardware, so it stays off until you turn it on; with it off, or "
+                 "on a single-GPU box, media generation is unchanged.",
+                 group="Media", owner="image", applies=Applies.RESTART),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  "Free the media model's VRAM and reload the chat model after a "
@@ -1023,6 +1035,22 @@ def _coerce_media_value(f: "MediaField", val):
     return s or None
 
 
+def _is_http_url(value: str) -> bool:
+    """True if *value* is a well-formed absolute http(s) URL with a host.
+
+    Deliberately shape-only (scheme in http/https + a non-empty host): a
+    scheme-less or hostless value never works as a ComfyUI endpoint anyway
+    (urllib.request.urlopen needs a scheme), so rejecting it loses no working
+    config. SSRF / link-local screening is NOT done here - that stays with
+    sanitize_comfy_url at request time (do not duplicate the SSRF policy)."""
+    import urllib.parse
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except (ValueError, TypeError):
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
 def validate_media_block(name: str, updates: dict) -> dict:
     """Coerce + validate a per-plugin media update into a block-merge dict.
 
@@ -1040,6 +1068,16 @@ def validate_media_block(name: str, updates: dict) -> dict:
         if f is None:
             raise ValueError(f"unknown media field for {name!r}: {key!r}")
         coerced = _coerce_media_value(f, val)
+        # api_url shape check (REC-MEDIA-CMD): reject a malformed URL at SET time
+        # with a clear error, instead of storing it and letting sanitize_comfy_url
+        # silently drop it back to the loopback default at READ time (AGENTS.md
+        # rule 5 - surface a bad input, do not hide it). launch_cmd is intentionally
+        # NOT shape-checked: it is a free-form shell command, so there is no "valid
+        # path" invariant to assert without rejecting real commands.
+        if f.key == "api_url" and coerced is not None and not _is_http_url(coerced):
+            raise ValueError(
+                f"api_url must be a valid http(s) URL "
+                f"(e.g. http://127.0.0.1:8188), got {coerced!r}")
         cur = merge
         for p in f.block_path[:-1]:
             cur = cur.setdefault(p, {})

@@ -3,6 +3,7 @@
 All HuggingFace calls are mocked; no real network."""
 
 import ctypes
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -26,7 +27,8 @@ from localm.discover import (
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _native_backend_has_vulkan,
-    _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
+    _quant_of, applied_split_device_count, apply_gpu_split, apply_main_gpu,
+    fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
     resolve_gpu_split, resolve_main_gpu_index, split_device_count, vram_capacity,
     vram_info,
@@ -631,6 +633,122 @@ class TestListGpusTimeoutStatus:
         relax - otherwise `localm gpus` inherits the same premature timeout."""
         assert _GPU_PROBE_CLI_DEADLINE > _GPU_PROBE_DEADLINE
         assert _GPU_PROBE_CLI_DEADLINE >= 10.0
+
+    def test_vram_capacity_forwards_deadline_so_a_cold_probe_completes(self, monkeypatch):
+        """Root cause of switch_engine's skipped gate: the pre-load probe ran at the
+        4s server cap while off the event loop, so a cold driver init (measured 4.63s;
+        ~6.5s per discover.py's own comment) reliably TIMED OUT and served no reading,
+        which made the gate treat the box as unmeasurable and skip the VRAM check.
+
+        This pins the fix's mechanism end to end through the plumbing: the SAME slow
+        probe TIMES OUT at the default cap (no 'free') but COMPLETES with a real
+        reading when vram_capacity is given the generous deadline. If vram_capacity
+        stopped forwarding the deadline, the second arm would time out too and this
+        goes red."""
+        from localm import discover
+        import time
+
+        def _slow_cold_probe():
+            time.sleep(1.0)   # overruns a short cap, beats a generous one
+            return [{"index": 0, "name": "GPU0", "total": 16, "free": 9}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow_cold_probe)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})  # no split
+
+        # ARM A: default cap (0.2s here) -> times out -> no 'free' -> gate would skip.
+        discover._reset_gpu_probe_cache()
+        cap_a, status_a = discover.vram_capacity(return_status=True, deadline=0.2)
+        assert status_a == GPU_PROBE_TIMEOUT
+        assert cap_a.get("free") is None, (
+            "a timed-out probe must not present a 'free' figure it did not measure")
+
+        # ARM B: generous deadline -> the same probe completes -> real reading.
+        discover._reset_gpu_probe_cache()
+        cap_b, status_b = discover.vram_capacity(return_status=True, deadline=3.0)
+        assert status_b == GPU_PROBE_OK
+        assert cap_b.get("free") == 9, (
+            "the generous deadline must thread through vram_capacity so the cold "
+            f"probe completes and the gate gets a real reading; got {cap_b}")
+
+    def test_deadline_forwarded_when_split_degrades_to_single_device(self, monkeypatch):
+        """vram_capacity's docstring promises the deadline is forwarded on EVERY
+        path. The split-configured-but-degraded-to-<2-devices fallback (a device
+        vanished / was never present) dropped it and re-probed at the default 4s cap,
+        so a cold init on that specific config could still time out.
+
+        Pinned with a TRACER, not with timings, deliberately. A timing version does
+        NOT guard: this path probes TWICE (vram_capacity's own split probe, then
+        vram_info's inside the fallback), and any probe short enough to keep the test
+        fast also completes under the 4s DEFAULT cap - so dropping the forwarding
+        would leave it green. Worse, the first probe's abandoned thread holds the
+        in-flight slot, so the second returns BUSY rather than TIMEOUT and a
+        status-based assertion pins the wrong thing. The tracer asserts what actually
+        matters: BOTH probes on this path receive the caller's deadline.
+
+        Mutation: drop `deadline` from _vi() (or from _list_gpus_kw) -> the second
+        recorded deadline is no longer the caller's -> RED."""
+        from localm import discover
+        seen = []
+
+        def _tracer(*, deadline=discover._GPU_PROBE_DEADLINE, return_status=False,
+                    wait_for_inflight=False):
+            seen.append(deadline)
+            # Only device 0 exists, so the configured [0, 5] split resolves to <2
+            # devices -> vram_capacity takes the degrade fallback under test.
+            gpus = [{"index": 0, "name": "GPU0", "total": 16, "free": 9}]
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        monkeypatch.setattr("localm.discover.list_gpus", _tracer)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 5]})
+
+        cap, status = discover.vram_capacity(
+            return_status=True, deadline=discover._GPU_PROBE_CLI_DEADLINE)
+
+        assert status == GPU_PROBE_OK and cap.get("free") == 9, (
+            f"degrade fallback should still return the single device's reading; "
+            f"got {status} {cap}")
+        assert len(seen) == 2, (
+            f"the degrade path probes twice (split probe, then vram_info's); got "
+            f"{len(seen)} - the path under test may not be reached")
+        assert seen == [discover._GPU_PROBE_CLI_DEADLINE] * 2, (
+            "BOTH probes on the degrade path must get the caller's deadline; the "
+            f"fallback dropping it is the bug this pins. got {seen}")
+
+    def test_vram_capacity_forwards_wait_for_inflight(self, monkeypatch):
+        """switch_engine's gate passes wait_for_inflight=True (#701) so a load that
+        races a concurrent probe (the GUI stats heartbeat holding the slot through a
+        cold init) JOINS it for a real reading instead of taking an instant BUSY and
+        refusing spuriously. That only works if vram_capacity FORWARDS the flag to
+        list_gpus. This pins the forwarding with a tracer; the join mechanism itself
+        is #701's and tested there. Mutation: drop wait_for_inflight from _vi() /
+        _list_gpus_kw and the positive assert goes red."""
+        from localm import discover
+        seen = {}
+
+        def _tracer(*, deadline=discover._GPU_PROBE_DEADLINE, return_status=False,
+                    wait_for_inflight=False):
+            seen["wait_for_inflight"] = wait_for_inflight
+            seen["deadline"] = deadline
+            gpus = [{"index": 0, "name": "A", "total": 16, "free": 9}]
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        monkeypatch.setattr("localm.discover.list_gpus", _tracer)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})  # no split
+
+        discover.vram_capacity(return_status=True,
+                               deadline=discover._GPU_PROBE_CLI_DEADLINE,
+                               wait_for_inflight=True)
+        assert seen["wait_for_inflight"] is True, (
+            "vram_capacity must forward wait_for_inflight to list_gpus, or the gate's "
+            "join is a no-op and the GUI cold-first-load still refuses spuriously")
+        assert seen["deadline"] == discover._GPU_PROBE_CLI_DEADLINE
+
+        # Negative: the default (every non-gate caller) must NOT join - joining is an
+        # opt-in for off-loop callers only; an on-loop caller must never block on it.
+        seen.clear()
+        discover.vram_capacity(return_status=True)
+        assert seen.get("wait_for_inflight") is False
 
 
 class TestListGpusJoinInflight:
@@ -1508,6 +1626,147 @@ class TestSplitDeviceCount:
         assert split_device_count({"gpu_split_indices": [0, 1]}) < 2
 
 
+class TestAppliedSplitDeviceCount:
+    """applied_split_device_count(): the LOADER-TRUTH count (mirrors
+    apply_gpu_split's own gate) vs split_device_count()'s DETECTED/labelling count.
+    The two AGREE on a non-vulkan box with a detected device list, and DIVERGE
+    exactly where the loader really splits but list_gpus() cannot measure it: a
+    GGUF-only box (no torch) and the vulkan build (GPU-SPLIT-VKINDEX)."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+    ]
+
+    def _vulkan(self, monkeypatch, on):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: on)
+
+    def test_no_split_is_zero_without_probing(self, monkeypatch):
+        # Mirrors split_device_count's no-probe contract: the common single-GPU
+        # path must not touch the hardware at all.
+        self._vulkan(monkeypatch, False)
+        called = {"n": 0}
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1) or self._GPUS)
+        assert applied_split_device_count({"gpu_split_indices": None}) == 0
+        assert called["n"] == 0, "no split configured -> no hardware probe"
+
+    def test_non_vulkan_two_valid_devices_counts_two(self, monkeypatch):
+        self._vulkan(monkeypatch, False)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS)
+        assert applied_split_device_count({"gpu_split_indices": [0, 1]}) == 2
+
+    def test_non_vulkan_stale_index_degrades_below_two(self, monkeypatch):
+        # Only device 0 detected: resolve_gpu_split drops the stale 5, the loader
+        # would NOT split -> 0, matching apply_gpu_split (single-GPU default) and
+        # split_device_count. The non-vulkan degrade reasoning is preserved.
+        self._vulkan(monkeypatch, False)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS[:1])
+        assert applied_split_device_count({"gpu_split_indices": [0, 5]}) == 0
+
+    @pytest.mark.parametrize("indices", [[0, 1], [0, 5]])
+    def test_matches_split_device_count_on_non_vulkan(self, monkeypatch, indices):
+        # The invariant: identical to the DETECTED count on a non-vulkan box with a
+        # detected device list (split_device_count's re-filter is a proven no-op
+        # there). Divergence is a vulkan / unmeasurable-only phenomenon.
+        self._vulkan(monkeypatch, False)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS)
+        cfg = {"gpu_split_indices": indices}
+        assert applied_split_device_count(cfg) == split_device_count(cfg)
+
+    def test_vulkan_split_is_two_even_though_detected_collapses(self, monkeypatch):
+        # LOAD-BEARING (GPU-SPLIT-VKINDEX): list_gpus() is Vulkan-blind and reports
+        # only device 0, but the loader really tensor_splits across [0, 1]. applied_
+        # must say 2 (loader truth) while split_device_count collapses to < 2 (the
+        # exact bug this fix closes). MUTATION: give applied_ the by_index re-filter
+        # split_device_count uses and it returns 1 here -> this goes RED.
+        self._vulkan(monkeypatch, True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._GPUS[:1])
+        cfg = {"gpu_split_indices": [0, 1]}
+        assert applied_split_device_count(cfg) == 2
+        assert split_device_count(cfg) < 2   # the DETECTED count still (correctly) collapses
+
+    def test_vulkan_split_two_when_list_gpus_blind_empty(self, monkeypatch):
+        self._vulkan(monkeypatch, True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: [])
+        assert applied_split_device_count({"gpu_split_indices": [0, 1]}) == 2
+
+    def test_vulkan_sanity_ceiling_still_enforced(self, monkeypatch):
+        # Passthrough on vulkan does NOT mean "trust any integer": an absurd index
+        # is still rejected (resolve_gpu_split's ceiling), so the loader is never
+        # handed an index past the end of its device array.
+        self._vulkan(monkeypatch, True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: [])
+        assert applied_split_device_count({"gpu_split_indices": [0, 500_000]}) == 0
+
+    @pytest.mark.parametrize("vulkan,gpus,indices", [
+        (False, _GPUS, [0, 1]),        # non-vulkan detected: both apply and applied split
+        (False, _GPUS[:1], [0, 5]),    # non-vulkan stale: neither splits
+        (True, _GPUS[:1], [0, 1]),     # vulkan blind: apply splits, applied agrees
+    ])
+    def test_agrees_with_apply_gpu_split_gate(self, monkeypatch, vulkan, gpus, indices):
+        # Graft (blast-radius judge): pin applied_ against apply_gpu_split's REAL
+        # gate, not a re-derivation. apply_gpu_split returns non-None iff it actually
+        # writes a 2+ device tensor_split; applied_ >= 2 must equal that exactly (it
+        # IS meant to be that gate). On the vulkan row this also demonstrates the
+        # divergence: split_device_count would say < 2 and disagree with the loader.
+        self._vulkan(monkeypatch, vulkan)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: list(gpus))
+        # Pin the tensor_split capacity to the documented fallback so this does not
+        # depend on whatever native runtime is provisioned (same guard
+        # TestApplyGpuSplit uses).
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._api.has_max_devices", lambda: False)
+        cfg = {"gpu_split_indices": indices}
+        mp = SimpleNamespace(main_gpu=0, tensor_split=None, split_mode=0)
+        applied_two_plus = applied_split_device_count(cfg) >= 2
+        assert (apply_gpu_split(mp, config=cfg) is not None) == applied_two_plus
+
+
+class TestGpuSplitShortfallVulkan:
+    """gpu_split_shortfall() honest-unknown on the vulkan build: the configured
+    split indices are in ggml-vulkan's index space, not torch's, so a per-device
+    free-VRAM check would name the WRONG card. It must SKIP the check (return the
+    'nothing to block on' sentinel []) and SURFACE the skip at INFO (discoverable
+    in a bug report), never presenting an un-run check as passed (AGENTS.md rule 5).
+    This one guard fixes both callers (the embedder AND http_server's chat path)."""
+
+    # A MIXED box where the UN-guarded check WOULD flag both devices (tiny free):
+    # this is what makes the mutation (revert the guard) go red instead of passing
+    # for the wrong reason.
+    _MIXED = [
+        {"index": 0, "total": 16_000_000_000, "free": 1_000_000_000},
+        {"index": 1, "total": 16_000_000_000, "free": 1_000_000_000},
+    ]
+
+    def test_vulkan_skips_per_device_check_and_logs_info(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: self._MIXED)
+        cfg = {"gpu_split_indices": [0, 1]}
+        with caplog.at_level(logging.INFO, logger="localm"):
+            result = gpu_split_shortfall(8_000_000_000, cfg)
+        # MUTATION: revert the vulkan guard -> the tiny-free mixed box flags BOTH
+        # devices -> result == [{index 0..}, {index 1..}] -> this assertion RED.
+        assert result == []
+        info = [r for r in caplog.records
+                if r.levelno == logging.INFO and "GPU-SPLIT-VKINDEX" in r.getMessage()]
+        # MUTATION: drop the log to debug (or remove it) -> no INFO record -> RED.
+        # Pins the honesty graft: the skip must reach a bug report, not hide at debug.
+        assert info, "the vulkan skip must be surfaced at INFO (reaches a bug report), not debug/silence"
+
+    def test_vulkan_skip_does_not_probe_torch(self, monkeypatch):
+        # The guard sits BEFORE the list_gpus() probe, so a torch-blind vulkan box
+        # pays no probe cost for a check it structurally cannot do.
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
+        called = {"n": 0}
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1) or self._MIXED)
+        gpu_split_shortfall(8_000_000_000, {"gpu_split_indices": [0, 1]})
+        assert called["n"] == 0
+
+
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestGpuSplitShortfall:
     """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not
@@ -1720,6 +1979,53 @@ class TestGpuSplitShortfall:
         gpu_split_shortfall(4_000_000_000, {"gpu_split_indices": [0, 1]})
         assert seen["deadline"] == "absent"
 
+    # --- Blindness axis (free_scope): the REFUSE direction must stay sound ---------
+    # A FREE_SCOPE_PROCESS reading OVER-states free (total minus only OUR own use), so
+    # a device whose blind free is already short is short FOR REAL: refusing on it is
+    # correct. PR #710 omitted such a device "for rule-5 honesty" and thereby traded a
+    # sound refusal for a permit (the load then dies in the worker instead of getting a
+    # clean 503); it was reverted. These pin that refusal so it cannot regress again.
+
+    def test_blind_process_scoped_device_that_is_short_is_still_flagged(self, monkeypatch):
+        """A PROCESS-scoped (blind) device whose free is already below its share MUST
+        still be flagged. Blind OVER-states free (it misses every other process), so
+        blind-free < needed implies real-free < needed - the refusal is sound and the
+        gate must not drop it. Reverting to PR #710's omit makes this return [] -> RED."""
+        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS},
+                {"index": 1, "name": "B", "total": 64_000_000_000, "free": 50_000_000_000,
+                 "free_scope": discover.FREE_SCOPE_DEVICE}]
+        cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
+        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == [
+            {"index": 0, "needed": 10_000_000_000, "free": 100_000_000}]
+
+    def test_all_blind_devices_short_are_all_flagged(self, monkeypatch):
+        """Every device PROCESS-scoped and short on a FRESH probe: all are flagged. The
+        blind tag never suppresses a refusal - each device's real free is at most its
+        blind free, so every one of them genuinely cannot cover its share."""
+        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS},
+                {"index": 1, "name": "B", "total": 16_000_000_000, "free": 100_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS}]
+        cfg = {"gpu_split_indices": [0, 1]}
+        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
+        assert {d["index"] for d in gpu_split_shortfall(20_000_000_000, cfg)} == {0, 1}
+
+    def test_blind_device_with_room_is_not_flagged(self, monkeypatch):
+        """The mirror: a blind device whose (over-stated) free covers its share is not
+        flagged. This is the PERMIT direction, where blindness genuinely bites - the
+        board may be full and this cannot see it - but that is undetectable from the
+        reading, so the per-device fit check does not pretend otherwise (a permit-side
+        caution belongs with the aggregate gate that owns eviction)."""
+        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS},
+                {"index": 1, "name": "B", "total": 16_000_000_000, "free": 15_000_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS}]
+        cfg = {"gpu_split_indices": [0, 1]}
+        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == []
+
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestFreeScope:
@@ -1768,7 +2074,8 @@ class TestFreeScope:
         # coverage in TestGpuUsageSourceRobustness) - stub it directly rather
         # than depending on its real, cross-test-state-sensitive behavior
         # (whether a GPU probe from an unrelated earlier test happens to still
-        # be in flight).
+        # be in flight, or a sibling test's sys.modules['torch'] mock flipping
+        # this by collection order).
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
                             lambda gpus: {})
@@ -2312,3 +2619,51 @@ class TestUncorrectedScopeIsNotAlwaysProcess:
         gpus = self._gpus()
         discover._apply_device_global_free(gpus)
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="patches ctypes.WinDLL, which exists only on Windows; "
+                           "monkeypatch.setattr raises AttributeError elsewhere")
+class TestAdlLatchRobustness:
+    """#697/#700 follow-up: _adl_open() must distinguish a PERMANENT unusability
+    (no atiadlxx.dll -> not an AMD box) from a TRANSIENT one (driver momentarily not
+    answering ADL2_Main_Control_Create). Latching the transient case off for the
+    process lifetime is the same missing-vs-corrupt collapse the PDH path had."""
+
+    def test_missing_dll_is_latched_permanently(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+
+        def _no_dll(_name):
+            raise OSError("atiadlxx.dll not found")
+
+        monkeypatch.setattr(gu.ctypes, "WinDLL", _no_dll)
+        assert gu._adl_open() == {}
+        assert gu._adl_state == {}, "a missing DLL (permanent) must latch off"
+
+    def test_create_failure_is_retryable_not_latched(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+
+        class _FakeDLL:
+            def ADL2_Main_Control_Create(self, *a):
+                return 1  # non-OK: Create failed (driver busy) - transient
+
+        monkeypatch.setattr(gu.ctypes, "WinDLL", lambda _name: _FakeDLL())
+        assert gu._adl_open() == {}
+        assert gu._adl_state is None, (
+            "a transient ADL2_Main_Control_Create failure must NOT latch ADL off for "
+            "the process lifetime - _adl_state must stay None so the next call retries")
+
+    def test_successful_open_is_cached(self, monkeypatch):
+        import localm.gpu_usage as gu
+        monkeypatch.setattr(gu, "_adl_state", None)
+
+        class _FakeDLL:
+            def ADL2_Main_Control_Create(self, *a):
+                return 0  # OK
+
+        monkeypatch.setattr(gu.ctypes, "WinDLL", lambda _name: _FakeDLL())
+        state = gu._adl_open()
+        assert state and state.get("dll") is not None
+        assert gu._adl_state is state, "a successful open must be cached"

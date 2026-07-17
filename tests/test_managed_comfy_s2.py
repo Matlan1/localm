@@ -312,7 +312,8 @@ def test_isolated_env_pins_the_pip_cache_into_the_data_dir(home, monkeypatch):
     assert env["PIP_CACHE_DIR"] == str(prov.pip_cache_dir())
     assert prov.pip_cache_dir() == home / "cache" / "pip"
     assert home in prov.pip_cache_dir().parents            # inside the data dir
-    assert Path.home() not in prov.pip_cache_dir().parents  # NOT the home profile
+    if Path.home() not in home.parents:
+        assert Path.home() not in prov.pip_cache_dir().parents  # NOT the home profile
 
 
 def test_pip_subprocess_really_honours_the_contained_cache_dir(home, fake_user_comfy):

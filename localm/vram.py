@@ -142,12 +142,16 @@ def media_single_device_shortfall(settings: dict, *,
     OOMs, spills to shared RAM, or trips the ROCm TDR. The gate is not wrong; it simply
     cannot see placement.
 
-    NOTE, and do not let this rot: ComfyUI core CAN place DIFFERENT components (model /
-    CLIP / VAE) on different cards via ``comfy_extras/nodes_multigpu.py``'s
-    ``Select*Device`` nodes. localm does not emit those yet. When it does, this check
-    must become per-component against each component's chosen card, not one card for
-    the whole job - the estimate here would then be over-strict rather than wrong, but
-    it would still be measuring a placement that no longer happens.
+    NOTE, and do not let this rot: localm now DOES emit ComfyUI core's ``Select*Device``
+    nodes (:func:`localm.media.comfy_client.inject_device_placement`), but under the v1
+    placement policy the big MODEL stays on the preferred card (only the smaller CLIP +
+    VAE move to the second card). So the preferred card still holds the model whole, and
+    "does the preferred card hold the WHOLE job" remains a SAFE, conservative bound here:
+    it over-counts (it still demands room for the CLIP + VAE that placement moved off
+    this card), so it errs toward swapping the chat model, never toward an OOM. A
+    per-component-per-card refinement is a follow-up gated on per-component byte sizes,
+    which do not exist yet (only whole-job estimates). See dev-notes/media-split-gpu/
+    SPEC-placement.md.
 
     This answers the placement question instead: does the specific card
     ``discover.resolve_preferred_device()`` chose hold the WHOLE model plus the same
@@ -172,10 +176,16 @@ def media_single_device_shortfall(settings: dict, *,
     if not isinstance(need, int) or need <= 0:
         return None
     from localm.config import load_config
-    from localm.discover import (list_gpus, resolve_preferred_device,
-                                 split_device_count)
+    from localm.discover import (applied_split_device_count, list_gpus,
+                                 resolve_preferred_device)
     cfg = config if config is not None else load_config()
-    if split_device_count(cfg) < 2:
+    # applied_split_device_count (loader truth), NOT split_device_count: whether a
+    # split is ACTIVE for chat/embeddings is a load-time fact, and on vulkan the
+    # detected count would wrongly report < 2 for a live split (GPU-SPLIT-VKINDEX).
+    # On a torch-blind box resolve_preferred_device() below still returns None, so
+    # this stays a no-op there; on a mixed box it measures torch space, which is
+    # where media actually runs.
+    if applied_split_device_count(cfg) < 2:
         return None
     gpus = list_gpus()
     idx = resolve_preferred_device(cfg, gpus=gpus)
@@ -191,26 +201,76 @@ def media_single_device_shortfall(settings: dict, *,
     return {"index": idx, "needed": needed, "free": free}
 
 
-def media_split_notice(config: Optional[dict] = None) -> Optional[str]:
-    """A user-visible line for a box with a configured GPU split, saying media runs on
-    ONE card and why, or ``None`` when there is nothing to say.
+def _placement_targets(placement: Optional[dict]) -> list:
+    """The distinct non-empty ``gpu:N`` targets in a placement plan (``[]`` when the plan
+    is None or every component is left on its default card)."""
+    if not isinstance(placement, dict):
+        return []
+    seen = []
+    for key in ("model", "clip", "vae"):
+        t = placement.get(key)
+        if t and t not in seen:
+            seen.append(t)
+    return seen
 
-    The user explicitly configured a split and is NOT getting it for media, so this is
-    a capability shortfall they must be told about, not a debug detail. The house
-    precedent for exactly this shape is the partial-GPU-offload console notice in
+
+def media_split_notice(config: Optional[dict] = None, *,
+                       placement: Optional[dict] = None,
+                       capability=None) -> Optional[str]:
+    """A user-visible line about how media generation uses the box's GPUs, or ``None``
+    when there is nothing worth saying.
+
+    Three cases, in order:
+
+    1. **Placement ACTIVE** (*placement* has a real ``gpu:N`` target): say what was
+       placed where. This is the line that would be a LIE if it still claimed media
+       "runs on ONE card" - per-component placement means the second card DOES carry
+       work (the text encoder + VAE), even though a single model still cannot be sharded
+       across cards. Fires from the plan alone: placement is capability-driven (two
+       visible cards is enough), so it does not require a configured chat split.
+
+    2. **Split configured but placement UNAVAILABLE** (*capability* is present and not
+       available): the user configured a split and is not getting per-component placement
+       either - give the HONEST reason from the capability (old ComfyUI, one card
+       visible), not a flat "runs on one card".
+
+    3. **Split configured, no placement info threaded in** (legacy callers): the original
+       single-card notice, so existing behavior and tests are unchanged.
+
+    Returns None on a single-GPU / unsplit box with no active placement, so a user who
+    configured nothing is never nagged about a shortfall that does not exist. The house
+    precedent for this altitude (a user-visible console notice for a capability the user
+    configured and is not fully getting) is the partial-GPU-offload notice in
     ``inference/backends/llamacpp/_sizing.py``. Deliberately not ``logger.debug``: the
     always-on ring buffer is INFO+, so a debug line is invisible without --debug and
-    would never reach a bug report.
-
-    Returns None on a single-GPU / unsplit box so a user who configured nothing is
-    never nagged about a shortfall that does not exist.
-    """
+    would never reach a bug report."""
     from localm.config import load_config
-    from localm.discover import resolve_preferred_device, split_device_count
+    from localm.discover import applied_split_device_count, resolve_preferred_device
     cfg = config if config is not None else load_config()
-    n = split_device_count(cfg)
+    targets = _placement_targets(placement)
+    if targets:
+        where = " and ".join(targets)
+        return (f"Note: image/music/video generation is placing the text encoder and VAE "
+                f"on {where} to free the main card for the model. A single model still "
+                "cannot be divided across cards, but its components can be spread. Chat "
+                "and embeddings use the full split.")
+
+    # applied_split_device_count (loader truth), NOT split_device_count: the user
+    # CONFIGURED this split and it IS active for chat/embeddings, so the notice must
+    # fire even on the vulkan build, where the detected count wrongly collapses to
+    # < 2 and would suppress the notice entirely (GPU-SPLIT-VKINDEX) - the exact
+    # user-visible Q2 miss #704 closes.
+    n = applied_split_device_count(cfg)
     if n < 2:
         return None
+
+    if capability is not None and not getattr(capability, "available", True):
+        reason = getattr(capability, "reason", "") or "per-component placement is unavailable"
+        return (f"Note: your GPU split spans {n} cards, but image/music/video generation "
+                f"is running on a single card because {reason}. A single model cannot be "
+                "divided across cards the way chat and embeddings are. Chat and embeddings "
+                "still use the full split.")
+
     idx = resolve_preferred_device(cfg)
     where = f"GPU {idx}" if idx is not None else "a single GPU"
     return (f"Note: your GPU split spans {n} cards, but image/music/video generation "
@@ -453,7 +513,10 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
     unauthenticated call is rejected and the chat model stays resident - the
     media model then loads on top of it and hangs the GPU driver. Logs the
     outcome (and the VRAM freed) on *job* so a failure is visible instead of
-    silent. Returns True when the server confirmed the chat model is unloaded.
+    silent. Returns True only when the server reports NOTHING left resident
+    and in use; any pinned model (the chat engine or a sibling) yields False,
+    because what matters to this caller is resident VRAM, and the caller then
+    falls back to its own conservative swap handling.
     *media_label* names the caller ("image"/"music"/"video") for the messages."""
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:
@@ -493,6 +556,23 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
                       f"not be unloaded - the {media_label} backend may run low "
                       "on VRAM."})
             return False
+        skipped = [str(m) for m in (data.get("skipped_in_use") or [])]
+        if skipped:
+            # "unloaded" means SOMETHING was freed (an idle sibling engine, the
+            # embedding model), not that the chat model was: released_anything
+            # wins the status in unload_all_models(), so a pinned chat engine
+            # still lands in skipped_in_use under status "unloaded". For this
+            # caller only the chat model matters - falling through to "Chat
+            # model unloaded." here was the same rule-5 false success the
+            # "in_use" branch above closes for the nothing-freed shape, just
+            # hidden behind a freed bystander. Report what actually happened;
+            # the caller falls back to its conservative swap handling, exactly
+            # as for "in_use".
+            job.push({"type": "line", "text":
+                      "Freed what could be freed, but still in use and NOT "
+                      f"unloaded: {', '.join(skipped)} - the {media_label} "
+                      "backend may run low on VRAM."})
+            return False
         before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
         uncertain = bool(data.get("vram_reading_uncertain"))
         if uncertain:
@@ -503,7 +583,7 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
             # for exactly that reason (rule 5).
             job.push({"type": "line", "text":
                       "Chat model unloaded - could not confirm how much VRAM was "
-                      "freed (no live GPU reading) - continuing."})
+                      "freed - continuing."})
         elif data.get("vram_freed") and before is not None and after is not None:
             gb = max(0.0, (after - before) / 1024 ** 3)
             job.push({"type": "line", "text":

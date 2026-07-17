@@ -415,7 +415,14 @@ export async function kbReindexCollection(name) {
     log.textContent += `Skipping ${uploadedCount} uploaded document(s) - `
       + `re-upload them if you need to refresh those too.\n`;
   }
-  await kbRunAdd(name, paths, embed, log, false, /* reindex */ true);
+  const BATCH = 50;
+  const batches = [];
+  for (let i = 0; i < paths.length; i += BATCH) batches.push(paths.slice(i, i + BATCH));
+  for (let b = 0; b < batches.length; b++) {
+    if (batches.length > 1)
+      log.textContent += `Batch ${b + 1} / ${batches.length} (${batches[b].length} docs)…\n`;
+    await kbRunAdd(name, batches[b], embed, log, false, /* reindex */ true);
+  }
 }
 
 /** In-page confirm before a full reindex (which re-embeds every document and

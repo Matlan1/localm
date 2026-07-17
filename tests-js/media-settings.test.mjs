@@ -185,6 +185,59 @@ test("R12: saving one media subsection preserves unsaved edits in the others", a
     "/music/edited", "the other subsection's unsaved edit survives the save");
 });
 
+test("EXPERIMENTAL comfy_gpu_placement toggle renders in Media and saves via /v1/config", async () => {
+  // Schema carrying the experimental placement toggle (a core group=Media TOGGLE,
+  // like comfy_func_shim but GIVEN a GUI home here). It must render in the Media
+  // section (unconditionally, not gated on a managed install) and save through the
+  // generic PATCH /v1/config path, exactly like comfy_target.
+  const SCHEMA_P = { fields: [
+    ...SCHEMA.fields,
+    { key: "comfy_gpu_placement", widget: "toggle",
+      label: "Split media across GPUs (experimental)",
+      help: "Off by default. Puts CLIP+VAE on a second card.",
+      group: "Media", owner: "image", default: false, applies: "restart" },
+  ] };
+  const patches = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const method = opts.method || "GET";
+    if (url === "/v1/config/schema")
+      return { ok: true, status: 200, json: async () => SCHEMA_P, text: async () => "" };
+    if (url === "/v1/media/config" && method === "GET")
+      return { ok: true, status: 200, json: async () => MEDIA, text: async () => "" };
+    if (url === "/v1/config" && method === "PATCH") {
+      patches.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+  const doc = win.document;
+
+  // The toggle renders inside the Media section (not the flat core form).
+  const media = doc.querySelector("#settings-sec-media");
+  const toggle = media.querySelector('input[data-key="comfy_gpu_placement"]');
+  assert.ok(toggle, "the experimental placement toggle renders in the Media section");
+  assert.equal(toggle.type, "checkbox", "it is a checkbox (a TOGGLE widget)");
+  assert.equal(toggle.checked, false, "default off");
+  // It is NOT in the per-plugin subsections (it is a single global control).
+  const box = toggle.closest(".media-comfy-box");
+  assert.ok(box, "the toggle sits in a media-comfy box, not a per-plugin subsection");
+  assert.ok(/experimental/i.test(box.textContent),
+    "the box is labelled experimental so the user knows it is unproven");
+
+  // Turning it on and clicking its Save PATCHes /v1/config with just this key.
+  toggle.checked = true;
+  const save = box.querySelector("button.btn-primary");
+  assert.ok(save, "the experimental box has its own Save");
+  save.click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches.length, 1, "one PATCH /v1/config");
+  assert.equal(patches[0].comfy_gpu_placement, true,
+    "the toggle value reaches the config PATCH");
+});
+
 test("R14: in each media subsection the dropdown renders before the checkboxes", async () => {
   // Mirror the post-R14 server field order (folders/text, then SELECT, then toggles).
   const ORDERED = { plugins: [{ plugin: "image", label: "Image", fields: [

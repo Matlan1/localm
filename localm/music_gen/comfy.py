@@ -44,6 +44,7 @@ from localm.media.comfy_client import (
     default_api_url,
     ensure_comfy,
     find_node_by_class,
+    inject_device_placement,
     POLL_CANCELLED,
     POLL_EXEC_ERROR,
     POLL_TIMEOUT,
@@ -169,6 +170,7 @@ def generate_music(
     swap: bool = True,
     cancel_check: Optional[callable] = None,
     delete_outputs: bool = False,
+    placement: Optional[dict] = None,
 ) -> tuple[bool, str]:
     """
     Generate a music track and save it to *output_path* (FLAC).
@@ -271,6 +273,15 @@ def generate_music(
     # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
     if swap:
         _localm_unload(localm_url)
+
+    # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
+    # nodes per the plan resolve_media_placement() decided. A component whose loader is
+    # absent from this graph is surfaced to the user, never silently dropped (rule 5); the
+    # happy-path summary already went out via the placement notice.
+    if placement:
+        for _note in inject_device_placement(workflow, placement):
+            if "could not place" in _note:
+                _say(_note)
 
     # Queue
     kind, value = comfy_submit_prompt(api_url, workflow)

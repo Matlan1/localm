@@ -182,7 +182,8 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
 
     def test_fully_stale_probe_is_flagged(self):
         with patch("localm.discover.list_gpus",
-                   side_effect=_list_gpus_double([_IDLE], GPU_PROBE_TIMEOUT)):
+                   side_effect=_list_gpus_double([_IDLE], GPU_PROBE_TIMEOUT)), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait):
             r = self.client.post("/v1/models/unload")
         self.assertNoUnqualifiedNotFreed(r.json())
 
@@ -223,7 +224,8 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double(
                        [dict(_IDLE, free=10 * GB, free_scope="device")],
-                       GPU_PROBE_OK)):
+                       GPU_PROBE_OK)), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait):
             r = self.client.post("/v1/models/unload")
         body = r.json()
         self.assertIs(body["vram_freed"], False)
@@ -276,7 +278,14 @@ class TestUnloadAllEndpointHonesty(_UnloadCase):
 
 class TestUnloadOneEndpointHonesty(_UnloadCase):
     """unload_one_model() carries its own reader + reporter - the per-model Unload
-    button. Fixing only unload_all_models() would leave this one lying."""
+    button. Fixing only unload_all_models() would leave this one lying.
+
+    `model` is a QUERY param on POST /v1/models/unload (a bare `str | None` with no
+    Body()), so it MUST go through params=; a json body is silently ignored and the
+    route falls through to unload_all_models(), which flags on its own reader and
+    makes these pass WITHOUT touching unload_one_model at all. The mutation oracle
+    (revert unload_one_model's reader / drop its before_scope -> exactly the matching
+    test below goes red, nothing else) is what proves they reach the intended path."""
 
     def test_reading_lost_after_a_live_before_is_not_reported_as_not_freed(self):
         from localm.inference import http_server as hs
@@ -284,7 +293,7 @@ class TestUnloadOneEndpointHonesty(_UnloadCase):
         with patch.dict(hs._engines, {"test-model": self.engine}, clear=False), \
              patch("localm.discover.list_gpus", side_effect=double), \
              patch("localm.vram.wait_for_vram_release", _impatient_wait):
-            r = self.client.post("/v1/models/unload", json={"model": "test-model"})
+            r = self.client.post("/v1/models/unload", params={"model": "test-model"})
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertEqual(body["status"], "unloaded")
@@ -303,9 +312,94 @@ class TestUnloadOneEndpointHonesty(_UnloadCase):
                        [dict(_IDLE, free=10 * GB, free_scope="process")],
                        GPU_PROBE_OK)), \
              patch("localm.vram.wait_for_vram_release", _impatient_wait):
-            r = self.client.post("/v1/models/unload", json={"model": "test-model"})
+            r = self.client.post("/v1/models/unload", params={"model": "test-model"})
         self.assertEqual(r.status_code, 200)
         body = r.json()
+        self.assertEqual(body["vram_before_bytes"], 10 * GB)
+        self.assertIs(body["vram_reading_uncertain"], True)
+        self.assertIn("worker process", body["vram_note"])
+
+
+class TestUnloadEmbedderEndpointHonesty(_UnloadCase):
+    """_unload_embedder_if_matches() is the THIRD unload path, and the one the two
+    classes above do not exercise: the per-row Unload button for a resident
+    EMBEDDING model, which lives outside _engines on its own lifecycle. It carries
+    its own copy of the reader + _add_vram_fields call, so - exactly as
+    unload_one_model would lie if only unload_all_models were fixed - this path can
+    lie while the other two are honest. unload_one_model reaches it only when
+    _engines has no live engine for the name, so these install NO engine and stand
+    the embedder up instead (contrast TestUnloadOneEndpointHonesty, which puts an
+    engine in _engines and therefore never gets here).
+
+    Its docstring in http_server claims "all three unload paths thread before_scope
+    through the same _add_vram_fields"; before these tests, two of the three were
+    pinned and this one was not - a reader/scope regression here would have been
+    caught by nothing."""
+
+    _EMB = "/models/embedding-model.gguf"
+
+    def _drive(self, list_gpus_side_effect):
+        from localm.inference import http_server as hs
+        # No engine for this name -> unload_one_model falls through to the embedder
+        # branch. Stand up a resident embedder whose resolved path matches the name.
+        with patch.dict(hs._engines, {}, clear=False), \
+             patch("localm.inference.embedder.loaded_path", lambda: self._EMB), \
+             patch("localm.inference.embedder.active_requests", lambda: 0), \
+             patch("localm.inference.embedder.reset_embedder", lambda: None), \
+             patch("localm.config.load_registry",
+                   return_value={"emb-model": {"path": self._EMB}}), \
+             patch("localm.model_manager._entry_path", lambda entry: self._EMB), \
+             patch("localm.discover.list_gpus", side_effect=list_gpus_side_effect), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait):
+            # `model` is a QUERY param on this route (a bare `str | None` with no
+            # Body()), so it MUST be passed as params - a json body is silently
+            # ignored and the route falls through to unload_all_models(), whose own
+            # reader would set the flag and make this test pass without ever
+            # reaching the embedder path (the mutation oracles below are what prove
+            # it genuinely does).
+            r = self.client.post("/v1/models/unload", params={"model": "emb-model"})
+        return r
+
+    def test_reading_lost_after_a_live_before_is_not_reported_as_not_freed(self):
+        """#694's shape (fresh device-scoped BEFORE, driver lost for the AFTER
+        polls) on the embedder path. The poll reader must return None so vram_freed
+        is null-and-flagged, never a bare false.
+
+        MUTATION ORACLE: revert this path's `_free` to a staleness-blind reader
+        (`_free = lambda: _vram_free_reading()[0]`, i.e. #693's read) and only this
+        test goes red - the whole rest of the suite stays green, which is exactly
+        the coverage gap it fills."""
+        calls = {"n": 0}
+
+        def _double(*, deadline=None, return_status=False):
+            calls["n"] += 1
+            # BEFORE read is fresh AND device-scoped, so the ONLY thing that can
+            # raise the flag is the lost after-poll (released is None) - which
+            # isolates the staleness mutation cleanly from the scope axis.
+            served = [dict(_IDLE, free=10 * GB, free_scope="device")]
+            status = GPU_PROBE_OK if calls["n"] == 1 else GPU_PROBE_TIMEOUT
+            return (served, status) if return_status else served
+
+        r = self._drive(_double)
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "unloaded")   # the unload itself worked
+        self.assertGreater(calls["n"], 1, "the after-poll never ran - the scenario "
+                                          "under test did not happen")
+        self.assertNoUnqualifiedNotFreed(body)
+
+    def test_process_scoped_no_rise_is_flagged_here_too(self):
+        """The embedder button must not lie where the other two unload paths are
+        honest. All three thread before_scope through the same _add_vram_fields;
+        this pins the third shut.
+
+        MUTATION ORACLE: drop `before_scope=before_scope` from this path's
+        _add_vram_fields call and only this test goes red."""
+        r = self._drive(_list_gpus_double(
+            [dict(_IDLE, free=10 * GB, free_scope="process")], GPU_PROBE_OK))
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        # The figure is still reported (best we have), but flagged, never fact.
         self.assertEqual(body["vram_before_bytes"], 10 * GB)
         self.assertIs(body["vram_reading_uncertain"], True)
         self.assertIn("worker process", body["vram_note"])
@@ -374,6 +468,28 @@ class TestMediaSwapMessageHonesty(unittest.TestCase):
                          f"still pinned: {lines}")
         self.assertIn("busy", joined)
 
+    def test_partial_unload_with_pinned_chat_is_not_reported_as_unloaded(self):
+        """Regression: unload_all_models() reports {"status": "unloaded"} whenever
+        ANYTHING was freed (an idle embedding model is enough - released_anything
+        wins the status), even when the chat model itself was skipped as in-use.
+        The consumer matched only status == "in_use", so this partial shape fell
+        through to "Chat model unloaded - freed X GB" + True and the media model
+        loaded on top of the still-resident chat model: the same driver-hang
+        hazard as the fully-pinned case, hidden behind a freed bystander."""
+        ok, lines = self._push_lines({
+            "status": "unloaded", "model": "none", "unloaded_models": [],
+            "vram_freed": True,
+            "vram_before_bytes": 10 * GB, "vram_after_bytes": 11 * GB,
+            "skipped_in_use": ["chat-model"]})
+        self.assertFalse(ok, "must report failure so the caller falls back to "
+                             "its own conservative swap handling")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed the chat model was unloaded while it was "
+                         f"still pinned behind a freed bystander: {lines}")
+        self.assertIn("chat-model", joined,
+                      "the still-resident model must be named honestly")
+
 
 class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
     """The regression test above hand-crafts the {"status": "in_use", ...} body -
@@ -418,6 +534,38 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
                          f"claimed success while the real endpoint reported the "
                          f"engine still pinned: {lines}")
         self.assertIn("busy", joined)
+
+    def test_partial_unload_pinned_chat_plus_freed_embedder_end_to_end(self):
+        """The partial shape driven through the REAL route: the chat engine is
+        pinned (active_requests set like an in-flight request) while a resident
+        embedding model frees successfully, so unload_all_models() genuinely
+        returns status "unloaded" + skipped_in_use=[engine]. The consumer must
+        not read that as chat-model success."""
+        self.engine.active_requests = 1          # a request is mid-generation
+
+        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None):
+            return self._Adapter(self.client.post(f"/v1{path}"))
+
+        from localm import vram as vram_mod
+        job = MagicMock()
+        lines = []
+        job.push.side_effect = lambda d: lines.append(d.get("text", ""))
+        with patch("localm.inference.embedder.loaded_dim", return_value=384), \
+             patch("localm.inference.embedder.active_requests", return_value=0), \
+             patch("localm.vram.wait_for_vram_release", _impatient_wait), \
+             patch("localm.selfclient.self_request", fake_self_request):
+            ok = vram_mod.unload_chat_for_media(job, "http://x", "image")
+
+        self.assertFalse(ok, "the chat model was NOT freed; the embedder was")
+        self.assertTrue(self.engine.loaded,
+                        "the pinned engine must survive the media handover's unload")
+        joined = " ".join(lines)
+        self.assertNotIn("Chat model unloaded", joined,
+                         f"claimed chat-model success off an embedder-only "
+                         f"partial unload: {lines}")
+        self.assertIn("NOT unloaded", joined,
+                      "must hit the partial-unload branch specifically, not a "
+                      f"sibling failure path: {lines}")
 
 
 class TestMcpModelSwitchHonesty(unittest.TestCase):

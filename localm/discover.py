@@ -1068,7 +1068,29 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None):
     return arr
 
 
-def vram_info(*, return_status: bool = False):
+def _list_gpus_kw(*, deadline: Optional[float] = None, return_status: bool = False,
+                  wait_for_inflight: bool = False):
+    """Call :func:`list_gpus` passing ONLY the kwargs the caller actually asked for.
+
+    Not a style nicety: ~22 test modules patch list_gpus() with a zero-arg double
+    (``lambda: gpus``), which its documented bare-list contract entitles them to.
+    Forwarding ``deadline=None`` unconditionally would hand those doubles a kwarg
+    they never agreed to accept and raise TypeError in tests with no stake in this
+    change. Omitting it keeps the default call byte-identical, so only a caller
+    that opts in pays for opting in. ``wait_for_inflight`` (#701) is forwarded the
+    same way - only when True."""
+    kw = {}
+    if deadline is not None:
+        kw["deadline"] = deadline
+    if return_status:
+        kw["return_status"] = True
+    if wait_for_inflight:
+        kw["wait_for_inflight"] = True
+    return list_gpus(**kw)
+
+
+def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
+              wait_for_inflight: bool = False):
     """{"total": bytes, "free"?: bytes} for the CONFIGURED main GPU device (see
     main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is
     configured, or {} when not measurable. Tries torch (CUDA/ROCm) then
@@ -1085,12 +1107,27 @@ def vram_info(*, return_status: bool = False):
     ``return_status`` defaults to False, preserving the plain-dict contract
     (AND the plain, no-kwarg list_gpus() call) every existing caller and test
     double relies on - the status-aware call is made ONLY when a caller opts
-    in, never unconditionally."""
+    in, never unconditionally.
+
+    ``deadline`` overrides list_gpus()'s default probe cap for callers that are
+    NOT on the event loop and can afford to wait out a slow COLD driver init
+    rather than be handed an inconclusive reading (see
+    :data:`_GPU_PROBE_CLI_DEADLINE`). None keeps list_gpus()'s own default, and
+    keeps the call byte-identical for every existing caller - the 4s default cap
+    exists to protect the single event loop (PR #541) and must stay the default
+    for anything that runs on it.
+
+    ``wait_for_inflight`` (opt-in, #701): when a probe is already running (e.g. the
+    GUI's 2.5s stats heartbeat holds it through a cold init), JOIN it and wait on its
+    result up to ``deadline`` instead of being handed an instant last-known-good/BUSY.
+    Only safe for a caller OFF the event loop. Forwarded, not defaulted, for the same
+    byte-identical-call reason as ``deadline``."""
     from localm.config import load_config
     if return_status:
-        gpus, status = list_gpus(return_status=True)
+        gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
+                                     wait_for_inflight=wait_for_inflight)
     else:
-        gpus = list_gpus()
+        gpus = _list_gpus_kw(deadline=deadline, wait_for_inflight=wait_for_inflight)
         status = None   # unused: _ret() never reads it when return_status=False
 
     def _ret(info: dict):
@@ -1152,7 +1189,8 @@ def vram_info(*, return_status: bool = False):
     return _ret({})
 
 
-def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False):
+def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
+                  deadline: Optional[float] = None, wait_for_inflight: bool = False):
     """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
     right ceiling for any "will this model fit" decision (a pre-load refusal
     gate, a fit badge, a VRAM-estimate readout).
@@ -1183,20 +1221,41 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
     when a caller opts in (never unconditionally), so every existing caller
     and test double that patches vram_info()/list_gpus() with a plain, no-kwarg
     stand-in keeps working exactly as before.
+
+    ``deadline`` / ``wait_for_inflight``: see :func:`vram_info` - forwarded through
+    ALL paths below (the no-split short-circuit, the split-summed path, and the
+    degrade-to-single-device fallback), so a blocking (non-event-loop) caller gets
+    the same longer probe budget and join behaviour whether or not a split is
+    configured. Defaults keep the 4s cap and no-join, which protect the event loop.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
+
+    def _vi():
+        # Forward ONLY the opt-in kwargs the caller supplied, so the call stays
+        # byte-identical to a bare vram_info() for the no-kwarg vram_info() doubles
+        # (~11 test modules patch it; same reason as _list_gpus_kw).
+        kw = {}
+        if return_status:
+            kw["return_status"] = True
+        if deadline is not None:
+            kw["deadline"] = deadline
+        if wait_for_inflight:
+            kw["wait_for_inflight"] = True
+        return vram_info(**kw)
+
     # Cheap short-circuit for the common (no split configured) case, mirroring
     # resolve_gpu_split's own early return - skips a real hardware probe
     # (list_gpus() -> torch/nvidia-smi) on every request for the vast majority
     # of single-GPU installs that never configured a split.
     if not cfg.get("gpu_split_indices"):
-        return vram_info(return_status=True) if return_status else vram_info()
+        return _vi()
 
     if return_status:
-        gpus, status = list_gpus(return_status=True)
+        gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
+                                     wait_for_inflight=wait_for_inflight)
     else:
-        gpus = list_gpus()
+        gpus = _list_gpus_kw(deadline=deadline, wait_for_inflight=wait_for_inflight)
         status = None
 
     def _ret(info: dict):
@@ -1207,7 +1266,10 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
     by_index = {g.get("index"): g for g in gpus}
     split_gpus = [by_index[idx] for idx, _ in pairs if idx in by_index]
     if len(split_gpus) < 2:
-        return vram_info(return_status=True) if return_status else vram_info()
+        # Split configured but degraded to a single detected device (the other
+        # vanished / was never present). Same forwarding as the no-split path, so a
+        # cold init on THIS path also completes / joins rather than timing out.
+        return _vi()
 
     out = {"total": sum(g["total"] for g in split_gpus)}
     frees = [g.get("free") for g in split_gpus]
@@ -1229,15 +1291,29 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False)
 
 
 def split_device_count(config: Optional[dict] = None) -> int:
-    """How many DETECTED devices the configured gpu_split resolves to.
+    """How many DETECTED devices the configured gpu_split resolves to - the
+    DETECTED/labelling signal, NOT a load-safety gate.
 
     This is the exact signal ``vram_capacity()`` uses to decide whether its total
     is COMBINED across a split (>= 2) or the single main GPU (< 2): the same
-    ``resolve_gpu_split`` + detected-device filter. Callers that LABEL a VRAM
+    ``resolve_gpu_split`` + detected-device re-filter. Callers that LABEL a VRAM
     number ("combined across N GPUs" vs "your main GPU's") must gate on this, not
     on the raw ``gpu_split_indices`` length - a stale/typo'd index or a GGUF-only
     box (no ``list_gpus``) leaves a 2-entry split resolving to one device, where
     the number is single-GPU and calling it "combined" would mislabel it.
+
+    Do NOT use this to decide "will the loader ACTUALLY apply a multi-device
+    split" (a VRAM preflight, a swap decision, a "your split spans N cards"
+    notice): on the ``vulkan`` build the real split devices live in ggml-vulkan's
+    own index space, which ``list_gpus()`` (torch.cuda / nvidia-smi) is
+    structurally blind to (GPU-SPLIT-VKINDEX), so the detected re-filter here
+    COLLAPSES a live, working 2-way vulkan split to < 2. That is the honest answer
+    for a LABEL (``vram_capacity()`` itself cannot sum a split it cannot measure,
+    so it too falls back to the single-GPU number, and calling that "combined"
+    would lie), but the WRONG answer for a load-safety gate. Use
+    :func:`applied_split_device_count` for the "will a split be applied at load
+    time" question - it mirrors :func:`apply_gpu_split`'s own gate and does not
+    apply the detected re-filter.
 
     Returns 0 when no split is configured (the common single-GPU path, with no
     hardware probe); otherwise the count of valid split devices (0/1 = effectively
@@ -1251,6 +1327,44 @@ def split_device_count(config: Optional[dict] = None) -> int:
     pairs = resolve_gpu_split(split, cfg.get("gpu_split_ratios"), gpus=gpus)
     by_index = {g.get("index") for g in gpus}
     return len([idx for idx, _ in pairs if idx in by_index])
+
+
+def applied_split_device_count(config: Optional[dict] = None) -> int:
+    """How many devices the loader will ACTUALLY tensor_split across for a
+    GGUF/llama.cpp load - the loader-truth counterpart to
+    :func:`split_device_count`'s DETECTED/labelling count.
+
+    Mirrors :func:`apply_gpu_split`'s own gate (``len(resolve_gpu_split(...)) < 2``
+    -> no split), so it answers "will a multi-device split be applied at load
+    time", NOT "can we MEASURE that split's combined VRAM". The two counts differ
+    on exactly one axis: the detected-device re-filter that
+    :func:`split_device_count` / :func:`vram_capacity` apply against
+    :func:`list_gpus` AFTER ``resolve_gpu_split``. That filter is CORRECT for a
+    VRAM LABEL (you cannot honestly call a number "combined across N GPUs" when
+    ``list_gpus()`` only measured one device), but WRONG for a load-safety gate on
+    the ``vulkan`` build, where ``resolve_gpu_split`` passes the configured indices
+    through UNVALIDATED in ggml-vulkan's own index space (GPU-SPLIT-VKINDEX) - a
+    real 2-way split ``list_gpus()`` (torch.cuda / nvidia-smi) is structurally
+    blind to. There this returns 2 while :func:`split_device_count` collapses to
+    < 2. On a NON-vulkan box with a detected device list the two are IDENTICAL
+    (``resolve_gpu_split`` already dropped unknown indices, so that later re-filter
+    is a proven no-op).
+
+    Deliberately does NOT pass ``gpus=`` (so ``resolve_gpu_split`` calls
+    ``list_gpus()`` itself) and does NOT re-filter the result - exactly what
+    :func:`apply_gpu_split` does, which is what makes this the loader truth rather
+    than a measurability check.
+
+    Returns 0 when no split is configured (the common path, no hardware probe);
+    otherwise the count ``resolve_gpu_split`` yields. Domain is {0} U {2, 3, ...}:
+    a single surviving index collapses to 0, same as ``apply_gpu_split`` leaving
+    the native single-GPU default untouched."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    if not cfg.get("gpu_split_indices"):
+        return 0
+    return len(resolve_gpu_split(
+        cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios")))
 
 
 def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
@@ -1326,10 +1440,27 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     ``return_status=True`` to receive ``(shortfall, status)`` carrying the underlying
     :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY`.
 
-    This proves the reading is LIVE, not COMPLETE. On a backend/OS where ``free``
-    counts only this process's own allocations (blind to other processes' VRAM), a
-    fresh reading can still under-state usage; that completeness axis is orthogonal
-    and is carried per-device elsewhere, not by this probe status.
+    Completeness (the blindness axis) is deliberately NOT gated on here, and the
+    asymmetry is the reason. ``list_gpus`` tags each device :data:`FREE_SCOPE_DEVICE`
+    (the board's number) or :data:`FREE_SCOPE_PROCESS` (counts ONLY this process's own
+    allocations - blind to every other process; Windows + AMD with no device-global
+    source). A PROCESS-scoped reading OVER-states free (``total`` minus only OUR use,
+    missing an out-of-process model's VRAM #606 or another app's), so in the REFUSE
+    direction this gate governs, ignoring the tag is SOUND: if even the over-stated
+    ``free`` is short, the real free is shorter still, and the refusal is correct. Only
+    the quoted figure is imprecise, and it errs by over-stating what is available, so it
+    never talks a user out of a load that would in fact fit.
+
+    Do NOT "fix" this by omitting a PROCESS-scoped device from the check: that trades a
+    SOUND refusal for a permit, and the load then reaches llama.cpp too small and dies
+    in the worker instead of returning a clean 503. That was tried in PR #710 and
+    reverted; this comment is the guard rail.
+
+    The blindness that DOES bite is the PERMIT direction - a blind ``free`` can read
+    comfortable while the board is genuinely full - and it is not detectable from the
+    reading itself, so no per-device tag check here can catch it. A permit-side caution
+    (e.g. prefer single-resident on a PROCESS-scoped reading) belongs with the aggregate
+    gate that owns eviction, not with this per-device fit check.
 
     Only meaningful for the GGUF/llama.cpp load path - callers should gate on that
     themselves (e.g. via ``inference.engine._is_gguf``); this function has no way to
@@ -1362,6 +1493,36 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
 
     if not cfg.get("gpu_split_indices"):
         # No split configured: a conclusive answer that needs no hardware probe.
+        return _ret([], GPU_PROBE_OK)
+    if _native_backend_has_vulkan():
+        # GPU-SPLIT-VKINDEX honest-unknown: on the vulkan build the configured
+        # split indices live in ggml-vulkan's own index space at load time, which
+        # list_gpus() (torch.cuda / nvidia-smi) cannot see or order - torch index
+        # N is NOT ggml-vulkan index N (resolve_preferred_device documents exactly
+        # this hazard). A per-device share check here would measure the WRONG
+        # cards: a silent no-op when torch sees nothing, a wrong refusal/pass on a
+        # mixed box. We cannot honestly check per-device fit on this backend, so we
+        # do not - but we SURFACE the skip rather than present a check that never
+        # ran as "passed" (rule 5, do-not-hide-problems). INFO not debug: the
+        # always-on ring buffer is INFO+, so a debug line would never reach a bug
+        # report - the same reason vram.py's media_split_notice gives for not
+        # burying a user-configured-split shortfall at debug. Not WARNING: the skip
+        # is benign whenever the model fits (the common case), so WARNING would cry
+        # wolf every load. The GGUF load is subprocess-isolated, so an oversized
+        # model still fails as a catchable error, not a lost check - that isolation
+        # is the real backstop this defers to.
+        logger.info(
+            "gpu_split_shortfall: skipping the per-device split VRAM preflight on "
+            "the vulkan backend - the configured split indices are in ggml-vulkan's "
+            "index space, which list_gpus() cannot map to a card, so no per-device "
+            "check can name the right device (GPU-SPLIT-VKINDEX); relying on the "
+            "subprocess-isolated loader to catch an oversized load instead.")
+        # Conclusive skip with no probe, so it mirrors the no-split return above and
+        # reports GPU_PROBE_OK - NOT a non-OK "stale probe" status: nothing was
+        # probed, and (like the no-split branch) this is a deterministic routing
+        # decision, not an inconclusive reading. A future return_status consumer that
+        # needs to tell "checked-clear" from "vulkan-skip" apart would want a distinct
+        # status; flagged for the probe-status owner rather than overloaded here.
         return _ret([], GPU_PROBE_OK)
 
     gpus, status = _list_gpus_reading(deadline)
@@ -1400,6 +1561,8 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
             # production; it only stops a None-free entry (e.g. test-injected) from
             # crashing the loop.
             continue
+        # NOTE: deliberately NOT gated on g["free_scope"] - do not "fix" that (see the
+        # blindness paragraph in the docstring; tried in PR #710 and reverted).
         needed = int(vram_required * (ratio / total_ratio))
         free = g["free"]
         if free < needed:
@@ -1519,6 +1682,84 @@ def visible_device_order(config: Optional[dict] = None, *,
     rest = sorted(g.get("index") for g in devices
                   if g.get("index") is not None and g.get("index") != chosen)
     return [chosen] + rest
+
+
+def comfy_gpu_option(device_index: int, config: Optional[dict] = None, *,
+                     gpus: Optional[list] = None) -> Optional[str]:
+    """The ``gpu:N`` string ComfyUI will understand for OUR *device_index*, or ``None``
+    when it cannot be named honestly.
+
+    THE INDEX-SPACE GATE. Three coordinate systems meet here and an off-by-one puts a
+    component on the wrong card and STILL RENDERS - a silent wrong answer, not a crash:
+
+    1. localm's own device index (``list_gpus()`` -> ``torch.cuda`` enumeration of the
+       UNMASKED box). This is what ``gpu_split_indices`` and ``main_gpu_index`` mean.
+    2. The VISIBLE ORDER we impose (:func:`visible_device_order`), written into
+       ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES`` either by ComfyUI's own
+       ``--default-device`` (``main.py:69-76``) or by us for a ComfyUI we cannot pass
+       argv to.
+    3. ComfyUI's ``gpu:N`` widget value, which is a POSITION, not a device id:
+       ``get_gpu_device_options`` (``model_management.py:246-257``) emits
+       ``gpu:{i} for i in range(len(get_all_torch_devices()))``, and
+       ``get_all_torch_devices`` enumerates torch AFTER the mask/reorder has applied.
+
+    So ``gpu:N`` means "the Nth entry of the visible order", and the mapping is
+    DERIVABLE rather than guessable precisely because localm is the one that imposes
+    that order. This is the whole reason we must never mask: masking collapses the
+    order to one entry and ``get_gpu_device_options`` then emits no ``gpu:N`` at all
+    (it gates on ``len(devices) > 1``), so every placement node silently no-ops.
+
+    Returns ``None`` when no order is established (nothing configured, or no
+    torch-visible device) or when *device_index* is not in it, rather than guessing a
+    position. Callers must treat None as "do not emit a device for this component".
+
+    VERIFY, DO NOT TRUST, at runtime: this mapping is derived from source
+    (``model_management.py:246-257`` read at ComfyUI git 867404b) and is UNPROVEN on a
+    real multi-GPU box - this one has a single card, where the order is trivially
+    ``[0]``. Before placement is enabled by default, confirm against the live server's
+    ``/object_info`` (does ``SelectModelDevice`` actually offer this ``gpu:N``?) and
+    ``/system_stats`` (does that position correspond to the card we meant?).
+    """
+    order = visible_device_order(config, gpus=gpus)
+    if not order or device_index not in order:
+        return None
+    return f"gpu:{order.index(device_index)}"
+
+
+def plan_media_placement(config: Optional[dict] = None, *,
+                         gpu_options: Optional[list] = None) -> Optional[dict]:
+    """Assign media components to cards for a box ComfyUI sees as 2+ GPUs, or ``None`` to
+    keep the single-card floor. Pure: no I/O, no probe of its own.
+
+    *gpu_options* is the LIVE ``gpu:N`` list read from the running ComfyUI's
+    ``/object_info`` device combo (:func:`localm.media.comfy_client.probe_placement_capability`).
+    It is authoritative about how many cards ComfyUI actually enumerates, and it is
+    ComfyUI's OWN index space, so a POSITIONAL policy over it inherits NONE of the
+    localm-index vs ``gpu:N`` translation hazard (:func:`comfy_gpu_option` exists for a
+    future identity-based policy) and never consults ``split_device_count`` (whose Vulkan
+    soundness hole we deliberately do not inherit).
+
+    v1 policy - no free-VRAM read (the live free number is not yet trustworthy, and
+    per-component byte sizes do not exist): keep the big model on the preferred card (the
+    first visible position, where ``--default-device`` already put the most-free card;
+    ``"model": None`` means "no injection", so the GGUF UNet is never moved off its
+    loader default and needs no factory patch), and offload the smaller CLIP text-encoder
+    and VAE to the SECOND visible card. That is the concrete win (the FLUX T5-XXL encoder
+    and the VAE off the compute card free real headroom on card 0) with zero dependency
+    on the lying free-VRAM number or on the GGUF factory.
+
+    Returns ``None`` when fewer than two ``gpu:N`` options exist (single-card floor,
+    unchanged). Placement is capability-driven: it does not require a configured chat
+    ``gpu_split`` - two visible cards is enough for the second one to carry weight. A
+    size-aware spread across 3+ cards is a documented follow-up (SPEC-placement.md).
+    """
+    _ = config  # reserved for a future size/identity-aware policy; v1 is positional
+    gpu = [o for o in (gpu_options or [])
+           if isinstance(o, str) and o.startswith("gpu:")]
+    if len(gpu) < 2:
+        return None
+    second = gpu[1]
+    return {"model": None, "clip": second, "vae": second}
 
 
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:

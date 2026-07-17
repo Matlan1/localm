@@ -31,6 +31,8 @@ import ctypes
 import os
 from typing import List, Optional, Tuple
 
+from . import _api as api
+
 
 class _MtmdParams(ctypes.Structure):
     # Over-allocated opaque buffer (the real struct is well under this); 8-byte
@@ -118,13 +120,24 @@ class MtmdContext:
 
     def eval_into(self, llama_ctx: int, prompt: str,
                   images: List[Tuple[int, int, bytes]], *,
-                  add_special: bool, n_batch: int = 512) -> int:
+                  add_special: bool, n_batch: Optional[int] = None) -> int:
         """Tokenize *prompt* (which contains one ``self.marker`` per image, in
         order) together with *images* (each ``(width, height, rgb_bytes)``) and
         evaluate the resulting text+image chunks into *llama_ctx*'s KV cache from
         position 0. Returns the new n_past (with logits at the last position, ready
-        for sampling). Raises RuntimeError on a tokenize/eval failure."""
+        for sampling). Raises RuntimeError on a tokenize/eval failure.
+
+        RAG-VISION-1: *n_batch* defaults to the LIVE context's own configured
+        batch size (via ``llama_n_ctx``, capped the same way llama.py's own
+        context construction caps it) rather than a fixed 512 - the caller's
+        real context can be configured larger (up to 2048), and asking mtmd to
+        micro-batch smaller than what the context was built for is a latent
+        mismatch, not just a performance nit. An explicit *n_batch* still wins,
+        for a caller that knows its own real batch size precisely."""
         m = self._m
+        ctx_n_ctx = api.llama_n_ctx(llama_ctx)
+        if n_batch is None:
+            n_batch = min(ctx_n_ctx, 2048) if ctx_n_ctx else 512
         bitmaps = []
         try:
             for (w, h, rgb) in images:
@@ -148,7 +161,23 @@ class MtmdContext:
                     ctypes.byref(new_n_past))
                 if rc2 != 0:
                     raise RuntimeError(f"mtmd image eval failed (rc={rc2})")
-                return int(new_n_past.value)
+                pos = int(new_n_past.value)
+                # RAG-VISION-1: the generation loop trusts this position as the
+                # base for every subsequent single-token decode with zero prior
+                # sanity check - if a native call under/over-reports how many KV
+                # positions the image actually consumed (a real risk: idefics3
+                # and llava-family projectors emit very different image-token
+                # counts, and this binding's ABI note above already flags mtmd's
+                # struct layout as unverified across llama.cpp versions),
+                # generation would silently continue from a corrupted position
+                # instead of failing loudly. A garbage pos manifests exactly like
+                # the degenerate/repeated-token output this check exists to catch.
+                if pos <= 0 or (ctx_n_ctx and pos > ctx_n_ctx):
+                    raise RuntimeError(
+                        f"mtmd image eval returned an implausible position "
+                        f"(new_n_past={pos}, context size={ctx_n_ctx}) - refusing "
+                        f"to generate from a likely-corrupted KV state")
+                return pos
             finally:
                 m.mtmd_input_chunks_free(chunks)
         finally:

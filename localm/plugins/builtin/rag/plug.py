@@ -113,11 +113,21 @@ def _make_self_embed(self_url: str, active_model):
     """Embed via this server's own /v1/embeddings - the endpoint holds the
     inference semaphore, so indexing never races a chat reply. Raises when the
     backend has no embedding support (GGUF ctypes binding); callers degrade to
-    lexical-only."""
+    lexical-only.
+
+    Sends the EMBEDDING model's registered name (from the ``embedding_model``
+    config key), not the chat model name. /v1/embeddings recognises a registry
+    entry with model_type="embedding" and routes it directly to embed_texts()
+    without trying to load a chat engine - so embedding works even when no chat
+    model is loaded."""
     def _self_embed(texts: list) -> list:
         from localm.selfclient import self_request
+        from localm.config import load_config as _lc
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        _cfg = _lc()
+        emb_name = str(_cfg.get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
         r = self_request("POST", "/embeddings",
-                         json={"input": texts, "model": active_model() or "localm"},
+                         json={"input": texts, "model": emb_name or "localm"},
                          timeout=600, base_url=self_url)
         if not r.ok:
             # Surface the endpoint's actionable detail (e.g. "No embedding model
