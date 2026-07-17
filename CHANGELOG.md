@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-17
+
 ### Added
 - **Choose how your embedding model is pooled.** Settings > Models has a new
   Embedding pooling option. The default (`mean`) suits the bundled `bge-small`
@@ -41,6 +43,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
   slot (UNet/checkpoint, CLIP, VAE, ...) the active workflow exposes - no more
   needing to hand-edit the workflow JSON to pick a different model. Picks are sent
   along with the next generation and are remembered while you stay on that workflow.
+- **Automatic server-hang diagnostics:** an event-loop stall watchdog runs by
+  default and, if the server ever freezes, dumps every thread's stack to
+  `<home>/logs/hang_*.log` (the file is created only when a real stall happens, so
+  a healthy run leaves nothing behind). A captured trace is bundled into a bug
+  report automatically, so an intermittent "it just hung" becomes diagnosable with
+  no setup on the reporter's part. It respects privacy: in privacy mode (the
+  default) it writes nothing automatically, unless you turn on "Keep diagnostics
+  for bug reports" (below). `LOCALM_HANG_WATCHDOG=0` turns it off entirely (and `=1`
+  forces it on with verbose logging even in privacy mode); a loopback-only
+  `GET /debug/stacks` returns thread and task state on demand.
+- **"Keep diagnostics for bug reports" privacy setting:** privacy mode saves
+  nothing automatically, which also means a hang or crash leaves nothing to
+  report. This new toggle (off by default) keeps the diagnostic bits a report
+  needs - the hang stack trace, the restart breadcrumb log, and a debug log -
+  even in privacy mode. It is available in Settings > Privacy (in-app) and as a
+  checkbox in the desktop launcher (and `--keep-diagnostics` on the command line).
+  It keeps operational diagnostics only - see Security below for the chat-content
+  guarantee this is held to.
+- **Clearer bug-report send failures:** when a bug report cannot be filed, the app
+  now tells you WHERE it failed - you appear offline, the server is unreachable, a
+  secure-connection problem, or the server rejected it - instead of a raw error. It
+  always keeps your report and offers to retry, or to download the report file so
+  you can send it by email/Discord yourself (works from a phone or another device
+  where a server-side path is useless). Both the WebUI and `localm bug-report`.
 
 ### Changed
 - **Memory recall is now relevant-only.** Chat memory used to inject the same handful
@@ -673,83 +699,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   whole server. The second path now checks whether that background probe might
   still be mid-load before touching the same library itself, rather than risking
   the crash.
-
-### Security
-- **Bug reports no longer leak your username in the fields you type or the issue
-  title.** When you file a bug (through the app's "Report a bug", `localm bug-report`,
-  or the standalone reporter used when localm will not start), the automatically
-  collected diagnostics were already stripped of your home-folder path - which
-  contains your account name - and of any pasted credential. The one-line summary, the
-  description, and the extra "reason" you type were not, and neither was the public
-  issue title built from them, so a home path or a key pasted into those fields could
-  reach the public tracking issue even though the preview claims it shows exactly what
-  will be sent. Those fields are now scrubbed at the point of upload too, so what is
-  filed matches the redacted preview.
-- **Disabling the private-network (SSRF) guard now requires an owner key.** The
-  "Allow private/loopback targets" setting (`net_allow_private`) turns off the
-  guard that blocks model-initiated requests to localhost, your LAN, and
-  cloud-metadata addresses. It was changeable by any key with `config:write`;
-  now, like the other trust-widening settings (the RAG indexing folders, a media
-  backend's launch command), it is owner-only, so a scoped device key can no
-  longer weaken this protection. No change for an owner running the app normally.
-- **`localm key recover` and `localm key clear` now sign out browser sessions.**
-  Rotating the owner key with `key recover` (the compromise-recovery path) or
-  removing it with `key clear` now also invalidates every active browser (cookie)
-  session, matching what the in-app "clear key" button already did. A browser
-  session is deliberately decoupled from the key so a routine key roll does not
-  log you out - but that meant a captured session cookie could keep owner access
-  after a recovery meant to lock an attacker out. Your scoped device keys are
-  untouched, so devices keep working; just sign in again in the browser with the
-  new key.
-- **Knowledge-base indexing refuses credential files named directly through the
-  API:** the folder scan already skipped key and secret material (`.pem`, `.key`,
-  `id_rsa`, `.env`, and the like) and model-weight binaries, but a file named
-  explicitly in an API "add to collection" request slipped past that filter, so a
-  scoped or remote client could point the indexer straight at a private key and
-  read it back through search. Such files are now refused (HTTP 400) whenever
-  indexing goes through the API, for every caller. Indexing your own key material
-  on your own machine still works from the `localm rag add` command line.
-- **The embedding model now shares VRAM management with your chat model.**
-  Loading an embedding model (for memory/knowledge search) while a chat model was
-  already resident used to just pile both into VRAM/RAM at once instead of
-  swapping the chat model out first, the way image/music/video generation already
-  does - on a tight card this could push system memory uncomfortably high. And
-  "Unload all" on the Models page only ever freed the chat model: the embedding
-  model stayed loaded and unaccounted for, so the button under-reported how much
-  VRAM was actually released. Both are fixed: loading a large embedding model now
-  swaps the chat model out first when needed, and "Unload all" (and the Models
-  page's per-row Unload) now release the embedding model too and show it as
-  loaded when it's the one resident.
-
-## [0.1.2] - 2026-07-10
-
-### Added
-- **Automatic server-hang diagnostics:** an event-loop stall watchdog runs by
-  default and, if the server ever freezes, dumps every thread's stack to
-  `<home>/logs/hang_*.log` (the file is created only when a real stall happens, so
-  a healthy run leaves nothing behind). A captured trace is bundled into a bug
-  report automatically, so an intermittent "it just hung" becomes diagnosable with
-  no setup on the reporter's part. It respects privacy: in privacy mode (the
-  default) it writes nothing automatically, unless you turn on "Keep diagnostics
-  for bug reports" (below). `LOCALM_HANG_WATCHDOG=0` turns it off entirely (and `=1`
-  forces it on with verbose logging even in privacy mode); a loopback-only
-  `GET /debug/stacks` returns thread and task state on demand.
-- **"Keep diagnostics for bug reports" privacy setting:** privacy mode saves
-  nothing automatically, which also means a hang or crash leaves nothing to
-  report. This new toggle (off by default) keeps the diagnostic bits a report
-  needs - the hang stack trace, the restart breadcrumb log, and a debug log -
-  even in privacy mode. It is available in Settings > Privacy (in-app) and as a
-  checkbox in the desktop launcher (and `--keep-diagnostics` on the command line).
-  It keeps operational diagnostics only - see Security below for the chat-content
-  guarantee this is held to.
-- **Clearer bug-report send failures:** when a bug report cannot be filed, the app
-  now tells you WHERE it failed - you appear offline, the server is unreachable, a
-  secure-connection problem, or the server rejected it - instead of a raw error. It
-  always keeps your report and offers to retry, or to download the report file so
-  you can send it by email/Discord yourself (works from a phone or another device
-  where a server-side path is useless). Both the WebUI and `localm bug-report`.
-
-### Fixed
 - **Launcher model selector lists only chat models:** the desktop launcher's model
   dropdown listed every registered model, including non-LLM ones (embedding /
   text-encoder / VAE / LoRA / diffusion components, or an unclassified `unknown`
@@ -838,6 +787,51 @@ permanent public record of what shipped and are never rewritten; the in-progress
   what it just attempted.
 
 ### Security
+- **Bug reports no longer leak your username in the fields you type or the issue
+  title.** When you file a bug (through the app's "Report a bug", `localm bug-report`,
+  or the standalone reporter used when localm will not start), the automatically
+  collected diagnostics were already stripped of your home-folder path - which
+  contains your account name - and of any pasted credential. The one-line summary, the
+  description, and the extra "reason" you type were not, and neither was the public
+  issue title built from them, so a home path or a key pasted into those fields could
+  reach the public tracking issue even though the preview claims it shows exactly what
+  will be sent. Those fields are now scrubbed at the point of upload too, so what is
+  filed matches the redacted preview.
+- **Disabling the private-network (SSRF) guard now requires an owner key.** The
+  "Allow private/loopback targets" setting (`net_allow_private`) turns off the
+  guard that blocks model-initiated requests to localhost, your LAN, and
+  cloud-metadata addresses. It was changeable by any key with `config:write`;
+  now, like the other trust-widening settings (the RAG indexing folders, a media
+  backend's launch command), it is owner-only, so a scoped device key can no
+  longer weaken this protection. No change for an owner running the app normally.
+- **`localm key recover` and `localm key clear` now sign out browser sessions.**
+  Rotating the owner key with `key recover` (the compromise-recovery path) or
+  removing it with `key clear` now also invalidates every active browser (cookie)
+  session, matching what the in-app "clear key" button already did. A browser
+  session is deliberately decoupled from the key so a routine key roll does not
+  log you out - but that meant a captured session cookie could keep owner access
+  after a recovery meant to lock an attacker out. Your scoped device keys are
+  untouched, so devices keep working; just sign in again in the browser with the
+  new key.
+- **Knowledge-base indexing refuses credential files named directly through the
+  API:** the folder scan already skipped key and secret material (`.pem`, `.key`,
+  `id_rsa`, `.env`, and the like) and model-weight binaries, but a file named
+  explicitly in an API "add to collection" request slipped past that filter, so a
+  scoped or remote client could point the indexer straight at a private key and
+  read it back through search. Such files are now refused (HTTP 400) whenever
+  indexing goes through the API, for every caller. Indexing your own key material
+  on your own machine still works from the `localm rag add` command line.
+- **The embedding model now shares VRAM management with your chat model.**
+  Loading an embedding model (for memory/knowledge search) while a chat model was
+  already resident used to just pile both into VRAM/RAM at once instead of
+  swapping the chat model out first, the way image/music/video generation already
+  does - on a tight card this could push system memory uncomfortably high. And
+  "Unload all" on the Models page only ever freed the chat model: the embedding
+  model stayed loaded and unaccounted for, so the button under-reported how much
+  VRAM was actually released. Both are fixed: loading a large embedding model now
+  swaps the chat model out first when needed, and "Unload all" (and the Models
+  page's per-row Unload) now release the embedding model too and show it as
+  loaded when it's the one resident.
 - **Privacy mode never logs chat content, even with diagnostics on.** Two
   code paths (the GGUF backend's raw model output, and the coder's web-tool
   call logging) could write your actual chat content - prompts and replies -
