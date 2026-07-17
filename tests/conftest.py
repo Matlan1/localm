@@ -300,3 +300,38 @@ def cli_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     return CliRunner()
+
+
+def probe_double(reading, *, status=None):
+    """Wrap a fake VRAM reading so it honours discover's OPT-IN ``return_status`` /
+    ``deadline`` kwargs, for tests that patch ``discover.vram_info`` /
+    ``discover.list_gpus`` / ``discover.vram_capacity``.
+
+    The zero-arg doubles this replaces predate both kwargs, so a reader that opts in
+    (switch_engine's pre-load gate, /v1/models/unload's reporting) hands them a kwarg
+    they reject with TypeError. Swallowing that in production code was rejected: it
+    would mask a genuine TypeError from inside a reader, and - worse - a status-blind
+    double CANNOT express the probe_ok/timeout states the gate's behaviour now turns
+    on, so the tests could not cover the very thing they exist to cover.
+
+    ``status`` defaults to GPU_PROBE_OK because a patched reading IS the simulated
+    result of a probe that COMPLETED - that is precisely what OK means, so this
+    states a truth rather than assuming a convenient default. Pass
+    ``status=GPU_PROBE_TIMEOUT`` / ``GPU_PROBE_BUSY`` to simulate a probe that did
+    not complete, in which case ``reading`` is what the frozen last-known-good
+    fallback would serve.
+
+    ``reading`` may be a value or a zero-arg callable (for doubles that recompute
+    per call, e.g. free VRAM that tracks which fake engines are currently loaded).
+    ``deadline`` is accepted and ignored: these doubles are instant, so there is no
+    cold init for a longer budget to wait out.
+    """
+    from localm.discover import GPU_PROBE_OK
+
+    def _double(*args, **kwargs):
+        value = reading() if callable(reading) else reading
+        if kwargs.get("return_status"):
+            return value, (status or GPU_PROBE_OK)
+        return value
+
+    return _double

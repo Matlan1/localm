@@ -35,6 +35,7 @@ import pytest
 from fastapi import HTTPException
 
 from localm.inference import http_server as hs
+from tests.conftest import probe_double
 
 
 GB = 1024 ** 3
@@ -81,7 +82,7 @@ def coordinated(monkeypatch):
     monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     # 2 GB free; incoming model is 10 GB * 1.2 + 1 GB headroom -> never fits.
     monkeypatch.setattr("localm.discover.vram_capacity",
-                        lambda config=None: {"free": 2 * GB, "total": 16 * GB})
+                        probe_double({"free": 2 * GB, "total": 16 * GB}))
     monkeypatch.setattr("localm.discover.gpu_split_shortfall", lambda need: [])
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
@@ -187,10 +188,10 @@ def test_split_instance_still_asks_a_peer_on_its_other_split_device(
     base = real_load_config()
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {**base, "gpu_split_indices": [0, 1]})
-    monkeypatch.setattr("localm.discover.list_gpus", lambda: [
+    monkeypatch.setattr("localm.discover.list_gpus", probe_double([
         {"index": 0, "name": "A", "total": 16 * GB, "free": 1 * GB},
         {"index": 1, "name": "B", "total": 16 * GB, "free": 1 * GB},
-    ])
+    ]))
     peer = {"instance_id": "peer-1", "port": 8082, "model": "big",
             "vram_estimate_bytes": 12 * GB, "gpu_index": 1,
             "coordination_token": "x"}
@@ -203,8 +204,8 @@ def test_split_instance_still_asks_a_peer_on_its_other_split_device(
     calls = _install_peers(monkeypatch, [peer], _on_request)
     monkeypatch.setattr(
         "localm.discover.vram_capacity",
-        lambda config=None: {"free": (14 * GB) if freed["yes"] else (2 * GB),
-                             "total": 32 * GB})
+        probe_double(lambda: {"free": (14 * GB) if freed["yes"] else (2 * GB),
+                              "total": 32 * GB}))
 
     engines = {"incoming": FakeEngine("incoming")}
     res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__))
@@ -232,8 +233,8 @@ def test_cooperation_still_happens_when_it_can_actually_free_enough(
     # After the peer frees, the next VRAM probe sees room.
     monkeypatch.setattr(
         "localm.discover.vram_capacity",
-        lambda config=None: {"free": (14 * GB) if freed["yes"] else (2 * GB),
-                             "total": 16 * GB})
+        probe_double(lambda: {"free": (14 * GB) if freed["yes"] else (2 * GB),
+                              "total": 16 * GB}))
 
     engines = {"incoming": FakeEngine("incoming")}
     res = asyncio.run(hs.switch_engine("incoming", engines.__getitem__))

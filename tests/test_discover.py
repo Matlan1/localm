@@ -634,6 +634,122 @@ class TestListGpusTimeoutStatus:
         assert _GPU_PROBE_CLI_DEADLINE > _GPU_PROBE_DEADLINE
         assert _GPU_PROBE_CLI_DEADLINE >= 10.0
 
+    def test_vram_capacity_forwards_deadline_so_a_cold_probe_completes(self, monkeypatch):
+        """Root cause of switch_engine's skipped gate: the pre-load probe ran at the
+        4s server cap while off the event loop, so a cold driver init (measured 4.63s;
+        ~6.5s per discover.py's own comment) reliably TIMED OUT and served no reading,
+        which made the gate treat the box as unmeasurable and skip the VRAM check.
+
+        This pins the fix's mechanism end to end through the plumbing: the SAME slow
+        probe TIMES OUT at the default cap (no 'free') but COMPLETES with a real
+        reading when vram_capacity is given the generous deadline. If vram_capacity
+        stopped forwarding the deadline, the second arm would time out too and this
+        goes red."""
+        from localm import discover
+        import time
+
+        def _slow_cold_probe():
+            time.sleep(1.0)   # overruns a short cap, beats a generous one
+            return [{"index": 0, "name": "GPU0", "total": 16, "free": 9}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow_cold_probe)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})  # no split
+
+        # ARM A: default cap (0.2s here) -> times out -> no 'free' -> gate would skip.
+        discover._reset_gpu_probe_cache()
+        cap_a, status_a = discover.vram_capacity(return_status=True, deadline=0.2)
+        assert status_a == GPU_PROBE_TIMEOUT
+        assert cap_a.get("free") is None, (
+            "a timed-out probe must not present a 'free' figure it did not measure")
+
+        # ARM B: generous deadline -> the same probe completes -> real reading.
+        discover._reset_gpu_probe_cache()
+        cap_b, status_b = discover.vram_capacity(return_status=True, deadline=3.0)
+        assert status_b == GPU_PROBE_OK
+        assert cap_b.get("free") == 9, (
+            "the generous deadline must thread through vram_capacity so the cold "
+            f"probe completes and the gate gets a real reading; got {cap_b}")
+
+    def test_deadline_forwarded_when_split_degrades_to_single_device(self, monkeypatch):
+        """vram_capacity's docstring promises the deadline is forwarded on EVERY
+        path. The split-configured-but-degraded-to-<2-devices fallback (a device
+        vanished / was never present) dropped it and re-probed at the default 4s cap,
+        so a cold init on that specific config could still time out.
+
+        Pinned with a TRACER, not with timings, deliberately. A timing version does
+        NOT guard: this path probes TWICE (vram_capacity's own split probe, then
+        vram_info's inside the fallback), and any probe short enough to keep the test
+        fast also completes under the 4s DEFAULT cap - so dropping the forwarding
+        would leave it green. Worse, the first probe's abandoned thread holds the
+        in-flight slot, so the second returns BUSY rather than TIMEOUT and a
+        status-based assertion pins the wrong thing. The tracer asserts what actually
+        matters: BOTH probes on this path receive the caller's deadline.
+
+        Mutation: drop `deadline` from _vi() (or from _list_gpus_kw) -> the second
+        recorded deadline is no longer the caller's -> RED."""
+        from localm import discover
+        seen = []
+
+        def _tracer(*, deadline=discover._GPU_PROBE_DEADLINE, return_status=False,
+                    wait_for_inflight=False):
+            seen.append(deadline)
+            # Only device 0 exists, so the configured [0, 5] split resolves to <2
+            # devices -> vram_capacity takes the degrade fallback under test.
+            gpus = [{"index": 0, "name": "GPU0", "total": 16, "free": 9}]
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        monkeypatch.setattr("localm.discover.list_gpus", _tracer)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [0, 5]})
+
+        cap, status = discover.vram_capacity(
+            return_status=True, deadline=discover._GPU_PROBE_CLI_DEADLINE)
+
+        assert status == GPU_PROBE_OK and cap.get("free") == 9, (
+            f"degrade fallback should still return the single device's reading; "
+            f"got {status} {cap}")
+        assert len(seen) == 2, (
+            f"the degrade path probes twice (split probe, then vram_info's); got "
+            f"{len(seen)} - the path under test may not be reached")
+        assert seen == [discover._GPU_PROBE_CLI_DEADLINE] * 2, (
+            "BOTH probes on the degrade path must get the caller's deadline; the "
+            f"fallback dropping it is the bug this pins. got {seen}")
+
+    def test_vram_capacity_forwards_wait_for_inflight(self, monkeypatch):
+        """switch_engine's gate passes wait_for_inflight=True (#701) so a load that
+        races a concurrent probe (the GUI stats heartbeat holding the slot through a
+        cold init) JOINS it for a real reading instead of taking an instant BUSY and
+        refusing spuriously. That only works if vram_capacity FORWARDS the flag to
+        list_gpus. This pins the forwarding with a tracer; the join mechanism itself
+        is #701's and tested there. Mutation: drop wait_for_inflight from _vi() /
+        _list_gpus_kw and the positive assert goes red."""
+        from localm import discover
+        seen = {}
+
+        def _tracer(*, deadline=discover._GPU_PROBE_DEADLINE, return_status=False,
+                    wait_for_inflight=False):
+            seen["wait_for_inflight"] = wait_for_inflight
+            seen["deadline"] = deadline
+            gpus = [{"index": 0, "name": "A", "total": 16, "free": 9}]
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        monkeypatch.setattr("localm.discover.list_gpus", _tracer)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})  # no split
+
+        discover.vram_capacity(return_status=True,
+                               deadline=discover._GPU_PROBE_CLI_DEADLINE,
+                               wait_for_inflight=True)
+        assert seen["wait_for_inflight"] is True, (
+            "vram_capacity must forward wait_for_inflight to list_gpus, or the gate's "
+            "join is a no-op and the GUI cold-first-load still refuses spuriously")
+        assert seen["deadline"] == discover._GPU_PROBE_CLI_DEADLINE
+
+        # Negative: the default (every non-gate caller) must NOT join - joining is an
+        # opt-in for off-loop callers only; an on-loop caller must never block on it.
+        seen.clear()
+        discover.vram_capacity(return_status=True)
+        assert seen.get("wait_for_inflight") is False
+
 
 class TestListGpusJoinInflight:
     """A patient off-loop caller must be able to JOIN a probe already in flight

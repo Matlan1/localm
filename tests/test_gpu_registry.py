@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 from localm import gpu_registry
 from localm.inference import http_server as hs
 from localm.inference.http_server import create_app
+from tests.conftest import probe_double
 
 
 @pytest.fixture(autouse=True)
@@ -338,7 +339,7 @@ class TestSwitchEngineCooperativeUnload:
         every --isolated run) -> the new branch is a pure no-op and the exact
         pre-existing 503 behavior is unchanged."""
         assert hs._gpu_coord is None
-        monkeypatch.setattr("localm.discover.vram_info", _dynamic_vram())
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
 
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)
@@ -366,7 +367,7 @@ class TestSwitchEngineCooperativeUnload:
             return []
 
         monkeypatch.setattr(gpu_registry, "list_gpu_peers", fake_list_peers)
-        monkeypatch.setattr("localm.discover.vram_info", _dynamic_vram())
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
 
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)
@@ -389,7 +390,7 @@ class TestSwitchEngineCooperativeUnload:
                       "model": "peer-model", "coordination_token": "peertok"}
         monkeypatch.setattr(gpu_registry, "list_gpu_peers", lambda exclude_self_id=None: [peer_entry])
         monkeypatch.setattr(gpu_registry, "request_cooperative_unload", lambda peer, **k: False)
-        monkeypatch.setattr("localm.discover.vram_info", _dynamic_vram())
+        monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
 
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)
@@ -423,7 +424,7 @@ class TestSwitchEngineCooperativeUnload:
         monkeypatch.setattr(gpu_registry, "list_gpu_peers", fake_list_peers)
         monkeypatch.setattr(gpu_registry, "request_cooperative_unload", fake_request)
         monkeypatch.setattr("localm.discover.vram_info",
-                            _dynamic_vram(free_gate=lambda: state["cooperated"]))
+                            probe_double(_dynamic_vram(free_gate=lambda: state["cooperated"])))
 
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)

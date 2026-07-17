@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from localm.inference import embedder as emb
 from localm.inference import http_server as hs
 from localm.plugins.gui.web import attach_gui
+from tests.conftest import probe_double
 
 
 class FakeEngine:
@@ -69,7 +70,7 @@ def setup_multi_model(monkeypatch):
     # Plenty of (static, not usage-aware) free VRAM so loading a second model
     # never triggers eviction of the first - both stay resident.
     monkeypatch.setattr("localm.discover.vram_info",
-                        lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+                        probe_double({"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3}))
     monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
 
     hs._engines.clear()
