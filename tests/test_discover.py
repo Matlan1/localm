@@ -737,8 +737,12 @@ class TestListGpusTimeoutStatus:
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"gpu_split_indices": [0, 5]})
 
-        cap, status = discover.vram_capacity(
-            return_status=True, deadline=discover._GPU_PROBE_CLI_DEADLINE)
+        # SENTINEL deadline, not _GPU_PROBE_CLI_DEADLINE: since the deadline
+        # unification made the CLI constant equal the tracer's default, asserting
+        # the constant became tautological (a dropped forwarding records the
+        # default, which compares equal). A value nothing defaults to is the only
+        # thing that keeps the mutation guard biting.
+        cap, status = discover.vram_capacity(return_status=True, deadline=7.7)
 
         assert status == GPU_PROBE_OK and cap.get("free") == 9, (
             f"degrade fallback should still return the single device's reading; "
@@ -746,7 +750,7 @@ class TestListGpusTimeoutStatus:
         assert len(seen) == 2, (
             f"the degrade path probes twice (split probe, then vram_info's); got "
             f"{len(seen)} - the path under test may not be reached")
-        assert seen == [discover._GPU_PROBE_CLI_DEADLINE] * 2, (
+        assert seen == [7.7] * 2, (
             "BOTH probes on the degrade path must get the caller's deadline; the "
             f"fallback dropping it is the bug this pins. got {seen}")
 
@@ -771,13 +775,15 @@ class TestListGpusTimeoutStatus:
         monkeypatch.setattr("localm.discover.list_gpus", _tracer)
         monkeypatch.setattr("localm.config.load_config", lambda: {})  # no split
 
-        discover.vram_capacity(return_status=True,
-                               deadline=discover._GPU_PROBE_CLI_DEADLINE,
+        # Sentinel deadline for the same reason as the degrade test above: the
+        # unified constant equals the tracer's default, so only a value nothing
+        # defaults to proves the forwarding happened.
+        discover.vram_capacity(return_status=True, deadline=7.7,
                                wait_for_inflight=True)
         assert seen["wait_for_inflight"] is True, (
             "vram_capacity must forward wait_for_inflight to list_gpus, or the gate's "
             "join is a no-op and the GUI cold-first-load still refuses spuriously")
-        assert seen["deadline"] == discover._GPU_PROBE_CLI_DEADLINE
+        assert seen["deadline"] == 7.7
 
         # Negative: the default (every non-gate caller) must NOT join - joining is an
         # opt-in for off-loop callers only; an on-loop caller must never block on it.
@@ -791,8 +797,8 @@ class TestListGpusJoinInflight:
     (opt-in wait_for_inflight), not just get an instant BUSY.
 
     WHY this is the real fix, and a longer deadline alone is not: on a cold box the
-    FIRST probe (typically the GUI's 4s /api/stats heartbeat, off-loaded but at the
-    4s cap) holds _gpu_probe_inflight for the entire ~4.6s cold ROCm/CUDA init. A
+    FIRST probe (typically the GUI's /api/stats heartbeat, off-loaded; historically
+    at a 4s cap) holds _gpu_probe_inflight for the entire ~4.6s cold ROCm/CUDA init. A
     model-load probe arriving in that window hits the in-flight guard and returns
     BUSY + last-known-good in ~0.000s WITHOUT probing - the identical short-circuit
     a deadline-15 RETRY hits (measured 0.0000s). So switch_engine's VRAM-fit gate
