@@ -51,7 +51,11 @@
 // in-memory conversation only once per page load, not on every 30s poll tick
 // (GUI-LIVE-WIPE) - a stale-cached client would keep erasing a user's own
 // first message every 30 seconds in privacy mode.
-const CACHE = "localm-shell-v58";
+// v59: the v58 privacyWiped latch is now reset when the poll sees the server
+// leave privacy mode, so a LATER restart back into privacy mode wipes newly-
+// accumulated non-privacy leftovers again instead of leaving them painted in
+// the sidebar (AUD-PRIV-2) - a stale-cached client would suppress that wipe.
+const CACHE = "localm-shell-v59";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

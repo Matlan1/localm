@@ -252,6 +252,68 @@ test("GUI-LIVE-WIPE: a SECOND refreshCtxLimit() call in privacy mode (the 30s " 
     "second poll tick");
 });
 
+test("GUI-LIVE-WIPE: leaving privacy mode re-arms the wipe latch, so a LATER " +
+     "return to privacy mode wipes newly-accumulated non-privacy leftovers " +
+     "again (AUD-PRIV-2)", async () => {
+  const { window } = loadApp({
+    fetchImpl: makeFetch({ instanceId: "backend-x" }),
+  });
+
+  // 1) First privacy-mode confirmation: wipes (as usual) and arms the latch.
+  runScript(window, `
+    window.__mode = "privacy";
+    window.fetch = async (url) => {
+      const u = String(url);
+      if (u === "/v1/config") {
+        return { ok: true, status: 200, text: async () => "",
+          json: async () => ({ effective_mode: window.__mode, n_ctx_max: 16384,
+                                instance_id: "backend-x" }) };
+      }
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+    };
+    window.chatState = chat;
+    refreshCtxLimit();
+  `);
+  await drain();
+  assert.equal(window.chatState.privacy, true);
+  assert.equal(window.chatState.conversations.length, 0);
+
+  // 2) The server restarts OUT of privacy mode (log/full); the tab goes on to
+  // accumulate a new conversation exactly as a real non-privacy session would.
+  runScript(window, `window.__mode = "log"; refreshCtxLimit();`);
+  await drain();
+  assert.equal(window.chatState.privacy, false,
+    "sanity check: the tab now sees non-privacy mode");
+
+  runScript(window, `
+    chat.conversations.push({
+      id: "leftover-1", title: "Non-privacy leftover", updated_at: 1000,
+      pinned: false, folder: null, branches: [],
+      messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }],
+    });
+    chat.activeId = "leftover-1";
+    renderConvList();
+  `);
+  assert.equal(window.chatState.conversations.length, 1);
+
+  // 3) The server restarts back INTO privacy mode - the exact AUD-PRIV-2
+  // scenario the wipe exists to prevent. Without re-arming privacyWiped on the
+  // way out of privacy mode (step 2), this second confirmation is silently
+  // suppressed and the non-privacy leftover stays painted in the sidebar for
+  // the rest of the tab's life.
+  runScript(window, `window.__mode = "privacy"; refreshCtxLimit();`);
+  await drain();
+
+  assert.equal(window.chatState.privacy, true);
+  assert.equal(window.chatState.conversations.length, 0,
+    "the second privacy-mode confirmation must wipe the non-privacy leftover, " +
+    "not leave it painted in the sidebar for the rest of the tab's life");
+  const listText2 = window.document.getElementById("conv-list").textContent;
+  assert.ok(!listText2.includes("Non-privacy leftover"),
+    "the sidebar must be repainted clean on the second privacy confirmation too");
+});
+
 test("reconcileInstanceId: a matching id is a no-op (nothing wiped)", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.instanceId", "same-id");
