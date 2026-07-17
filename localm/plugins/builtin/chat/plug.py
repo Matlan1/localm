@@ -20,8 +20,12 @@ default_enabled), so the engine auto-provisions it on first run.
 
 All paths resolve from the data dir at request time, so the plugin needs no
 shared services from attach_gui. Persistence is gated on the chat surface's
-session mode: privacy mode (the default) keeps conversations in the browser only
-and blocks server writes - "no new traces", not amnesia, so reads stay allowed.
+session mode (see _persist_enabled): in privacy mode (the default) the store is
+off entirely - writes 403 and the list/get routes return empty/403 - so a
+conversation lives only in the browser tab for the current session and is gone
+on reload ("no new traces", by design; the GUI also wipes its localStorage copy
+when it confirms privacy mode). In log/full mode conversations are stored under
+the data dir and survive reloads and other devices on the LAN.
 """
 
 from __future__ import annotations
