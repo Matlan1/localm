@@ -115,6 +115,86 @@ def _print_qr(url: str) -> None:
                   "terminal; just open the URL above on your phone)[/dim]")
 
 
+# gui options that only shape a FRESH server: an attach to an existing instance
+# cannot honor them, so passing one explicitly is a conflict we must NOT swallow
+# (the hard-won rule: never silently discard the user's explicit choice). Not
+# listed here = compatible with an attach: no_browser / debug / project /
+# force_new / isolated / keep_diagnostics (local or attach-control), no_model
+# (only picks a STARTUP model, moot when nothing is starting), or value-aware
+# (model / host / port) handled below.
+_ATTACH_CONFLICT_FLAGS = {
+    "ctx": "--ctx", "gpu_layers": "--gpu-layers",
+    "pull_spec": "--pull", "mode": "--mode", "insecure": "--insecure",
+    "no_tls": "--no-tls", "tls_cert": "--tls-cert", "tls_key": "--tls-key",
+    "show_qr": "--qr", "api_mode": "--api-mode", "mmproj": "--mmproj",
+    "device": "--device",
+}
+
+
+def _explicit(ctx, name: str) -> bool:
+    """True when *name* came from the command line (not its default). Lets us tell
+    an explicit `--port 8794` apart from the unset default so we only object to
+    flags the user actually typed."""
+    from click.core import ParameterSource
+    try:
+        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+    except Exception:
+        return False
+
+
+def _probe_active_model(existing: dict):
+    """The running instance's active model id, or None when it cannot be read
+    (unreachable / a chat-scoped attach token that cannot GET /v1/models). Used to
+    decide whether an explicitly-named `localm gui MODEL` conflicts with what the
+    running server actually serves."""
+    try:
+        from localm.inference.http_engine import remote_model_status
+        scheme = existing.get("scheme") or "http"
+        base = f"{scheme}://127.0.0.1:{existing.get('port')}/v1"
+        return remote_model_status(base, existing.get("token"))[1]
+    except Exception:
+        return None
+
+
+def _attach_conflicts(ctx, existing: dict, model: str) -> list:
+    """Command-line options the user passed that an attach to *existing* cannot
+    honor - each a reason NOT to silently attach. Returns human-readable strings
+    (empty list = attaching is fine). port/host/model are value-aware so re-passing
+    what the running server already uses is NOT a conflict."""
+    conflicts: list = []
+    # port / host: conflict only if the requested value DIFFERS from the running
+    # instance's - asking for the port it is already on is harmless.
+    if _explicit(ctx, "port"):
+        want, have = ctx.params.get("port"), existing.get("port")
+        try:
+            same = have is not None and int(want) == int(have)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            conflicts.append(f"--port {want} (the running server is on {have})")
+    if _explicit(ctx, "host"):
+        want, have = ctx.params.get("host"), existing.get("host")
+        if str(want) != str(have):
+            conflicts.append(f"--host {want} (the running server bound {have})")
+    # model: a specific model was named. Probe the running instance; conflict only
+    # when its active model is KNOWN and different (unknown -> attach quietly, like
+    # `localm run`; same model -> attach). Never silently serve a different model.
+    if model and _explicit(ctx, "model"):
+        active = _probe_active_model(existing)
+        if active and active != model:
+            conflicts.append(
+                f"model {model} (the running server serves {active})")
+    # everything else: an attach cannot retroactively set the running server's
+    # ctx / gpu-layers / tls / mode / ..., so an explicit pass is a conflict.
+    # (--mode is the session-persistence mode, a different namespace from the
+    # entry's SURFACE mode, so it cannot be compared cheaply - any explicit --mode
+    # conflicts.)
+    for name, flag in _ATTACH_CONFLICT_FLAGS.items():
+        if _explicit(ctx, name):
+            conflicts.append(flag)
+    return conflicts
+
+
 @click.command("gui")
 @click.argument("model", default="", required=False, shell_complete=_complete_model)
 @click.option("-H", "--host", default="127.0.0.1", show_default=True,
@@ -268,6 +348,26 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if not (force_new or isolated):
         existing = instances.find_attachable(home_dir(), root_dir)
         if existing:
+            # Do NOT silently discard explicit server-config flags by attaching.
+            # If the user asked for something the running instance cannot provide
+            # (a different port/host/model, a fresh --mode/--ctx/tls/... ), say so
+            # and let them decide: --new starts a separate server with their
+            # settings, or they drop the flag to attach (hard-won rule: never
+            # silently override an explicit choice).
+            ctx = click.get_current_context()
+            conflicts = _attach_conflicts(ctx, existing, model)
+            if conflicts:
+                console.print(
+                    f"[red]A localm server is already running for [cyan]{root_dir}"
+                    f"[/cyan] (pid {existing.get('pid')}, port "
+                    f"{existing.get('port')}); it cannot apply:[/red]")
+                for c in conflicts:
+                    console.print(f"  [red]-[/red] {c}")
+                console.print(
+                    "[dim]Start a SEPARATE server with your settings using "
+                    "[bold]--new[/bold], or drop the option(s) above to attach to "
+                    "the running one.[/dim]")
+                sys.exit(1)
             url = instances.attach_url(existing)
             console.print(
                 f"[bold green]Attaching[/bold green] to the localm already "
