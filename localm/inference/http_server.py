@@ -54,6 +54,13 @@ _default_model_name: str | None = None
 # Active model name (most recently used/loaded)
 _active_model_name: str | None = None
 
+# The server's audit log, published by create_app() (see the `global _audit`
+# there). Must default to None here so _do_restart's `global _audit` guard
+# always resolves to a real (possibly None) value even if it runs in a
+# process/interpreter where create_app() was never called first - reading an
+# unassigned global raises NameError, not a clean "None" check.
+_audit = None
+
 # Inference serialisation - per-model semaphores mapping display name -> Semaphore
 _inference_sems: dict[str, asyncio.Semaphore] = {}
 
@@ -2268,7 +2275,7 @@ def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = N
 
 
 def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAPI:
-    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _inference_sems, _last_activity_per_model
+    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _inference_sems, _last_activity_per_model, _audit
     
     _engines.clear()
     _engines_lru.clear()
@@ -2292,7 +2299,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     # Session-persistence mode for this server (privacy -> no traces). One audit
     # log / transcript covers the server lifetime; GUI + API chat traffic flows
-    # through /v1/chat/completions and lands here.
+    # through /v1/chat/completions and lands here. _audit is published as a
+    # module global (unlike _mode/_transcript, kept local and closure-shared
+    # with the nested handlers below) because _do_restart is a separate
+    # top-level function with no closure access into this frame - without
+    # `global _audit` here, its cleanup could never reach the real object.
     from localm.audit import effective_mode, make_audit_log, make_transcript
     _mode = effective_mode("server")
     _audit = make_audit_log(_mode, label="server")
