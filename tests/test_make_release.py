@@ -84,15 +84,22 @@ class _FakeGh:
     """A scripted `gh` runner for require_ci_green: records calls and returns canned
     results per subcommand, with no network. `run list` returns empty on the first
     (snapshot) call, then a new run id, so the 'wait for the run to appear' loop ends."""
-    def __init__(self, *, state="active", watch_rc=0, appear=True, snapshot_rc=0):
+    def __init__(self, *, state="active", watch_rc=0, appear=True, snapshot_rc=0,
+                 permissions_enabled=True, permissions_rc=0):
         self.state, self.watch_rc, self.appear = state, watch_rc, appear
         self.snapshot_rc = snapshot_rc                     # non-zero => before-snapshot query fails
+        self.permissions_enabled = permissions_enabled     # repo-level Actions switch
+        self.permissions_rc = permissions_rc                # non-zero => permissions query fails
         self.calls, self._lists = [], 0
 
     def __call__(self, args):
         self.calls.append(list(args))
         def res(rc=0, out="", err=""):
             return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+        if args[:2] == ["api", "repos/{owner}/{repo}/actions/permissions"]:
+            if self.permissions_rc != 0:
+                return res(rc=self.permissions_rc, err="gh: could not read Actions permissions")
+            return res(out=json.dumps({"enabled": self.permissions_enabled}))
         if args[:1] == ["api"]:
             return res(out=json.dumps({"workflows": [
                 {"path": ".github/workflows/ci.yml", "name": "CI", "state": self.state, "id": 1}]}))
@@ -151,6 +158,59 @@ def test_ci_gate_errors_if_run_never_appears(monkeypatch):
     with pytest.raises(SystemExit, match="did not appear"):
         make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None,
                                       appear_timeout_s=30, poll_s=10)
+
+
+# ---- FIX: GitHub has TWO independent Actions switches (2026-07-17, 0.1.2 release) ----
+# A workflow's own `state` can read "active" while Actions is disabled for the WHOLE
+# repo (repos/{owner}/{repo}/actions/permissions -> enabled: false), verified live
+# during the 0.1.2 release. The old gate only ever queried/repaired the workflow-level
+# `state`, so a repo-level-disabled repo triggered a run that silently never started
+# and the gate blamed a misdiagnosed "did not appear" ~3 minutes later. These tests
+# lock in: fail immediately with the real cause when the repo switch is off, keep
+# working when only the workflow-level switch is off (the original case), and treat a
+# failed permissions query as a soft/best-effort check, not a hard abort.
+
+def test_ci_gate_fails_fast_when_repo_actions_disabled(monkeypatch):
+    """Repo-level Actions off, workflow `state` still 'active': must fail immediately
+    naming the repo-level switch, and must NEVER even try to trigger a run - the old
+    behavior was to trigger it anyway and time out ~3 minutes later."""
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="active", permissions_enabled=False)
+    with pytest.raises(SystemExit, match="repo level"):
+        make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)
+    assert not fake.called("workflow", "run"), "must abort before ever triggering a run"
+    assert not fake.called("run", "watch")
+
+
+def test_ci_gate_workflow_disabled_but_repo_actions_enabled_still_works(monkeypatch):
+    """The repo-level switch ON + the workflow itself disabled is the ORIGINAL,
+    already-handled case: the existing per-workflow auto-enable path must still fire
+    (this switch, unlike the repo-level one, IS safe to auto-enable - see the comment
+    in require_ci_green)."""
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="disabled_manually", permissions_enabled=True)
+    make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)
+    assert fake.called("workflow", "enable")
+    assert fake.called("workflow", "run")
+
+
+def test_ci_gate_continues_when_permissions_query_fails(monkeypatch):
+    """A failed repo-permissions query is a best-effort early diagnostic, not a load-
+    bearing gate (a genuinely-disabled repo is still caught by the downstream appear-
+    timeout, just less precisely) - so it must NOT abort the release outright."""
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="active", permissions_rc=1)
+    make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)   # must not raise
+    assert fake.called("run", "watch")
+
+
+def test_actions_enabled_true_false_and_none_on_query_failure():
+    def runner_with(rc, out):
+        return lambda _args: types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
+    assert make_release._actions_enabled(runner_with(0, json.dumps({"enabled": True}))) is True
+    assert make_release._actions_enabled(runner_with(0, json.dumps({"enabled": False}))) is False
+    assert make_release._actions_enabled(runner_with(1, "")) is None            # query failed
+    assert make_release._actions_enabled(runner_with(0, "not json")) is None    # unparseable
 
 
 # ---- HONESTY FIX #1: a FAILED before-snapshot must ABORT, not silently pass ----

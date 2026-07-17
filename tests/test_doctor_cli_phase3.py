@@ -13,12 +13,18 @@ fixture and monkeypatch the smi/torch/rich probes. The REPL tests unit-call
 ``_handle_command`` directly.
 """
 
+import importlib
 import sys
 import types
 
 import pytest
 
 import localm.cli as cli
+
+# localm.cli re-exports `doctor` as the click Command itself, shadowing the
+# submodule name - go through importlib for the module (same as
+# test_doctor_gpu_verdict.py / test_doctor_worker_spawn.py).
+doctor_mod = importlib.import_module("localm.cli.doctor")
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +73,13 @@ def _no_smi(monkeypatch):
 
 def _install_torch(monkeypatch, gpu_names):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(gpu_names))
+    # This fake torch stub lacks the real internals transformers needs (it is
+    # only a `.cuda` stand-in), so if the REAL transformers is installed in this
+    # venv, its lazy AutoTokenizer/AutoProcessor/AutoModelForCausalLM resolution
+    # would genuinely fail against it - a false "HF backend UNUSABLE" that has
+    # nothing to do with what these hardware-probe tests are about. Neutralize
+    # it here, the same way the ABI/GPU-device probes are neutralized elsewhere.
+    monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
 
 
 # --------------------------------------------------------------------------- #

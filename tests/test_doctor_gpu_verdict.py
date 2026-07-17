@@ -75,6 +75,11 @@ def _no_smi(monkeypatch):
 
 def _install_torch(monkeypatch, gpu_names):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(gpu_names))
+    # This fake torch stub lacks the real internals transformers needs, so if
+    # the REAL transformers is installed in this venv, its lazy AutoTokenizer/
+    # AutoProcessor/AutoModelForCausalLM resolution would genuinely fail against
+    # it - a false "HF backend UNUSABLE" unrelated to the GPU verdict under test.
+    monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
 
 
 def _healthy_bindir(tmp_path, backend=None):
