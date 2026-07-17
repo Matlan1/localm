@@ -24,6 +24,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is no longer a recognized extra.
 
 ### Fixed
+- **`localcoder` now names the real reason when its auto-started server dies
+  fast.** The busy-port refusal above meant an auto-started `localm gui` now
+  exits immediately instead of relocating - but `localcoder`'s attach loop
+  didn't notice the child had already exited, so it waited out the full
+  attach timeout and reported the generic "Failed to attach to the
+  auto-started server", which reads like a hang, not a port conflict. An
+  explicit `--port` that is busy is now checked before spawning at all, so the
+  same "Port N is already in use" message surfaces immediately; any other
+  fast, non-zero exit is now caught mid-poll and reported with its exit code
+  instead of the misleading generic message.
 - **An explicit `--port` that is busy now errors instead of silently moving you
   onto the default port.** `localm gui`/`serve --port N` resolved a busy port by
   scanning localm's range from the start, so a deliberately chosen high port (e.g.
