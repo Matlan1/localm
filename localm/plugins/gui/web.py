@@ -204,6 +204,12 @@ class PullRequest(BaseModel):
     # "copy" | "move" | None (default: register a local path in place, unchanged).
     # Ignored for a HuggingFace/URL spec - only the local-path pull branch uses it.
     store: str | None = None
+    # Explicit type hint from a type-scoped "Find models" tab (embedding,
+    # diffusion-unet, text-encoder, vae, lora). Bypasses pull-time HF guessing
+    # entirely - see discover.NO_TYPE_FILTER for why that guess is unreliable
+    # for vae/text-encoder specifically. None for the all/unknown tabs, which
+    # keep today's auto-detect behavior.
+    model_type: str | None = None
 
 
 class PullTokenRedeemRequest(BaseModel):

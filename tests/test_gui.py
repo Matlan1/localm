@@ -1037,6 +1037,41 @@ class TestModelEndpoints:
                 "/api/models/pull", json={"spec": "owner/repo", "store": "delete"})
         assert r.status_code == 400
 
+    @pytest.mark.parametrize("model_type", [
+        "llm", "embedding", "diffusion-unet", "text-encoder", "vae", "lora"])
+    def test_pull_model_type_forwarded_to_cli(self, gui_app, monkeypatch, model_type):
+        """A discovery result found under a type-scoped tab (models.js's
+        pendingPullTypeHint) reaches the CLI as --type, bypassing pull-time HF
+        guessing entirely - the fix for HF's own metadata being proven
+        unreliable for vae/text-encoder specifically (see discover.py's
+        NO_TYPE_FILTER)."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull",
+                json={"spec": "owner/repo", "model_type": model_type})
+        assert r.status_code == 200
+        assert captured["args"] == ["pull", "--type", model_type, "--", "owner/repo"]
+
+    def test_pull_model_type_omitted_when_not_requested(self, gui_app, monkeypatch):
+        """The "Other"/"All" tabs never force a type - --type must not appear at
+        all, so the CLI keeps today's auto-detect default."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull", json={"spec": "owner/repo"})
+        assert r.status_code == 200
+        assert "--type" not in captured["args"]
+
+    def test_pull_rejects_invalid_model_type_value(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull", json={"spec": "owner/repo", "model_type": "bogus"})
+        assert r.status_code == 400
+
 
 class TestPullTokenRedeemEndpoint:
     """SEC-PULL-CONFIRM: `POST /api/models/pull-token/redeem` is the HTTP surface
@@ -1925,7 +1960,7 @@ class TestDiscoverEndpoints:
         app, _ = gui_app
         monkeypatch.setattr(
             "localm.discover.hf_search",
-            lambda q, limit=20, formats=("gguf",): [
+            lambda q, limit=20, formats=("gguf",), model_type=None: [
                 {"id": "org/m", "downloads": 1, "likes": 0, "updated": "",
                  "formats": ["gguf"]}])
         monkeypatch.setattr("localm.discover.vram_info",
@@ -1978,7 +2013,7 @@ class TestDiscoverEndpoints:
         from localm.discover import DiscoverError
         app, _ = gui_app
 
-        def blocked(q, limit=20, formats=("gguf",)):
+        def blocked(q, limit=20, formats=("gguf",), model_type=None):
             raise DiscoverError("Network access is disabled (net_mode=off).")
         monkeypatch.setattr("localm.discover.hf_search", blocked)
         with TestClient(app) as client:
