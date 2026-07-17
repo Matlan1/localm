@@ -106,6 +106,8 @@ def _mock_engine(*, supports_images, can_be_multimodal, loaded=True):
     engine.supports_images = supports_images
     engine.can_be_multimodal = can_be_multimodal
     engine.last_finish_reason = "stop"
+    engine.count_tokens.return_value = 2
+    engine.count_messages_tokens.return_value = 3
     type(engine).loaded = property(lambda self: _state["loaded"])
     return engine
 
