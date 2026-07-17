@@ -286,6 +286,36 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
+    """Direct-process fallback for ``localm stop`` when a graceful HTTP shutdown
+    (POST /v1/server/shutdown) could not be confirmed - the server did not
+    answer, took too long, or is an older build without that route. Sends a
+    graceful terminate first (SIGTERM on POSIX; psutil maps this to
+    TerminateProcess on Windows, where there is no finer-grained graceful
+    signal for an unrelated process), force-kills if it has not exited within
+    *timeout*. Returns whether the pid is confirmed gone afterward; never
+    raises."""
+    if not isinstance(pid, int) or pid <= 0 or not pid_alive(pid):
+        return True
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except psutil.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                pass
+    except psutil.NoSuchProcess:
+        pass
+    except Exception as e:
+        logger.debug("kill_pid(%s) failed: %s", pid, e)
+    return not pid_alive(pid)
+
+
 def reap_stale(home: Path, *, self_id: Optional[str] = None,
                is_alive: Optional[Callable[[dict], bool]] = None) -> list[str]:
     """Remove registry entries for processes that are gone (or whose file is

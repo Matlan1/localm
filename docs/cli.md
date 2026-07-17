@@ -381,7 +381,12 @@ localm doctor                            # check Python, llama.dll, GPU driver, 
 localm info                              # data directory, config file, registry, registry file
 localm status                            # show the localm server serving this directory, if any
 localm ps                                # list running localm servers (per-directory instances)
+localm stop                              # stop the server serving this directory
+localm stop <id>                         # stop one instance by id (or an id prefix, as shown by `ps`)
+localm stop --all                        # stop every running localm instance
 ```
+
+`localm run`/`localm gui`/`localm serve` start a background server that keeps running after the command exits; `localm stop` is how you end it - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 
 `localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path.
 

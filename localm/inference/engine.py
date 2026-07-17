@@ -8,14 +8,11 @@ import threading
 from pathlib import Path
 from typing import Iterator, List, Optional
 
-from rich.console import Console
-
 from localm.config import load_config
+from localm.console import console
 from localm.debuglog import logger
 from localm.inference.backends.base import BaseBackend
 from localm.inference.textnorm import scrub_stream
-
-console = Console()
 
 
 # Process-global model-load lock. Loading a model onto the GPU is the dangerous,
