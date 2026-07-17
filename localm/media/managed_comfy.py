@@ -216,9 +216,12 @@ def managed_comfy_launch_cmd(config: Optional[dict] = None) -> str:
     See ``dev-notes/media-split-gpu/SPEC.md``.
 
     Creates nothing on disk. No longer strictly pure, though: resolving the device
-    reads config and probes the GPU via ``discover.list_gpus()``. That probe is
-    deadline-bounded on a helper thread by construction (it is explicitly safe for
-    event-loop callers), so this stays safe to call from where it is called today.
+    reads config and probes the GPU via ``discover.list_gpus()``. That probe runs
+    the driver query on a helper thread but BLOCKS THIS CALLING THREAD up to the
+    probe deadline (15s default since the deadlines were unified) - fine from the
+    media job worker threads that call it today, but it must NOT be called inline
+    on the server's event loop (PR #541; discover's module comment has the full
+    rationale).
     """
     paths = managed_comfy_paths()
     cmd = (f'"{paths.venv_python}" "{paths.main_py}" '

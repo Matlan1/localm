@@ -299,9 +299,11 @@ def _quant_of(name: str) -> str:
 # routes running this probe inline on the server's single asyncio loop, which
 # froze the whole WebUI while a probe was busy - and fixed that by OFFLOADING
 # every server call site to an executor. As of that PR no production caller
-# probes on the event loop (re-verified 2026-07-17: the GUI routes all
-# run_in_executor, and the GPU-registry heartbeat does not probe at all), so
-# the deadline does NOT protect the loop; it only bounds how long one worker
+# probes ON THE EVENT LOOP (re-verified 2026-07-17: the GUI routes all
+# run_in_executor, and the GPU-registry heartbeat's probe - it DOES probe, via
+# resolve_main_gpu_index -> list_gpus every ~20s when main_gpu_index >= 1 - is
+# likewise executor-offloaded, see http_server's heartbeat loop), so the
+# deadline does NOT protect the loop; it only bounds how long one worker
 # thread (or a blocking CLI call) waits on a wedged driver before degrading.
 #
 # That is why the default is COLD-INIT-TOLERANT. The first torch.cuda / HIP
@@ -431,11 +433,12 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     probe is already in flight: instead of returning :data:`GPU_PROBE_BUSY` at once
     with the last-known-good reading, this call JOINS the running probe and waits on
     its completion, bounded by its own ``deadline``. This is what makes a longer
-    ``deadline`` actually help on a cold box: there the FIRST probe (typically a 4s
-    event-loop heartbeat via /api/stats) holds the in-flight slot for the entire
-    ~4.6s cold ROCm/CUDA init, so a model-load probe arriving in that window would
-    otherwise short-circuit on BUSY without ever probing - the identical 0.0000s
-    no-op a deadline-15 RETRY hits on the same guard. Set it ONLY together with a
+    ``deadline`` actually help on a cold box: there the FIRST probe (typically the
+    GUI's /api/stats heartbeat, executor-offloaded, historically at a 4s cap before
+    the deadlines were unified) holds the in-flight slot for the entire ~4.6s cold
+    ROCm/CUDA init, so a model-load probe arriving in that window would otherwise
+    short-circuit on BUSY without ever probing - the identical 0.0000s no-op a
+    long-deadline RETRY hits on the same guard. Set it ONLY together with a
     long ``deadline`` and ONLY off the event loop: like the long deadline itself, a
     joining wait can block the caller up to ``deadline`` seconds, which must never
     land on the server's single loop (PR #541). It never spawns a second probe, so
