@@ -258,7 +258,7 @@
               <input type="text" id="disc-query" placeholder="search HuggingFace - empty shows the most downloaded" spellcheck="false">
               <button class="btn-primary" id="disc-search">Search</button>
             </div>
-            <div class="disc-formats">
+            <div class="disc-formats" id="disc-formats">
               <span class="sub">Show:</span>
               <label class="disc-fmt-toggle"><input type="checkbox" id="disc-fmt-gguf" checked> GGUF</label>
               <label class="disc-fmt-toggle"><input type="checkbox" id="disc-fmt-hf" checked> HF / transformers</label>
@@ -266,9 +266,6 @@
             <div class="sub disc-hf-hint" id="disc-hf-hint" style="display:none"></div>
             <div class="sub" id="disc-vram"></div>
             <div id="disc-results"></div>
-          </div>
-          <div id="disc-placeholder" style="display:none; padding: 10px 0;">
-            <div class="sub">HuggingFace discovery for this type coming soon.</div>
           </div>
         </div>
         <div class="card">

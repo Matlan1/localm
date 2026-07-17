@@ -23,22 +23,43 @@ export function fmtSize(bytes) {
 }
 
 let currentTypeFilter = "all";
+// Set once a discovery result is chosen from a type-scoped tab, cleared on a
+// successful add or a spec edit. {spec, type} - the Add handler only attaches
+// model_type when spec still matches exactly what was prefilled, so a hand-
+// edited spec silently falls back to today's auto-detect (never sends a
+// stale/wrong type hint).
+let pendingPullTypeHint = null;
+// Tabs with no meaningful gguf/hf format choice - discovery there is a plain
+// full-text query (see discover.NO_TYPE_FILTER), so the toggles are just noise.
+const FORMAT_HIDDEN_TABS = new Set(["lora", "vae", "text-encoder", "unknown"]);
+// Tabs where the intended type is known from the tab itself, not from HF's
+// (proven-unreliable for vae/text-encoder) own metadata - a result found here
+// carries that type as an explicit override at add time. "all" and "unknown"
+// never force a type: "unknown" exists precisely so a real guess still gets a
+// chance, and locking every "Other"-tab find to model_type=unknown would
+// defeat that.
+const TYPE_HINT_TABS = new Set(
+  ["embedding", "diffusion-unet", "text-encoder", "vae", "lora"]);
 
 export async function refreshModelsPage() {
   await refreshModels();
-  
-  // Toggle the search box vs placeholder based on selected tab type
-  const searchBox = $("disc-search-box");
-  const placeholder = $("disc-placeholder");
-  if (searchBox && placeholder) {
-    if (currentTypeFilter === "all" || currentTypeFilter === "llm") {
-      searchBox.style.display = "block";
-      placeholder.style.display = "none";
-    } else {
-      searchBox.style.display = "none";
-      placeholder.style.display = "block";
-    }
+
+  // Every tab now has real HF discovery (search.py: discover.py's three
+  // type-scoped buckets) - only the format toggles' relevance varies per tab.
+  const formatsBox = $("disc-formats");
+  if (formatsBox) {
+    formatsBox.style.display = FORMAT_HIDDEN_TABS.has(currentTypeFilter) ? "none" : "flex";
   }
+  // Discard any prior search results on every re-render (tab switch, a
+  // successful pull, a ComfyUI scan, ...), not just a tab click: each result
+  // row's pull affordance closes over the TAB IT WAS FOUND UNDER (typeHint),
+  // so a stale row left visible after switching tabs would still be pullable
+  // and would carry the WRONG tab's type hint into the registry.
+  const discResults = $("disc-results");
+  if (discResults) discResults.replaceChildren();
+  const discVram = $("disc-vram");
+  if (discVram) discVram.textContent = "";
+  hideHfHint();
 
   const box = $("models-table");
   box.replaceChildren();
@@ -103,8 +124,8 @@ export async function refreshModelsPage() {
     // type could not be determined) is highlighted so it stands out as needing a
     // type set via the control below.
     const roleTd = el("td", "mono");
-    const roleClass = "job-state" + (m.model_type === "unknown" ? " st-unknown" : "");
-    roleTd.appendChild(el("span", roleClass, m.model_type || "llm"));
+    const roleType = m.model_type || "llm";
+    roleTd.appendChild(el("span", "type-badge type-" + roleType, roleType));
     tr.appendChild(roleTd);
     
     tr.appendChild(el("td", "mono", m.source || ""));
@@ -236,9 +257,10 @@ export async function showModelDetail(name) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
   openModal("Model - " + name, (body) => {
+    const modelType = data.model_type || "llm";
     const rows = [
       ["Path", data.path],
-      ["Type", data.model_type || "llm"],
+      ["Type", null],
       ["Source", data.source],
       ["Size", fmtSize(data.size_bytes)],
       ["SHA256", data.sha256 || "(not computed yet - hashes lazily on use)"],
@@ -248,7 +270,8 @@ export async function showModelDetail(name) {
     for (const [k, v] of rows) {
       const row = el("div", "log-entry");
       row.appendChild(el("span", "t", k));
-      row.appendChild(document.createTextNode(String(v)));
+      if (k === "Type") row.appendChild(el("span", "type-badge type-" + modelType, modelType));
+      else row.appendChild(document.createTextNode(String(v)));
       body.appendChild(row);
     }
   });
@@ -364,9 +387,10 @@ function hideHfHint() {
 // A bare owner/repo (no :file.gguf) tells `localm pull` to fetch the WHOLE
 // transformers repo -> the HF backend. Prefill the Add box and let the user
 // confirm (they can still just download the files, backend or not).
-function prefillHfPull(repo) {
+function prefillHfPull(repo, typeHint) {
   $("pull-spec").value = repo;
   $("pull-name").value = repo.split("/").pop();
+  pendingPullTypeHint = typeHint ? { spec: repo, type: typeHint } : null;
   const mmprojSelect = $("pull-mmproj");
   if (mmprojSelect) { mmprojSelect.replaceChildren(); mmprojSelect.style.display = "none"; }
   const nameInput = $("pull-name");
@@ -382,12 +406,22 @@ function prefillHfPull(repo) {
 
 // One search-result repo: name + per-format badge(s) + the right pull affordance
 // (GGUF -> a per-quant file list; HF -> a whole-repo add). A repo tagged with
-// both formats gets both.
-function discRepoRow(m, gpus) {
+// both formats gets both. `typeHint` (a MODEL_TYPES value, from the tab the
+// search ran under) is threaded into both pull affordances so a genuinely
+// type-scoped find (embedding/diffusion-unet/text-encoder/vae/lora) registers
+// with that type explicitly rather than relying on HF's own metadata, which
+// is proven unreliable for vae/text-encoder specifically.
+function discRepoRow(m, gpus, typeHint) {
   const row = el("div", "disc-repo");
   const head = el("div", "head");
   head.appendChild(iconEl("models", "ic ic-model"));
   head.appendChild(el("span", "name", m.id));
+  // Best-effort HF classification, DISPLAY ONLY - never gates whether a result
+  // is shown (see discover.NO_TYPE_FILTER). Absent entirely for the all/llm
+  // tabs' plain search (back-compat response shape).
+  if (m.detected_type) {
+    head.appendChild(el("span", "type-badge type-" + m.detected_type, m.detected_type));
+  }
   const fmts = Array.isArray(m.formats) ? m.formats : ["gguf"];
   for (const f of fmts) head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] || f));
   // HF repos pull whole, so show total size + a VRAM fit badge inline (from the
@@ -420,12 +454,12 @@ function discRepoRow(m, gpus) {
   const filesBox = el("div", "files");
   if (fmts.includes("gguf")) {
     const btn = el("button", "btn-secondary", "files");
-    btn.onclick = () => discoverFiles(m.id, filesBox, btn, gpus);
+    btn.onclick = () => discoverFiles(m.id, filesBox, btn, gpus, typeHint);
     head.appendChild(btn);
   }
   if (fmts.includes("hf")) {
     const btn = el("button", "btn-secondary", "add full repo");
-    btn.onclick = () => prefillHfPull(m.id);
+    btn.onclick = () => prefillHfPull(m.id, typeHint);
     head.appendChild(btn);
   }
   row.appendChild(head);
@@ -447,7 +481,8 @@ export async function discoverSearch() {
   try {
     const q = $("disc-query").value.trim();
     const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q)
-                          + "&formats=" + encodeURIComponent(formats.join(",")),
+                          + "&formats=" + encodeURIComponent(formats.join(","))
+                          + "&type=" + encodeURIComponent(currentTypeFilter),
                           { headers: authHeaders() });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -465,7 +500,8 @@ export async function discoverSearch() {
       box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
     }
-    for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
+    const typeHint = TYPE_HINT_TABS.has(currentTypeFilter) ? currentTypeFilter : null;
+    for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus, typeHint));
   } catch (e) {
     box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
   } finally {
@@ -473,7 +509,7 @@ export async function discoverSearch() {
   }
 }
 
-export async function discoverFiles(repo, filesBox, btn, gpus) {
+export async function discoverFiles(repo, filesBox, btn, gpus, typeHint) {
   if (filesBox.childElementCount) {            // toggle collapse
     filesBox.replaceChildren();
     return;
@@ -514,7 +550,14 @@ export async function discoverFiles(repo, filesBox, btn, gpus) {
         // server's default name (file name without .gguf).
         $("pull-spec").value = `${repo}:${f.file}`;
         $("pull-name").value = f.file.replace(/\.gguf$/i, "");
-        
+        // A vision-projector companion file is never the tab's type (there is
+        // no mmproj tab) - only hint a REGULAR file's own pull, not one drawn
+        // from data.mmprojs (same object reference, "show mmproj files" merge
+        // above).
+        const isMmproj = Array.isArray(data.mmprojs) && data.mmprojs.includes(f);
+        pendingPullTypeHint = (typeHint && !isMmproj)
+          ? { spec: `${repo}:${f.file}`, type: typeHint } : null;
+
         // Populate the mmproj dropdown
         const mmprojSelect = $("pull-mmproj");
         mmprojSelect.replaceChildren();
@@ -553,7 +596,11 @@ export async function discoverFiles(repo, filesBox, btn, gpus) {
         }
 
         const nameInput = $("pull-name");
-        nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+        // scrollIntoView is absent in some environments (e.g. jsdom); guard so
+        // this per-file pull button matches prefillHfPull's existing guard above.
+        if (typeof nameInput.scrollIntoView === "function") {
+          nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
         nameInput.focus();
         nameInput.select();
         toast("Review the alias, then click Pull to start the download");
@@ -1027,6 +1074,13 @@ $("pull-start").onclick = async () => {
     const payload = { spec, name: name || null };
     if (mmproj) payload.mmproj = mmproj;
     if (store) payload.store = store;
+    // Only attach the type hint if the spec still matches exactly what it was
+    // prefilled for - a hand-edited spec after picking a discovery result
+    // silently falls back to today's auto-detect rather than sending a hint
+    // for a now-different model.
+    if (pendingPullTypeHint && pendingPullTypeHint.spec === spec) {
+      payload.model_type = pendingPullTypeHint.type;
+    }
 
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
@@ -1077,6 +1131,7 @@ $("pull-start").onclick = async () => {
       $("pull-spec").value = "";
       $("pull-name").value = "";
       if (storeInput) storeInput.value = "";
+      pendingPullTypeHint = null;
       refreshModelsPage();
     } else {
       // Surface the failure: red bar, exit code, and keep the inputs so the

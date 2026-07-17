@@ -1271,6 +1271,32 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent);
 }
+/* Model-type tag pills - Registered-models "Role" column, the model-detail modal,
+   and HF-discovery result rows. One hue per localm.model_manager.registry
+   MODEL_TYPES entry, drawn from the existing --cat-* category palette so a type
+   reads as the same color everywhere it appears. 'unknown' keeps the yellow
+   "needs attention" treatment above rather than a category hue, since it signals
+   an action needed, not a category. */
+.type-badge {
+  font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); white-space: nowrap; letter-spacing: 0.01em;
+}
+.type-badge.type-llm { color: var(--cat-blue); border-color: var(--cat-blue);
+  background: color-mix(in srgb, var(--cat-blue) 15%, transparent); }
+.type-badge.type-embedding { color: var(--cat-teal); border-color: var(--cat-teal);
+  background: color-mix(in srgb, var(--cat-teal) 15%, transparent); }
+.type-badge.type-mmproj { color: var(--cat-slate); border-color: var(--cat-slate);
+  background: color-mix(in srgb, var(--cat-slate) 15%, transparent); }
+.type-badge.type-diffusion-unet { color: var(--cat-violet); border-color: var(--cat-violet);
+  background: color-mix(in srgb, var(--cat-violet) 15%, transparent); }
+.type-badge.type-text-encoder { color: var(--cat-amber); border-color: var(--cat-amber);
+  background: color-mix(in srgb, var(--cat-amber) 15%, transparent); }
+.type-badge.type-vae { color: var(--cat-green); border-color: var(--cat-green);
+  background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
+.type-badge.type-lora { color: var(--cat-cyan); border-color: var(--cat-cyan);
+  background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
+.type-badge.type-unknown { color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent); }
 /* The per-row model type <select> in the Models table actions cell. */
 .model-type-select {
   font-size: 11px;
