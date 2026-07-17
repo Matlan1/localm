@@ -525,6 +525,45 @@ def _recent_hang_traces(home=None, max_chars: int = 8000, *, pid=None) -> str:
         return ""
 
 
+def live_server_hang_trace(home=None) -> str:
+    """The event-loop hang trace captured by a LIVE server of this install, for a
+    user-initiated ``localm bug-report`` filed from a SEPARATE process (REG-736).
+
+    The two in-process collectors each feed _recent_hang_traces a pid they already
+    know: ``save_user_report`` (GUI) matches its own ``getpid()`` because the GUI IS
+    the server, and crash recovery matches the crashed run's marker pid. The
+    ``localm bug-report`` CLI has neither - it is its OWN short-lived process, whose
+    pid never wrote a hang trace, while the frozen server is a DIFFERENT process
+    still running. So a pid-of-self match (what the other paths do) finds nothing,
+    and the report ships WITHOUT the one diagnostic the feature exists to deliver.
+
+    Instead we look the server up in the live instance registry
+    (``<home>/run/*.json``), keep only entries whose pid is actually alive, and
+    return that server's pid-matched trace - the SAME pid-scoped _recent_hang_traces
+    collection the crash path uses, just sourced from the live registry rather than
+    a crash marker. With more than one live server, the most recently started one
+    wins: a single, stable choice (build_report renders one hang-trace section).
+    Empty when no live server captured a freeze. Never raises - a registry hiccup
+    must not break filing a bug report."""
+    try:
+        from localm import instances
+        if home is None:
+            from localm.config import HOME_DIR
+            home = HOME_DIR
+        entries = sorted(instances.list_entries(home),
+                         key=lambda e: e.get("started") or "", reverse=True)
+        for entry in entries:
+            pid = entry.get("pid")
+            if not isinstance(pid, int) or not instances.pid_alive(pid):
+                continue
+            trace = _recent_hang_traces(home, pid=pid)
+            if trace:
+                return trace
+        return ""
+    except Exception:
+        return ""
+
+
 def _kv_lines(d: dict) -> list:
     """Render a flat dict as ``- key: value`` markdown lines (stable order)."""
     lines = []
