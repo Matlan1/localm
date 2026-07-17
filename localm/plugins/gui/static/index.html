@@ -258,10 +258,22 @@
               <input type="text" id="disc-query" placeholder="search HuggingFace - empty shows the most downloaded" spellcheck="false">
               <button class="btn-primary" id="disc-search">Search</button>
             </div>
-            <div class="disc-formats" id="disc-formats">
-              <span class="sub">Show:</span>
-              <label class="disc-fmt-toggle"><input type="checkbox" id="disc-fmt-gguf" checked> GGUF</label>
-              <label class="disc-fmt-toggle"><input type="checkbox" id="disc-fmt-hf" checked> HF / transformers</label>
+            <div class="disc-filter-bar">
+              <div class="disc-filters" id="disc-type-filter">
+                <span class="sub disc-filter-label">Types</span>
+                <label class="disc-chip" data-type="llm"><input type="checkbox" class="disc-type" value="llm" checked><span>LLMs</span></label>
+                <label class="disc-chip" data-type="embedding"><input type="checkbox" class="disc-type" value="embedding" checked><span>Embedding</span></label>
+                <label class="disc-chip" data-type="diffusion-unet"><input type="checkbox" class="disc-type" value="diffusion-unet" checked><span>Diffusion</span></label>
+                <label class="disc-chip" data-type="text-encoder"><input type="checkbox" class="disc-type" value="text-encoder" checked><span>Encoders</span></label>
+                <label class="disc-chip" data-type="vae"><input type="checkbox" class="disc-type" value="vae" checked><span>VAEs</span></label>
+                <label class="disc-chip" data-type="lora"><input type="checkbox" class="disc-type" value="lora" checked><span>LoRAs</span></label>
+                <label class="disc-chip" data-type="unknown"><input type="checkbox" class="disc-type" value="unknown" checked><span>Other</span></label>
+              </div>
+              <div class="disc-filters" id="disc-formats">
+                <span class="sub disc-filter-label">Format</span>
+                <label class="disc-chip disc-chip-fmt" data-fmt="gguf"><input type="checkbox" id="disc-fmt-gguf" checked><span>GGUF</span></label>
+                <label class="disc-chip disc-chip-fmt" data-fmt="hf"><input type="checkbox" id="disc-fmt-hf" checked><span>Safetensors</span></label>
+              </div>
             </div>
             <div class="sub disc-hf-hint" id="disc-hf-hint" style="display:none"></div>
             <div class="sub" id="disc-vram"></div>

@@ -82,17 +82,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   always keeps your report and offers to retry, or to download the report file so
   you can send it by email/Discord yourself (works from a phone or another device
   where a server-side path is useless). Both the WebUI and `localm bug-report`.
-- **HuggingFace search works on every model type, not just LLMs.** The Embedding,
-  Diffusion, Encoders, VAEs, LoRAs, and Other tabs on the Models page showed a
-  "coming soon" placeholder instead of a search box. Every tab now searches
-  HuggingFace for real: narrowed to that type where HF's own tagging is reliable
-  (Embedding, Diffusion, LoRAs), and by plain text where it is not (even the most
-  widely-used VAE and text-encoder files on HF rarely carry a tag identifying them
-  as such, so a type filter there would have hidden exactly what you're looking
-  for). A model found under a specific tab registers with that type directly,
-  instead of falling back to a guess that can land on "unknown" for those two.
-  Each result also shows its detected type, and the Registered models table's Role
-  column and the model-detail view now color-code every type consistently.
+- **HuggingFace search works on every model type, with explicit filters.** The
+  Models page "Find models" search used to only work for LLMs; the other model
+  types showed a "coming soon" placeholder. It now has explicit, always-visible
+  filter checkboxes: which model Types to search for (LLMs, Embedding, Diffusion,
+  Encoders, VAEs, LoRAs, Other) and which Format (GGUF or Safetensors). Tick any
+  combination and HuggingFace is searched for real, narrowed on both axes where
+  its own tagging is reliable, and by format plus your query text where it is not
+  (even the most widely-used VAE and text-encoder files on HF carry no tag saying
+  so, so a hard type filter there would hide exactly what you want; the format
+  filter still applies). Every result shows its detected type, and a model you add
+  registers with the type you searched for instead of falling back to a guess.
+  These search filters are independent of the Registered-models tabs below, so
+  what the search covers is always visible, never inferred silently. The
+  Registered models table's Role column and the model-detail view also color-code
+  every type consistently.
 
 ### Changed
 - **Memory recall is now relevant-only.** Chat memory used to inject the same handful

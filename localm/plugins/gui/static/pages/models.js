@@ -22,44 +22,19 @@ export function fmtSize(bytes) {
   return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB (see app.js)
 }
 
+// The Registered-models table tab (All/LLMs/Embedding/...). Scopes only the
+// installed-models TABLE below - the HuggingFace SEARCH has its own explicit,
+// always-visible Type checkboxes (discTypes()), so what the search covers is
+// never inferred silently from this tab.
 let currentTypeFilter = "all";
-// Set once a discovery result is chosen from a type-scoped tab, cleared on a
-// successful add or a spec edit. {spec, type} - the Add handler only attaches
-// model_type when spec still matches exactly what was prefilled, so a hand-
-// edited spec silently falls back to today's auto-detect (never sends a
-// stale/wrong type hint).
+// Set when a discovery result is chosen, cleared on a successful add or a spec
+// edit. {spec, type} - the Add handler only attaches model_type when spec still
+// matches exactly what was prefilled, so a hand-edited spec silently falls back
+// to auto-detect (never sends a stale/wrong type hint).
 let pendingPullTypeHint = null;
-// Tabs with no meaningful gguf/hf format choice - discovery there is a plain
-// full-text query (see discover.NO_TYPE_FILTER), so the toggles are just noise.
-const FORMAT_HIDDEN_TABS = new Set(["lora", "vae", "text-encoder", "unknown"]);
-// Tabs where the intended type is known from the tab itself, not from HF's
-// (proven-unreliable for vae/text-encoder) own metadata - a result found here
-// carries that type as an explicit override at add time. "all" and "unknown"
-// never force a type: "unknown" exists precisely so a real guess still gets a
-// chance, and locking every "Other"-tab find to model_type=unknown would
-// defeat that.
-const TYPE_HINT_TABS = new Set(
-  ["embedding", "diffusion-unet", "text-encoder", "vae", "lora"]);
 
 export async function refreshModelsPage() {
   await refreshModels();
-
-  // Every tab now has real HF discovery (search.py: discover.py's three
-  // type-scoped buckets) - only the format toggles' relevance varies per tab.
-  const formatsBox = $("disc-formats");
-  if (formatsBox) {
-    formatsBox.style.display = FORMAT_HIDDEN_TABS.has(currentTypeFilter) ? "none" : "flex";
-  }
-  // Discard any prior search results on every re-render (tab switch, a
-  // successful pull, a ComfyUI scan, ...), not just a tab click: each result
-  // row's pull affordance closes over the TAB IT WAS FOUND UNDER (typeHint),
-  // so a stale row left visible after switching tabs would still be pullable
-  // and would carry the WRONG tab's type hint into the registry.
-  const discResults = $("disc-results");
-  if (discResults) discResults.replaceChildren();
-  const discVram = $("disc-vram");
-  if (discVram) discVram.textContent = "";
-  hideHfHint();
 
   const box = $("models-table");
   box.replaceChildren();
@@ -359,8 +334,9 @@ export function splitFitHint(sizeBytes, gpus) {
 }
 
 export function discFormats() {
-  // The search-page model-type toggles -> the formats list. Defaults to gguf
-  // when the checkboxes are absent (older DOM) so search never silently returns
+  // The search-page FORMAT toggles -> the formats list. "hf" is the non-gguf /
+  // safetensors world (labelled "Safetensors" in the UI). Defaults to gguf when
+  // the checkboxes are absent (older DOM) so search never silently returns
   // nothing. Empty (both unchecked) is a real state the caller handles.
   const g = $("disc-fmt-gguf"), h = $("disc-fmt-hf");
   if (!g && !h) return ["gguf"];
@@ -368,6 +344,31 @@ export function discFormats() {
   if (!g || g.checked) out.push("gguf");
   if (h && h.checked) out.push("hf");
   return out;
+}
+
+const ALL_SEARCH_TYPES =
+  ["llm", "embedding", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
+
+export function discTypes() {
+  // The search-page TYPE checkboxes -> the model_types list. Explicit and
+  // always visible, independent of the Registered-models tab. Defaults to all
+  // types when the checkboxes are absent (older DOM). Empty (none ticked) is a
+  // real state the caller surfaces, same as no format.
+  const boxes = [...document.querySelectorAll(".disc-type")];
+  if (!boxes.length) return ALL_SEARCH_TYPES.slice();
+  return boxes.filter((b) => b.checked).map((b) => b.value);
+}
+
+// The model_type hint carried into a pull for a chosen discovery result. What
+// you SEE badged is what it registers as (detected_type), so the two never
+// disagree. When HF gave no confident type ("unknown" - the common case for a
+// standalone VAE / text-encoder, whose repos carry no type metadata) but the
+// user narrowed the search to exactly ONE type, that single explicit choice is
+// the hint. Otherwise let the pull auto-detect (never force "unknown").
+function resolveTypeHint(detectedType) {
+  if (detectedType && detectedType !== "unknown") return detectedType;
+  const types = discTypes();
+  return types.length === 1 ? types[0] : null;
 }
 
 function showHfHint() {
@@ -387,9 +388,10 @@ function hideHfHint() {
 // A bare owner/repo (no :file.gguf) tells `localm pull` to fetch the WHOLE
 // transformers repo -> the HF backend. Prefill the Add box and let the user
 // confirm (they can still just download the files, backend or not).
-function prefillHfPull(repo, typeHint) {
+function prefillHfPull(repo, detectedType) {
   $("pull-spec").value = repo;
   $("pull-name").value = repo.split("/").pop();
+  const typeHint = resolveTypeHint(detectedType);
   pendingPullTypeHint = typeHint ? { spec: repo, type: typeHint } : null;
   const mmprojSelect = $("pull-mmproj");
   if (mmprojSelect) { mmprojSelect.replaceChildren(); mmprojSelect.style.display = "none"; }
@@ -404,21 +406,19 @@ function prefillHfPull(repo, typeHint) {
   toast("Review the alias, then click Add to download the full HF model");
 }
 
-// One search-result repo: name + per-format badge(s) + the right pull affordance
-// (GGUF -> a per-quant file list; HF -> a whole-repo add). A repo tagged with
-// both formats gets both. `typeHint` (a MODEL_TYPES value, from the tab the
-// search ran under) is threaded into both pull affordances so a genuinely
-// type-scoped find (embedding/diffusion-unet/text-encoder/vae/lora) registers
-// with that type explicitly rather than relying on HF's own metadata, which
-// is proven unreliable for vae/text-encoder specifically.
-function discRepoRow(m, gpus, typeHint) {
+// One search-result repo: name + type badge + per-format badge(s) + the right
+// pull affordance (GGUF -> a per-quant file list; HF -> a whole-repo add). A
+// repo tagged with both formats gets both. Each pull affordance resolves its
+// model_type hint at click time from the result's detected type and the current
+// Type checkboxes (resolveTypeHint), so a vae/text-encoder whose HF metadata
+// gave no type still registers under the type the user searched for.
+function discRepoRow(m, gpus) {
   const row = el("div", "disc-repo");
   const head = el("div", "head");
   head.appendChild(iconEl("models", "ic ic-model"));
   head.appendChild(el("span", "name", m.id));
   // Best-effort HF classification, DISPLAY ONLY - never gates whether a result
-  // is shown (see discover.NO_TYPE_FILTER). Absent entirely for the all/llm
-  // tabs' plain search (back-compat response shape).
+  // is shown (HF has no reliable type signal for standalone vae/text-encoder).
   if (m.detected_type) {
     head.appendChild(el("span", "type-badge type-" + m.detected_type, m.detected_type));
   }
@@ -454,12 +454,12 @@ function discRepoRow(m, gpus, typeHint) {
   const filesBox = el("div", "files");
   if (fmts.includes("gguf")) {
     const btn = el("button", "btn-secondary", "files");
-    btn.onclick = () => discoverFiles(m.id, filesBox, btn, gpus, typeHint);
+    btn.onclick = () => discoverFiles(m.id, filesBox, btn, gpus, m.detected_type);
     head.appendChild(btn);
   }
   if (fmts.includes("hf")) {
     const btn = el("button", "btn-secondary", "add full repo");
-    btn.onclick = () => prefillHfPull(m.id, typeHint);
+    btn.onclick = () => prefillHfPull(m.id, m.detected_type);
     head.appendChild(btn);
   }
   row.appendChild(head);
@@ -470,9 +470,16 @@ function discRepoRow(m, gpus, typeHint) {
 export async function discoverSearch() {
   const box = $("disc-results");
   const formats = discFormats();
+  const types = discTypes();
   if (!formats.length) {
     box.replaceChildren(el("div", "sub",
-      "Select at least one model type (GGUF or HF) to search."));
+      "Select at least one format (GGUF or Safetensors) to search."));
+    hideHfHint();
+    return;
+  }
+  if (!types.length) {
+    box.replaceChildren(el("div", "sub",
+      "Select at least one model type to search for."));
     hideHfHint();
     return;
   }
@@ -482,7 +489,7 @@ export async function discoverSearch() {
     const q = $("disc-query").value.trim();
     const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q)
                           + "&formats=" + encodeURIComponent(formats.join(","))
-                          + "&type=" + encodeURIComponent(currentTypeFilter),
+                          + "&types=" + encodeURIComponent(types.join(",")),
                           { headers: authHeaders() });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -500,8 +507,7 @@ export async function discoverSearch() {
       box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
     }
-    const typeHint = TYPE_HINT_TABS.has(currentTypeFilter) ? currentTypeFilter : null;
-    for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus, typeHint));
+    for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
   } catch (e) {
     box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
   } finally {
@@ -509,7 +515,7 @@ export async function discoverSearch() {
   }
 }
 
-export async function discoverFiles(repo, filesBox, btn, gpus, typeHint) {
+export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
   if (filesBox.childElementCount) {            // toggle collapse
     filesBox.replaceChildren();
     return;
@@ -550,12 +556,14 @@ export async function discoverFiles(repo, filesBox, btn, gpus, typeHint) {
         // server's default name (file name without .gguf).
         $("pull-spec").value = `${repo}:${f.file}`;
         $("pull-name").value = f.file.replace(/\.gguf$/i, "");
-        // A vision-projector companion file is never the tab's type (there is
-        // no mmproj tab) - only hint a REGULAR file's own pull, not one drawn
-        // from data.mmprojs (same object reference, "show mmproj files" merge
-        // above).
+        // A vision-projector companion file is never the searched-for type
+        // (there is no mmproj tab/checkbox) - only hint a REGULAR file's own
+        // pull, not one drawn from data.mmprojs (same object reference, "show
+        // mmproj files" merge above). The hint resolves at click time from the
+        // repo's detected type and the current Type checkboxes.
         const isMmproj = Array.isArray(data.mmprojs) && data.mmprojs.includes(f);
-        pendingPullTypeHint = (typeHint && !isMmproj)
+        const typeHint = isMmproj ? null : resolveTypeHint(detectedType);
+        pendingPullTypeHint = typeHint
           ? { spec: `${repo}:${f.file}`, type: typeHint } : null;
 
         // Populate the mmproj dropdown
@@ -620,21 +628,36 @@ $("disc-query").addEventListener("keydown", (e) => {
   if (e.key === "Enter") discoverSearch();
 });
 
-// Restore + persist the search format toggles (both default on). Re-run the
-// search on change when results are already showing, so a toggle reflects live.
-function _bindDiscToggle(id, key) {
-  const box = $(id);
+// Mirror a filter checkbox's state onto its chip label as an `.on` class, which
+// is what style.css colours (a CSS :checked-combinator does not repaint on a
+// programmatic toggle in every engine - see the .disc-chip comment there).
+function _syncChip(box) {
+  const chip = box.closest(".disc-chip");
+  if (chip) chip.classList.toggle("on", box.checked);
+}
+
+// Restore + persist a search filter checkbox (all default on). Keep its chip in
+// sync, and re-run the search on change when results are already showing so a
+// toggle reflects live.
+function _bindDiscToggle(box, key) {
   if (!box) return;
   const saved = localStorage.getItem(key);
   if (saved !== null) box.checked = saved === "true";
+  _syncChip(box);
   box.addEventListener("change", () => {
     localStorage.setItem(key, box.checked ? "true" : "false");
+    _syncChip(box);
     const results = $("disc-results");
     if (results && results.childElementCount) discoverSearch();
   });
 }
-_bindDiscToggle("disc-fmt-gguf", "localm.discFmtGguf");
-_bindDiscToggle("disc-fmt-hf", "localm.discFmtHf");
+_bindDiscToggle($("disc-fmt-gguf"), "localm.discFmtGguf");
+_bindDiscToggle($("disc-fmt-hf"), "localm.discFmtHf");
+// The explicit model-TYPE checkboxes, persisted per type so a chosen scope
+// sticks across reloads (keyed by value, e.g. localm.discType.vae).
+for (const box of document.querySelectorAll(".disc-type")) {
+  _bindDiscToggle(box, "localm.discType." + box.value);
+}
 
 // add-models-disk: make adding a model already on disk discoverable - pick a
 // folder on this machine and drop its path into the spec field (the /api/models/

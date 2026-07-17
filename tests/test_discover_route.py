@@ -51,7 +51,7 @@ def test_formats_param_reaches_hf_search_and_response_has_backend_flag(gui_app, 
     app, disc = gui_app
     seen = {}
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
         seen["query"] = query
         seen["formats"] = list(formats)
         return [{"id": "org/hf", "downloads": 1, "likes": 0,
@@ -73,7 +73,7 @@ def test_default_formats_is_gguf(gui_app, monkeypatch):
     app, disc = gui_app
     seen = {}
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
         seen["formats"] = list(formats)
         return []
 
@@ -95,63 +95,62 @@ def test_bad_format_token_is_422(gui_app, monkeypatch):
     assert r.status_code == 422, r.text
 
 
-def test_type_param_reaches_hf_search(gui_app, monkeypatch):
+def test_types_param_reaches_hf_search(gui_app, monkeypatch):
     app, disc = gui_app
     seen = {}
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
-        seen["model_type"] = model_type
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        seen["model_types"] = model_types
         return []
 
     monkeypatch.setattr(disc, "hf_search", spy)
     monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
     with TestClient(app) as c:
-        r = c.get("/api/discover/search?q=x&type=vae", headers=_hdr())
+        r = c.get("/api/discover/search?q=x&types=vae,lora", headers=_hdr())
     assert r.status_code == 200, r.text
-    assert seen["model_type"] == "vae"
+    assert seen["model_types"] == ["vae", "lora"]
 
 
-def test_type_all_maps_to_none(gui_app, monkeypatch):
-    """"all" (and the default when `type` is omitted) maps to model_type=None -
-    byte-for-byte today's request shape, protecting any caller that predates
-    the `type` param."""
+def test_empty_types_maps_to_none(gui_app, monkeypatch):
+    """An empty/absent `types` maps to model_types=None - the legacy untyped
+    request shape, protecting any caller that predates the `types` param."""
     app, disc = gui_app
     seen = {}
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
-        seen["model_type"] = model_type
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        seen["model_types"] = model_types
         return []
 
     monkeypatch.setattr(disc, "hf_search", spy)
     monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
     with TestClient(app) as c:
-        r1 = c.get("/api/discover/search?q=x&type=all", headers=_hdr())
-        assert seen["model_type"] is None
-        r2 = c.get("/api/discover/search?q=x", headers=_hdr())     # no type= at all
-        assert seen["model_type"] is None
+        r1 = c.get("/api/discover/search?q=x&types=", headers=_hdr())
+        assert seen["model_types"] is None
+        r2 = c.get("/api/discover/search?q=x", headers=_hdr())     # no types= at all
+        assert seen["model_types"] is None
     assert r1.status_code == 200 and r2.status_code == 200
 
 
-def test_invalid_type_param_is_422(gui_app, monkeypatch):
+def test_invalid_types_param_is_422(gui_app, monkeypatch):
     app, disc = gui_app
-    # Real hf_search: an unrecognized model_type raises DiscoverError -> 422.
+    # Real hf_search: an all-invalid types CSV raises DiscoverError -> 422.
     monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
     with TestClient(app) as c:
-        r = c.get("/api/discover/search?q=x&type=bogus", headers=_hdr())
+        r = c.get("/api/discover/search?q=x&types=bogus", headers=_hdr())
     assert r.status_code == 422, r.text
 
 
 def test_detected_type_passed_through_response(gui_app, monkeypatch):
     app, disc = gui_app
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
         return [{"id": "stabilityai/sd-vae-ft-mse", "downloads": 1, "likes": 0,
                  "updated": "", "formats": ["hf"], "detected_type": "unknown"}]
 
     monkeypatch.setattr(disc, "hf_search", spy)
     monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
     with TestClient(app) as c:
-        r = c.get("/api/discover/search?q=vae&type=vae", headers=_hdr())
+        r = c.get("/api/discover/search?q=vae&types=vae", headers=_hdr())
     assert r.status_code == 200, r.text
     assert r.json()["results"][0]["detected_type"] == "unknown"
 
@@ -159,7 +158,7 @@ def test_detected_type_passed_through_response(gui_app, monkeypatch):
 def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
     app, disc = gui_app
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
         return [
             {"id": "org/small", "downloads": 1, "likes": 0, "updated": "",
              "formats": ["hf"], "size_bytes": 2_000_000_000},   # ~2 GB weights
@@ -198,7 +197,7 @@ def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
     split across both must badge "fits", not "too-big"."""
     app, disc = gui_app
 
-    def spy(query, limit=20, formats=("gguf",), model_type=None):
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
         return [{"id": "org/split-fit", "downloads": 1, "likes": 0, "updated": "",
                  "formats": ["hf"], "size_bytes": 15_000_000_000}]   # ~15 GB weights
 
