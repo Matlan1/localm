@@ -309,12 +309,42 @@ def raw_reading_is_process_scoped() -> bool:
     uncertainty flag on a number that is actually fine. Detected via
     ``torch.version.hip`` (set on ROCm builds, None on CUDA builds). torch absence
     (a GGUF-only install) reaches here only via nvidia-smi, which is device-global
-    and already tagged as such upstream, so False is the safe answer there too."""
+    and already tagged as such upstream, so False is the safe answer there too.
+
+    Guards against a live-crashing race: this can run on whatever thread called
+    :func:`discover._apply_device_global_free`, which can collide with
+    ``discover._list_gpus_probe``'s own first ``import torch`` running in a
+    BACKGROUND probe thread. That probe thread is deadline-bounded and, on a
+    timeout, is ABANDONED while still running (documented in
+    ``_list_gpus_with_status``: "the abandoned thread finish[es] (or never)") -
+    so it can still be mid-import, stuck deep in the platform's native library
+    preload, long after the probe call that spawned it has returned. A second
+    thread's plain ``import torch`` then blocks on CPython's per-module import
+    lock waiting for that abandoned import, which on this platform's ROCm SDK
+    native preload has been observed to hard-crash the process (Windows fatal
+    exception, STATUS_ENTRYPOINT_NOT_FOUND) rather than merely block.
+
+    If torch is already resident in ``sys.modules`` (the overwhelmingly common
+    case - torch is imported by many other code paths well before a real VRAM
+    probe runs), this is a plain attribute read, no import, no race. If it is
+    NOT yet resident, a normal ``import torch`` is safe UNLESS a GPU probe is
+    currently in flight (``discover._gpu_probe_inflight``, including an
+    abandoned/timed-out one - the exact hazard above): only THEN does it fall
+    back to the conservative default (False, "cannot confirm a blindness"),
+    same as the exception path below. Reuses discover's existing probe-tracking
+    lock rather than inventing new cross-module coordination."""
     import sys
     if sys.platform != "win32":
         return False
     try:
-        import torch
+        torch = sys.modules.get("torch")
+        if torch is None:
+            from localm import discover as _discover
+            with _discover._gpu_probe_lock:
+                probe_may_be_mid_import = _discover._gpu_probe_inflight
+            if probe_may_be_mid_import:
+                return False
+            import torch
         return bool(getattr(torch.version, "hip", None))
     except Exception:
         return False

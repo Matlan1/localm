@@ -62,11 +62,15 @@
 // a fresh, device-global measurement (the backend withholds used/free for a stale
 // or process-blind one) - a stale-cached client would keep presenting an
 // untrustworthy VRAM number as live and lack the fullness colour.
-// v62: app/settings-perf.js no longer hides the Main GPU / Split rows on an
+// v62: the v58 privacyWiped latch is now reset when the poll sees the server
+// leave privacy mode, so a LATER restart back into privacy mode wipes newly-
+// accumulated non-privacy leftovers again instead of leaving them painted in
+// the sidebar (AUD-PRIV-2) - a stale-cached client would suppress that wipe.
+// v63: app/settings-perf.js no longer hides the Main GPU / Split rows on an
 // INCONCLUSIVE /api/gpus probe (probe_status timeout/busy) - a stale-cached
 // client would keep concluding "single GPU" from a wedged driver and hide
 // controls a multi-GPU box owns.
-const CACHE = "localm-shell-v62";
+const CACHE = "localm-shell-v63";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
