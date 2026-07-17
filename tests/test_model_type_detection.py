@@ -116,6 +116,23 @@ def test_hf_image_is_diffusion(monkeypatch):
     assert _hf_pipeline_tag_to_type("owner/repo") == "diffusion-unet"
 
 
+def test_hf_diffusion_lora_precedence(monkeypatch):
+    # XLabs-AI/flux-RealismLora (real repo, captured live): pipeline_tag=
+    # text-to-image (inherited from its FLUX base model) AND an exact 'lora'
+    # tag on the SAME repo. The tag must win - classify_hf_metadata checks it
+    # before the diffusion pipeline_tag branch. This is the fix for a real
+    # pre-existing bug: every diffusion LoRA on HF carries its base model's
+    # image pipeline_tag, so checking pipeline_tag first misclassified every
+    # one of them as a full diffusion-unet checkpoint instead of a lora.
+    _patch_hf(monkeypatch, {
+        "pipeline_tag": "text-to-image", "library_name": "diffusers",
+        "tags": ["diffusers", "lora", "Stable Diffusion", "image-generation",
+                 "Flux", "text-to-image",
+                 "base_model:adapter:black-forest-labs/FLUX.1-dev"],
+    })
+    assert _hf_pipeline_tag_to_type("XLabs-AI/flux-RealismLora") == "lora"
+
+
 # --------------------------------------------------------------------------- #
 #  add_local: lone .safetensors dir-scan + HF-dir detection                    #
 # --------------------------------------------------------------------------- #

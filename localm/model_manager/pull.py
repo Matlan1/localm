@@ -1035,43 +1035,10 @@ def _pull_url(
 
 
 def _hf_pipeline_tag_to_type(repo_id: str) -> str:
-    """Classify a HuggingFace repo's model type from HARD metadata (pipeline_tag,
-    library_name, and exact tag tokens).
-
-    Matching is EXACT, never substring: a tag that merely CONTAINS 'vae' / 'lora' /
-    'clip' (e.g. 'exploration' contains 'lora') must NOT be misclassified (MED-15).
-    Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
-    resolves (including an offline/failed query), so an ambiguous pull is registered
-    honestly and is not auto-loaded as the chat model.
-    """
-    from localm.discover import _get, HF_API
-    try:
-        data = _get(f"{HF_API}/api/models/{repo_id}", {"full": "false"})
-        if isinstance(data, dict):
-            tag = data.get("pipeline_tag")
-            library = (data.get("library_name") or "").strip().lower()
-            # Exact, lowercased tag tokens - a set so membership is equality, not
-            # substring containment.
-            tags = {str(t).strip().lower() for t in data.get("tags", []) if isinstance(t, str)}
-
-            # Media / auxiliary types (exact pipeline_tag or exact tag token). These
-            # are checked before the generic text-generation LLM signal because a
-            # LoRA/VAE repo can also carry a text-generation pipeline tag.
-            if tag in ("text-to-image", "image-to-image", "text-to-audio", "audio-to-audio"):
-                return "diffusion-unet"
-            if "vae" in tags:
-                return "vae"
-            if "lora" in tags or library == "peft":
-                return "lora"
-            if {"text-encoder", "clip"} & tags:
-                return "text-encoder"
-            if tag in ("feature-extraction", "sentence-similarity"):
-                return "embedding"
-            # Text generation / chat model.
-            if tag in ("text-generation", "text2text-generation", "conversational"):
-                return "llm"
-    except Exception as e:
-        logger.debug("HF pipeline tag query failed for %s: %s", repo_id, e)
-        return "unknown"
-    return "unknown"
+    """Classify a HuggingFace repo's model type from HARD metadata. The real
+    implementation lives in localm.discover (shared with search-result
+    classification there); lazy import matches this module's existing
+    convention of not importing localm.discover at module scope."""
+    from localm.discover import _hf_pipeline_tag_to_type as _classify
+    return _classify(repo_id)
 

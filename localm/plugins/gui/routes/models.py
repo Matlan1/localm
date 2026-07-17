@@ -314,6 +314,13 @@ def register(app: FastAPI, ctx) -> None:
             if req.store not in ("copy", "move"):
                 raise HTTPException(400, "store must be 'copy' or 'move'")
             args += ["--store", req.store]
+        if req.model_type:
+            from localm.model_manager import MODEL_TYPES
+            if req.model_type not in MODEL_TYPES:
+                raise HTTPException(
+                    400, f"Invalid type: {req.model_type}. "
+                         f"One of: {', '.join(sorted(MODEL_TYPES))}")
+            args += ["--type", req.model_type]
         args += ["--", spec]
         # Stream structured download progress; suppress huggingface_hub's own
         # tqdm bars (their \r output doesn't line-stream cleanly).
@@ -541,15 +548,22 @@ def register(app: FastAPI, ctx) -> None:
         return vram, vram.get("total")
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf"):
+    async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf",
+                               type: str = "all"):
         # `formats` is a CSV of {gguf, hf} from the search-page toggles. Empty
         # tokens are dropped; hf_search raises DiscoverError if none stay valid.
         # hf_backend_available lets the GUI warn (not block) that a transformers
         # model needs the .[gpu] extra to RUN, though it can still be downloaded.
+        # `type` is the "Find models" tab (a MODEL_TYPES value, or "all"/""). "all"
+        # (the default, and the value with no reliable per-type search strategy)
+        # maps to model_type=None - byte-for-byte today's request shape, so a
+        # caller that predates the `type` param (or explicitly picks "all") is
+        # unaffected. hf_search itself rejects any other unrecognized value.
         from localm.discover import fit_label, hf_backend_available, hf_search
         wanted = [f.strip() for f in formats.split(",") if f.strip()]
+        model_type = None if type.strip().lower() in ("", "all") else type.strip().lower()
         results = await _run_discover(
-            lambda: hf_search(q, limit=limit, formats=wanted))
+            lambda: hf_search(q, limit=limit, formats=wanted, model_type=model_type))
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata). GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown;
