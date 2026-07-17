@@ -68,7 +68,11 @@ export async function refreshKnowledgePage() {
     // it up when (re)indexed. BM25-while-ready means this specific collection
     // predates the model (or its vector index went stale) and reindexing would
     // fix it - worth flagging inline, not just in the info-modal warning.
-    const needsReindex = !c.has_vectors && embedReady;
+    // Gated on n_chunks > 0: an EMPTY collection also reports has_vectors=false
+    // (there is nothing to have vectors for), which is not the same situation as
+    // "was indexed without embeddings" - a freshly created, never-indexed
+    // collection has nothing to reindex and must not show the badge.
+    const needsReindex = c.n_chunks > 0 && !c.has_vectors && embedReady;
 
     // Drag-and-drop upload directly onto the collection row
     tr.addEventListener("dragover", (e) => {
@@ -192,6 +196,10 @@ export async function refreshEmbeddingPanel() {
   }
   if (st.error) {
     statusEl.textContent += "  Last error: " + st.error;
+    statusEl.style.color = "var(--yellow)";
+  }
+  if (st.gpu_fallback_reason) {
+    statusEl.textContent += "  " + st.gpu_fallback_reason;
     statusEl.style.color = "var(--yellow)";
   }
   // Options: the internal keys, then the user's registered models.

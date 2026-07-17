@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """C2 confinement: the RAG indexing API must not be trickable into reading and
-serving back system files (C:/Windows/win.ini, /etc/passwd), the localm keystore,
-or credential folders.
+serving back system files (C:/Windows/win.ini, /etc/passwd) or THIRD-PARTY
+credential folders (.ssh, .aws, ...) that a caller other than the owner should
+never be able to reach through the API.
 
-The confinement is MODE-based (whitelist / blacklist) with an always-on HARD FLOOR
-(the localm data dir + credential folders, refused in every mode). The CLI stays
-unconfined except the hard floor - a local user can already read their own files -
-so the mode confinement engages only when a policy is passed, which the HTTP route
-always does and the CLI never does. A whitelist MISS is offered back to the owner
-as 'add and continue' (409), not a dead-end error.
+The confinement is MODE-based (whitelist / blacklist) with an always-on HARD
+FLOOR of well-known third-party credential folders, refused in every mode. The
+localm data directory (LOCALM_HOME) is deliberately NOT part of that hard floor:
+localm does not block the owner from indexing their own files, including its own
+config/registry/keystore, if they explicitly choose to - it is their machine.
+LOCALM_HOME is subject to the SAME whitelist/blacklist rules as any other
+location, no special case. The CLI stays unconfined except the credential-folder
+hard floor - a local user can already read their own files - so the mode
+confinement engages only when a policy is passed, which the HTTP route always
+does and the CLI never does. A whitelist MISS is offered back to the owner as
+'add and continue' (409), not a dead-end error.
 """
 
 import os
@@ -113,12 +119,12 @@ class TestBlacklist:
         assert ei.value.reason == "denied"
 
     def test_hard_floor_still_applies(self, home_env):
-        # The data dir + credential folders are refused even in blacklist mode.
+        # Credential folders are refused even in blacklist mode; the data dir is
+        # NOT part of the hard floor (it is not special-cased at all).
         home, localm = home_env
         (localm / "registry.json").write_text("{}", encoding="utf-8")
-        with pytest.raises(ConfinementError) as ei:
-            confine_index_path(localm / "registry.json", _bl())
-        assert ei.value.reason == "data_dir"
+        assert confine_index_path(localm / "registry.json", _bl()) == \
+            (localm / "registry.json").resolve()
         ssh = home / ".ssh"
         ssh.mkdir()
         (ssh / "id").write_text("k", encoding="utf-8")
@@ -147,13 +153,13 @@ class TestBlacklist:
 # --------------------------------------------------------------------------- #
 
 class TestHardFloor:
-    def test_data_dir_rejected_even_in_home(self, home_env):
+    def test_data_dir_not_blocked_by_role(self, home_env):
+        # The localm data directory is not special-cased: it indexes like any
+        # other file under an allowed root (here, the home folder).
         home, localm = home_env
         keyfile = localm / "keys.json"
         keyfile.write_text("{}", encoding="utf-8")
-        with pytest.raises(ConfinementError) as ei:
-            confine_index_path(keyfile, _wl())
-        assert ei.value.reason == "data_dir"
+        assert confine_index_path(keyfile, _wl()) == keyfile.resolve()
 
     def test_credential_dir_rejected(self, home_env):
         home, _ = home_env
@@ -183,15 +189,21 @@ class TestHardFloor:
         with pytest.raises(ConfinementError, match="credential"):
             confine_index_path(f, _wl())
 
-    def test_cli_unconfined_but_hard_floor_holds(self, home_env, tmp_path):
+    def test_cli_unconfined_but_credential_floor_holds(self, home_env, tmp_path):
         # policy=None: an ordinary path anywhere is allowed (the CLI contract),
-        # but the hard floor still denies the data dir / credential folders.
+        # INCLUDING the data dir (not special-cased) - only the credential-folder
+        # hard floor still denies anything.
         home, localm = home_env
         ok = tmp_path / "anywhere.txt"
         ok.write_text("x", encoding="utf-8")
         assert confine_index_path(ok, None) == ok.resolve()
+        assert confine_index_path(localm / "registry.json", None) == \
+            (localm / "registry.json").resolve()
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        (ssh / "id").write_text("k", encoding="utf-8")
         with pytest.raises(ConfinementError):
-            confine_index_path(localm / "registry.json", None)
+            confine_index_path(ssh / "id", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -246,7 +258,10 @@ class TestAddPathsConfinement:
         with pytest.raises(ValueError):
             c.add_paths([outside], policy=_wl())
 
-    def test_nested_secret_is_skipped_not_indexed(self, home_env, tmp_path):
+    def test_nested_secret_is_skipped_but_data_dir_is_not(self, home_env, tmp_path):
+        # Third-party credential folders (.ssh) are still skipped by a folder
+        # walk. The localm data dir is NOT: registry.json indexes like any
+        # other file under an allowed root - it is not special-cased.
         home, localm = home_env
         (home / "docs" / "good.txt").write_text(
             "ordinary indexable document", encoding="utf-8")
@@ -260,7 +275,7 @@ class TestAddPathsConfinement:
         sources = " ".join(d["path"] for d in c.docs())
         assert "good.txt" in sources
         assert "id_rsa" not in sources
-        assert "registry.json" not in sources
+        assert "registry.json" in sources
 
 
 # --------------------------------------------------------------------------- #
@@ -324,7 +339,9 @@ class TestRagAddRoute:
             assert body["needs_consent"] is True
             assert any("secret.txt" in a for a in body["addable"])
 
-    def test_data_dir_is_hard_blocked_not_offered(self, rag_route_app):
+    def test_data_dir_is_not_hard_blocked(self, rag_route_app):
+        # The localm data directory is not special-cased: it indexes like any
+        # other file under an allowed root (here, the home folder).
         app, home = rag_route_app
         localm = home / ".localm"
         localm.mkdir(exist_ok=True)
@@ -334,7 +351,27 @@ class TestRagAddRoute:
             client.post("/api/rag/collections", json={"name": "kb"})
             r = client.post("/api/rag/collections/kb/add",
                             json={"paths": [str(keyfile)], "embed": False})
-            assert r.status_code == 400   # hard floor: refused, never offered
+            assert r.status_code == 200, r.text
+
+    def test_data_dir_outside_defaults_gets_same_consent_flow_as_any_folder(
+            self, rag_route_app, tmp_path_factory, monkeypatch):
+        # The data directory is treated EXACTLY like any other folder outside
+        # the default allowed roots (home + cwd): a miss offers 'add and
+        # continue' (409), the same consent flow any other folder gets - never
+        # a special hard block, and never a silent auto-allow either.
+        app, home = rag_route_app
+        localm_elsewhere = tmp_path_factory.mktemp("localm_home_elsewhere")
+        monkeypatch.setenv("LOCALM_HOME", str(localm_elsewhere))
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", localm_elsewhere)
+        keyfile = localm_elsewhere / "keys.json"
+        keyfile.write_text("{}", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"})
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(keyfile)], "embed": False})
+            assert r.status_code == 409, r.text
+            assert r.json()["needs_consent"] is True
 
     def test_non_owner_gets_403_not_409_on_whitelist_miss(
             self, tmp_path, monkeypatch, tmp_path_factory):

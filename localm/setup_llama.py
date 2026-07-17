@@ -224,6 +224,53 @@ def _is_wanted(f: Path) -> bool:
     return ".so" in n          # libfoo.so and libfoo.so.1
 
 
+# rocBLAS and hipBLASLt (ROCm's vendor BLAS libraries) resolve their GPU-arch-
+# specific GEMM kernels ("Tensile" library) at RUNTIME from a "<name>/library/"
+# data directory sitting next to their DLL - the kernels are NOT linked into the
+# DLL itself. That data is pure .dat/.hsaco/.co files, so _is_wanted() (by
+# design: it must not copy the source tree's .py/.md/etc) never matches them,
+# and _copy_binaries' flat `target / f.name` copy would lose their required
+# subdirectory layout even if it did. The result: every ROCm/HIP provision
+# (amd-rocm auto-detect, or --from/--url pointed at the identical archive)
+# silently shipped rocblas.dll/hipblaslt.dll with NO kernel data at all. Nothing
+# failed at provision time - ggml's own hand-written HIP kernels cover ordinary
+# chat decode - so this went undetected until a workload that dispatches a GEMM
+# through Tensile (the embedder's non-causal batch encode) hit it: rocBLAS
+# fails to init its Tensile host and hard-crashes the native process outright
+# (uncatchable from Python - the whole reason the embedder load/embed calls run
+# in an isolated child, see inference/embedder.py). Confirmed 2026-07-17: the
+# lemonade-sdk b1288 gfx103X archive DOES ship a complete rocblas/library/ (410
+# files, including gfx1030 kernels) and hipblaslt/library/ - the data was always
+# there, just always dropped on the way in.
+_BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt")
+
+
+def _copy_blas_library_dirs(src_dir: Path, target: Path) -> int:
+    """Copy any of ``_BLAS_LIBRARY_DIRS`` found under *src_dir* into *target*,
+    preserving their internal directory structure (unlike _copy_binaries' flat
+    DLL copy - rocBLAS/hipBLASLt resolve this data by RELATIVE PATH, not by
+    file name, so flattening it would be as useless as dropping it). Searches
+    one level of nesting too, in case an archive wraps its contents in a single
+    top-level folder. Returns the number of files copied."""
+    n = 0
+    for name in _BLAS_LIBRARY_DIRS:
+        src = src_dir / name
+        if not src.is_dir():
+            nested = list(src_dir.glob(f"*/{name}"))
+            src = nested[0] if nested else None
+        if not src or not src.is_dir():
+            continue
+        dest_root = target / name
+        for f in src.rglob("*"):
+            if not f.is_file():
+                continue
+            out = dest_root / f.relative_to(src)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, out)
+            n += 1
+    return n
+
+
 def _repo_runtime_lib() -> Path:
     """The localm-llama-runtime wheel's lib/ dir."""
     try:
@@ -594,6 +641,9 @@ def _copy_binaries(src_dir: Path, target: Path) -> int:
         if f.is_file() and _is_wanted(f):
             shutil.copy2(f, target / f.name)
             n += 1
+    # rocBLAS/hipBLASLt Tensile kernel data (see _BLAS_LIBRARY_DIRS) - a no-op
+    # on every non-ROCm backend, since src_dir then has no rocblas/hipblaslt dir.
+    n += _copy_blas_library_dirs(src_dir, target)
     # MIT requires the license to accompany the binaries; capture it (or a
     # bundled fallback) alongside them whenever we actually placed binaries.
     if n:
@@ -792,7 +842,8 @@ def _fetch_and_place(url: str, target: Path, sha256: Optional[str] = None) -> in
 def _clear_target(target: Path) -> None:
     """Remove previously provisioned library files so a re-provision (or a
     fallback to a different backend) never mixes DLLs from two builds. Only
-    touches files in the dir, never subdirectories."""
+    touches files in the dir, plus the _BLAS_LIBRARY_DIRS subdirectories
+    _copy_blas_library_dirs may have created (never any OTHER subdirectory)."""
     try:
         for f in target.iterdir():
             if f.is_file():
@@ -800,6 +851,8 @@ def _clear_target(target: Path) -> None:
                     f.unlink()
                 except OSError:
                     pass
+            elif f.is_dir() and f.name in _BLAS_LIBRARY_DIRS:
+                shutil.rmtree(f, ignore_errors=True)
     except OSError:
         pass
 

@@ -214,7 +214,19 @@ def register(app: FastAPI, ctx) -> None:
                     400,
                     f"Unsupported encoding_format {req.encoding_format!r}: "
                     "expected 'float' or 'base64'.")
-            vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
+            try:
+                vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
+            except RuntimeError as e:
+                # The isolated embedder worker can hard-crash MID-embed (a native
+                # GPU-backend fault, e.g. a missing rocBLAS/Tensile kernel library -
+                # see IsolatedEmbedder.embed's docstring: this is re-raised, never
+                # silently swallowed, per rule 5). Left uncaught, this reached the
+                # caller as a bare Starlette "Internal Server Error" with no detail
+                # at all - useless for diagnosing a GPU/runtime fault, and exactly
+                # what rag/plug.py's _make_self_embed then logged verbatim to every
+                # indexing job ("embeddings unavailable (Internal server error)").
+                # Surface the real cause as a clean, actionable 503 instead.
+                raise HTTPException(503, f"Embedding failed: {e}")
             if vecs_emb is None:
                 why = last_error() or "embedding model unavailable"
                 raise HTTPException(422, f"Embedding model unavailable ({why}). "
