@@ -204,11 +204,10 @@ class PullRequest(BaseModel):
     # "copy" | "move" | None (default: register a local path in place, unchanged).
     # Ignored for a HuggingFace/URL spec - only the local-path pull branch uses it.
     store: str | None = None
-    # Explicit type hint from a type-scoped "Find models" tab (embedding,
-    # diffusion-unet, text-encoder, vae, lora). Bypasses pull-time HF guessing
-    # entirely - see discover.NO_TYPE_FILTER for why that guess is unreliable
-    # for vae/text-encoder specifically. None for the all/unknown tabs, which
-    # keep today's auto-detect behavior.
+    # Explicit type hint from the "Find models" search: the result's detected
+    # type, or the single Type checkbox the user narrowed to. Bypasses pull-time
+    # HF guessing (unreliable for a standalone vae/text-encoder, whose repos
+    # carry no type metadata). None lets the pull auto-detect.
     model_type: str | None = None
 
 

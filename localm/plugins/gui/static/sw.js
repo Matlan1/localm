@@ -70,7 +70,7 @@
 // INCONCLUSIVE /api/gpus probe (probe_status timeout/busy) - a stale-cached
 // client would keep concluding "single GPU" from a wedged driver and hide
 // controls a multi-GPU box owns.
-const CACHE = "localm-shell-v65";
+const CACHE = "localm-shell-v67";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
