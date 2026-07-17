@@ -359,14 +359,19 @@ DEFAULT_CONFIG: dict = {
     # <home>/models/embeddings on first use (auto only under net_mode=allow, else
     # run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
     "embedding_model": "bge-small-en-v1.5",
-    # How the embedding model's token states are pooled into one vector.
-    # "mean" (default) suits the bundled bge/nomic choices and is what every
-    # existing index was built with. A DECODER-based embedder (Qwen3-Embedding,
-    # gte-Qwen2) is trained for last-token pooling and is degraded by mean: set
-    # "last", or "auto" to follow whatever the GGUF declares. Changing this
-    # invalidates already-embedded RAG collections and memory vectors (same
-    # dimensions, different meaning), so re-index after changing it.
-    "embedding_pooling": "mean",
+    # How the embedding model's token states are pooled into one vector. None
+    # (nothing explicitly chosen) is NOT the same as "mean": embedder.py's
+    # resolve_pooling_setting/_effective_pooling apply the measured-safe
+    # default per model - MEAN for the bundled bge/nomic choices (matches every
+    # existing index they built), but LAST for a model that DECLARES last-token
+    # pooling (a decoder-based embedder such as Qwen3-Embedding, gte-Qwen2),
+    # since forcing mean on those measurably degrades them and there is no
+    # existing mean-built index of that shape to protect. An explicit choice
+    # here ("mean", "last", "cls", "none", or "auto" to always follow whatever
+    # the GGUF declares) always overrides that default. Changing the EFFECTIVE
+    # pooling invalidates already-embedded RAG collections and memory vectors
+    # (same dimensions, different meaning), so re-index after changing it.
+    "embedding_pooling": None,
     # Which host folders the document-indexing (RAG) API may READ. All three keys
     # are OWNER-ONLY: a non-owner config:write key can neither see nor set them
     # (enforced at PATCH /v1/config; see settings_schema.admin_only). The localm

@@ -89,8 +89,9 @@ _POOLING_BY_NAME = {"none": _POOLING_NONE, "mean": _POOLING_MEAN,
 _POOLING_NAMES = {v: k for k, v in _POOLING_BY_NAME.items()}
 POOLING_CHOICES = [POOLING_AUTO, *_POOLING_BY_NAME]
 
-# Why MEAN is the DEFAULT rather than "whatever the model declares" (measured
-# 2026-07-15 against the real GGUFs, via the bundled llama.dll):
+# Why MEAN is the DEFAULT rather than unconditionally "whatever the model
+# declares" (measured 2026-07-15 against the real GGUFs, via the bundled
+# llama.dll):
 #
 #   model                 declares                 forced MEAN today
 #   bge-small (default)   bert.pooling_type=2 CLS  works: +0.29 related/unrelated margin
@@ -99,35 +100,50 @@ POOLING_CHOICES = [POOLING_AUTO, *_POOLING_BY_NAME]
 #   Qwen3-Embedding-0.6B  qwen3.pooling_type=3 LAST  MIS-POOLED - the real defect
 #
 # So MEAN is right for three of the four and is what every existing index was
-# built with. Switching the default to the declared type would silently flip
-# bge from MEAN to CLS at the SAME 384 dims - no dim guard fires (rag/store.py's
-# mixed-dim check, memory's dim check), so every already-embedded collection
-# would quietly stop matching new queries. That is the exact silent degradation
-# this module must not cause. The fix for a mis-pooled model is therefore an
-# explicit opt-in (``embedding_pooling``) plus a LOUD warning when a model
-# declares LAST and is being pooled otherwise - never a default change under
-# users' feet.
+# built with; switching the default to unconditionally follow the declared
+# type would silently flip bge from MEAN to CLS at the SAME 384 dims - no dim
+# guard fires (rag/store.py's mixed-dim check, memory's dim check), so every
+# already-embedded collection would quietly stop matching new queries. But the
+# fourth row - a model DECLARING last-token pooling - is a confirmed, narrow
+# exception the table itself names "the real defect": MEAN measurably degrades
+# a decoder-based embedder trained for LAST pooling, and there is no
+# already-working index of THIS shape to protect (nothing was ever correctly
+# built with mean for a LAST-declaring model). So the untouched default
+# (``embedding_pooling`` never configured - _POOLING_UNSET) resolves LAST
+# specifically when the model declares LAST, and MEAN for every other
+# declaration (CLS, MEAN, unspecified) exactly as before - zero regression risk
+# for bge/nomic/gte-Qwen2, and a decoder-based embedder like Qwen3-Embedding
+# now genuinely works out of the box with no manual setting to discover. An
+# EXPLICIT choice (including an explicit "mean") always wins as before - this
+# only changes what happens when nothing was configured at all.
 _POOLING_DEFAULT = _POOLING_MEAN
+# Distinct from both an explicit numeric override and POOLING_AUTO (which
+# unconditionally follows whatever is declared, including CLS - measured WORSE
+# than the MEAN override for bge). Internal only: never a user-facing choice
+# in POOLING_CHOICES: the user cannot "select" absence-of-configuration.
+_POOLING_UNSET = "unset"
 _EMBED_CTX = 512          # embedding models cap at 512 tokens; short texts anyway
 
 
 def resolve_pooling_setting(spec: object) -> object:
-    """Map the ``embedding_pooling`` config value to a llama.cpp pooling int, or
-    POOLING_AUTO for per-model resolution. An unrecognised value falls back to the
-    MEAN default rather than failing the load, but says so (never silently)."""
+    """Map the ``embedding_pooling`` config value to a llama.cpp pooling int,
+    POOLING_AUTO for per-model resolution, or _POOLING_UNSET when nothing was
+    configured (see _effective_pooling for what that resolves to). An
+    unrecognised value falls back to the same per-model-aware default rather
+    than failing the load, but says so (never silently)."""
     if spec is None:
-        return _POOLING_DEFAULT
+        return _POOLING_UNSET
     text = str(spec).strip().lower()
     if not text:
-        return _POOLING_DEFAULT
+        return _POOLING_UNSET
     if text == POOLING_AUTO:
         return POOLING_AUTO
     if text in _POOLING_BY_NAME:
         return _POOLING_BY_NAME[text]
     logger.warning(
-        "embedding_pooling=%r is not one of %s; using 'mean'",
+        "embedding_pooling=%r is not one of %s; using the default",
         spec, ", ".join(POOLING_CHOICES))
-    return _POOLING_DEFAULT
+    return _POOLING_UNSET
 
 
 def declared_pooling_type(model, api) -> Optional[int]:
@@ -162,10 +178,21 @@ def declared_pooling_type(model, api) -> Optional[int]:
 
 
 def _effective_pooling(requested: object, declared: Optional[int]) -> int:
-    """Resolve the pooling actually used: an explicit choice wins as-is; AUTO
-    honours what the model declares, falling back to MEAN when it declares
-    nothing usable (a decoder declaring NONE would otherwise produce no pooled
-    output at all - see _embed_one's null-embedding guard)."""
+    """Resolve the pooling actually used:
+    - UNSET (nothing configured) applies the measured-safe default: MEAN,
+      EXCEPT when the model declares LAST-token pooling specifically - the one
+      case the module docstring's table names "the real defect", where there is
+      no already-working mean-built index of this shape to protect. Every
+      other declaration (CLS, MEAN, unspecified) keeps the exact MEAN default
+      it always had.
+    - an explicit choice (a real pooling int, including an explicit "mean")
+      always wins as-is, never overridden - the user's call, not ours;
+    - AUTO honours what the model declares, falling back to MEAN when it
+      declares nothing usable (a decoder declaring NONE would otherwise
+      produce no pooled output at all - see _embed_one's null-embedding
+      guard)."""
+    if requested == _POOLING_UNSET:
+        return _POOLING_LAST if declared == _POOLING_LAST else _POOLING_DEFAULT
     if requested != POOLING_AUTO:
         return int(requested)
     if declared in (_POOLING_MEAN, _POOLING_CLS, _POOLING_LAST):
@@ -527,20 +554,26 @@ class IsolatedEmbedder(VramSizingMixin):
         choice itself stays the user's (embedding_pooling), we just stop hiding
         the consequence (AGENTS.md rule 5).
 
-        Only LAST is worth a warning. bge declares CLS and is pooled MEAN, which
-        measures fine (+0.29 related/unrelated margin) and is what every existing
-        index was built with - warning about that on the DEFAULT setup would be
-        noise, not signal, so it stays at debug level in GGUFEmbedder.
+        With the untouched default now resolving LAST correctly for a
+        LAST-declaring model (see _effective_pooling), this only fires when the
+        user has EXPLICITLY set embedding_pooling to something else (mean/cls/
+        none) for such a model - their call, but still worth surfacing, not
+        silencing. Only LAST is worth a warning at all: bge declares CLS and is
+        pooled MEAN by default, which measures fine (+0.29 related/unrelated
+        margin) and is what every existing index was built with - warning about
+        that would be noise, not signal, so it stays at debug level in
+        GGUFEmbedder.
         """
         declared, effective = self.declared_pooling, self.effective_pooling
         if declared != _POOLING_LAST or effective == _POOLING_LAST:
             return
         logger.warning(
             "embedding model %s declares %s-token pooling (it is a decoder-based "
-            "embedder) but is being pooled with %s, which degrades its "
-            "embeddings. Set embedding_pooling=last (or 'auto') to use the "
-            "model's own pooling; existing RAG collections and memory vectors "
-            "were built with %s and need re-indexing after the change.",
+            "embedder) but embedding_pooling is explicitly set to %s, which "
+            "degrades its embeddings. Unset embedding_pooling (or set it to "
+            "'last'/'auto') to use the model's own pooling; existing RAG "
+            "collections and memory vectors were built with %s and need "
+            "re-indexing after the change.",
             Path(self.model_path).name, pooling_name(declared),
             pooling_name(effective), pooling_name(effective))
 
