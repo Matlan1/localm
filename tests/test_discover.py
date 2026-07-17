@@ -2069,9 +2069,13 @@ class TestFreeScope:
         is what makes /v1/models/unload report the reading as uncertain instead of
         asserting a wrong number as fact."""
         monkeypatch.setattr(sys, "platform", "win32")
-        # Pin the known-blind condition rather than depend on the real import torch:
-        # a sibling test that mocks sys.modules['torch'] can otherwise flip this by
-        # collection order (raw_reading_is_process_scoped reads torch.version.hip).
+        # This test is about the uncorrected-scope FALLBACK path, not about
+        # raw_reading_is_process_scoped() itself (that has its own dedicated
+        # coverage in TestGpuUsageSourceRobustness) - stub it directly rather
+        # than depending on its real, cross-test-state-sensitive behavior
+        # (whether a GPU probe from an unrelated earlier test happens to still
+        # be in flight, or a sibling test's sys.modules['torch'] mock flipping
+        # this by collection order).
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
                             lambda gpus: {})
@@ -2100,6 +2104,9 @@ class TestFreeScope:
         """A driver/ctypes failure in the correction must degrade to "we cannot vouch
         for this number", never take down the caller that only wanted a probe."""
         monkeypatch.setattr(sys, "platform", "win32")
+        # See test_windows_without_a_source_keeps_number_but_tags_process above:
+        # stub the uncorrected-scope input directly rather than depending on
+        # raw_reading_is_process_scoped()'s own cross-test-state-sensitive result.
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
 
         def _boom(gpus):
@@ -2125,6 +2132,9 @@ class TestFreeScope:
         """A multi-GPU box where the source can map only one device: the mapped one
         gets truth, the unmapped one is honestly tagged rather than guessed at."""
         monkeypatch.setattr(sys, "platform", "win32")
+        # See test_windows_without_a_source_keeps_number_but_tags_process above:
+        # stub the uncorrected-scope input directly rather than depending on
+        # raw_reading_is_process_scoped()'s own cross-test-state-sensitive result.
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
@@ -2286,10 +2296,9 @@ class TestFreeScopeColdBudget:
 
     def test_cold_source_is_skipped_when_the_budget_is_thin(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
-        # Pin the known-blind condition: the cold-skip tags with the platform's
-        # uncorrected scope, which is PROCESS only where raw_reading_is_process_scoped
-        # is True. Without pinning it, a sibling test's sys.modules['torch'] mock can
-        # flip it by collection order.
+        # See TestFreeScope.test_windows_without_a_source_keeps_number_but_tags_process:
+        # stub the uncorrected-scope input directly rather than depending on
+        # raw_reading_is_process_scoped()'s own cross-test-state-sensitive result.
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
         # 0.4s left of the probe's budget: not enough to absorb a ~750ms cold open.
@@ -2465,6 +2474,102 @@ class TestGpuUsageSourceRobustness:
         _FakeTorch.version = SimpleNamespace(hip="7.13", cuda=None)
         monkeypatch.setitem(_sys.modules, "torch", _FakeTorch())
         assert gu.raw_reading_is_process_scoped() is False
+
+    def test_raw_reading_is_process_scoped_imports_fresh_when_no_probe_is_inflight(
+            self, monkeypatch):
+        """The common, safe case: nothing else is touching torch right now, so a
+        fresh `import torch` is fine - this must NOT be sacrificed for safety
+        against the abandoned-probe race below (a prior, overly-conservative fix
+        attempt made this ALWAYS return False when torch was not yet imported,
+        which is wrong on a machine where torch genuinely has not been imported
+        by anything else yet, e.g. very early in the process).
+
+        Uses a fake `torch` injected via a patched `__import__`, like the sibling
+        test above, rather than deleting the REAL torch from sys.modules and
+        letting a genuine re-import run: torch's ROCm SDK native library preload
+        is not safe to run a second time in the same process once it has already
+        succeeded once (observed live: WinError 127, "the specified procedure
+        could not be found", on a forced re-import) - an unrelated, pre-existing
+        native-library fragility that would make this test flaky for reasons
+        having nothing to do with the code path under test."""
+        import localm.gpu_usage as gu
+        import localm.discover as _discover
+        import sys as _sys
+        import builtins
+
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.delitem(_sys.modules, "torch", raising=False)
+        monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
+
+        class _FakeTorch:
+            version = SimpleNamespace(hip="7.13", cuda=None)
+
+        _real_import = builtins.__import__
+        attempted = []
+
+        def _fake_import(name, *a, **k):
+            if name == "torch":
+                attempted.append(name)
+                fake = _FakeTorch()
+                _sys.modules["torch"] = fake
+                return fake
+            return _real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+        assert gu.raw_reading_is_process_scoped() is True
+        assert attempted == ["torch"], "the safe import must actually have been attempted"
+
+    def test_raw_reading_is_process_scoped_skips_import_while_a_probe_is_inflight(
+            self, monkeypatch):
+        """Root-caused live crash: discover._list_gpus_probe's background probe
+        thread does its OWN first `import torch` and, on a probe timeout, is
+        ABANDONED while still possibly mid-import (stuck in native ROCm library
+        preload) - discover._gpu_probe_inflight stays True for exactly this
+        window (documented in _list_gpus_with_status). If
+        raw_reading_is_process_scoped() also did a fresh `import torch` from a
+        DIFFERENT thread while that flag is set, it would block on CPython's
+        per-module import lock waiting for the abandoned thread - observed live
+        to crash the whole process (Windows fatal exception,
+        STATUS_ENTRYPOINT_NOT_FOUND) rather than merely block. It must consult
+        discover._gpu_probe_inflight and skip the import entirely while it is
+        True, falling back to the conservative "unknown" default instead.
+
+        This machine's real torch build IS ROCm/HIP (verified: torch.version.hip
+        is set), so if the function fell back to a real `import torch` anyway,
+        this would wrongly return True - the test only passes if the import was
+        genuinely skipped."""
+        import localm.gpu_usage as gu
+        import localm.discover as _discover
+        import sys as _sys
+
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.delitem(_sys.modules, "torch", raising=False)
+        monkeypatch.setattr(_discover, "_gpu_probe_inflight", True)
+
+        # Record every import attempt rather than raising from inside the patched
+        # __import__: raw_reading_is_process_scoped() has its own broad
+        # `except Exception: return False`, which would silently swallow a raised
+        # guard and make the test pass either way - true regardless of whether the
+        # forbidden import actually happened. Recording + asserting afterward
+        # cannot be masked that way.
+        import builtins
+        _real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *a, **k):
+            attempted.append(name)
+            return _real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+
+        result = gu.raw_reading_is_process_scoped()
+        assert "torch" not in attempted, (
+            "raw_reading_is_process_scoped() triggered a fresh import of torch "
+            "while a GPU probe was in flight - it can race an abandoned probe "
+            "thread mid-import and crash the process (STATUS_ENTRYPOINT_NOT_FOUND, "
+            "observed live)")
+        assert result is False
 
 
 @pytest.mark.usefixtures("_non_vulkan_host")
