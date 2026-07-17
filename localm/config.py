@@ -239,7 +239,7 @@ DEFAULT_CONFIG: dict = {
     # command, app icon, and shortcut are fixed regardless.
     "logo_style": "local-m",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
-    "port": 8642,             # default inference server port (auto-bumps if busy)
+    "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
     # Require a configured API key on protected endpoints: true refuses requests
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
@@ -519,15 +519,40 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+class PortInUseError(RuntimeError):
+    """An explicitly requested port is already in use.
+
+    An explicit ``--port`` is honored exactly or not at all: if it is busy,
+    ``pick_port`` raises this instead of quietly binding a different port. The old
+    fallback scanned from ``PORT_RANGE[0]``, so a deliberately chosen high port
+    that was busy landed back on the shared default 8642 - the opposite of what a
+    user who picked a specific port to avoid a collision asked for. The default (no
+    ``--port``) still auto-bumps through the range; only an explicit request refuses.
+    """
+
+    def __init__(self, port: int):
+        self.port = port
+        super().__init__(f"Port {port} is already in use.")
+
+
 def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
     """
-    Resolve the port to serve on.
+    Resolve the port to serve on. Returns ``(port, default_port_was_busy)``.
 
-    Returns (port, requested_port_was_busy). Tries the requested port (or the
-    configured default), then walks the localm range for a free one, and as a
-    last resort lets the OS assign any free port.
+    An explicit ``requested`` port is honored exactly: returned if free, otherwise
+    :class:`PortInUseError` is raised. It is never silently relocated to a
+    different port (see that class for why).
+
+    With no explicit port, uses the configured default (``config['port']``, 8642)
+    and, if that is busy, walks localm's range (8642-8741) for the next free port,
+    falling back to an OS-assigned port. The returned flag is True only in that
+    auto-bump case; an explicit request never returns True (it raises instead).
     """
-    start = requested if requested is not None else load_config().get("port", PORT_RANGE[0])
+    if requested is not None:
+        if port_in_use(requested, host):
+            raise PortInUseError(requested)
+        return requested, False
+    start = load_config().get("port", PORT_RANGE[0])
     if not port_in_use(start, host):
         return start, False
     for candidate in range(PORT_RANGE[0], PORT_RANGE[1] + 1):
