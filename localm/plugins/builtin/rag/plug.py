@@ -595,11 +595,13 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
 async def rag_embedding_status():
     """Current embedding-model config + availability, for the Knowledge page's
     embedding picker. Cheap: it never loads a model - `dim` is reported only if one
-    is already loaded, and `error` carries why the last load failed (if any)."""
+    is already loaded, `error` carries why the last load failed (if any), and
+    `gpu_fallback_reason` carries why the loaded embedder dropped to CPU after a
+    native GPU crash (if it did)."""
     from localm.config import load_config
     from localm.inference.embedder import (
-        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, last_error, loaded_dim,
-        resolve_embedding_model_path)
+        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, gpu_fallback_reason,
+        last_error, loaded_dim, resolve_embedding_model_path)
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     installed = bool(resolve_embedding_model_path(allow_download=False))
     return {
@@ -609,6 +611,7 @@ async def rag_embedding_status():
         "installed": installed,
         "dim": loaded_dim(),
         "error": last_error(),
+        "gpu_fallback_reason": gpu_fallback_reason(),
         "status": "ready" if installed else "not_installed",
     }
 

@@ -582,7 +582,7 @@ def _reset_stub_runner():
     yield
 
 
-def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None):
+def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None, n_gpu_layers=99):
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
     # The embedder gates on applied_split_device_count (loader truth), not the
     # detected/labelling split_device_count - see GPU-SPLIT-VKINDEX.
@@ -590,7 +590,7 @@ def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None):
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram",
                         check_vram if check_vram is not None else (lambda self: None))
-    return emb.IsolatedEmbedder("model.gguf", n_gpu_layers=99)
+    return emb.IsolatedEmbedder("model.gguf", n_gpu_layers=n_gpu_layers)
 
 
 def test_isolated_embedder_single_gpu_runs_check_vram_preflight(monkeypatch):
@@ -741,8 +741,14 @@ def test_isolated_embedder_embed_respawns_after_prior_crash(monkeypatch):
 def test_isolated_embedder_embed_crash_clears_runner_for_next_call(monkeypatch):
     """A crash DURING this call still raises to the caller (never silently
     swallowed, rule 5) - but clears the runner so the NEXT call auto-reloads
-    instead of repeatedly hitting the same dead child."""
-    e = _isolated_embedder(monkeypatch)
+    instead of repeatedly hitting the same dead child.
+
+    n_gpu_layers=0: this is the generic dead-worker/drop-and-reload contract,
+    kept CPU-configured so the separate GPU-crash-fallback path (which retries
+    INLINE rather than waiting for the next call - see
+    test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline below) never
+    engages here."""
+    e = _isolated_embedder(monkeypatch, n_gpu_layers=0)
     runner1 = _StubRunner.instances[-1]
 
     def _boom(texts, timeout=None):
@@ -763,6 +769,40 @@ def test_isolated_embedder_embed_crash_clears_runner_for_next_call(monkeypatch):
     out = e.embed(["hello again"])              # next call transparently reloads
     assert out == [[1.0] * 5]
     assert len(_StubRunner.instances) == 2
+
+
+def test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline(monkeypatch):
+    """A GPU-offloaded worker crash retries INLINE on CPU within the SAME
+    call - unlike the generic case above, the caller gets a real result, not
+    an exception, so a batch already in progress does not go lexical-only for
+    the rest of its run. Falls back only ONCE per embedder instance."""
+    e = _isolated_embedder(monkeypatch, n_gpu_layers=99)
+    assert e.gpu_fallback_reason is None
+    runner1 = _StubRunner.instances[-1]
+
+    def _boom(texts, timeout=None):
+        runner1.alive = False
+        raise RuntimeError("The embedding worker process crashed (exit code -6)")
+    runner1.embed = _boom
+
+    out = e.embed(["hello"])                    # recovers inline, no exception
+    assert out == [[1.0] * 5]
+    assert len(_StubRunner.instances) == 2       # the CPU respawn
+    assert e.n_gpu_layers == 0                   # dropped to CPU
+    assert e.gpu_fallback_reason is not None
+    assert "CPU" in e.gpu_fallback_reason
+
+    # A SECOND crash (now already on CPU) must NOT try to fall back again -
+    # it propagates normally, matching the generic dead-worker contract.
+    runner2 = _StubRunner.instances[-1]
+
+    def _boom_again(texts, timeout=None):
+        runner2.alive = False
+        raise RuntimeError("The embedding worker process crashed (exit code -6)")
+    runner2.embed = _boom_again
+    with pytest.raises(RuntimeError, match="crashed"):
+        e.embed(["hello again"])
+    assert e._runner is None
 
 
 def test_isolated_embedder_close_shuts_down_runner(monkeypatch):

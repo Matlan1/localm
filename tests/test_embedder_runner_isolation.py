@@ -336,6 +336,12 @@ class TestCleanEmbedErrorKeepsTheWorker:
         e.active_requests = 0
         e._rpc_lock = threading.RLock()
         e._runner = dead
+        # n_gpu_layers=0: this test is about the generic dead-worker/drop-and-
+        # reload contract, not the GPU-crash-fallback path (covered separately
+        # in test_embedder.py) - keep it CPU-configured so that branch never
+        # engages here.
+        e.n_gpu_layers = 0
+        e.gpu_fallback_reason = None
         # is_alive() is False, so embed() reloads FIRST; keep that reload a no-op
         # so the crash arrives from the RPC itself.
         monkeypatch.setattr(IsolatedEmbedder, "_reload", lambda self: None)

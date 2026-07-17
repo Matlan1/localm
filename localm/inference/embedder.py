@@ -429,6 +429,11 @@ class IsolatedEmbedder(VramSizingMixin):
         # what is actually pooled with.
         self.declared_pooling: Optional[int] = None
         self.effective_pooling: Optional[int] = None
+        # Set once a GPU-offloaded embed() crashes the worker and this embedder
+        # falls back to CPU (see embed()'s crash-recovery branch) - None while
+        # still on GPU, or when configured for CPU from the start. Exposed via
+        # gpu_fallback_reason() so the GUI can show it, not just a log line.
+        self.gpu_fallback_reason: Optional[str] = None
         self._runner = None
         # Serializes embed() below. The worker protocol has NO request-id
         # correlation (one req_q/resp_q pair, see _embedder_runner.py's module
@@ -539,7 +544,10 @@ class IsolatedEmbedder(VramSizingMixin):
         process's life (mirrors Engine.chat_stream's auto-reload after a
         chat-backend crash). A crash DURING this call is still raised to the
         caller (rule 5: never silently swallowed) - only the NEXT call
-        recovers automatically.
+        recovers automatically, EXCEPT for the GPU-crash-once case below,
+        which retries inline so a batch already in progress does not fall
+        back to lexical-only for the rest of its run while a perfectly usable
+        CPU path sits unused.
 
         Pinned via ``active_requests`` for the whole call (including a
         respawn), not just the RPC itself - a ``reset_embedder()`` arriving
@@ -589,6 +597,38 @@ class IsolatedEmbedder(VramSizingMixin):
                         # child is already dead (ModelRunner.shutdown's contract),
                         # and _wait's own timeout path has already done it.
                         runner.shutdown(grace=0)
+                    # A crash while GPU-offloaded is a SYSTEMIC case this project
+                    # has hit for real, not a hypothetical: an incomplete ROCm
+                    # runtime (rocBLAS/hipBLASLt shipped without their Tensile
+                    # kernel data - see setup_llama.py's _copy_blas_library_dirs,
+                    # added for exactly this) makes every GPU embed call abort
+                    # the native process the same way, every time. Retrying with
+                    # the SAME config on the caller's next call would just crash
+                    # again forever, silently disabling embeddings for the rest
+                    # of the process's life. An already-provisioned runtime
+                    # (installed before that fix, or not yet reprovisioned)
+                    # stays broken regardless of the fix, so this bridge matters
+                    # now, not just for some future fault. Fall back to CPU
+                    # ONCE per embedder instance and retry THIS call inline - a
+                    # small dedicated embedder (~25-90MB) is cheap enough on CPU
+                    # that this is a genuine recovery, not a degraded stub. Say
+                    # so loudly (rule 5): this is not a silent override of the
+                    # user's n_gpu_layers setting (which still governs the chat
+                    # model), it is a narrow, discoverable, in-memory-only
+                    # response to a proven native failure.
+                    if self.n_gpu_layers > 0 and self.gpu_fallback_reason is None:
+                        self.gpu_fallback_reason = (
+                            "GPU-offloaded embedding crashed natively (worker "
+                            "exit); retrying on CPU. Chat-model GPU settings "
+                            "are unaffected. Run 'localm setup-llama --force' "
+                            "to reprovision the GPU runtime and restore "
+                            "GPU-accelerated embedding.")
+                        logger.warning("embedder %s: %s",
+                                       Path(self.model_path).name,
+                                       self.gpu_fallback_reason)
+                        self.n_gpu_layers = 0
+                        self._reload()
+                        return self._runner.embed(list(texts))
                     raise
         finally:
             self.active_requests = max(0, self.active_requests - 1)
@@ -757,6 +797,15 @@ def loaded_dim() -> Optional[int]:
     Does NOT trigger a load - safe for a cheap status probe (GUI picker)."""
     with _LOCK:
         return _EMBEDDER.dim if _EMBEDDER is not None else None
+
+
+def gpu_fallback_reason() -> Optional[str]:
+    """Why the currently-loaded embedder dropped from GPU to CPU after a native
+    crash (see IsolatedEmbedder.embed), or None when it hasn't (still on GPU,
+    or configured for CPU from the start). Does NOT trigger a load - for the
+    GUI picker to surface this instead of leaving it as a log-only fact."""
+    with _LOCK:
+        return _EMBEDDER.gpu_fallback_reason if _EMBEDDER is not None else None
 
 
 def loaded_path() -> Optional[str]:
