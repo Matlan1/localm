@@ -15,12 +15,17 @@ only variable under test is the managed-ComfyUI state - it never touches real GP
 state (mirrors test_doctor_cli_phase3.py).
 """
 
+import importlib
 import importlib.machinery
 import sys
 import types
 
 import localm.cli as cli
 from localm.media import managed_comfy as mc
+
+# localm.cli re-exports `doctor` as the click Command itself, shadowing the
+# submodule name - go through importlib for the module.
+doctor_mod = importlib.import_module("localm.cli.doctor")
 
 _SETUP_HINT = "localm comfy setup"
 _CROSS = "✗"  # the red-cross glyph doctor uses for a FAILED check
@@ -60,6 +65,11 @@ def _stub_probes(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _raise)
     monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
     monkeypatch.setitem(sys.modules, "torch", _fake_torch_no_gpu())
+    # This fake torch stub lacks the real internals transformers needs, so if
+    # the REAL transformers is installed in this venv, its lazy AutoTokenizer/
+    # AutoProcessor/AutoModelForCausalLM resolution would genuinely fail against
+    # it - a false "HF backend UNUSABLE" unrelated to what this test is about.
+    monkeypatch.setattr(doctor_mod, "_check_hf_backend_usable", lambda *a, **k: None)
     # rich soft-wraps at the console width, which defaults to 80 cols under the
     # non-tty CliRunner capture and would split a long hint/path line mid-string.
     # Render wide so substring assertions see the unbroken line (a real terminal
