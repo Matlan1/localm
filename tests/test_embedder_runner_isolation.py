@@ -353,6 +353,83 @@ class TestCleanEmbedErrorKeepsTheWorker:
             "a dropped runner must have its queues/handles released, not leaked")
 
 
+class TestCpuOnlyHidesGpuDevices:
+    """cpu_only must hide GPU devices from the runtime BEFORE anything native
+    loads - n_gpu_layers=0 alone only controls weight placement, and a large
+    enough model's matmul still dispatches to a REGISTERED vendor backend
+    regardless (confirmed live on real ROCm hardware: bge-small never crosses
+    that threshold either way, but Qwen3-Embedding-4B does, and hits the
+    identical rocBLAS/Tensile crash even at n_gpu_layers=0 - issue #749).
+    Runs _runner_main's own dispatch loop directly (no real subprocess - the
+    env-var mechanism needs no GPU hardware to verify, only that it engages
+    before GGUFEmbedder is constructed and is popped before reaching it)."""
+
+    def test_cpu_only_sets_env_before_construction_and_is_popped(self, monkeypatch):
+        import queue as _q
+        seen = {}
+
+        class _StubGGUFEmbedder:
+            def __init__(self, **kwargs):
+                # Captured HERE: must reflect the env var set by the dispatch
+                # loop moments earlier, before this constructor ran.
+                seen["hip"] = os.environ.get("HIP_VISIBLE_DEVICES")
+                seen["rocr"] = os.environ.get("ROCR_VISIBLE_DEVICES")
+                seen["cuda"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+                seen["kwargs"] = kwargs
+                self.dim = 4
+                self.declared_pooling = None
+                self.pooling_type = 1
+
+        monkeypatch.setattr("localm.inference.embedder.GGUFEmbedder", _StubGGUFEmbedder)
+        for var in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+            monkeypatch.delenv(var, raising=False)
+
+        req_q, resp_q = _q.Queue(), _q.Queue()
+        req_q.put(("load", dict(model_path="x.gguf", n_gpu_layers=0, n_ctx=512,
+                                pooling_type=1, cpu_only=True)))
+        req_q.put(None)   # _runner_main returns after this
+
+        runner_mod._runner_main(req_q, resp_q)
+
+        assert resp_q.get_nowait()[0] == "ok"
+        # "-1", not "": Windows' CRT putenv("VAR=") with nothing after '=' REMOVES
+        # the variable rather than setting it empty (confirmed live: an empty
+        # string left the ROCm device visible to llama.cpp). "-1" is the
+        # standard CUDA/HIP convention for "no valid device index".
+        assert seen["hip"] == "-1"
+        assert seen["rocr"] == "-1"
+        assert seen["cuda"] == "-1"
+        # cpu_only must never reach GGUFEmbedder's constructor (it has no such
+        # parameter) - popped, not merely read.
+        assert "cpu_only" not in seen["kwargs"]
+
+    def test_cpu_only_false_leaves_env_untouched(self, monkeypatch):
+        import queue as _q
+        seen = {}
+
+        class _StubGGUFEmbedder:
+            def __init__(self, **kwargs):
+                seen["hip"] = os.environ.get("HIP_VISIBLE_DEVICES")
+                seen["kwargs"] = kwargs
+                self.dim = 4
+                self.declared_pooling = None
+                self.pooling_type = 1
+
+        monkeypatch.setattr("localm.inference.embedder.GGUFEmbedder", _StubGGUFEmbedder)
+        monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+
+        req_q, resp_q = _q.Queue(), _q.Queue()
+        req_q.put(("load", dict(model_path="x.gguf", n_gpu_layers=99, n_ctx=512,
+                                pooling_type=1, cpu_only=False)))
+        req_q.put(None)
+
+        runner_mod._runner_main(req_q, resp_q)
+
+        assert resp_q.get_nowait()[0] == "ok"
+        assert seen["hip"] is None            # untouched: the ordinary GPU load path
+        assert "cpu_only" not in seen["kwargs"]
+
+
 class TestConcurrentEmbedSerialization:
     """The worker protocol has NO request-id correlation: one req_q/resp_q pair
     feeds one child, so two overlapping embed() calls are two threads blocked in
