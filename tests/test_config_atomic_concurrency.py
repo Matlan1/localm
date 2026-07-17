@@ -40,6 +40,19 @@ def home(tmp_path, monkeypatch):
 def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
     """A few transient PermissionErrors from os.replace must not fail the write;
     the file ends up correct."""
+    # This retry is deliberately WINDOWS-ONLY: _is_transient_permission_error returns
+    # False when os.name != "nt", because a POSIX EACCES is a STABLE state the retry
+    # can never clear, so retrying would just burn ~1s of time.sleep while holding
+    # _io_lock (which serializes config access process-wide, including the auth path).
+    # This test asserts the RETRY, so stub the classifier rather than pinning os.name.
+    # Do NOT pin cfg.os.name here: cfg.os IS the os module, so setting name="nt" also
+    # switches os.path/tempfile to Windows semantics, and this test drives
+    # _atomic_write_json, which BUILDS a tmp path - on POSIX that yields a backslashed
+    # '\tmp\...\config.json.xxx.tmp' and the write dies with FileNotFoundError.
+    # (Measured on ubuntu CI.) The sibling REG-586/REG-566 tests can pin os.name only
+    # because they fake READS and never construct a path. Classification itself is
+    # covered there; what this test owns is "given a transient error, the write retries".
+    monkeypatch.setattr(cfg, "_is_transient_permission_error", lambda e: True)
     real_replace = cfg.os.replace
     calls = {"n": 0}
 
@@ -49,7 +62,9 @@ def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
         # left alone so we isolate the crash site.
         if str(dst).endswith("config.json") and calls["n"] < 3:
             calls["n"] += 1
-            raise PermissionError(13, "Access is denied")
+            err = PermissionError(13, "Access is denied")
+            err.winerror = 5                # ERROR_ACCESS_DENIED
+            raise err
         return real_replace(src, dst)
 
     monkeypatch.setattr(cfg.os, "replace", flaky_replace)
@@ -77,11 +92,18 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
     import builtins
     real_open = builtins.open
     state = {"n": 0}
+    # Windows-only retry - see the note in
+    # test_atomic_write_rides_out_transient_replace_error above. Same classifier stub,
+    # for the same reason and for symmetry: it is platform-neutral by construction,
+    # where an os.name pin is not.
+    monkeypatch.setattr(cfg, "_is_transient_permission_error", lambda e: True)
 
     def flaky_open(file, *a, **k):
         if str(file).endswith("registry.json") and state["n"] < 2:
             state["n"] += 1
-            raise PermissionError(13, "Access is denied")
+            err = PermissionError(13, "Access is denied")
+            err.winerror = 5                # ERROR_ACCESS_DENIED
+            raise err
         return real_open(file, *a, **k)
 
     monkeypatch.setattr(builtins, "open", flaky_open)

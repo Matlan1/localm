@@ -2556,7 +2556,17 @@ class TestGpuUsageSourceRobustness:
             if name == "torch":
                 attempted.append(name)
                 fake = _FakeTorch()
-                _sys.modules["torch"] = fake
+                # setitem, NOT a raw `_sys.modules["torch"] = fake`: monkeypatch then
+                # removes the fake at teardown. The raw form LEAKED, and only where
+                # torch is NOT installed - exactly the CI env, never this box:
+                # the delitem above finds a real torch here, records it, and teardown
+                # puts it back over the fake; with no torch installed it is a no-op that
+                # records NOTHING, so the fake survived into every later test in the same
+                # xdist worker. importlib.util.find_spec("torch") then hit a _FakeTorch
+                # with no __spec__ and raised "torch.__spec__ is not set" instead of
+                # returning None, breaking test_hf_device_map's skip guard on both CI
+                # platforms while the full suite stayed green locally.
+                monkeypatch.setitem(_sys.modules, "torch", fake)
                 return fake
             return _real_import(name, *a, **k)
 

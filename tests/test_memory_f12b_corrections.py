@@ -290,7 +290,6 @@ def test_proposal_for_size_cap_evicted_target_is_not_falsely_counted(tmp_path,
     # a target the same run then evicts must not report a false `proposed` count and
     # then be silently dropped by corrections() (memory-audit [9] is about never
     # losing a contradiction silently). The eviction itself is surfaced separately.
-    from localm.memory import store as store_mod
     from localm.memory.store import N_MAX
 
     s = MemoryStore("owner", "chat", root=tmp_path)
