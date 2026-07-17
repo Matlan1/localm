@@ -477,6 +477,8 @@ def ps_cmd():
             str(r.get("instance_id", ""))[:8], status, str(r.get("mode", "?")),
             addr, str(r.get("pid", "?")), str(r.get("root_dir", "")))
     console.print(table)
+    console.print("[dim]Stop one with[/dim] localm stop <id>  [dim]or[/dim]  "
+                  "localm stop --all")
 
 
 
@@ -502,6 +504,7 @@ def status_cmd(project):
     console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
     console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
     console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
+    console.print("[dim]Stop it with[/dim] localm stop")
 
 
 
@@ -674,3 +677,140 @@ def unload_cmd(model):
         console.print("[dim]Nothing was loaded.[/dim]")
     else:
         console.print(f"[green]✓[/green] unloaded: {', '.join(unloaded)}")
+
+
+@main.command("stop")
+@click.argument("instance_id", required=False)
+@click.option("--all", "stop_all", is_flag=True,
+              help="Stop every running localm instance.")
+@click.option("--timeout", default=10.0, show_default=True, type=float,
+              help="Seconds to wait for a clean shutdown before forcing the "
+                   "process to end.")
+def stop_cmd(instance_id, stop_all, timeout):
+    """Stop a running localm server.
+
+    With no argument, stops the instance serving the current directory (see
+    `localm status`). Pass an ID or ID prefix (as shown by `localm ps`) to
+    stop a specific instance, or --all to stop every running one.
+
+    Requests the same clean shutdown the GUI's Settings page uses (model
+    unloaded, then the process exits). Without LOCALM_API_KEY set, a plain
+    local instance declines the unauthenticated request (by design), and if
+    the server does not confirm within --timeout for any reason, `stop` ends
+    the process directly instead.
+    """
+    import os
+    import time
+
+    import requests
+
+    from .. import instances, tls
+    from ..config import home_dir
+
+    if instance_id and stop_all:
+        console.print("[red]Pass either an instance id or --all, not both.[/red]")
+        sys.exit(1)
+
+    home = home_dir()
+    instances.reap_stale(home)
+    entries = instances.list_entries(home)
+
+    if stop_all:
+        targets = entries
+        if not targets:
+            console.print("[dim]No running localm instances.[/dim]")
+            return
+    elif instance_id:
+        targets = [e for e in entries
+                   if str(e.get("instance_id", "")).startswith(instance_id)]
+        if not targets:
+            console.print(f"[red]No running instance matches[/red] {instance_id!r}")
+            console.print("[dim]See[/dim] localm ps [dim]for the running instances.[/dim]")
+            sys.exit(1)
+        if len(targets) > 1:
+            console.print(f"[red]{instance_id!r} matches {len(targets)} instances "
+                          f"- be more specific:[/red]")
+            for e in targets:
+                console.print(f"  {str(e.get('instance_id', ''))[:8]}  "
+                              f"{e.get('root_dir', '')}")
+            sys.exit(1)
+    else:
+        root = instances.resolve_root_dir()
+        entry = instances.find_attachable(home, root)
+        if entry is None:
+            console.print(f"[dim]No localm server is serving[/dim] {root}")
+            console.print("[dim]Pass an id (see[/dim] localm ps[dim]) or --all.[/dim]")
+            sys.exit(1)
+        targets = [entry]
+
+    headers = {}
+    key = os.environ.get("LOCALM_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    any_failed = False
+    for entry in targets:
+        iid = str(entry.get("instance_id", ""))[:8]
+        root = entry.get("root_dir", "")
+        pid = entry.get("pid")
+        scheme = entry.get("scheme", "http")
+        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+
+        stopped = False
+        graceful_denied = False
+        try:
+            resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
+                                 timeout=5, verify=tls.requests_verify(url))
+            if resp.status_code in (401, 403):
+                # The open-mode management gate (H5) refuses an unauthenticated
+                # POST from a bare local client with no shell/API-key credential -
+                # this is the DEFAULT case for a plain `localm run`/`gui`/`serve`
+                # with no LOCALM_API_KEY configured (the same gate `localm unload`
+                # hits unauthenticated), not a rare misconfiguration. Fall back to
+                # a direct kill rather than hard-failing, or `stop` would not work
+                # for the common case this command exists for.
+                graceful_denied = True
+            elif resp.status_code == 200:
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline and not stopped:
+                    if not instances.pid_alive(int(pid or -1)):
+                        stopped = True
+                    else:
+                        time.sleep(0.25)
+        except requests.RequestException:
+            pass  # server unreachable (hung / already gone) - fall through to a direct kill
+
+        if not stopped:
+            if graceful_denied:
+                console.print(f"[dim]{iid}:[/dim] server declined an "
+                              f"unauthenticated shutdown request (set "
+                              f"LOCALM_API_KEY for a clean model-unload "
+                              f"shutdown) - ending the process directly.")
+            stopped = instances.kill_pid(int(pid or -1), timeout=timeout)
+            if stopped:
+                # A direct kill bypasses the server's own clean-shutdown path
+                # (_do_shutdown), which is what normally clears the crash
+                # marker - without this, the next `localm` start would
+                # misreport this INTENTIONAL stop as a crash and file a
+                # spurious bug report. Only after confirming the process is
+                # actually gone (never before attempting the kill): if the
+                # kill had failed, the still-running process must keep its
+                # marker so a later genuine crash is still caught.
+                try:
+                    from localm import bugreport
+                    bugreport.disarm_crash_guard(home)
+                except Exception:
+                    pass
+
+        path = entry.get("_path")
+        if path:
+            instances.unregister_instance(path)
+
+        if stopped:
+            console.print(f"[green]stopped[/green]  {iid}  {root}")
+        else:
+            console.print(f"[red]{iid}:[/red] could not confirm it stopped (pid {pid})")
+            any_failed = True
+
+    if any_failed:
+        sys.exit(1)

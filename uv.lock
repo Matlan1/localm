@@ -537,6 +537,7 @@ coder = [
     { name = "requests" },
 ]
 dev = [
+    { name = "psutil" },
     { name = "pypdf" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -546,6 +547,7 @@ dev = [
 gpu = [
     { name = "accelerate" },
     { name = "pillow" },
+    { name = "psutil" },
     { name = "rocm", marker = "sys_platform == 'win32'" },
     { name = "rocm-sdk-core", marker = "sys_platform == 'win32'" },
     { name = "rocm-sdk-libraries-gfx103x-all", marker = "sys_platform == 'win32'" },
@@ -578,6 +580,8 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.23.0" },
     { name = "mcp", specifier = ">=1.28.1" },
     { name = "pillow", marker = "extra == 'gpu'", specifier = ">=12.3.0" },
+    { name = "psutil", marker = "extra == 'dev'", specifier = ">=7.2.2" },
+    { name = "psutil", marker = "extra == 'gpu'", specifier = ">=7.2.2" },
     { name = "psutil", marker = "extra == 'monitor'", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pypdf", marker = "extra == 'dev'", specifier = ">=6.14.2" },

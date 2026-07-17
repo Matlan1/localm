@@ -277,8 +277,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
       localm gui --no-model
       localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
     """
-    from rich.console import Console
-    console = Console()
+    from localm.console import console
 
     # A click into this console window must not freeze the server
     # (Windows QuickEdit suspends output, and output blocks inference).

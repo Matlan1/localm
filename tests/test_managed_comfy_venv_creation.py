@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 
-from localm import _mp_spawn
 from localm.media import managed_comfy as mc
 from localm.media import managed_comfy_fresh as fresh
 

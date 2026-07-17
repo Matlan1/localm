@@ -11,6 +11,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`localm stop`.** `localm run`/`gui`/`serve` start a background server that
+  outlives the command; there was no documented way to end it short of reading
+  its PID from `ps`/`status` and killing it by hand. `localm stop` (with no
+  argument, an id from `ps`, or `--all`) asks it to shut down cleanly and
+  force-ends the process if it does not confirm in time.
+
 ### Removed
 - **The `[gguf]` optional extra (`llama-cpp-python`).** GGUF inference has run
   through localm's own ctypes binding to `llama.dll` since day one; this extra
@@ -24,6 +31,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is no longer a recognized extra.
 
 ### Fixed
+- **Garbled startup banner on `localm gui`/`localm serve`.** The background
+  model-preload thread and the main thread's own startup prints used separate
+  `rich.Console` instances with no shared lock, so their output could
+  interleave character-by-character (e.g. "Loading   qwen2.Open the GUI:5
+  ..."). All output on that path now goes through one shared console.
 - **`localm doctor`'s Python version check.** It reported any 3.10+ interpreter
   as OK, but `pyproject.toml` has required exactly 3.12 for a while (3.10/3.11
   cannot even import `localm.plugins.loader`, and the AMD `[gpu]` wheels are

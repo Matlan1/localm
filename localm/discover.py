@@ -1594,6 +1594,21 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     return _ret(shortfall, status)
 
 
+def _device_choice_configured(cfg: dict) -> bool:
+    """True when the user actually chose a device: a GPU split, or a Main GPU.
+
+    ONE definition of "nothing configured", shared by :func:`resolve_preferred_device`
+    and :func:`visible_device_order`. Both answer ``None`` in that case, and - this is
+    the load-bearing part - neither may probe the driver to find that out: the answer
+    comes from config alone. Keeping the gate in one place is what stops the two from
+    drifting, which is exactly what happened in #688: visible_device_order kept calling
+    list_gpus() eagerly, BEFORE delegating to the gated resolve_preferred_device, so an
+    unconfigured box paid for a GPU probe (torch init, or the nvidia-smi fallback) to
+    compute the same ``None`` the config could have answered for free.
+    """
+    return bool(cfg.get("gpu_split_indices")) or cfg.get("main_gpu_index") is not None
+
+
 def resolve_preferred_device(config: Optional[dict] = None, *,
                             gpus: Optional[list] = None) -> Optional[int]:
     """The device a media workload should DEFAULT to, with every OTHER card left
@@ -1631,7 +1646,7 @@ def resolve_preferred_device(config: Optional[dict] = None, *,
     cfg = config if config is not None else load_config()
     split = cfg.get("gpu_split_indices")
     main = cfg.get("main_gpu_index")
-    if not split and main is None:
+    if not _device_choice_configured(cfg):
         return None                 # nothing configured: do not invent a device
     devices = gpus if gpus is not None else list_gpus()
     by_index = {g.get("index"): g for g in devices}
@@ -1699,8 +1714,17 @@ def visible_device_order(config: Optional[dict] = None, *,
     position, not to localm's own ``list_gpus`` index. Anything emitting ``gpu:N`` into
     a workflow has to map through this order, not around it.
     """
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    if not _device_choice_configured(cfg):
+        # Nothing configured, so the answer is None either way - take it from config and
+        # do NOT probe. This gate mirrors resolve_preferred_device's own (both call the
+        # shared helper): without it, every ComfyUI spawn on an unconfigured box pays for
+        # a driver probe to learn what config already knew (#688 regression). Callers put
+        # this on the launch path (comfy_client.comfy_child_env), so the probe is not free.
+        return None
     devices = gpus if gpus is not None else list_gpus()
-    chosen = resolve_preferred_device(config, gpus=devices)
+    chosen = resolve_preferred_device(cfg, gpus=devices)
     if chosen is None:
         return None
     rest = sorted(g.get("index") for g in devices

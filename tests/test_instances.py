@@ -9,6 +9,8 @@ leak), and the advertise() context manager lifecycle.
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -187,6 +189,34 @@ def test_pid_alive_self_and_invalid():
     assert instances.pid_alive(os.getpid()) is True
     assert instances.pid_alive(-1) is False
     assert instances.pid_alive(0) is False
+
+
+# ------------------------------------------------------------------ #
+#  kill_pid (the `localm stop` direct-kill fallback)                 #
+# ------------------------------------------------------------------ #
+
+def test_kill_pid_invalid_pid_is_noop():
+    assert instances.kill_pid(-1) is True
+    assert instances.kill_pid(0) is True
+
+
+def test_kill_pid_already_dead_returns_true():
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait(timeout=10)
+    assert instances.pid_alive(proc.pid) is False
+    assert instances.kill_pid(proc.pid) is True
+
+
+def test_kill_pid_terminates_a_real_live_process():
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert instances.pid_alive(proc.pid) is True
+        assert instances.kill_pid(proc.pid, timeout=10) is True
+        assert instances.pid_alive(proc.pid) is False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
 
 
 # ------------------------------------------------------------------ #
