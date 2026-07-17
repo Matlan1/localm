@@ -328,23 +328,39 @@ def test_pooling_setting_resolution():
     assert emb.resolve_pooling_setting("  LAST ") == emb._POOLING_LAST   # tolerant
 
 
-def test_pooling_setting_defaults_to_mean():
-    """Unset/blank keeps the documented default. A BOGUS value must not fail the
-    load, but must not pass silently either (it is logged by resolve_*)."""
-    assert emb.resolve_pooling_setting(None) == emb._POOLING_MEAN
-    assert emb.resolve_pooling_setting("") == emb._POOLING_MEAN
-    assert emb.resolve_pooling_setting("nonsense") == emb._POOLING_MEAN
+def test_pooling_setting_defaults_to_unset():
+    """Unset/blank/bogus all resolve to the internal UNSET sentinel - resolved
+    per-model at _effective_pooling time, not pinned to a bare int here. A
+    BOGUS value must not fail the load, but must not pass silently either (it
+    is logged by resolve_*)."""
+    assert emb.resolve_pooling_setting(None) == emb._POOLING_UNSET
+    assert emb.resolve_pooling_setting("") == emb._POOLING_UNSET
+    assert emb.resolve_pooling_setting("nonsense") == emb._POOLING_UNSET
 
 
 def test_default_pooling_is_mean_not_the_declared_type():
-    """Guards the deliberate choice NOT to follow the model by default.
+    """Guards the deliberate choice NOT to unconditionally follow the model by
+    default.
 
     bge-small (the default embedder) declares CLS, yet every existing index was
     built with MEAN at the same 384 dims. Following the declaration by default
     would silently invalidate those indexes with no dim guard to catch it, so
-    MEAN stays the default and a mis-pooled model is fixed by opting in."""
+    MEAN stays the default for CLS/unspecified declarations - only a model
+    declaring LAST specifically (see test_unset_default_resolves_last_for_a_
+    last_declaring_model) gets the correction, since there is no existing
+    mean-built index of THAT shape to protect."""
     assert emb.resolve_pooling_setting(
-        emb_config_default("embedding_pooling")) == emb._POOLING_MEAN
+        emb_config_default("embedding_pooling")) == emb._POOLING_UNSET
+    assert emb._effective_pooling(emb._POOLING_UNSET, emb._POOLING_CLS) == emb._POOLING_MEAN
+    assert emb._effective_pooling(emb._POOLING_UNSET, None) == emb._POOLING_MEAN
+
+
+def test_unset_default_resolves_last_for_a_last_declaring_model():
+    """The fix: nothing configured (the common case - no one manually sets
+    embedding_pooling) + a model that declares LAST (a decoder-based embedder
+    like Qwen3-Embedding) now correctly resolves to LAST, not MEAN - so it
+    works out of the box with no setting to discover."""
+    assert emb._effective_pooling(emb._POOLING_UNSET, emb._POOLING_LAST) == emb._POOLING_LAST
 
 
 def emb_config_default(key):
