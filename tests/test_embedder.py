@@ -559,6 +559,64 @@ def test_loaded_dim_and_last_error_track_state(monkeypatch):
     assert emb.loaded_dim() == 7 and emb.last_error() is None
 
 
+def test_reset_embedder_force_semantics():
+    """Direct test against the REAL reset_embedder(force=...), not a test
+    double standing in for it. The shape of bug a review caught DURING this
+    function's own development - an early "if _EMBEDDER is None: return
+    False" that accidentally skipped clearing the negative-cache flags - had
+    no test against the real function; every force=False test elsewhere
+    (http_server.py's unload paths) monkeypatches reset_embedder itself with
+    a fake, which by construction cannot catch a bug INSIDE reset_embedder."""
+    class _Fake:
+        def __init__(self):
+            self.active_requests = 0
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    # force=False, nothing loaded, but a cached load failure - must still
+    # clear the negative caches (the exact regression this test locks in).
+    emb._EMBEDDER = None
+    emb._LOAD_FAILED = True
+    emb._TRIED_DOWNLOAD = True
+    emb._LAST_ERROR = "boom"
+    assert emb.reset_embedder(force=False) is False
+    assert emb._LOAD_FAILED is False
+    assert emb._TRIED_DOWNLOAD is False
+    assert emb._LAST_ERROR is None
+
+    # force=False, idle embedder - clears it and reports True.
+    fake = _Fake()
+    emb._EMBEDDER = fake
+    assert emb.reset_embedder(force=False) is True
+    assert fake.closed is True
+    assert emb._EMBEDDER is None
+
+    # force=False, BUSY embedder - a full no-op: not closed, negative caches
+    # untouched, _EMBEDDER survives (AUDIT-CRIT-1 for the embedder).
+    fake = _Fake()
+    fake.active_requests = 1
+    emb._EMBEDDER = fake
+    emb._LOAD_FAILED = True
+    emb._LAST_ERROR = "still cached"
+    assert emb.reset_embedder(force=False) is False
+    assert fake.closed is False, "a busy embedder must not be closed"
+    assert emb._EMBEDDER is fake, "a busy embedder must survive force=False"
+    assert emb._LOAD_FAILED is True, (
+        "a no-op decline (busy, force=False) must not touch the negative "
+        "caches either - nothing actually changed")
+    assert emb._LAST_ERROR == "still cached"
+
+    # force=True (the default) always clears, even a busy embedder.
+    fake = _Fake()
+    fake.active_requests = 1
+    emb._EMBEDDER = fake
+    assert emb.reset_embedder() is True
+    assert fake.closed is True
+    assert emb._EMBEDDER is None
+
+
 # --------------------------------------------------------------------------- #
 #  IsolatedEmbedder - preflight dispatch + auto-respawn (parent-side only, no  #
 #  real subprocess - EmbedderRunner is stubbed, mirroring how                  #

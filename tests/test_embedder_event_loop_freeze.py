@@ -34,6 +34,7 @@ call under test yielded the loop instead of blocking it outright.
 from __future__ import annotations
 
 import asyncio
+import functools
 import threading
 import time
 
@@ -189,7 +190,25 @@ def _recording_run_in_executor(loop, calls):
     return _wrapped
 
 
+def _offloaded(calls, fn):
+    """True if `fn` (or a functools.partial wrapping it) is among the funcs
+    handed to loop.run_in_executor. reset_embedder(force=False) is invoked as
+    ``functools.partial(_embedder_mod.reset_embedder, force=False)`` at its
+    two production call sites, not bare - see http_server.py."""
+    return any(
+        c is fn or (isinstance(c, functools.partial) and c.func is fn)
+        for c in calls)
+
+
 def test_unload_all_models_offloads_active_requests_check(hsclean, monkeypatch):
+    """reset_embedder(force=False) is what now takes embedder._LOCK to decide
+    the busy/idle question atomically (see embedder.reset_embedder's
+    docstring: the old separate, unlocked active_requests() call before an
+    unconditional reset_embedder() left a real TOCTOU window, so the check
+    moved INSIDE reset_embedder itself). It must still run via
+    loop.run_in_executor - a direct call reintroduces the exact
+    event-loop-freeze hazard this file's other tests already prove for
+    loaded_dim()/loaded_path() against the same lock."""
     monkeypatch.setattr("localm.discover.vram_capacity", lambda: {"free": None})
     monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
     emb._EMBEDDER = _FakeLoadedEmbedder()
@@ -203,10 +222,10 @@ def test_unload_all_models_offloads_active_requests_check(hsclean, monkeypatch):
 
     result, calls = asyncio.run(_drive())
     assert result["embedder_unloaded"] is True
-    assert emb.active_requests in calls, (
-        "active_requests() must run via loop.run_in_executor, like loaded_dim() "
-        "just above it - a direct call reintroduces the event-loop-freeze "
-        "hazard this file's other tests already prove for the same lock")
+    assert _offloaded(calls, emb.reset_embedder), (
+        "reset_embedder() must run via loop.run_in_executor - a direct call "
+        "reintroduces the event-loop-freeze hazard this file's other tests "
+        "already prove for the same lock")
 
 
 def test_unload_embedder_if_matches_offloads_active_requests_check(hsclean, monkeypatch):
@@ -223,6 +242,6 @@ def test_unload_embedder_if_matches_offloads_active_requests_check(hsclean, monk
 
     result, calls = asyncio.run(_drive())
     assert result["status"] == "unloaded"
-    assert emb.active_requests in calls, (
-        "active_requests() must run via loop.run_in_executor - same hazard as "
+    assert _offloaded(calls, emb.reset_embedder), (
+        "reset_embedder() must run via loop.run_in_executor - same hazard as "
         "loaded_path() just above it in this same function")

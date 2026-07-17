@@ -165,6 +165,184 @@ def test_measurable_vram_allows_coexistence(monkeypatch):
         f"ample VRAM must keep multi-model coexistence; loaded={loaded}")
 
 
+def _install_embedder_fakes(monkeypatch, *, free_with_embedder, free_after_evict,
+                            embedder_active=0):
+    """A fake shared embedder resident in VRAM, plus the same single-model chat
+    registry `_install_fakes` uses. `free_with_embedder` is what the probe
+    reports while the embedder is still resident; a successful
+    `reset_embedder()` mutates the reading to `free_after_evict`, simulating
+    the VRAM it actually holds landing back as free - mirroring how a real
+    native unload changes what the next probe reads.
+
+    The fake `reset_embedder(force=True)` mirrors the real function's
+    force-gated, single-call atomic check-and-clear contract (embedder.py) so
+    these tests exercise the same call shape switch_engine actually uses
+    (`functools.partial(reset_embedder, force=False)`), and counts calls in
+    `state["reset_calls"]` so a test can prove the eviction branch was
+    genuinely entered and consulted the pin, not merely that eviction did
+    not happen (which is also true of code that never looks at the embedder
+    at all)."""
+    fake_registry = {"model-a": {"path": "models/model-a.gguf", "source": "local"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
+    monkeypatch.setattr("localm.model_manager.get_model_info",
+                        lambda name: (f"models/{name}.gguf", "hint"))
+    monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+
+    state = {"embedder_loaded": True, "free": free_with_embedder,
+             "active_requests": embedder_active, "reset_calls": 0}
+
+    monkeypatch.setattr(
+        "localm.discover.vram_info",
+        probe_double(lambda: {"total": 16 * 1024 ** 3, "free": state["free"]}))
+    monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._inference_sems.clear()
+    hs._last_activity_per_model.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+
+    monkeypatch.setattr(
+        "localm.inference.embedder.loaded_dim",
+        lambda: (768 if state["embedder_loaded"] else None))
+    monkeypatch.setattr(
+        "localm.inference.embedder.active_requests",
+        lambda: state["active_requests"])
+
+    def _fake_reset_embedder(force=True):
+        state["reset_calls"] += 1
+        if not state["embedder_loaded"]:
+            return False
+        if not force and state["active_requests"] > 0:
+            return False
+        state["embedder_loaded"] = False
+        state["free"] = free_after_evict
+        return True
+
+    monkeypatch.setattr("localm.inference.embedder.reset_embedder", _fake_reset_embedder)
+    return state
+
+
+def test_idle_embedder_evicted_to_make_room_for_chat_load(monkeypatch):
+    """Reported bug: an embedding run leaves the shared embedder resident in
+    VRAM; loading a chat model that would fit once the embedder is freed must
+    NOT 503 - switch_engine's auto-eviction must free the idle embedder the
+    same way it frees an idle chat engine, not just refuse."""
+    state = _install_embedder_fakes(
+        monkeypatch, free_with_embedder=3 * 1024 ** 3,
+        free_after_evict=9 * 1024 ** 3)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    r = _chat(client, "model-a")
+    assert r.status_code == 200, r.text
+    assert hs._engines["model-a"].loaded is True
+    assert state["embedder_loaded"] is False
+    assert state["reset_calls"] == 1, (
+        "the embedder-eviction branch must be attempted exactly once per load")
+
+
+def test_busy_embedder_not_evicted_for_chat_load(monkeypatch):
+    """AUDIT-CRIT-1 for the embedder: a request mid-embed() (active_requests>0)
+    must not have its embedder freed out from under it just because a chat
+    load is short on VRAM. The load fails honestly instead of silently
+    yanking a pinned embedder.
+
+    Asserts reset_calls == 1, not just embedder_loaded staying True: a
+    reset_embedder(force=False) call that correctly declines because the
+    embedder is busy is indistinguishable, via embedder_loaded alone, from
+    the eviction branch never having been reached at all (e.g. code with no
+    embedder-eviction feature) - both leave embedder_loaded True and return
+    503. reset_calls proves the branch actually executed and consulted the
+    pin, not merely that eviction did not happen to occur."""
+    state = _install_embedder_fakes(
+        monkeypatch, free_with_embedder=3 * 1024 ** 3,
+        free_after_evict=9 * 1024 ** 3, embedder_active=1)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    r = _chat(client, "model-a")
+    assert r.status_code == 503, r.text
+    assert state["embedder_loaded"] is True, (
+        "a busy (pinned) embedder must not be evicted")
+    assert state["reset_calls"] == 1, (
+        "the eviction branch must have been reached and consulted the pin, "
+        "not merely have skipped the embedder entirely")
+
+
+def test_idle_embedder_evicted_for_split_per_device_shortfall(monkeypatch, tmp_path):
+    """Combines the two previously-unverified pieces (flagged in review): the
+    shared embedder is resident on a GPU that is also part of a configured
+    chat-model split, and it is specifically its PER-DEVICE share
+    (discover.gpu_split_shortfall), not just the aggregate, that goes from
+    short to sufficient once the embedder is evicted - proving the
+    embedder-eviction branch composes correctly with the split-aware gate,
+    not just the plain single-GPU path the other embedder tests here use."""
+    model_a_file = tmp_path / "model-a.gguf"
+    fake_registry = {"model-a": {"path": str(model_a_file), "source": "local"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
+    monkeypatch.setattr("localm.model_manager.get_model_info",
+                        lambda name: (str(model_a_file), "hint"))
+    monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+    from localm.config import load_config as real_load_config
+    base_cfg = real_load_config()
+    monkeypatch.setattr(
+        "localm.config.load_config",
+        lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+
+    # GPU 0 holds the embedder: short on its own ~equal-split share of the
+    # ~6.15 GiB aggregate threshold (4 GiB default file size * 1.2 + 1 GiB
+    # headroom) while the embedder is resident, sufficient once evicted. GPU
+    # 1 is ample throughout, so the AGGREGATE (32 GiB) is already well past
+    # the threshold before any eviction - only the PER-DEVICE gate blocks
+    # the load here, unlike every other embedder-eviction test in this file.
+    state = {"embedder_loaded": True, "reset_calls": 0}
+
+    def _list_gpus():
+        gpu0_free = (2 if state["embedder_loaded"] else 6) * 1024 ** 3
+        return [
+            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": gpu0_free},
+            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+        ]
+
+    monkeypatch.setattr("localm.discover.list_gpus", probe_double(_list_gpus))
+    monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._inference_sems.clear()
+    hs._last_activity_per_model.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+
+    monkeypatch.setattr(
+        "localm.inference.embedder.loaded_dim",
+        lambda: (768 if state["embedder_loaded"] else None))
+    monkeypatch.setattr("localm.inference.embedder.active_requests", lambda: 0)
+
+    def _fake_reset_embedder(force=True):
+        state["reset_calls"] += 1
+        if not state["embedder_loaded"]:
+            return False
+        state["embedder_loaded"] = False
+        return True
+
+    monkeypatch.setattr("localm.inference.embedder.reset_embedder", _fake_reset_embedder)
+
+    app = hs.create_app(None)
+    client = TestClient(app)
+    r = _chat(client, "model-a")
+    assert r.status_code == 200, (
+        f"evicting the idle embedder must relieve GPU 0's per-device split "
+        f"shortfall, not just the aggregate: {r.text}")
+    assert hs._engines["model-a"].loaded
+    assert state["embedder_loaded"] is False
+    assert state["reset_calls"] == 1
+
+
 def _mb_figure_in(text):
     """True if *text* quotes a concrete free-VRAM figure ('<N> MB free'). The gate
     must quote one only for a reading it actually measured (AGENTS.md rule 5)."""

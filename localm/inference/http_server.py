@@ -396,6 +396,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         # Only perform eviction check if there are registered models
         if registry:
             from localm.inference.engine import _is_gguf
+            from localm.inference import embedder as _embedder_mod
             from localm.vram import wait_for_vram_release
             vram_required = int(file_size * 1.2)
             headroom = 1024 ** 3  # 1GB VRAM headroom
@@ -413,6 +414,14 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # Peers already asked to cooperate during THIS load attempt: each is
             # answerable once, so the loop below always makes progress (REG-454).
             asked_peers: set = set()
+            # The shared embedder is attempted as an eviction candidate at most
+            # once per load attempt, mirroring asked_peers just above: without
+            # this bound, a concurrent get_embedder() reload from an unrelated
+            # RAG/memory/coder-episode request between two iterations of this
+            # loop could repopulate localm.inference.embedder._EMBEDDER between
+            # attempts, making this branch fire again instead of the loop
+            # converging to either a successful load or the final 503.
+            embedder_evict_attempted = False
 
             while True:
                 # Off the event loop: vram_capacity()/gpu_split_shortfall() route
@@ -551,6 +560,52 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         break
 
                 if evict_name is None:
+                    # Nothing idle among the chat engines. The shared embedder is a
+                    # separate lifecycle from _engines (see localm.inference.embedder's
+                    # module docstring): it is loaded independently by RAG/memory/
+                    # coder-episode callers via get_embedder(), never through
+                    # switch_engine, so the LRU scan above can never see it even
+                    # though it can hold real, evictable VRAM. Without this, a chat
+                    # load that only needed to reclaim the embedder's VRAM fell
+                    # straight through to the cooperative-unload / final-503 handling
+                    # below having never tried the cheapest, purely-local option
+                    # first - a resident-but-idle embedder left over from a RAG/
+                    # memory run made every next chat load 503 with "not enough
+                    # VRAM" even though the embedder alone was the entire shortfall.
+                    # Honor the in-flight-request pin (AUDIT-CRIT-1) exactly like
+                    # unload_all_models's own embedder release does: a request
+                    # mid-embed() must not have its embedder (and the isolated
+                    # worker process it is waiting on) freed out from under it.
+                    # reset_embedder(force=False) checks active_requests()==0 and
+                    # clears the embedder in ONE locked step, not a separate
+                    # active_requests() call followed by an unconditional
+                    # reset_embedder() - that used to leave a TOCTOU window, since
+                    # IsolatedEmbedder.embed() pins active_requests without taking
+                    # embedder._LOCK.
+                    #
+                    # embedder_evict_attempted (set above the while loop) bounds
+                    # this to once per load, same rationale as asked_peers just
+                    # below: loaded_dim() answers None again once THIS attempt
+                    # clears it, but a concurrent get_embedder() from an unrelated
+                    # request could repopulate it before this loop's next pass, so
+                    # "it clears itself" alone is not a progress guarantee.
+                    if not embedder_evict_attempted:
+                        embedder_dim = await loop.run_in_executor(
+                            None, _embedder_mod.loaded_dim)
+                        if embedder_dim is not None:
+                            embedder_evict_attempted = True
+                            cleared = await loop.run_in_executor(
+                                None, functools.partial(
+                                    _embedder_mod.reset_embedder, force=False))
+                            if cleared:
+                                if measurable and free_vram is not None:
+                                    await loop.run_in_executor(
+                                        None,
+                                        lambda: wait_for_vram_release(
+                                            lambda: vram_capacity().get("free"),
+                                            before_bytes=free_vram))
+                                continue
+
                     # Nothing idle left to evict.
                     if cannot_measure:
                         # This BOX cannot report free VRAM at all, and every remaining
@@ -980,14 +1035,19 @@ async def unload_all_models() -> dict:
         # Honor the in-flight-request pin (AUDIT-CRIT-1) for the embedder too,
         # exactly like the chat-engine loop above: a request mid-embed() must
         # not have its embedder (and the isolated worker process it is
-        # waiting on) freed out from under it. Skip it and report it
-        # alongside the pinned chat engines instead of a lying "unloaded".
-        embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
-        if embedder_active > 0:
-            skipped_in_use.append("embedding model")
-        else:
-            await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+        # waiting on) freed out from under it. reset_embedder(force=False)
+        # checks active_requests()==0 and clears the embedder in ONE locked
+        # step (not two separate executor calls) - a real TOCTOU window used
+        # to sit between a standalone active_requests() check and an
+        # unconditional reset_embedder(), since IsolatedEmbedder.embed() pins
+        # active_requests without taking embedder._LOCK. Skip it and report
+        # it alongside the pinned chat engines instead of a lying "unloaded".
+        cleared = await loop.run_in_executor(
+            None, functools.partial(_embedder_mod.reset_embedder, force=False))
+        if cleared:
             embedder_was_loaded = True
+        else:
+            skipped_in_use.append("embedding model")
 
     # Update compatibility pointers - but NOT if the active engine was a pinned one
     # we deliberately left loaded (clearing it would strand the in-flight request's
@@ -1068,8 +1128,29 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     # Honor the in-flight-request pin (AUDIT-CRIT-1): a request mid-embed()
     # must not have its embedder freed out from under it. Report it as still
     # in use instead of a lying "unloaded", matching unload_one_model's own
-    # pinned-chat-engine check just below. Executor-offloaded for the same
-    # reason as loaded_path() above - active_requests() also blocks on
+    # pinned-chat-engine check just below.
+    #
+    # TWO layers, deliberately, mirroring switch_engine's own chat-engine
+    # eviction (its LRU scan's active_requests==0 check, THEN a synchronous
+    # "defensive re-check right before we commit" - http_server.py's own
+    # comment on that code names it "approach (a) of the pin-during-unload
+    # fix"): a cheap active_requests() precheck here avoids paying for the
+    # _vram_free_reading() hardware probe below on the common busy case (that
+    # probe is NOT executor-offloaded and can block this whole single-
+    # threaded event loop for up to discover._GPU_PROBE_DEADLINE seconds - a
+    # regression a review caught: folding the busy check ENTIRELY into
+    # reset_embedder(force=False) after moving the probe earlier meant a busy
+    # embedder paid for the probe every time, where the pre-existing code
+    # never reached it). reset_embedder(force=False) is still what actually
+    # authorizes the close, atomically re-checking active_requests()==0 under
+    # embedder._LOCK in the SAME step as the close (no separate unlocked
+    # active_requests() call before an unconditional reset_embedder() - that
+    # TOCTOU window is what round 1 of this fix closed, since
+    # IsolatedEmbedder.embed() pins active_requests without taking
+    # embedder._LOCK) - so the rare case of a pin arriving in the gap between
+    # this precheck and the actual close is still caught correctly, just no
+    # longer the ONLY thing gating the probe cost. Both calls are executor-
+    # offloaded for the same reason as loaded_path() above - each blocks on
     # embedder._LOCK, which get_embedder() can hold for the length of an
     # IsolatedEmbedder load; a synchronous call here would freeze the whole
     # event loop, not just this request.
@@ -1083,7 +1164,10 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     _free = _live_free_vram_bytes
 
     before, before_fresh, before_scope = _vram_free_reading()
-    await loop.run_in_executor(None, _embedder_mod.reset_embedder)
+    cleared = await loop.run_in_executor(
+        None, functools.partial(_embedder_mod.reset_embedder, force=False))
+    if not cleared:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
