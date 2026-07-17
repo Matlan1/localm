@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
+from tests.conftest import probe_double
 
 
 class FakeEngine:
@@ -69,7 +70,7 @@ class FakeEngine:
         return [[0.1, 0.2, 0.3] for _ in texts]
 
 
-def _install_fakes(monkeypatch, *, free):
+def _install_fakes(monkeypatch, *, free, status=None):
     fake_registry = {
         "model-a": {"path": "models/model-a.gguf", "source": "local"},
         "model-b": {"path": "models/model-b.gguf", "source": "local"},
@@ -79,11 +80,15 @@ def _install_fakes(monkeypatch, *, free):
     monkeypatch.setattr("localm.model_manager.get_model_info",
                         lambda name: (f"models/{name}.gguf", "hint"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
-    # `free`=None models an install where VRAM cannot be measured.
+    # `free`=None models an install where VRAM cannot be measured. `status` (default
+    # GPU_PROBE_OK via probe_double) lets a caller simulate a probe that did NOT
+    # complete (GPU_PROBE_TIMEOUT/BUSY), in which case any `free` here is the frozen
+    # last-known-good the guard would have served.
     info = {"total": 16 * 1024 ** 3}
     if free is not None:
         info["free"] = free
-    monkeypatch.setattr("localm.discover.vram_info", lambda: dict(info))
+    monkeypatch.setattr("localm.discover.vram_info",
+                        probe_double(lambda: dict(info), status=status))
     monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
     hs._engines.clear()
     hs._engines_lru.clear()
@@ -160,6 +165,98 @@ def test_measurable_vram_allows_coexistence(monkeypatch):
         f"ample VRAM must keep multi-model coexistence; loaded={loaded}")
 
 
+def _mb_figure_in(text):
+    """True if *text* quotes a concrete free-VRAM figure ('<N> MB free'). The gate
+    must quote one only for a reading it actually measured (AGENTS.md rule 5)."""
+    import re
+    return re.search(r"\d+\s*MB free", text) is not None
+
+
+class TestInconclusiveProbeDoesNotSkipTheGate:
+    """The root-cause split: `measurable` conflated 'this box CANNOT measure free
+    VRAM' (permanent -> best-effort load is correct) with 'this PROBE did not
+    complete' (transient -> NOT a licence to skip the VRAM check). On master a
+    timed-out probe served free=None -> measurable=False -> on a fresh server
+    (nothing to evict) `if not measurable: break` loaded with NO VRAM CHECK - the
+    first load after every server start on any box whose cold driver init overruns
+    the probe cap. These pin the fixed behaviour by forcing the probe status.
+    """
+
+    def test_inconclusive_probe_refuses_instead_of_loading_unchecked(self, monkeypatch):
+        """The prize: a timed-out probe on a fresh server must REFUSE, not load
+        blind. Negative-tested: revert to `if not measurable: break` and this
+        returns 200 (the unguarded-first-load bug) instead of 503."""
+        from localm.discover import GPU_PROBE_TIMEOUT
+        # Probe did not complete and served no reading (cold init, no last-known-good).
+        _install_fakes(monkeypatch, free=None, status=GPU_PROBE_TIMEOUT)
+        app = hs.create_app(None)
+        client = TestClient(app)
+
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, (
+            "an inconclusive (timed-out) probe on a fresh server must refuse, not "
+            f"load with no VRAM check; got {r.status_code}: {r.text[:200]}")
+        assert not hs._engines.get("model-a", FakeEngine("x")).loaded, (
+            "the model must NOT have loaded on an unmeasured probe")
+
+    def test_inconclusive_refusal_quotes_no_figure(self, monkeypatch):
+        """rule 5: the inconclusive 503 must not state a free-VRAM figure it never
+        measured. Contrast test_measured_refusal_quotes_the_figure below."""
+        from localm.discover import GPU_PROBE_TIMEOUT
+        _install_fakes(monkeypatch, free=None, status=GPU_PROBE_TIMEOUT)
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+        assert r.status_code == 503
+        assert not _mb_figure_in(r.text), (
+            "the inconclusive-probe 503 quotes an MB figure it did not measure "
+            f"(rule 5): {r.text[:200]}")
+
+    def test_stale_high_reading_does_not_permit_a_load(self, monkeypatch):
+        """The OOM direction: a timed-out probe that happens to serve a HIGH stale
+        free reading must NOT permit a load. Negative-tested: drop the probe_ok
+        requirement from the permit check and the 15 GB stale reading passes the
+        fit test -> the model loads (200) on top of whatever really holds the GPU."""
+        from localm.discover import GPU_PROBE_TIMEOUT
+        # 15 GB 'free' is ample for the ~5.8 GB the load needs, but the probe TIMED
+        # OUT, so that figure is a frozen last-known-good, not a live measurement.
+        _install_fakes(monkeypatch, free=15 * 1024 ** 3, status=GPU_PROBE_TIMEOUT)
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, (
+            "a stale-HIGH reading from a timed-out probe must not be trusted to "
+            f"permit a load; got {r.status_code}")
+        assert not hs._engines.get("model-a", FakeEngine("x")).loaded
+
+    def test_measured_refusal_still_quotes_the_figure(self, monkeypatch):
+        """Guard the honest refusal: when the probe COMPLETES and genuinely shows
+        too little VRAM, the 503 still refuses AND still quotes the measured figure.
+        Without this, a fix could regress into 'never quote / never refuse' and the
+        rule-5 test above would pass vacuously."""
+        from localm.discover import GPU_PROBE_OK
+        # 2 GB free, probe OK: below the ~5.8 GB the load needs -> honest refusal.
+        _install_fakes(monkeypatch, free=2 * 1024 ** 3, status=GPU_PROBE_OK)
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+        assert r.status_code == 503
+        assert _mb_figure_in(r.text), (
+            "a refusal from a COMPLETED probe must quote the measured figure; "
+            f"got: {r.text[:200]}")
+
+    def test_cannot_measure_still_loads_best_effort(self, monkeypatch):
+        """Guard the permanent case: a box that genuinely cannot report free VRAM
+        (probe COMPLETES but returns no 'free' - CPU-only / GGUF-only / registry
+        tier) must still load best-effort, NOT be refused. The inconclusive refusal
+        must not brick these boxes."""
+        from localm.discover import GPU_PROBE_OK
+        _install_fakes(monkeypatch, free=None, status=GPU_PROBE_OK)
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+        assert r.status_code == 200, (
+            "a box that cannot measure VRAM (probe OK, no free) must load "
+            f"best-effort, not be refused; got {r.status_code}: {r.text[:200]}")
+        assert hs._engines["model-a"].loaded
+
+
 def _fake_stat_size(monkeypatch, path: Path, size_bytes: int):
     """Make ``path.stat().st_size`` report *size_bytes* without writing that
     many real bytes to disk. *path* must already exist (a real, tiny
@@ -233,7 +330,7 @@ class TestSplitAwareCapacityGate:
             return {**base_cfg, "gpu_split_indices": gpu_split_indices}
 
         monkeypatch.setattr("localm.config.load_config", _cfg)
-        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr("localm.discover.list_gpus", probe_double(gpus))
         monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
         hs._engines.clear()
         hs._engines_lru.clear()
@@ -336,7 +433,7 @@ class TestPerDeviceSplitFitGate:
                     "gpu_split_ratios": gpu_split_ratios}
 
         monkeypatch.setattr("localm.config.load_config", _cfg)
-        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr("localm.discover.list_gpus", probe_double(gpus))
         monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
         hs._engines.clear()
         hs._engines_lru.clear()
@@ -451,7 +548,7 @@ class TestPerDeviceSplitFitGate:
         fake_b.load = _b_load_and_shrink_gpu0
         fake_b.unload = _b_unload_and_relieve_gpu0
 
-        monkeypatch.setattr("localm.discover.list_gpus", _list_gpus)
+        monkeypatch.setattr("localm.discover.list_gpus", probe_double(_list_gpus))
         monkeypatch.setattr(
             hs, "_engine_factory",
             lambda name: fake_b if name == "model-b" else FakeEngine(name))
@@ -631,7 +728,7 @@ def test_eviction_waits_for_vram_release(monkeypatch):
         used = sum(per_model for e in hs._engines.values() if e.loaded)
         return {"free": max(0, total - used), "total": total}
 
-    monkeypatch.setattr("localm.discover.vram_info", dyn_vram)
+    monkeypatch.setattr("localm.discover.vram_info", probe_double(dyn_vram))
 
     calls = {"n": 0}
     import localm.vram as vram

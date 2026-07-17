@@ -35,6 +35,7 @@ import pytest
 from fastapi import HTTPException
 
 from localm.inference import http_server as hs
+from tests.conftest import probe_double
 
 
 class _IncomingEngine:
@@ -85,7 +86,8 @@ class _RacyVictim:
 def evicting(monkeypatch):
     vram = {"free": 3 * 1024 ** 3}   # below the ~5.8 GB the incoming load needs
     monkeypatch.setattr("localm.discover.vram_capacity",
-                        lambda config=None: {"free": vram["free"], "total": 16 * 1024 ** 3})
+                        probe_double(lambda: {"free": vram["free"],
+                                              "total": 16 * 1024 ** 3}))
     monkeypatch.setattr("localm.discover.gpu_split_shortfall", lambda need: [])
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
@@ -204,7 +206,7 @@ def _install(monkeypatch, engines, *, total_gb=10):
         return {"free": (total_gb * 1024 ** 3) - int(loaded * 4.8 * 1024 ** 3),
                 "total": total_gb * 1024 ** 3}
 
-    monkeypatch.setattr("localm.discover.vram_info", _vram)
+    monkeypatch.setattr("localm.discover.vram_info", probe_double(_vram))
     monkeypatch.setattr(hs, "_engine_factory", lambda name: engines[name])
 
     for d in (hs._engines, hs._engines_lru, hs._inference_sems,
