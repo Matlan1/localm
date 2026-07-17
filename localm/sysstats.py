@@ -13,6 +13,96 @@ enough to call on a short GUI poll:
 
 from __future__ import annotations
 
+import threading
+import time
+
+
+def _clamped_field_deltas(t1, t2):
+    """Per-field ``t2 - t1`` from two same-shaped ``psutil.cpu_times()`` ntuples,
+    each trimmed to >= 0. CPU-time counters are supposed to only increase, but
+    some fields (Windows ``interrupt``/``dpc``, some Linux counters) can
+    occasionally regress even while total CPU time moves forward - psutil's own
+    ``_cpu_times_deltas`` trims each field to zero rather than let one regressing
+    field corrupt the aggregate, and this mirrors that exactly (verified against
+    psutil 7.2.2 source) so the percent derived from it matches what a blocking
+    ``cpu_percent(interval=..)`` would report even across a regressing field."""
+    return type(t2)(*(max(0.0, float(b) - float(a)) for a, b in zip(t1, t2)))
+
+
+def _busy_total(times) -> tuple[float, float]:
+    """``(busy, total)`` CPU-seconds from a ``psutil.cpu_times()``-shaped ntuple -
+    either an absolute snapshot or a delta from :func:`_clamped_field_deltas` (the
+    formula is identical either way; this mirrors psutil's own
+    ``_cpu_busy_time``/``_cpu_tot_time``, which run on both shapes too).
+    ``iowait``/``guest``/``guest_nice`` exist only on some platforms (Linux); the
+    ``getattr`` defaults keep this correct on Windows and macOS, which have
+    neither, so ``busy`` there is simply ``total - idle``."""
+    total = float(sum(times))
+    # Linux already counts guest/guest_nice inside user/nice; subtract them so the
+    # total is not double-counted (mirrors psutil._cpu_tot_time).
+    total -= float(getattr(times, "guest", 0.0) or 0.0)
+    total -= float(getattr(times, "guest_nice", 0.0) or 0.0)
+    # iowait is a wait, not work: fold it into idle like psutil._cpu_busy_time does.
+    idle = float(times.idle) + float(getattr(times, "iowait", 0.0) or 0.0)
+    return total - idle, total
+
+
+class _CpuMeter:
+    """Non-blocking CPU-utilisation meter that keeps its OWN previous snapshot.
+
+    ``psutil.cpu_percent(interval=None)`` measures CPU% "since the previous call"
+    off psutil's process-global state, so its FIRST reading (and any reading whose
+    since-last-call window happened to span a burst, e.g. server startup or a model
+    load) is fabricated: it can report 100% on a busy-starting box or 0% on an idle
+    one, neither a real measurement. The GUI polls /api/stats off a MULTI-thread
+    executor (get_plugin_executor), which chops that shared window into unpredictable
+    slices on top of it.
+
+    So we do not rely on that implicit state. We store our own previous
+    ``(times, monotonic)`` snapshot and derive the percent from the CLAMPED
+    per-field delta over a real, known window (see :func:`_clamped_field_deltas`
+    - computing an aggregate busy/total per snapshot and subtracting THOSE would
+    let one regressing field, e.g. Windows ``interrupt``, corrupt the whole
+    percentage; clamping per-field first, like psutil itself does, does not).
+    The first reading (no baseline yet) reports ``None`` so the caller omits the
+    CPU field for that one poll rather than showing a made-up number (AGENTS.md
+    rule 5: never present a fabricated value as a live measurement)."""
+
+    # Two samples closer than this (seconds) form too short a window to trust -
+    # rapid or concurrent polls, where the delta is noise; reuse the last value.
+    _MIN_INTERVAL = 0.1
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._prev: tuple[object, float] | None = None  # times, monotonic
+        self._last: float | None = None                  # last computed percent
+
+    def percent(self, times, now: float) -> float | None:
+        """CPU% over the interval since the previous sample, or ``None`` when there
+        is no trustworthy baseline yet. *times* is a ``psutil.cpu_times()`` ntuple;
+        *now* is a monotonic timestamp. Deterministic given its inputs plus the prior
+        state, so it is unit-testable with fabricated snapshots."""
+        with self._lock:
+            prev = self._prev
+            if prev is None:                       # first poll: seed, no baseline yet
+                self._prev = (times, now)
+                return None
+            prev_times, prev_now = prev
+            if now - prev_now < self._MIN_INTERVAL:
+                return self._last                  # window too short; keep last value
+            self._prev = (times, now)
+            busy_delta, total_delta = _busy_total(_clamped_field_deltas(prev_times, times))
+            if total_delta <= 0:                   # no CPU time advanced (or clock skew)
+                return self._last
+            pct = max(0.0, min(100.0, busy_delta / total_delta * 100.0))
+            self._last = round(pct, 1)
+            return self._last
+
+
+# Process-global meter: the status bar polls repeatedly, so its previous snapshot
+# must survive across requests (that persistence is the whole point of the fix).
+_cpu_meter = _CpuMeter()
+
 
 def _cpu_ram() -> dict:
     """{"cpu": {...}, "ram": {...}} via psutil, or {} when psutil is absent."""
@@ -22,10 +112,16 @@ def _cpu_ram() -> dict:
         return {}
     out: dict = {}
     try:
-        # interval=None is non-blocking: it measures since the previous call, so
-        # the very first poll reads ~0 and subsequent polls are real. Right for a
-        # repeating status-bar poll; a blocking interval would stall the request.
-        out["cpu"] = {"percent": round(float(psutil.cpu_percent(interval=None)), 1)}
+        # Derive CPU% from OUR own previous snapshot over a real window, not from
+        # psutil's fragile since-last-call global (see _CpuMeter). Non-blocking:
+        # cpu_times() is an instantaneous read, so the request never stalls. The
+        # first poll has no baseline yet -> pct is None -> omit the CPU field this
+        # once; the frontend renders only the sections it receives, so it shows the
+        # rest and the CPU figure appears (correct) on the next 2.5s poll, rather
+        # than a fabricated 0 or 100.
+        pct = _cpu_meter.percent(psutil.cpu_times(), time.monotonic())
+        if pct is not None:
+            out["cpu"] = {"percent": pct}
     except Exception:
         pass
     try:
