@@ -10,7 +10,7 @@ from localm.rag import (
     Collection, ExtractError, chunk_text, collection_names,
     delete_collection, extract_text,
 )
-from localm.rag.bm25 import BM25, tokenize
+from localm.rag.bm25 import BM25, ENGLISH_STOP_WORDS, tokenize
 
 
 def _tiny_pdf(text: str) -> bytes:
@@ -197,6 +197,41 @@ class TestBM25:
 
     def test_empty_corpus(self):
         assert BM25([]).scores("anything") == []
+
+    def test_tokenize_keeps_stopwords_by_default(self):
+        # Default MUST leave stopwords in place: localm.memory.store's REG-590
+        # self-reference check reads "i"/"me"/"my" from this raw token stream.
+        assert tokenize("I and me") == ["i", "and", "me"]
+
+    def test_tokenize_filters_stopwords_when_requested(self):
+        assert tokenize("cat and the dog", ENGLISH_STOP_WORDS) == ["cat", "dog"]
+
+    def test_english_stopwords_cover_common_function_words(self):
+        assert {"a", "and", "the", "or", "of", "to", "is", "are"} <= ENGLISH_STOP_WORDS
+
+    def test_stopword_only_overlap_scores_zero_when_filtered(self):
+        # The reported failure mode: a query and a doc overlap ONLY on the
+        # stopword "and". Unfiltered BM25 hands that doc a real lexical score
+        # (in a small corpus "and" earns a high IDF); filtering removes it so a
+        # stopword can never be the sole basis of a lexical match.
+        docs = [
+            "felines groom their fur then curl up to nap",  # no query content word, no "and"
+            "automobiles and trucks burn diesel fuel",      # shares ONLY "and"
+            "mitochondria power each living cell",
+            "interest compounds inside savings accounts",
+        ]
+        query = "cat behavior and sleep habits"
+        raw = BM25(docs).scores(query)
+        assert raw[1] > 0.0            # "and" gives the vehicles doc a lexical hit
+        assert raw[0] == 0.0          # the semantic doc has no lexical overlap
+        filtered = BM25(docs, ENGLISH_STOP_WORDS).scores(query)
+        assert filtered == [0.0, 0.0, 0.0, 0.0]
+
+    def test_stop_words_default_is_opt_in(self):
+        # Same corpus/query, no stop set passed -> unchanged behavior (the
+        # stopword hit survives), proving the filter is strictly opt-in.
+        docs = ["automobiles and trucks", "felines nap often"]
+        assert BM25(docs).scores("cats and sleep")[0] > 0.0
 
 
 # ------------------------------------------------------------------ #
@@ -622,6 +657,57 @@ class TestCollection:
 
         hits = c.query("ROCm DLLs", k=1, embed_fn=fake_embed)
         assert "gpu.md" in hits[0]["source"]
+
+    def test_stopword_only_hit_does_not_outrank_semantic_match(self, tmp_path):
+        """Regression: a query overlapping a doc ONLY on a stopword must not let
+        that doc win the lexical half and, via the 50/50 blend, outrank the true
+        semantic match when vectors are present (the reported RAG-embedding
+        nuance). Four one-sentence docs; the query shares only the stopword "and"
+        with vehicles.txt, while animals.txt is the semantic match (cat~feline,
+        sleep~nap) with NO shared content word."""
+        base = tmp_path / "rag"
+        d = tmp_path / "docs"
+        d.mkdir()
+        (d / "animals.txt").write_text(
+            "Felines groom their fur, purr, then curl up to nap.", encoding="utf-8")
+        (d / "vehicles.txt").write_text(
+            "Automobiles and trucks burn diesel fuel.", encoding="utf-8")
+        (d / "biology.txt").write_text(
+            "Mitochondria power each living cell.", encoding="utf-8")
+        (d / "finance.txt").write_text(
+            "Interest compounds inside savings accounts.", encoding="utf-8")
+
+        def topic_embed(texts):
+            # Deterministic topic axes + a shared bias so EVERY doc has a small
+            # non-zero cosine to the query (as a real dense embedder would) -
+            # that is exactly what let a lone stopword hit flip the old blend.
+            animal = ("cat", "feline", "purr", "nap", "pet", "sleep", "groom", "fur")
+            vehicle = ("automobile", "truck", "fuel", "car", "diesel")
+            biology = ("mitochondria", "cell", "dna", "living")
+            finance = ("interest", "savings", "account", "compound")
+            out = []
+            for t in texts:
+                lo = t.lower()
+                out.append([
+                    1.0 if any(w in lo for w in animal) else 0.0,
+                    1.0 if any(w in lo for w in vehicle) else 0.0,
+                    1.0 if any(w in lo for w in biology) else 0.0,
+                    1.0 if any(w in lo for w in finance) else 0.0,
+                    0.5,   # shared bias axis
+                ])
+            return out
+
+        c = Collection("kb", base=base).create()
+        res = c.add_paths([d], embed_fn=topic_embed)
+        assert res["added"] == 4
+        assert c.stats()["has_vectors"] is True          # blend is actually active
+
+        hits = c.query("cat behavior and sleep habits", k=4, embed_fn=topic_embed)
+        srcs = [h["source"] for h in hits]
+        assert hits[0]["source"].endswith("animals.txt")
+        animals_i = next(i for i, s in enumerate(srcs) if s.endswith("animals.txt"))
+        vehicles_i = next(i for i, s in enumerate(srcs) if s.endswith("vehicles.txt"))
+        assert animals_i < vehicles_i
 
     def test_embed_failure_during_indexing_degrades(self, tmp_path, docs_dir):
         base = tmp_path / "rag"

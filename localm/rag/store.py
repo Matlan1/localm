@@ -32,7 +32,7 @@ from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
-from .bm25 import BM25
+from .bm25 import BM25, ENGLISH_STOP_WORDS
 from .chunk import chunk_text
 from .extract import (BLACKLISTED_SUFFIXES, SECRET_SUFFIXES,
                       UNINDEXABLE_SUFFIXES, ExtractError, classify_format,
@@ -1002,7 +1002,13 @@ class Collection:
         if not text.strip() or not self._chunks:
             return []
         if self._bm25 is None:
-            self._bm25 = BM25([c["text"] for c in self._chunks])
+            # Filter English stopwords from the lexical index so a query and a
+            # chunk that overlap ONLY on a stopword (e.g. "and") cannot let that
+            # chunk win the BM25 half and, via the 50/50 blend, outrank the true
+            # semantic match - a real failure mode on small/narrow home-scale
+            # corpora, where a stopword can earn a spuriously high IDF.
+            self._bm25 = BM25([c["text"] for c in self._chunks],
+                              stop_words=ENGLISH_STOP_WORDS)
         scores = self._bm25.scores(text)
         top = max(scores) if scores else 0.0
         if top > 0:

@@ -11,6 +11,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Knowledge search no longer lets a filler word outrank the better match.** In a
+  RAG collection, a document that shared only a common word like "and" or "the" with
+  your query could be ranked above the document that actually matched your meaning -
+  most visibly on small or narrowly-focused collections, where a filler word is rare
+  enough to look significant. Those stopwords are now filtered from the keyword half
+  of search (both when indexing and when querying), so a shared filler word alone can
+  no longer push the wrong document to the top. Semantic (embedding-based) matching is
+  unchanged, and collections do not need re-indexing.
+
 ## [0.1.2] - 2026-07-17
 
 ### Added
