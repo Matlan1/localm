@@ -11,6 +11,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`localm stop`.** `localm run`/`gui`/`serve` start a background server that
+  outlives the command; there was no documented way to end it short of reading
+  its PID from `ps`/`status` and killing it by hand. `localm stop` (with no
+  argument, an id from `ps`, or `--all`) asks it to shut down cleanly and
+  force-ends the process if it does not confirm in time.
+
+### Fixed
+- **Garbled startup banner on `localm gui`/`localm serve`.** The background
+  model-preload thread and the main thread's own startup prints used separate
+  `rich.Console` instances with no shared lock, so their output could
+  interleave character-by-character (e.g. "Loading   qwen2.Open the GUI:5
+  ..."). All output on that path now goes through one shared console.
+
 ## [0.1.2] - 2026-07-17
 
 ### Added

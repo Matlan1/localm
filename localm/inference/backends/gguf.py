@@ -26,13 +26,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator, List, Optional
 
-from rich.console import Console
+from localm.console import console
 
 from .base import BaseBackend, ModelLoadCancelled
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
-
-console = Console()
 
 
 class GgufBackend(VramSizingMixin, BaseBackend):

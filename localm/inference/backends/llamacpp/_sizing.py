@@ -30,11 +30,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
-
+from localm.console import console
 from localm.vram import VRAM_OVERHEAD_BYTES
-
-console = Console()
 
 
 class VramSizingMixin:
