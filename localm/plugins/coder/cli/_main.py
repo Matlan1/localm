@@ -497,7 +497,20 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 import subprocess
                 import time
                 from localm import instances
-                from localm.config import home_dir
+                from localm.config import PortInUseError, home_dir, pick_port
+
+                # An explicit --port that's already busy is refused by `localm gui`
+                # itself (it prints "Port N is already in use..." to its OWN console
+                # and exits - see #740). This process never reads that console, so
+                # check up front and surface the same real reason here instead of
+                # waiting out the attach-timeout below.
+                if port:
+                    try:
+                        pick_port(port, host="127.0.0.1")
+                    except PortInUseError as exc:
+                        print_error(f"Port {exc.port} is already in use. "
+                                    "Free it, or choose another with -p/--port.")
+                        sys.exit(2 if ci else 1)
 
                 cmd = [sys.executable, "-m", "localm", "gui", "--no-browser", "--api-mode"]
                 if model:
@@ -518,10 +531,12 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     kwargs["start_new_session"] = True
 
                 try:
-                    subprocess.Popen(cmd, **kwargs)
+                    proc = subprocess.Popen(cmd, **kwargs)
                     _tgt = None
                     for _ in range(40):
                         time.sleep(0.5)
+                        if proc.poll() is not None:
+                            break
                         _root = instances.resolve_root_dir(start=str(work_dir))
                         _tgt = instances.attach_target(home_dir(), _root)
                         if _tgt:
@@ -531,6 +546,13 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                                               native_tools=native_tools,
                                               localm_server=True)
                         console.print(f"[dim]connected to newly started server at {_tgt['base_url']}[/dim]")
+                    elif proc.poll() is not None:
+                        print_error(
+                            f"The auto-started server exited immediately (exit code "
+                            f"{proc.returncode}) instead of starting. Check the new "
+                            "console window it opened for the specific error."
+                        )
+                        sys.exit(2 if ci else 1)
                     else:
                         print_error("Failed to attach to the auto-started server.")
                         sys.exit(2 if ci else 1)
