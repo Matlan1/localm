@@ -61,14 +61,14 @@ Chat, the coder agent, model management, and any enabled plugin tabs in one page
 
 ```bash
 localm serve mymodel
-localm serve mymodel --port 8650            # explicit port
+localm serve mymodel --port 8650            # explicit port (must be free, else errors)
 localm serve mymodel --ctx 8192             # context window
 localm serve mymodel --gpu-layers 99        # GPU layers
 localm serve mymodel -H 0.0.0.0              # bind to all interfaces
 localm serve mymodel --debug                # debug logging
 ```
 
-localm owns the port range 8642-8741: the default is 8642 and the server bumps to the next free port automatically when it is taken. Use it with any OpenAI client - set `base_url="http://localhost:8642/v1"` and `api_key="localm"`.
+localm owns the port range 8642-8741: the default is 8642, and when no `--port` is given the server bumps to the next free port in that range automatically if it is taken. An explicit `--port` is different - it must be free, or startup errors rather than moving you onto another port. Use it with any OpenAI client - set `base_url="http://localhost:8642/v1"` and `api_key="localm"`.
 
 The streaming usage block adds `ttft_ms` and `tokens_per_sec`. See [docs/server-api.md](../docs/server-api.md) for the full API surface, including scope-gated management endpoints.
 

@@ -15,7 +15,8 @@ from ._core import (
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-H", "--host",        default="127.0.0.1", help="Bind address (0.0.0.0 for LAN).")
 @click.option("-p", "--port",        default=None,        type=click.IntRange(1, 65535),
-              help="Port [default: config 'port' (8642); auto-bumps when busy].")
+              help="Port [default: config 'port' (8642), auto-bumps if busy; an "
+                   "explicit --port must be free or startup errors].")
 @click.option("-c", "--ctx",         default=None,        type=int)
 @click.option("-g", "--gpu-layers",  default=None,        type=click.IntRange(0, 1000))
 @click.option("--mmproj",            default=None)

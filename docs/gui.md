@@ -10,7 +10,7 @@ Only two surfaces are always present: **Chat** (the protected plugin #0) and the
 localm gui              # launch with the first registered model
 localm gui mymodel      # launch with a named model
 localm gui --no-browser # start the server; open the URL yourself
-localm gui -p 8650      # explicit port (auto-bumps when busy)
+localm gui -p 8650      # explicit port (must be free, else startup errors)
 localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
 ```
 

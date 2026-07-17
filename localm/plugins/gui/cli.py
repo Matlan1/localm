@@ -200,7 +200,8 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
 @click.option("-H", "--host", default="127.0.0.1", show_default=True,
               help="Bind address. Keep 127.0.0.1 unless you know what you're doing.")
 @click.option("-p", "--port", default=None, type=click.IntRange(1, 65535),
-              help="Port [default: config 'port' (8642); auto-bumps when busy].")
+              help="Port [default: config 'port' (8642), auto-bumps if busy; an "
+                   "explicit --port must be free or startup errors].")
 @click.option("-c", "--ctx", default=None, type=int, help="Context window size.")
 @click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
 @click.option("--no-browser", is_flag=True, help="Don't open the browser automatically.")
@@ -399,7 +400,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 webbrowser.open(f"{url}{sep}lm={_secrets.token_hex(3)}")
             return
 
-    from localm.config import load_registry, pick_port
+    from localm.config import PortInUseError, load_registry, pick_port
     from localm.model_manager import (get_model_info, is_auto_chat_eligible,
                                       sync_models_dir)
 
@@ -474,9 +475,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         model_path, display_hint = info
         display_name = model if model in registry else display_hint
 
-    chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
+    try:
+        chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
+    except PortInUseError as exc:
+        # An explicit --port is honored or refused, never silently relocated onto
+        # another (often the shared default) port. Only the default auto-bumps.
+        console.print(f"[red]Port {exc.port} is already in use.[/red] "
+                      "Free it, or choose another with -p/--port.")
+        sys.exit(1)
     if was_busy:
-        console.print(f"[yellow]Requested port busy - using {chosen_port}.[/yellow]")
+        console.print(f"[yellow]Default port busy - using {chosen_port}.[/yellow]")
 
     # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
     # API key and all traffic are encrypted. Resolved before attach_gui so the

@@ -3638,12 +3638,16 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
           ssl_keyfile: Optional[str] = None,
           project: Optional[str] = None,
           isolated: bool = False, *,
-          mode: str = "api",
-          port_retry: bool = False) -> None:
+          mode: str = "api") -> None:
     """Start the server - blocks until Ctrl+C. The real production startup
     path: both ``localm serve`` and ``localm gui`` end up here, the latter via
     ``run_advertised`` above (it builds ``app`` itself, to attach GUI-only
     routes/state before advertising, then reuses the shared tail).
+
+    The caller resolves *port* up front (``config.pick_port``): the default
+    auto-bumps through localm's range, while an explicit ``--port`` is honored or
+    refused, never silently relocated. By here it is already a concrete free port
+    to bind.
 
     When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
     server speaks HTTPS on this port; a plain-HTTP request to it then fails the
@@ -3651,16 +3655,11 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     cleartext.
 
     ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
-    ``port_retry`` walks to the next free port (``config.pick_port``) when
-    *port* is already in use, instead of failing to bind.
 
     Advertises itself in the instance registry (H6 phase 3/4) so a future
     launch can discover and attach to it; ``isolated`` keeps it invisible to
     discovery.
     """
-    if port_retry:
-        from localm.config import pick_port
-        port, _ = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
     app = create_app(engine, api_landing=True)
     # Record the bind host so routes that depend on it (open-mode seeding,
     # CA download) can reason about loopback vs network binds.

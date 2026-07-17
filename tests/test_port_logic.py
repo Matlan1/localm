@@ -5,7 +5,7 @@ import socket
 
 import pytest
 
-from localm.config import PORT_RANGE, pick_port, port_in_use
+from localm.config import PORT_RANGE, PortInUseError, pick_port, port_in_use
 
 
 @pytest.fixture()
@@ -51,11 +51,47 @@ class TestPickPort:
         assert port == free
         assert was_busy is False
 
-    def test_busy_port_bumps_into_range(self, occupied_port):
-        port, was_busy = pick_port(occupied_port)
-        assert was_busy is True
-        assert port != occupied_port
-        assert not port_in_use(port)
+    def test_busy_explicit_port_refuses(self, occupied_port):
+        # An explicit port that is busy is refused, never silently relocated
+        # onto a different (often the shared default) port.
+        with pytest.raises(PortInUseError) as exc:
+            pick_port(occupied_port)
+        assert exc.value.port == occupied_port
+
+    def test_busy_out_of_range_explicit_port_refuses(self):
+        # The specific trap this fixes: an explicit port OUTSIDE localm's range,
+        # deliberately chosen to avoid a collision, must not be relocated back
+        # onto the default 8642 - it must refuse instead.
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        busy = s.getsockname()[1]
+        try:
+            assert not (PORT_RANGE[0] <= busy <= PORT_RANGE[1]), (
+                "OS-assigned ephemeral port unexpectedly landed inside localm's "
+                "range; test would not exercise the out-of-range path")
+            with pytest.raises(PortInUseError) as exc:
+                pick_port(busy)
+            assert exc.value.port == busy
+        finally:
+            s.close()
+
+    def test_default_port_auto_bumps_when_busy(self, monkeypatch):
+        # No explicit port: the configured default still auto-bumps to a free
+        # port when busy (the behavior an unspecified port should keep).
+        import localm.config as cfg
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        busy_default = s.getsockname()[1]
+        try:
+            monkeypatch.setattr(cfg, "load_config", lambda: {"port": busy_default})
+            port, was_busy = pick_port(None)
+            assert was_busy is True
+            assert port != busy_default
+            assert not port_in_use(port)
+        finally:
+            s.close()
 
     def test_default_comes_from_config(self, monkeypatch):
         import localm.config as cfg
