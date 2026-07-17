@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
 from localm.inference.http_engine import remote_model_status
+from tests.conftest import probe_double
 
 
 class FakeEngine:
@@ -63,8 +64,14 @@ def multi(monkeypatch):
     monkeypatch.setattr("localm.model_manager.get_model_info",
                         lambda name: (f"models/{name}.gguf", "hint"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+    # probe_double, not a bare lambda: #722's gate opts into return_status /
+    # deadline / wait_for_inflight on this exact path (vram_capacity -> vram_info),
+    # and a zero-arg double rejects those kwargs with a TypeError that 500s the
+    # chat-completion-driven load this file tests. Same conversion #722 applied
+    # to its ten other status-blind doubles; this file was the one it missed.
     monkeypatch.setattr("localm.discover.vram_info",
-                        lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+                        probe_double({"free": 10 * 1024 ** 3,
+                                      "total": 16 * 1024 ** 3}))
     monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
     for d in (hs._engines, hs._engines_lru, hs._inference_sems, hs._last_activity_per_model):
         d.clear()
