@@ -627,12 +627,47 @@ class TestListGpusTimeoutStatus:
         assert list_gpus() == good
         assert list_gpus(deadline=3.0) == good
 
-    def test_cli_deadline_is_more_generous_than_the_server_deadline(self):
-        """The blocking-caller deadline must give a cold driver init real room,
-        and must be strictly larger than the 4s server-loop cap it exists to
-        relax - otherwise `localm gpus` inherits the same premature timeout."""
-        assert _GPU_PROBE_CLI_DEADLINE > _GPU_PROBE_DEADLINE
-        assert _GPU_PROBE_CLI_DEADLINE >= 10.0
+    def test_default_deadline_tolerates_a_cold_driver_init(self):
+        """The DEFAULT deadline must sit ABOVE a legitimate cold ROCm/CUDA driver
+        init (4.63s observed on a cold box; ~6.5s historically), with real margin.
+        The retired 4.0s default sat inside that range, so a bare list_gpus() on a
+        cold driver "timed out" into [] / last-known-good - which a bare-list
+        caller cannot tell from "no GPU at all" (the #581/#722 bug class). No
+        production caller probes on the event loop (every server call site
+        offloads via run_in_executor), so nothing needs a short default. Mutation
+        guard: putting 4.0 back turns this red."""
+        assert _GPU_PROBE_DEADLINE >= 10.0
+        # The blocking-caller name must stay UNIFIED with the default: splitting
+        # them again re-creates the two-tier world where every caller that does
+        # not know to pass the long one silently gets the thin margin back.
+        assert _GPU_PROBE_CLI_DEADLINE == _GPU_PROBE_DEADLINE
+
+    def test_default_deadline_lets_a_cold_init_length_probe_complete(self):
+        """Behavioral half of the constant guard above: a probe that takes longer
+        than the RETIRED 4.0s cap (a realistic cold driver init) must COMPLETE at
+        the default deadline and hand back its real reading - not time out into
+        the []/"no GPU" misreport. Red on the pre-fix tree (4.4s > 4.0s cap)."""
+        import time
+        from localm import discover
+
+        good = [{"index": 0, "name": "COLD", "total": 8, "free": 8}]
+
+        def _cold_init():
+            time.sleep(4.4)   # just over the retired 4.0s cap
+            return list(good)
+
+        discover._reset_gpu_probe_cache()   # own the in-flight slot for sure
+        orig = discover._list_gpus_probe
+        discover._list_gpus_probe = _cold_init
+        try:
+            gpus, status = list_gpus(return_status=True)   # DEFAULT deadline
+        finally:
+            discover._list_gpus_probe = orig
+            discover._reset_gpu_probe_cache()
+        assert status == GPU_PROBE_OK, (
+            f"a cold-init-length probe must complete at the default deadline, "
+            f"got {status!r}")
+        assert gpus == good
 
     def test_vram_capacity_forwards_deadline_so_a_cold_probe_completes(self, monkeypatch):
         """Root cause of switch_engine's skipped gate: the pre-load probe ran at the
@@ -1543,7 +1578,11 @@ class TestVramInfoReturnStatus:
             return [{"index": 0, "name": "A", "total": 8, "free": 4}]
 
         monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
-        info, status = vram_info(return_status=True)
+        # Explicit short deadline: what is under test is the STATUS PROPAGATION
+        # through vram_info on an overrun, not the default deadline's value (the
+        # default is cold-init-tolerant and would out-wait this simulated wedge;
+        # its own guarantees are covered in TestListGpusTimeoutStatus).
+        info, status = vram_info(return_status=True, deadline=0.3)
         release.set()
         assert status == GPU_PROBE_TIMEOUT
         # No last-known-good reading yet in this test, so info is the genuinely

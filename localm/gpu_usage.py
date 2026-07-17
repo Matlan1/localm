@@ -279,9 +279,11 @@ def source_is_warm() -> bool:
     opening ADL is a driver init MEASURED at ~750 ms, a cold PDH query is ~887 ms,
     against a ~0.02 ms warm read. That matters in one place - the caller's probe runs
     under a hard deadline, and a cold open is enough to push an otherwise-comfortable
-    probe over it (measured: cold probes went from 2.9-3.5s to 3.6-4.0s against a
-    4.0s cap, timing out). So the caller skips a COLD correction when its remaining
-    budget is too thin, and never needs to skip a warm one.
+    probe over a thin one (measured under the since-retired 4.0s default: cold probes
+    went from 2.9-3.5s to 3.6-4.0s and started timing out). The default deadline is
+    now cold-init-tolerant, so this bites only callers that pass a deliberately short
+    deadline - the caller skips a COLD correction when its remaining budget is too
+    thin, and never needs to skip a warm one.
 
     Gates on EITHER usable source being open, not ADL alone: on a non-AMD box ADL is
     proven-unusable ({}, falsy) after the first try but PDH is the source that will

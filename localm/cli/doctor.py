@@ -252,9 +252,11 @@ def _check_vram_torch() -> bool:
         import torch
         if torch.cuda.is_available():
             from localm import discover
-            # The CLI deadline, not the server's 4s cap: a cold GPU driver init is
-            # measured at ~6.5s, and doctor is exactly where a cold box lands (same
-            # reason cli/models.py uses it). Never raises; [] just means no
+            # _GPU_PROBE_CLI_DEADLINE is an alias of the (cold-init-tolerant)
+            # default; passed explicitly because doctor is exactly where a cold
+            # box lands (driver init measured up to ~6.5s) and this call must
+            # never regress to a thin deadline if the default ever changes (same
+            # reason cli/models.py pins it). Never raises; [] just means no
             # correction is available and the raw readings below stand.
             try:
                 _gpus_corrected = discover.list_gpus(

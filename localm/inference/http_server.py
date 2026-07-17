@@ -416,23 +416,24 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # the exact class of hang #541 fixed for the GUI routes and the
                 # GPU-registry heartbeat. This loop can iterate (and re-probe)
                 # multiple times per eviction, so it is just as exposed.
-                # _GPU_PROBE_CLI_DEADLINE, not the 4s default: the 4s cap exists so a
-                # wedged driver can never freeze the single event loop (PR #541), and
-                # THIS probe is executor-offloaded (right here), so that constraint
-                # does not apply to it - it inherited the cap by accident. It matters
-                # because a COLD ROCm/CUDA driver init is MEASURED at 4.63s on this
-                # box and ~6.5s per discover.py's own comment, i.e. RELIABLY OVER the
-                # 4s cap. So the first load after every server start was guaranteed to
-                # time out, and a timed-out probe on a fresh process has no
-                # last-known-good to serve, which left free_vram None -> "unmeasurable"
-                # -> the gate SKIPPED ENTIRELY (see the state split below). Waiting out
-                # the cold init instead turns the most common load there is - the first
-                # one - from unguarded into properly checked. Retrying at a longer
-                # deadline AFTER a timeout cannot do this: an overrun probe is
-                # abandoned, not cancelled, so _gpu_probe_inflight stays True and every
-                # retry short-circuits to (last-known-good, GPU_PROBE_BUSY) in 0.0s
-                # without probing at all - measured. The budget must be spent on the
-                # FIRST call or not at all.
+                # _GPU_PROBE_CLI_DEADLINE (now an alias of the module default, which
+                # became cold-init-tolerant when the old 4.0s cap was retired): kept
+                # explicit because THIS caller's correctness DEPENDS on waiting out a
+                # cold driver init, and an explicit deadline documents that and pins
+                # it against any future default change. History: this probe once
+                # inherited that 4.0s cap while executor-offloaded (the cap existed
+                # to guard the event loop, which this call was never on), and a COLD
+                # ROCm/CUDA init (4.63s measured on this box, ~6.5s historically)
+                # reliably overran it - so the first load after every server start
+                # timed out, a fresh process had no last-known-good to serve,
+                # free_vram was None -> "unmeasurable" -> the gate SKIPPED ENTIRELY
+                # (see the state split below). Waiting out the cold init turns the
+                # most common load there is - the first one - from unguarded into
+                # properly checked. Retrying at a longer deadline AFTER a timeout
+                # cannot do this: an overrun probe is abandoned, not cancelled, so
+                # _gpu_probe_inflight stays True and every retry short-circuits to
+                # (last-known-good, GPU_PROBE_BUSY) in 0.0s without probing at all -
+                # measured. The budget must be spent on the FIRST call or not at all.
                 #
                 # wait_for_inflight=True (#701) closes the remaining window: when a
                 # CONCURRENT probe already holds the slot - the GUI polls /api/stats

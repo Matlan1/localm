@@ -66,7 +66,11 @@
 // leave privacy mode, so a LATER restart back into privacy mode wipes newly-
 // accumulated non-privacy leftovers again instead of leaving them painted in
 // the sidebar (AUD-PRIV-2) - a stale-cached client would suppress that wipe.
-const CACHE = "localm-shell-v62";
+// v63: app/settings-perf.js no longer hides the Main GPU / Split rows on an
+// INCONCLUSIVE /api/gpus probe (probe_status timeout/busy) - a stale-cached
+// client would keep concluding "single GPU" from a wedged driver and hide
+// controls a multi-GPU box owns.
+const CACHE = "localm-shell-v63";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
