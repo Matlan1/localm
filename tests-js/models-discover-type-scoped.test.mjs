@@ -1,44 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// HuggingFace discovery for every "Find models" tab, not just All/LLMs. Before
-// this, every non-all/llm tab showed a static "coming soon" placeholder instead
-// of a working search box (models.js's refreshModelsPage hardcoded the gate to
-// currentTypeFilter === "all" || "llm"). This is the regression test for that
-// bug across all 6 previously-broken tabs, plus the type-hint threading that
-// makes a type-scoped find register with the right model_type explicitly
-// rather than relying on HF's own (proven-unreliable-for-vae/text-encoder)
-// metadata. Mirrors models-discover-formats.test.mjs and
-// models-embedding-tab.test.mjs (same page, same harness/fetch-mock style).
+// HuggingFace discovery has EXPLICIT, always-visible filters: a row of model
+// TYPE checkboxes (LLMs/Embedding/Diffusion/Encoders/VAEs/LoRAs/Other) and a
+// FORMAT row (GGUF/Safetensors). Both are independent of the Registered-models
+// tabs, so what the search covers is never inferred silently from the active
+// tab (an earlier design scoped search by the tab, which was invisible to the
+// user). These tests cover: the filters are present + functional, the search
+// sends types=/formats= from the checkboxes, empty-selection guards, result
+// type badges, and the pull type-hint (detected type, or the single narrowed-to
+// type). Same page/harness/fetch-mock style as models-discover-formats.test.mjs.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-const PREVIOUSLY_BROKEN_TABS =
-  ["embedding", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
-const FORMAT_HIDDEN_TABS = new Set(["lora", "vae", "text-encoder", "unknown"]);
+const ALL_TYPES = ["llm", "embedding", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
 
-function makeFetch({ discoverPayload = null, filesPayload = null, calls = [], pullResponds = true } = {}) {
+function makeFetch({ discoverPayload = null, filesPayload = null, calls = [] } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : null });
     if (u.startsWith("/api/discover/search")) {
-      return {
-        ok: true, status: 200,
-        json: async () => discoverPayload || { query: "", vram: {}, hf_backend_available: true, results: [] },
-        text: async () => "",
-      };
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => discoverPayload || { query: "", vram: {}, hf_backend_available: true, results: [] } };
     }
     if (u.startsWith("/api/discover/files")) {
-      return {
-        ok: true, status: 200,
-        json: async () => filesPayload || { files: [], mmprojs: [], vram: {} },
-        text: async () => "",
-      };
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => filesPayload || { files: [], mmprojs: [], vram: {} } };
     }
     if (u === "/api/models/pull") {
-      return pullResponds
-        ? { ok: true, status: 200, json: async () => ({ job_id: "j1" }), text: async () => "" }
-        : { ok: false, status: 400, json: async () => ({ detail: "bad" }), text: async () => "" };
+      return { ok: true, status: 200, json: async () => ({ job_id: "j1" }), text: async () => "" };
     }
     if (u === "/api/models" || u.startsWith("/api/models?")) {
       return { ok: true, status: 200, json: async () => ({ models: [], active: null }) };
@@ -47,341 +37,275 @@ function makeFetch({ discoverPayload = null, filesPayload = null, calls = [], pu
   };
 }
 
-function clickTab(window, type) {
-  const btn = window.document.querySelector(`#models-tab-nav .tab-btn[data-type="${type}"]`);
-  assert.ok(btn, `tab button for ${type} exists`);
-  btn.click();
-}
+async function tick(n = 1) { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); }
 
-async function tick(n = 1) {
-  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
+function setTypes(window, values) {
+  for (const b of window.document.querySelectorAll(".disc-type")) b.checked = values.includes(b.value);
 }
+function setFormats(window, { gguf, hf }) {
+  window.document.getElementById("disc-fmt-gguf").checked = gguf;
+  window.document.getElementById("disc-fmt-hf").checked = hf;
+}
+function stubStreamJobDone(window) { runScript(window, `streamJob = async () => ({ status: "done" });`); }
 
 // --------------------------------------------------------------------------- //
-//  The literal regression test: every tab gets a real search box, never the   //
-//  static placeholder.                                                        //
+//  The filters exist, are visible, and cover every model type                 //
 // --------------------------------------------------------------------------- //
 
-for (const type of PREVIOUSLY_BROKEN_TABS) {
-  test(`discover-type-scoped: the "${type}" tab shows the real search box, not a placeholder`, async () => {
-    const { window } = loadAppWithPages({ fetchImpl: makeFetch() });
-    await window.refreshModelsPage();
-    await tick();
+test("discover-filters: the Type + Format filter rows are present, visible, all default-on", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch() });
+  const typeRow = window.document.getElementById("disc-type-filter");
+  const fmtRow = window.document.getElementById("disc-formats");
+  assert.ok(typeRow, "the Types filter row exists");
+  assert.ok(fmtRow, "the Format filter row exists");
+  assert.equal(window.document.getElementById("disc-placeholder"), null,
+    "no 'coming soon' placeholder element remains");
 
-    clickTab(window, type);
-    await tick();
+  const typeVals = [...window.document.querySelectorAll(".disc-type")].map((b) => b.value);
+  assert.deepEqual(typeVals.sort(), [...ALL_TYPES].sort(),
+    "there is one Type checkbox per searchable model type");
+  for (const b of window.document.querySelectorAll(".disc-type")) {
+    assert.ok(b.checked, `type ${b.value} defaults to checked (search everything)`);
+  }
+  assert.ok(window.document.getElementById("disc-fmt-gguf").checked, "GGUF default on");
+  assert.ok(window.document.getElementById("disc-fmt-hf").checked, "Safetensors default on");
+});
 
-    assert.equal(window.document.getElementById("disc-placeholder"), null,
-      "the 'coming soon' placeholder element no longer exists at all");
-    const searchBox = window.document.getElementById("disc-search-box");
-    assert.ok(searchBox, "the search box exists");
-    assert.notEqual(searchBox.style.display, "none",
-      `the search box is visible on the "${type}" tab`);
-    assert.doesNotMatch(window.document.body.textContent, /coming soon/i,
-      "no 'coming soon' text remains anywhere on the page");
-  });
-}
+test("discover-filters: each chip's active .on class stays in sync with its checkbox", async () => {
+  // style.css colours `.disc-chip.on span` (not a CSS :checked selector, which
+  // some engines fail to repaint on a programmatic toggle), so the `.on` class
+  // is the real visual-state contract. It must match the checkbox on load and
+  // after every change.
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch() });
+  const chips = [...window.document.querySelectorAll(".disc-chip")];
+  assert.ok(chips.length >= 9, "every type + format toggle is a chip");
+  for (const chip of chips) {
+    const box = chip.querySelector("input");
+    assert.equal(chip.classList.contains("on"), box.checked,
+      `chip for "${box.value || box.id}" starts in sync (both ${box.checked})`);
+  }
+  // Toggle one off via a real change event and confirm the class follows.
+  const vae = window.document.querySelector('.disc-chip[data-type="vae"]');
+  const vaeBox = vae.querySelector("input");
+  vaeBox.checked = false;
+  vaeBox.dispatchEvent(new window.Event("change"));
+  assert.equal(vae.classList.contains("on"), false, "unchecking removes the .on class (chip greys out)");
+  vaeBox.checked = true;
+  vaeBox.dispatchEvent(new window.Event("change"));
+  assert.equal(vae.classList.contains("on"), true, "re-checking restores the .on class (chip recolours)");
+});
 
-test("discover-type-scoped: format toggles are hidden for lora/vae/text-encoder/unknown, shown elsewhere", async () => {
+test("discover-filters: filters stay visible regardless of the active Registered-models tab", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch() });
   await window.refreshModelsPage();
   await tick();
-
-  for (const type of ["all", "llm", "embedding", "diffusion-unet", "lora", "vae", "text-encoder", "unknown"]) {
-    clickTab(window, type);
+  for (const type of ["all", ...ALL_TYPES]) {
+    const btn = window.document.querySelector(`#models-tab-nav .tab-btn[data-type="${type}"]`);
+    if (!btn) continue;
+    btn.click();
     await tick();
-    const formatsBox = window.document.getElementById("disc-formats");
-    if (FORMAT_HIDDEN_TABS.has(type)) {
-      assert.equal(formatsBox.style.display, "none", `formats hidden on "${type}"`);
-    } else {
-      assert.notEqual(formatsBox.style.display, "none", `formats shown on "${type}"`);
-    }
+    assert.notEqual(window.document.getElementById("disc-type-filter").style.display, "none",
+      `Types filter visible on the "${type}" tab`);
+    assert.notEqual(window.document.getElementById("disc-formats").style.display, "none",
+      `Format filter visible on the "${type}" tab`);
   }
 });
 
 // --------------------------------------------------------------------------- //
-//  discoverSearch() sends the current tab as `type=`                          //
+//  The search sends the checked types + formats                               //
 // --------------------------------------------------------------------------- //
 
-test("discover-type-scoped: discoverSearch() sends type=<tab> in the query string", async () => {
+test("discover-filters: a full-default search sends every type and both formats", async () => {
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({ calls }) });
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "vae");
-  await tick();
-
   await window.discoverSearch();
+  const u = decodeURIComponent(calls.find((c) => c.url.startsWith("/api/discover/search")).url);
+  assert.match(u, /formats=gguf,hf/, "both formats sent");
+  const typesParam = u.match(/types=([^&]*)/)[1].split(",").sort();
+  assert.deepEqual(typesParam, [...ALL_TYPES].sort(), "all seven types sent");
+});
 
-  const discoverCalls = calls.filter((c) => c.url.startsWith("/api/discover/search"));
-  assert.equal(discoverCalls.length, 1);
-  assert.match(decodeURIComponent(discoverCalls[0].url), /type=vae/,
-    "the search request carries the active tab as type=vae");
+test("discover-filters: narrowing to VAEs + Safetensors sends exactly that", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ calls }) });
+  setTypes(window, ["vae"]);
+  setFormats(window, { gguf: false, hf: true });
+  await window.discoverSearch();
+  const u = decodeURIComponent(calls.find((c) => c.url.startsWith("/api/discover/search")).url);
+  assert.match(u, /types=vae(&|$)/, "only vae in the types param");
+  assert.match(u, /formats=hf(&|$)/, "only the safetensors format sent");
+});
+
+test("discover-filters: no types selected shows a guard and issues no search", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ calls }) });
+  setTypes(window, []);
+  await window.discoverSearch();
+  assert.equal(calls.filter((c) => c.url.startsWith("/api/discover/search")).length, 0,
+    "no search fired with zero types checked");
+  assert.match(window.document.getElementById("disc-results").textContent, /at least one model type/i);
+});
+
+test("discover-filters: no formats selected shows a guard and issues no search", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ calls }) });
+  setFormats(window, { gguf: false, hf: false });
+  await window.discoverSearch();
+  assert.equal(calls.filter((c) => c.url.startsWith("/api/discover/search")).length, 0,
+    "no search fired with zero formats checked");
+  assert.match(window.document.getElementById("disc-results").textContent, /at least one format/i);
+});
+
+test("discover-filters: toggling a type checkbox re-runs the search live when results are showing", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true,
+    results: [{ id: "org/x", downloads: 1, likes: 0, updated: "", formats: ["hf"], detected_type: "llm" }] };
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload, calls }) });
+  await window.discoverSearch();
+  const before = calls.filter((c) => c.url.startsWith("/api/discover/search")).length;
+  const vaeBox = window.document.querySelector('.disc-type[value="vae"]');
+  vaeBox.checked = false;
+  vaeBox.dispatchEvent(new window.Event("change"));
+  await tick(2);
+  const after = calls.filter((c) => c.url.startsWith("/api/discover/search")).length;
+  assert.ok(after > before, "changing a type checkbox re-issued the search while results were showing");
 });
 
 // --------------------------------------------------------------------------- //
-//  A result's detected_type renders the matching color-coded badge            //
+//  Result badges + the pull type hint                                         //
 // --------------------------------------------------------------------------- //
 
-test("discover-type-scoped: a result with detected_type renders the matching .type-badge", async () => {
-  const payload = {
-    query: "", vram: {}, hf_backend_available: true,
-    results: [
-      { id: "stabilityai/sd-vae-ft-mse", downloads: 900, likes: 10, updated: "",
-        formats: ["hf"], detected_type: "unknown" },
-      { id: "BAAI/bge-m3", downloads: 20, likes: 5, updated: "",
-        formats: ["hf"], detected_type: "embedding" },
-    ],
-  };
+test("discover-filters: a result renders the badge for its detected type", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true, results: [
+    { id: "stabilityai/sd-vae-ft-mse", downloads: 900, likes: 10, updated: "", formats: ["hf"], detected_type: "unknown" },
+    { id: "BAAI/bge-m3", downloads: 20, likes: 5, updated: "", formats: ["hf"], detected_type: "embedding" },
+  ] };
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload }) });
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "vae");
-  await tick();
   await window.discoverSearch();
-
   const rows = [...window.document.querySelectorAll("#disc-results .disc-repo")];
-  const vaeRow = rows.find((r) => r.querySelector(".name")?.textContent === "stabilityai/sd-vae-ft-mse");
-  const embRow = rows.find((r) => r.querySelector(".name")?.textContent === "BAAI/bge-m3");
-  assert.ok(vaeRow.querySelector(".type-badge.type-unknown"),
-    "an honestly-unclassified VAE result still shows an 'unknown' badge, not excluded or guessed");
-  assert.ok(embRow.querySelector(".type-badge.type-embedding"),
-    "a classified result shows its detected type badge");
+  const vae = rows.find((r) => r.querySelector(".name").textContent === "stabilityai/sd-vae-ft-mse");
+  const emb = rows.find((r) => r.querySelector(".name").textContent === "BAAI/bge-m3");
+  assert.ok(vae.querySelector(".type-badge.type-unknown"), "an honestly-unclassified VAE still shows an 'unknown' badge");
+  assert.ok(emb.querySelector(".type-badge.type-embedding"), "a classified result shows its detected type badge");
 });
 
-test("discover-type-scoped: a result with no detected_type (all/llm tabs) renders no badge", async () => {
-  const payload = {
-    query: "", vram: {}, hf_backend_available: true,
-    results: [{ id: "org/plain", downloads: 1, likes: 0, updated: "", formats: ["gguf"] }],
-  };
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload }) });
-  await window.discoverSearch();   // default tab is "all"
-  const row = window.document.querySelector("#disc-results .disc-repo");
-  assert.equal(row.querySelector(".type-badge"), null,
-    "no badge is rendered when the server sent no detected_type");
-});
-
-// --------------------------------------------------------------------------- //
-//  Type-hint threading: a type-scoped find registers with that explicit type  //
-// --------------------------------------------------------------------------- //
-
-function stubStreamJobDone(window) {
-  runScript(window, `streamJob = async () => ({ status: "done" });`);
-}
-
-test("discover-type-scoped: adding a VAE-tab result POSTs model_type: 'vae'", async () => {
-  const payload = {
-    query: "", vram: {}, hf_backend_available: true,
-    results: [{ id: "stabilityai/sd-vae-ft-mse", downloads: 900, likes: 10, updated: "",
-                formats: ["hf"], detected_type: "unknown" }],
-  };
+test("discover-filters: adding a result badged with a known type hints THAT type", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true,
+    results: [{ id: "black-forest-labs/FLUX.1-dev", downloads: 500, likes: 9, updated: "",
+                formats: ["hf"], detected_type: "diffusion-unet" }] };
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload, calls }) });
   stubStreamJobDone(window);
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "vae");
-  await tick();
+  setTypes(window, ALL_TYPES);   // many types checked, but the badge is confident
   await window.discoverSearch();
-
   const row = window.document.querySelector("#disc-results .disc-repo");
-  const addBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo");
-  assert.ok(addBtn, "the VAE result offers 'add full repo'");
-  addBtn.click();
-
-  assert.equal(window.document.getElementById("pull-spec").value, "stabilityai/sd-vae-ft-mse");
-
+  [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo").click();
   window.document.getElementById("pull-start").click();
   await tick(3);
-
-  const pullCall = calls.find((c) => c.url === "/api/models/pull");
-  assert.ok(pullCall, "the pull request was sent");
-  assert.equal(pullCall.body.model_type, "vae",
-    "the explicit type hint from the VAE tab reaches the pull request, " +
-    "bypassing HF's own (proven-unreliable-for-vae) auto-guess");
+  const pull = calls.find((c) => c.url === "/api/models/pull");
+  assert.equal(pull.body.model_type, "diffusion-unet",
+    "what you see badged is what it registers as - the detected type is the hint");
 });
 
-test("discover-type-scoped: hand-editing the spec after prefill drops the stale type hint", async () => {
-  const payload = {
-    query: "", vram: {}, hf_backend_available: true,
+test("discover-filters: an 'unknown'-badged result hints the single narrowed-to type", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true,
     results: [{ id: "stabilityai/sd-vae-ft-mse", downloads: 900, likes: 10, updated: "",
-                formats: ["hf"], detected_type: "unknown" }],
-  };
+                formats: ["hf"], detected_type: "unknown" }] };
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload, calls }) });
   stubStreamJobDone(window);
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "vae");
-  await tick();
+  setTypes(window, ["vae"]);      // narrowed to exactly one type
   await window.discoverSearch();
-
   const row = window.document.querySelector("#disc-results .disc-repo");
-  const addBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo");
-  addBtn.click();
-
-  // The user changes their mind and edits the prefilled spec before hitting Add.
-  window.document.getElementById("pull-spec").value = "someone/else-entirely";
-
+  [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo").click();
   window.document.getElementById("pull-start").click();
   await tick(3);
-
-  const pullCall = calls.find((c) => c.url === "/api/models/pull");
-  assert.ok(pullCall, "the pull request was sent");
-  assert.equal(pullCall.body.model_type, undefined,
-    "a hand-edited spec silently falls back to auto-detect, never sends a hint for a different model");
+  const pull = calls.find((c) => c.url === "/api/models/pull");
+  assert.equal(pull.body.model_type, "vae",
+    "a metadata-less VAE found while searching only VAEs registers as vae, not a guess");
 });
 
-test("discover-type-scoped: adding an 'Other'/unknown-tab result never forces model_type", async () => {
-  const payload = {
-    query: "", vram: {}, hf_backend_available: true,
+test("discover-filters: an 'unknown'-badged result with MANY types checked forces no hint", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true,
     results: [{ id: "madebyollin/taesd", downloads: 50, likes: 2, updated: "",
-                formats: ["hf"], detected_type: "unknown" }],
-  };
+                formats: ["hf"], detected_type: "unknown" }] };
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload, calls }) });
   stubStreamJobDone(window);
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "unknown");
-  await tick();
+  setTypes(window, ["vae", "text-encoder", "unknown"]);   // more than one -> ambiguous
   await window.discoverSearch();
-
   const row = window.document.querySelector("#disc-results .disc-repo");
-  const addBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo");
-  addBtn.click();
+  [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo").click();
   window.document.getElementById("pull-start").click();
   await tick(3);
-
-  const pullCall = calls.find((c) => c.url === "/api/models/pull");
-  assert.ok(pullCall, "the pull request was sent");
-  assert.equal(pullCall.body.model_type, undefined,
-    "the 'Other' tab never locks a find to model_type=unknown - a real guess still gets a chance");
+  const pull = calls.find((c) => c.url === "/api/models/pull");
+  assert.equal(pull.body.model_type, undefined,
+    "ambiguous (unknown badge, multiple types) falls back to auto-detect, never a wrong guess");
 });
 
-// --------------------------------------------------------------------------- //
-//  The OTHER pull affordance: a per-quant GGUF file (discoverFiles), not just  //
-//  the whole-repo "add full repo" button. Real repo/file from a live search    //
-//  this feature was verified against (unsloth/bge-small-en-v1.5-GGUF).         //
-// --------------------------------------------------------------------------- //
-
-test("discover-type-scoped: picking a per-quant GGUF file from a type-scoped tab also carries the type hint", async () => {
-  const discoverPayload = {
-    query: "", vram: {}, hf_backend_available: true,
-    results: [{ id: "unsloth/bge-small-en-v1.5-GGUF", downloads: 9, likes: 1, updated: "",
-                formats: ["gguf"], detected_type: "embedding" }],
-  };
-  const filesPayload = {
-    vram: {}, mmprojs: [],
-    files: [{ file: "bge-small-en-v1.5-f16.gguf", quant: "F16", size_bytes: 1e8, n_parts: 1 }],
-  };
+test("discover-filters: hand-editing the spec after prefill drops the stale hint", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true,
+    results: [{ id: "some/vae", downloads: 1, likes: 0, updated: "", formats: ["hf"], detected_type: "vae" }] };
   const calls = [];
-  const { window } = loadAppWithPages({
-    fetchImpl: makeFetch({ discoverPayload, filesPayload, calls }) });
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload, calls }) });
   stubStreamJobDone(window);
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "embedding");
-  await tick();
   await window.discoverSearch();
-
   const row = window.document.querySelector("#disc-results .disc-repo");
-  const filesBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "files");
-  assert.ok(filesBtn, "the GGUF result offers the per-quant file list");
-  filesBtn.click();
-  await tick();
-
-  const fileRow = row.querySelector(".disc-file");
-  assert.ok(fileRow, "the file row renders");
-  const pullBtn = [...fileRow.querySelectorAll("button")].find((b) => b.textContent === "pull");
-  pullBtn.click();
-
-  assert.equal(window.document.getElementById("pull-spec").value,
-    "unsloth/bge-small-en-v1.5-GGUF:bge-small-en-v1.5-f16.gguf",
-    "the spec is repo:file, matching what the real HF API's tree listing produces");
-
+  [...row.querySelectorAll("button")].find((b) => b.textContent === "add full repo").click();
+  window.document.getElementById("pull-spec").value = "someone/else-entirely";   // user edits it
   window.document.getElementById("pull-start").click();
   await tick(3);
-
-  const pullCall = calls.find((c) => c.url === "/api/models/pull");
-  assert.ok(pullCall, "the pull request was sent");
-  assert.equal(pullCall.body.model_type, "embedding",
-    "the per-quant GGUF pull path (not just 'add full repo') also carries the type hint");
+  const pull = calls.find((c) => c.url === "/api/models/pull");
+  assert.equal(pull.body.model_type, undefined,
+    "a hand-edited spec never carries the hint meant for the original result");
 });
 
-// --------------------------------------------------------------------------- //
-//  A vision-projector companion file never inherits the tab's type hint.       //
-//  There is no "mmproj" tab, and mmproj pairing is filename-keyed, not         //
-//  model_type-keyed - forcing e.g. model_type="vae" onto it would mislabel     //
-//  its Role column / tab filtering for no reason.                              //
-// --------------------------------------------------------------------------- //
-
-test("discover-type-scoped: a vision-projector (mmproj) file never inherits the tab's type hint", async () => {
-  const discoverPayload = {
-    query: "", vram: {}, hf_backend_available: true,
-    results: [{ id: "org/vision-model", downloads: 9, likes: 1, updated: "",
-                formats: ["gguf"], detected_type: "vae" }],
-  };
-  const filesPayload = {
-    vram: {},
-    files: [{ file: "model-Q4_K_M.gguf", quant: "Q4_K_M", size_bytes: 1e8, n_parts: 1 }],
-    mmprojs: [{ file: "mmproj-model-f16.gguf", quant: "F16", size_bytes: 5e7, n_parts: 1 }],
-  };
+test("discover-filters: a per-quant GGUF file also carries the type hint", async () => {
+  const discoverPayload = { query: "", vram: {}, hf_backend_available: true,
+    results: [{ id: "unsloth/bge-small-en-v1.5-GGUF", downloads: 9, likes: 1, updated: "",
+                formats: ["gguf"], detected_type: "embedding" }] };
+  const filesPayload = { vram: {}, mmprojs: [],
+    files: [{ file: "bge-small-en-v1.5-f16.gguf", quant: "F16", size_bytes: 1e8, n_parts: 1 }] };
   const calls = [];
-  const { window } = loadAppWithPages({
-    fetchImpl: makeFetch({ discoverPayload, filesPayload, calls }) });
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload, filesPayload, calls }) });
+  stubStreamJobDone(window);
+  await window.discoverSearch();
+  const row = window.document.querySelector("#disc-results .disc-repo");
+  [...row.querySelectorAll("button")].find((b) => b.textContent === "files").click();
+  await tick();
+  const fileRow = row.querySelector(".disc-file");
+  [...fileRow.querySelectorAll("button")].find((b) => b.textContent === "pull").click();
+  assert.equal(window.document.getElementById("pull-spec").value,
+    "unsloth/bge-small-en-v1.5-GGUF:bge-small-en-v1.5-f16.gguf");
+  window.document.getElementById("pull-start").click();
+  await tick(3);
+  const pull = calls.find((c) => c.url === "/api/models/pull");
+  assert.equal(pull.body.model_type, "embedding",
+    "the per-quant GGUF pull path (not just 'add full repo') also carries the hint");
+});
+
+test("discover-filters: a vision-projector (mmproj) file never inherits a type hint", async () => {
+  const discoverPayload = { query: "", vram: {}, hf_backend_available: true,
+    results: [{ id: "org/vision-model", downloads: 9, likes: 1, updated: "",
+                formats: ["gguf"], detected_type: "llm" }] };
+  const filesPayload = { vram: {},
+    files: [{ file: "model-Q4_K_M.gguf", quant: "Q4_K_M", size_bytes: 1e8, n_parts: 1 }],
+    mmprojs: [{ file: "mmproj-model-f16.gguf", quant: "F16", size_bytes: 5e7, n_parts: 1 }] };
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload, filesPayload, calls }) });
   stubStreamJobDone(window);
   window.localStorage.setItem("localm.showMmprojFiles", "true");
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "vae");
-  await tick();
   await window.discoverSearch();
-
   const row = window.document.querySelector("#disc-results .disc-repo");
-  const filesBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "files");
-  filesBtn.click();
+  [...row.querySelectorAll("button")].find((b) => b.textContent === "files").click();
   await tick();
-
-  const fileRows = [...row.querySelectorAll(".disc-file")];
-  const mmprojRow = fileRows.find((r) => r.querySelector(".fname")?.textContent === "mmproj-model-f16.gguf");
+  const mmprojRow = [...row.querySelectorAll(".disc-file")]
+    .find((r) => r.querySelector(".fname").textContent === "mmproj-model-f16.gguf");
   assert.ok(mmprojRow, "the mmproj file row renders (show-mmproj-files is on)");
-  const pullBtn = [...mmprojRow.querySelectorAll("button")].find((b) => b.textContent === "pull");
-  pullBtn.click();
-
+  [...mmprojRow.querySelectorAll("button")].find((b) => b.textContent === "pull").click();
   window.document.getElementById("pull-start").click();
   await tick(3);
-
-  const pullCall = calls.find((c) => c.url === "/api/models/pull");
-  assert.ok(pullCall, "the pull request was sent");
-  assert.equal(pullCall.body.model_type, undefined,
-    "an mmproj file is never forced to the tab's type - there is no mmproj tab");
-});
-
-// --------------------------------------------------------------------------- //
-//  Stale results don't survive a tab switch (they'd carry the WRONG tab's      //
-//  type hint if pulled after switching).                                       //
-// --------------------------------------------------------------------------- //
-
-test("discover-type-scoped: switching tabs clears stale search results", async () => {
-  const discoverPayload = {
-    query: "", vram: {}, hf_backend_available: true,
-    results: [{ id: "org/found-under-vae", downloads: 1, likes: 0, updated: "",
-                formats: ["hf"], detected_type: "vae" }],
-  };
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload }) });
-  await window.refreshModelsPage();
-  await tick();
-  clickTab(window, "vae");
-  await tick();
-  await window.discoverSearch();
-
-  assert.ok(window.document.querySelector("#disc-results .disc-repo"),
-    "the VAE search result is showing");
-
-  clickTab(window, "lora");
-  await tick();
-
-  assert.equal(window.document.querySelectorAll("#disc-results .disc-repo").length, 0,
-    "switching tabs discards the previous tab's stale, wrongly-hinted results");
+  const pull = calls.find((c) => c.url === "/api/models/pull");
+  assert.equal(pull.body.model_type, undefined,
+    "an mmproj file is never forced to the searched-for type - there is no mmproj tab/checkbox");
 });

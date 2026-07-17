@@ -310,8 +310,8 @@ class TestHfSearchSize:
 class TestClassifyHfMetadata:
     """Fixtures below are REAL repo metadata, captured live from the actual HF
     API during design of this feature - not synthesized. See discover.py's
-    NO_TYPE_FILTER docstring for why vae/text-encoder canonical repos carry
-    none of the signals this function looks for."""
+    _HF_TYPE_FILTER_DEFAULT comment for why vae/text-encoder canonical repos
+    carry none of the signals this function looks for."""
 
     def test_llm(self):
         assert classify_hf_metadata("text-generation", "transformers",
@@ -383,9 +383,24 @@ class TestClassifyHfMetadata:
 #  Type-scoped search (per-tab HF discovery)                           #
 # ------------------------------------------------------------------ #
 
+def _urls_capture(monkeypatch, payload):
+    """Capture every request URL (repeated filter= keys survive, unlike a
+    parse_qsl dict) and return *payload* for each call."""
+    import json as _json
+    urls: list[str] = []
+
+    def fake(url, **kw):
+        urls.append(url)
+        return url, "application/json", _json.dumps(payload).encode("utf-8")
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+    return urls
+
+
 class TestTypeScopedSearch:
-    """One bucket per discover.py dispatch strategy - see hf_search's docstring
-    and the _TYPE_FILTER_HF / _LORA_FILTER / NO_TYPE_FILTER constants."""
+    """Two orthogonal, independently-selectable axes: model TYPE (via
+    model_types) and file FORMAT (gguf / hf==safetensors). Every filter value
+    below is live-verified against the real HF API. See hf_search's docstring
+    and _type_fmt_filter / _HF_TYPE_FILTER."""
 
     def test_embedding_hf_uses_feature_extraction_pipeline_tag(self, monkeypatch):
         seen = {}
@@ -394,22 +409,21 @@ class TestTypeScopedSearch:
              "pipeline_tag": "sentence-similarity", "library_name": "sentence-transformers",
              "tags": ["sentence-transformers", "feature-extraction", "sentence-similarity"]},
         ], seen)
-        results = hf_search("bge", limit=5, formats=["hf"], model_type="embedding")
+        results = hf_search("bge", limit=5, formats=["hf"], model_types=["embedding"])
         assert seen["pipeline_tag"] == "feature-extraction"
         assert "filter" not in seen   # replaces the generic transformers filter entirely
         assert results[0]["detected_type"] == "embedding"
 
     def test_embedding_gguf_stays_plain_gguf_filter(self, monkeypatch):
-        """No verified reliable gguf+embedding combined filter (see the plan's
-        'open item to verify' note) - conservative default: plain gguf filter,
-        still attempts classification for a badge when metadata happens to
-        be present."""
+        """No reliable gguf+embedding combined filter exists - conservative
+        default: plain gguf format filter, query text does the narrowing, still
+        classified for a badge when metadata is present."""
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "unsloth/bge-small-en-v1.5-GGUF", "downloads": 9,
              "pipeline_tag": "sentence-similarity", "tags": ["gguf", "feature-extraction"]},
         ], seen)
-        results = hf_search("bge", limit=5, formats=["gguf"], model_type="embedding")
+        results = hf_search("bge", limit=5, formats=["gguf"], model_types=["embedding"])
         assert seen["filter"] == "gguf"
         assert results[0]["detected_type"] == "embedding"
 
@@ -420,111 +434,181 @@ class TestTypeScopedSearch:
              "pipeline_tag": "text-to-image", "library_name": "diffusers",
              "tags": ["diffusers", "safetensors", "text-to-image", "flux"]},
         ], seen)
-        results = hf_search("flux", limit=5, formats=["hf"], model_type="diffusion-unet")
+        results = hf_search("flux", limit=5, formats=["hf"], model_types=["diffusion-unet"])
         assert seen["pipeline_tag"] == "text-to-image"
         assert "filter" not in seen
         assert results[0]["detected_type"] == "diffusion-unet"
 
     def test_diffusion_gguf_adds_diffusers_filter_alongside_gguf(self, monkeypatch):
-        """Repeated filter= keys (doseq-encoded AND) - live-verified against the
-        real HF API that filter=diffusers&filter=gguf returns real GGUF-format
-        diffusion repos. Asserted via the raw URL (parse_qsl collapses repeated
-        keys to the last one, same reason test_hf_results_carry_size_and_
-        request_expand asserts on seen_urls rather than a parsed dict)."""
-        import json as _json
-        seen_urls = []
-
-        def fake(url, **kw):
-            seen_urls.append(url)
-            payload = [{"id": "wikeeyang/Krea2-Turbo-HD-V1", "downloads": 35,
-                        "pipeline_tag": "text-to-image", "tags": ["diffusers", "gguf"]}]
-            return url, "application/json", _json.dumps(payload).encode("utf-8")
-
-        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
-        results = hf_search("flux", limit=5, formats=["gguf"], model_type="diffusion-unet")
-        assert "filter=gguf" in seen_urls[0]
-        assert "filter=diffusers" in seen_urls[0]
+        """Repeated filter= keys (doseq-encoded AND) - live-verified that
+        filter=diffusers&filter=gguf returns real GGUF diffusion repos. Asserted
+        via the raw URL (parse_qsl collapses repeated keys to the last one)."""
+        urls = _urls_capture(monkeypatch, [
+            {"id": "wikeeyang/Krea2-Turbo-HD-V1", "downloads": 35,
+             "pipeline_tag": "text-to-image", "tags": ["diffusers", "gguf"]}])
+        results = hf_search("flux", limit=5, formats=["gguf"], model_types=["diffusion-unet"])
+        assert "filter=gguf" in urls[0]
+        assert "filter=diffusers" in urls[0]
         assert results[0]["detected_type"] == "diffusion-unet"
 
-    def test_lora_single_query_ignores_format_toggle(self, monkeypatch):
-        import json as _json
-        import urllib.parse
+    def test_lora_hf_uses_peft_filter(self, monkeypatch):
         seen = {}
-        calls = []
-
-        def fake(url, **kw):
-            calls.append(url)
-            seen.update(dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query)))
-            payload = [{"id": "XLabs-AI/flux-RealismLora", "downloads": 12,
-                        "pipeline_tag": "text-to-image", "library_name": "diffusers",
-                        "tags": ["diffusers", "lora", "text-to-image"]}]
-            return url, "application/json", _json.dumps(payload).encode("utf-8")
-
-        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
-        results = hf_search("flux realism", limit=5, formats=["gguf"], model_type="lora")
-        assert len(calls) == 1        # one query, not split per the (irrelevant) formats
+        _mock_fetch(monkeypatch, [
+            {"id": "XLabs-AI/flux-RealismLora", "downloads": 12,
+             "pipeline_tag": "text-to-image", "library_name": "diffusers",
+             "tags": ["diffusers", "lora", "text-to-image"]},
+        ], seen)
+        results = hf_search("flux realism", limit=5, formats=["hf"], model_types=["lora"])
         assert seen["filter"] == "peft"
         assert results[0]["detected_type"] == "lora"   # tag wins over pipeline_tag
 
-    def test_vae_search_has_no_filter_param(self, monkeypatch):
-        """THE crux test. stabilityai/sd-vae-ft-mse carries no classifying
-        metadata at all - a hard filter would exclude it. Must come back
-        honestly 'unknown', never excluded and never a wrong guess."""
+    def test_lora_gguf_uses_gguf_format_filter(self, monkeypatch):
+        """LoRA now honors the format axis (it no longer ignores it): the gguf
+        side is the plain gguf format filter (no reliable gguf-LoRA narrowing;
+        query text + the badge do the rest)."""
+        seen = {}
+        _mock_fetch(monkeypatch, [{"id": "some/gguf-lora", "downloads": 3,
+                                   "tags": ["gguf", "lora"]}], seen)
+        hf_search("lora", limit=5, formats=["gguf"], model_types=["lora"])
+        assert seen["filter"] == "gguf"
+
+    def test_vae_hf_uses_safetensors_format_filter(self, monkeypatch):
+        """THE crux, revised: HF has no reliable VAE *type* filter (sd-vae-ft-mse
+        carries no vae tag), but the *format* axis IS reliable - filter=safetensors
+        returns exactly the canonical diffusers VAEs (live-verified). So the vae
+        tab's hf side narrows by format, and the badge stays honestly 'unknown'."""
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "stabilityai/sd-vae-ft-mse", "downloads": 900, "library_name": "diffusers",
              "tags": ["diffusers", "safetensors", "stable-diffusion", "stable-diffusion-diffusers"]},
         ], seen)
-        results = hf_search("vae", limit=5, model_type="vae")
-        assert "filter" not in seen
+        results = hf_search("vae", limit=5, formats=["hf"], model_types=["vae"])
+        assert seen["filter"] == "safetensors"
         assert results[0]["id"] == "stabilityai/sd-vae-ft-mse"
-        assert results[0]["detected_type"] == "unknown"
+        assert results[0]["detected_type"] == "unknown"   # never a wrong guess
 
-    def test_text_encoder_search_has_no_filter_param(self, monkeypatch):
+    def test_vae_gguf_uses_gguf_format_filter(self, monkeypatch):
+        seen = {}
+        _mock_fetch(monkeypatch, [{"id": "calcuis/pig-vae", "downloads": 5,
+                                   "tags": ["gguf"]}], seen)
+        hf_search("vae", limit=5, formats=["gguf"], model_types=["vae"])
+        assert seen["filter"] == "gguf"
+
+    def test_text_encoder_hf_uses_safetensors_format_filter(self, monkeypatch):
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "comfyanonymous/flux_text_encoders", "downloads": 400,
              "tags": ["license:apache-2.0", "region:us"]},
         ], seen)
-        results = hf_search("text encoder", limit=5, model_type="text-encoder")
-        assert "filter" not in seen
+        results = hf_search("text encoder", limit=5, formats=["hf"], model_types=["text-encoder"])
+        assert seen["filter"] == "safetensors"
         assert results[0]["id"] == "comfyanonymous/flux_text_encoders"
         assert results[0]["detected_type"] == "unknown"
 
-    def test_unknown_tab_search_has_no_filter_param(self, monkeypatch):
+    def test_unknown_hf_uses_safetensors_format_filter(self, monkeypatch):
         seen = {}
-        _mock_fetch(monkeypatch, [{"id": "madebyollin/taesd", "downloads": 50}], seen)
-        hf_search("taesd", limit=5, model_type="unknown")
-        assert "filter" not in seen
+        _mock_fetch(monkeypatch, [{"id": "madebyollin/taesd", "downloads": 50,
+                                   "tags": ["diffusers", "safetensors"]}], seen)
+        hf_search("taesd", limit=5, formats=["hf"], model_types=["unknown"])
+        assert seen["filter"] == "safetensors"
 
-    def test_default_model_type_none_has_no_detected_type_key(self, monkeypatch):
-        """Back-compat guard: today's ONLY real external contract - the CLI's
-        `localm search` and the MCP search_models tool, neither of which ever
-        passes model_type. Must be byte-for-byte what shipped before type-
-        scoped search existed."""
-        seen = {}
-        _mock_fetch(monkeypatch, [{"id": "org/g", "downloads": 1}], seen)
-        results = hf_search("x", formats=["gguf"])   # model_type defaults to None
-        assert "detected_type" not in results[0]
-        assert "pipeline_tag" not in seen and "expand[]" not in seen
-
-    def test_llm_tab_gets_classified_deliberately(self, monkeypatch):
-        """Unlike model_type=None, an explicit model_type="llm" (the GUI's LLM
-        tab, which - unlike CLI/MCP - now always sends a type) DOES request
-        classification, so the LLM tab's results get a colored type-badge too,
-        consistent with every other tab. Locked in explicitly so this reads as
-        intentional, not a future 'regression'."""
+    def test_llm_hf_keeps_transformers_filter(self, monkeypatch):
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "meta-llama/Llama-3.2-1B-Instruct", "downloads": 1,
              "pipeline_tag": "text-generation", "library_name": "transformers",
              "tags": ["transformers", "text-generation"]},
         ], seen)
-        results = hf_search("llama", formats=["hf"], model_type="llm")
-        assert seen["filter"] == "transformers"     # unchanged query shape
+        results = hf_search("llama", formats=["hf"], model_types=["llm"])
+        assert seen["filter"] == "transformers"
         assert results[0]["detected_type"] == "llm"
 
-    def test_unknown_model_type_raises(self, monkeypatch):
+    def test_singular_model_type_is_alias_for_one_element_list(self, monkeypatch):
+        """Back-compat: the route/tests still pass model_type= (singular). It is
+        exactly model_types=[that]."""
+        seen = {}
+        _mock_fetch(monkeypatch, [
+            {"id": "BAAI/bge-m3", "downloads": 1,
+             "pipeline_tag": "feature-extraction", "tags": ["sentence-transformers"]}], seen)
+        results = hf_search("bge", formats=["hf"], model_type="embedding")
+        assert seen["pipeline_tag"] == "feature-extraction"
+        assert results[0]["detected_type"] == "embedding"
+
+    def test_default_no_type_has_no_detected_type_key(self, monkeypatch):
+        """Back-compat guard: today's ONLY real external contract - the CLI's
+        `localm search` and the MCP search_models tool, neither of which passes
+        a type. Must be byte-for-byte what shipped before type-scoped search:
+        the hf side is filter=transformers, no classify, no detected_type."""
+        seen = {}
+        _mock_fetch(monkeypatch, [{"id": "org/g", "downloads": 1}], seen)
+        results = hf_search("x", formats=["gguf"])   # no model_type/model_types
+        assert "detected_type" not in results[0]
+        assert "pipeline_tag" not in seen and "expand[]" not in seen
+        assert seen["filter"] == "gguf"
+
+    def test_default_no_type_hf_side_stays_transformers(self, monkeypatch):
+        """The legacy (CLI/MCP) hf side must remain filter=transformers, NOT the
+        new filter=safetensors - the byte-compat contract is unchanged."""
+        seen = {}
+        _mock_fetch(monkeypatch, [{"id": "org/hf", "downloads": 1}], seen)
+        hf_search("x", formats=["hf"])
+        assert seen["filter"] == "transformers"
+
+    def test_all_types_selected_collapses_to_broad_format_filters(self, monkeypatch):
+        """Selecting every type is 'search everything', not a 7*fmt fan-out: the
+        widest reliable format filter (gguf / safetensors), classified. Two
+        queries, not fourteen - and safetensors (not transformers) so diffusion/
+        vae/encoders are NOT excluded from the non-gguf side."""
+        urls = _urls_capture(monkeypatch, [{"id": "org/x", "downloads": 1, "tags": ["gguf"]}])
+        all_types = ["llm", "embedding", "diffusion-unet", "text-encoder",
+                     "vae", "lora", "unknown"]
+        hf_search("x", limit=5, formats=["gguf", "hf"], model_types=all_types)
+        assert len(urls) == 2                         # one per format, not 14
+        joined = " ".join(urls)
+        assert "filter=gguf" in joined
+        assert "filter=safetensors" in joined
+        assert "filter=transformers" not in joined    # broad hf side is safetensors
+
+    def test_multi_type_dedupes_identical_resolved_queries(self, monkeypatch):
+        """vae + text-encoder both resolve to filter=safetensors on the hf side -
+        that query fires ONCE, not twice (a result's badge comes from its own
+        metadata, so the query's type is irrelevant to correctness)."""
+        urls = _urls_capture(monkeypatch, [{"id": "org/x", "downloads": 1,
+                                            "tags": ["safetensors"]}])
+        hf_search("x", limit=5, formats=["hf"], model_types=["vae", "text-encoder"])
+        assert len(urls) == 1
+        assert "filter=safetensors" in urls[0]
+
+    def test_multi_type_merges_and_dedupes_by_repo_id(self, monkeypatch):
+        """llm + embedding run distinct queries; a repo surfacing in both appears
+        once, interleaved, badged from its own metadata."""
+        import json as _json
+        import urllib.parse
+
+        def fake(url, **kw):
+            q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+            if q.get("filter") == "transformers":
+                payload = [{"id": "shared/repo", "downloads": 9,
+                            "pipeline_tag": "text-generation", "tags": ["transformers"]},
+                           {"id": "llm/only", "downloads": 8, "tags": ["transformers"]}]
+            else:   # embedding -> feature-extraction
+                payload = [{"id": "shared/repo", "downloads": 9,
+                            "pipeline_tag": "feature-extraction", "tags": ["sentence-transformers"]},
+                           {"id": "emb/only", "downloads": 7, "tags": ["sentence-transformers"]}]
+            return url, "application/json", _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        results = hf_search("x", limit=10, formats=["hf"], model_types=["llm", "embedding"])
+        ids = [r["id"] for r in results]
+        assert ids.count("shared/repo") == 1          # de-duped across the two queries
+        assert {"shared/repo", "llm/only", "emb/only"} == set(ids)
+
+    def test_empty_valid_types_raises(self, monkeypatch):
+        _mock_fetch(monkeypatch, [])
+        with pytest.raises(DiscoverError, match="model type"):
+            hf_search("x", model_types=["bogus", "also-bad"])
+
+    def test_unknown_singular_model_type_raises(self, monkeypatch):
         _mock_fetch(monkeypatch, [])
         with pytest.raises(DiscoverError, match="model type"):
             hf_search("x", model_type="bogus")

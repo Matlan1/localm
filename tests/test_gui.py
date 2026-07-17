@@ -1040,11 +1040,10 @@ class TestModelEndpoints:
     @pytest.mark.parametrize("model_type", [
         "llm", "embedding", "diffusion-unet", "text-encoder", "vae", "lora"])
     def test_pull_model_type_forwarded_to_cli(self, gui_app, monkeypatch, model_type):
-        """A discovery result found under a type-scoped tab (models.js's
-        pendingPullTypeHint) reaches the CLI as --type, bypassing pull-time HF
-        guessing entirely - the fix for HF's own metadata being proven
-        unreliable for vae/text-encoder specifically (see discover.py's
-        NO_TYPE_FILTER)."""
+        """A discovery result chosen from the search (models.js's
+        pendingPullTypeHint - the detected type, or the single Type checkbox the
+        user narrowed to) reaches the CLI as --type, bypassing pull-time HF
+        guessing (unreliable for a standalone vae/text-encoder)."""
         app, _ = gui_app
         captured = self._capture_pull_args(monkeypatch)
         with TestClient(app) as client:
@@ -1960,7 +1959,7 @@ class TestDiscoverEndpoints:
         app, _ = gui_app
         monkeypatch.setattr(
             "localm.discover.hf_search",
-            lambda q, limit=20, formats=("gguf",), model_type=None: [
+            lambda q, limit=20, formats=("gguf",), model_types=None: [
                 {"id": "org/m", "downloads": 1, "likes": 0, "updated": "",
                  "formats": ["gguf"]}])
         monkeypatch.setattr("localm.discover.vram_info",
@@ -2013,7 +2012,7 @@ class TestDiscoverEndpoints:
         from localm.discover import DiscoverError
         app, _ = gui_app
 
-        def blocked(q, limit=20, formats=("gguf",), model_type=None):
+        def blocked(q, limit=20, formats=("gguf",), model_types=None):
             raise DiscoverError("Network access is disabled (net_mode=off).")
         monkeypatch.setattr("localm.discover.hf_search", blocked)
         with TestClient(app) as client:

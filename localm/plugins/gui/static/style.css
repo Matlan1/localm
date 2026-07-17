@@ -1871,8 +1871,63 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .disc-file .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .disc-file .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
 .disc-file .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
-/* search model-type toggles (GGUF / HF) */
-.disc-formats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0 2px; }
+/* search filters: explicit model-TYPE + FORMAT (GGUF / Safetensors) toggle
+   chips. Always visible, independent of the Registered-models tabs, so what the
+   search covers is never inferred silently from the active tab. Each type chip,
+   when active, wears its type's hue - the SAME palette as the result .type-badge
+   pills - so the filter and the results read as one color language. */
+.disc-filter-bar {
+  display: flex; flex-direction: column; gap: 8px;
+  margin: 10px 0 4px; padding: 10px 12px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px;
+}
+.disc-formats, .disc-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.disc-filter-label {
+  min-width: 58px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+/* A chip: the native checkbox is kept in the DOM (so the label click toggles it
+   and it stays keyboard-focusable) but visually hidden; the <span> IS the pill.
+   The active state is driven by an `.on` class that models.js keeps in sync with
+   each checkbox (_syncChip), NOT by a CSS :checked/:has selector - some engines
+   we ship to do not recalc a :checked-combinator style on a programmatic toggle,
+   which would leave a chip stuck in its coloured state. The JS class is
+   engine-independent. */
+.disc-chip { display: inline-flex; align-items: center; cursor: pointer; user-select: none; }
+.disc-chip input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.disc-chip span {
+  font-size: 12px; font-weight: 500; padding: 3px 11px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-dim); background: transparent;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.disc-chip:hover span { border-color: var(--text-dim); color: var(--text); }
+.disc-chip input:focus-visible + span { box-shadow: 0 0 0 2px var(--accent-soft); }
+/* Checked base (format chips and the type fallback). */
+.disc-chip.on span {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+/* Per-type checked hue - mirrors .type-badge.type-<type> exactly. */
+.disc-chip[data-type="llm"].on span { color: var(--cat-blue); border-color: var(--cat-blue);
+  background: color-mix(in srgb, var(--cat-blue) 15%, transparent); }
+.disc-chip[data-type="embedding"].on span { color: var(--cat-teal); border-color: var(--cat-teal);
+  background: color-mix(in srgb, var(--cat-teal) 15%, transparent); }
+.disc-chip[data-type="diffusion-unet"].on span { color: var(--cat-violet); border-color: var(--cat-violet);
+  background: color-mix(in srgb, var(--cat-violet) 15%, transparent); }
+.disc-chip[data-type="text-encoder"].on span { color: var(--cat-amber); border-color: var(--cat-amber);
+  background: color-mix(in srgb, var(--cat-amber) 15%, transparent); }
+.disc-chip[data-type="vae"].on span { color: var(--cat-green); border-color: var(--cat-green);
+  background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
+.disc-chip[data-type="lora"].on span { color: var(--cat-cyan); border-color: var(--cat-cyan);
+  background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
+.disc-chip[data-type="unknown"].on span { color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent); }
+/* Format chips mirror the per-result .fmt-badge colors (gguf green, hf accent). */
+.disc-chip[data-fmt="gguf"].on span { color: var(--green); border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent); }
+.disc-chip[data-fmt="hf"].on span { color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent); }
+/* legacy alias: older markup used .disc-fmt-toggle for the same toggles. */
 .disc-fmt-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; }
 .disc-fmt-toggle input { cursor: pointer; }
 /* per-result format badge */

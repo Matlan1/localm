@@ -37,37 +37,38 @@ _TIMEOUT = 20
 # response may omit.
 _FORMAT_FILTER = {"gguf": "gguf", "hf": "transformers"}
 
-# Type-scoped search, one bucket per localm.model_manager.registry.MODEL_TYPES
-# entry that has a "Find models" tab. LIVE-VERIFIED against the real HF API
-# (not assumed): HF's /api/models list endpoint accepts expand[]=pipeline_tag,
-# library_name,tags directly (no per-repo fetch needed to classify a result),
-# and both `pipeline_tag=` and repeated `filter=` (ANDed) work as query params.
+# Type-scoped search narrows on TWO orthogonal, independently-selectable axes -
+# model TYPE (llm/embedding/diffusion/lora/vae/text-encoder/unknown) and file
+# FORMAT (gguf vs safetensors). Both are surfaced as explicit checkboxes in the
+# GUI (a type is never inferred silently from the active tab). Every filter value
+# below is LIVE-VERIFIED against the real HF /api/models API (not assumed): the
+# list endpoint accepts expand[]=pipeline_tag,library_name,tags directly (no
+# per-repo fetch to classify a result), and both `pipeline_tag=` and repeated
+# `filter=` (ANDed) work as query params.
 #
-# Bucket A - reliable server-side narrowing: swap the generic hf-format filter
-# for a type-specific pipeline_tag, and/or AND an extra library filter onto the
-# gguf-format query.
-_TYPE_FILTER_HF = {
+# The "hf" (non-gguf / safetensors) side of the format axis narrows PER TYPE
+# where HF exposes a reliable signal:
+_HF_TYPE_FILTER = {
+    "llm": {"filter": "transformers"},
     "embedding": {"pipeline_tag": "feature-extraction"},
     "diffusion-unet": {"pipeline_tag": "text-to-image"},
+    "lora": {"filter": "peft"},
 }
-_TYPE_FILTER_GGUF_EXTRA = {
-    "diffusion-unet": "diffusers",
-}
-# Bucket B - one reliable filter, no gguf/hf format split (no verified
-# GGUF-LoRA corpus to split against).
-_LORA_FILTER = "peft"
-# Bucket C - NO reliable HF-side filter exists for these types. Verified live:
-# the single most-used real-world repo for each carries no classifying metadata
-# at all - stabilityai/sd-vae-ft-mse (the canonical SD VAE) has no "vae" tag and
-# no pipeline_tag; comfyanonymous/flux_text_encoders (the standard FLUX text
-# encoder repo) has no tags beyond a license marker, not even a library_name.
-# A hard filter here would systematically exclude exactly the repos users
-# search for, so these run a plain full-text query with NO filter= param at
-# all; any classification found is attached for DISPLAY ONLY, never used to
-# exclude a result.
-NO_TYPE_FILTER = frozenset({"vae", "text-encoder", "unknown"})
+# vae / text-encoder / unknown carry NO reliable type signal on HF - the single
+# most-used real-world repo for each has none at all (stabilityai/sd-vae-ft-mse
+# has no "vae" tag or pipeline_tag; comfyanonymous/flux_text_encoders has no tag
+# beyond a license marker). A hard TYPE filter would systematically exclude
+# exactly the repos users search for. But the FORMAT axis is still reliable for
+# them: filter=safetensors returns the canonical diffusers VAEs/encoders, and
+# filter=gguf the GGUF ones (both verified live). So these types narrow by format
+# only; their type comes from the result badge (classify_hf_metadata) and, at
+# pull time, from the checkbox the user searched under.
+_HF_TYPE_FILTER_DEFAULT = {"filter": "safetensors"}
 _ALL_SEARCHABLE_TYPES = frozenset(
-    {"llm", "embedding", "diffusion-unet", "lora"} | NO_TYPE_FILTER)
+    {"llm", "embedding", "diffusion-unet", "lora", "vae", "text-encoder", "unknown"})
+# Sentinel model_type for the "all types selected" broad search: the widest
+# reliable format filter (gguf / safetensors), badged, so nothing is excluded.
+_ANY_TYPE = "__any__"
 
 # Single-sourced from localm.vram, the same overhead (KV cache + compute buffers)
 # and weight safety factor GgufBackend._check_vram / sysstats.estimate_vram use,
@@ -243,29 +244,41 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
     return out
 
 
-def _search_one(fmt: str, query: str, limit: int,
-                 model_type: Optional[str] = None) -> list[dict]:
-    """One HF /api/models query for a single format, each item tagged with it.
+def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
+    """HF query narrowing (a params fragment: ``filter=`` and/or
+    ``pipeline_tag=``) for one (model_type, format) pair.
 
-    When *model_type* narrows to a bucket-A type (embedding, diffusion-unet),
-    the generic library filter is swapped/extended for a more precise HF-side
-    query, and the classify expand fields are requested so each row carries a
-    ``detected_type`` badge. *model_type* being anything other than None also
-    turns classification on generically (e.g. the "llm" tab), even without a
-    dedicated filter entry, so every type-scoped tab gets a badge attempt."""
-    classify = model_type is not None
+    ``model_type is None`` is the LEGACY path (CLI ``localm search`` / MCP
+    ``search_models``): the plain per-format library tag, byte-for-byte what
+    shipped before type-scoped search - gguf -> "gguf", hf -> "transformers".
+
+    Otherwise the gguf side is the reliable, type-independent "gguf" Hub tag
+    (diffusion additionally ANDs "diffusers" so a gguf search isn't drowned by
+    unrelated gguf repos), and the hf (safetensors) side narrows per type where
+    HF exposes a reliable signal, else the plain "safetensors" format tag."""
+    if model_type is None:
+        return {"filter": _FORMAT_FILTER[fmt]}
+    if fmt == "gguf":
+        if model_type == "diffusion-unet":
+            return {"filter": ["gguf", "diffusers"]}
+        return {"filter": "gguf"}
+    if model_type == _ANY_TYPE:
+        return {"filter": "safetensors"}
+    return _HF_TYPE_FILTER.get(model_type, _HF_TYPE_FILTER_DEFAULT)
+
+
+def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
+                classify: bool) -> list[dict]:
+    """One HF /api/models query for a single (format, type), rows tagged *fmt*.
+
+    ``classify`` requests the pipeline_tag/library_name/tags expand fields and
+    attaches a ``detected_type`` badge to each row (display only, never used to
+    exclude a result). Off for the legacy CLI/MCP path so its response shape is
+    unchanged."""
     params: dict = {"sort": "downloads", "direction": "-1", "limit": str(limit)}
     if query.strip():
         params["search"] = query.strip()
-    if fmt == "hf" and model_type in _TYPE_FILTER_HF:
-        # Replaces the generic "transformers" library filter entirely - a
-        # pipeline_tag query alone is reliable and verified live, no filter=
-        # needed alongside it.
-        params.update(_TYPE_FILTER_HF[model_type])
-    elif fmt == "gguf" and model_type in _TYPE_FILTER_GGUF_EXTRA:
-        params["filter"] = [_FORMAT_FILTER["gguf"], _TYPE_FILTER_GGUF_EXTRA[model_type]]
-    else:
-        params["filter"] = _FORMAT_FILTER[fmt]
+    params.update(_type_fmt_filter(model_type, fmt))
     expand: list[str] = []
     if fmt == "hf":
         # Expand the safetensors param metadata so each result carries a param
@@ -281,84 +294,115 @@ def _search_one(fmt: str, query: str, limit: int,
     return _rows_from_items(data, limit, fmt=fmt, classify=classify)
 
 
-def _search_single_query(query: str, limit: int, *,
-                          filter_: Optional[str]) -> list[dict]:
-    """One HF /api/models query with NO gguf/hf format split - used for search
-    buckets that don't distinguish format: lora (one reliable filter) and
-    vae/text-encoder/unknown (no reliable filter at all, see NO_TYPE_FILTER's
-    docstring - a bare full-text query is the only honest option)."""
-    params: dict = {
-        "sort": "downloads", "direction": "-1", "limit": str(limit),
-        "expand[]": ["safetensors", "downloads", "likes", "lastModified",
-                      "pipeline_tag", "library_name", "tags"],
-    }
-    if query.strip():
-        params["search"] = query.strip()
-    if filter_ is not None:
-        params["filter"] = filter_
-    data = _get(f"{HF_API}/api/models", params)
-    return _rows_from_items(data, limit, fmt=None, classify=True)
+def _spec_key(model_type: Optional[str], fmt: str):
+    """Hashable identity of the HF request a (type, fmt) pair resolves to, so
+    two selected types that produce the SAME query (e.g. vae + text-encoder both
+    -> filter=safetensors on the hf side) fire ONE call, not two. Safe because a
+    result's badge comes from its own metadata, not the query's type."""
+    frag = _type_fmt_filter(model_type, fmt)
+    return (fmt, tuple(sorted(
+        (k, tuple(v) if isinstance(v, list) else v) for k, v in frag.items())))
 
 
 def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf",),
-              model_type: Optional[str] = None) -> list[dict]:
+              model_type: Optional[str] = None,
+              model_types: Optional[Sequence[str]] = None) -> list[dict]:
     """Search HF for model repos. Empty query = most downloaded.
 
-    *formats* (a subset of {"gguf", "hf"}) picks the search strategy when
-    *model_type* is None, "llm", "embedding", or "diffusion-unet" - one HF query
-    per requested format, merged de-duped by repo id and round-robin
-    interleaved so neither format crowds the other out of *limit*. For "lora"
-    and the no-reliable-filter types ("vae", "text-encoder", "unknown"),
-    *formats* is ignored entirely - see NO_TYPE_FILTER's docstring for why a
-    single full-text query is used instead of a format split there.
+    Two independent axes, both from explicit GUI controls:
+
+    - *formats*: a subset of {"gguf", "hf"} ("hf" == the non-gguf / safetensors
+      world). One HF query runs per requested format.
+    - *model_types*: which registry types to search for (a subset of
+      _ALL_SEARCHABLE_TYPES). Each is narrowed server-side where HF exposes a
+      reliable signal, and every result is badged with its detected type. When
+      ALL searchable types are selected it collapses to the widest reliable
+      format filter (2 queries), not a fan-out. *model_type* (singular) is the
+      back-compat alias for a single-element *model_types*.
+
+    Results across every (type, format) query are merged de-duped by repo id and
+    round-robin interleaved so no single query crowds the others out of *limit*.
 
     Returns [{id, downloads, likes, updated, formats, size_bytes?, detected_type?}].
-    ``detected_type`` is present only when *model_type* was given (display only,
-    never used to exclude a result). Defaults to gguf-only, model_type=None so
-    the CLI ``localm search`` and the MCP ``search_models`` tool are byte-for-
-    byte unchanged; the GUI passes both explicitly from its toggles/tabs."""
+    ``detected_type`` is present only when a type was requested (display only,
+    never used to exclude). With NEITHER *model_types* nor *model_type* (the CLI
+    ``localm search`` / MCP ``search_models`` default) the query shape and
+    response are byte-for-byte what shipped before type-scoped search existed."""
     _ensure_online()
     limit = max(1, min(int(limit), 50))
-    if model_type is not None and model_type not in _ALL_SEARCHABLE_TYPES:
-        raise DiscoverError(f"Unknown model type for search: {model_type}")
-    if model_type == "lora":
-        return _search_single_query(query, limit, filter_=_LORA_FILTER)
-    if model_type in NO_TYPE_FILTER:
-        return _search_single_query(query, limit, filter_=None)
-    wanted = [f for f in formats if f in _FORMAT_FILTER]
-    if not wanted:
+
+    # Resolve the requested type set. model_types (GUI) wins; else the singular
+    # model_type (back-compat); else None = legacy broad search (no type scoping,
+    # no classify) so the CLI/MCP path is untouched.
+    if model_types is not None:
+        types: Optional[list[str]] = [t for t in model_types if t in _ALL_SEARCHABLE_TYPES]
+        if not types:
+            raise DiscoverError("No valid model type requested for search.")
+    elif model_type is not None:
+        if model_type not in _ALL_SEARCHABLE_TYPES:
+            raise DiscoverError(f"Unknown model type for search: {model_type}")
+        types = [model_type]
+    else:
+        types = None
+
+    fmts = [f for f in formats if f in _FORMAT_FILTER]
+    if not fmts:
         raise DiscoverError(
             "No valid model format requested (choose gguf and/or hf).")
-    # One list per format (each already download-sorted by the API), de-duped by
-    # repo id: a repo that surfaces under both formats stays in the FIRST list it
-    # appeared in and its tags are unioned there.
+
+    classify = types is not None
+    if types is None:
+        query_types: list[Optional[str]] = [None]
+    elif set(types) == _ALL_SEARCHABLE_TYPES:
+        # Everything selected: the widest reliable format filter, not N*fmts
+        # near-duplicate calls. Still classified, so results are badged.
+        query_types = [_ANY_TYPE]
+    else:
+        query_types = list(types)
+
+    # Build the (type, fmt) query list, collapsing pairs that resolve to the
+    # SAME HF request so a multi-type selection never fires duplicate calls.
+    seen_specs: set = set()
+    query_specs: list[tuple] = []
+    for mt in query_types:
+        for fmt in fmts:
+            key = _spec_key(mt, fmt)
+            if key in seen_specs:
+                continue
+            seen_specs.add(key)
+            query_specs.append((mt, fmt))
+
+    # One list per query (each already download-sorted by the API), de-duped by
+    # repo id: a repo surfacing under several queries stays in the FIRST it
+    # appeared in and unions its formats there.
     seen: dict[str, dict] = {}
-    per_format: list[list[dict]] = []
-    for fmt in wanted:
+    per_query: list[list[dict]] = []
+    for mt, fmt in query_specs:
         lst: list[dict] = []
-        for item in _search_one(fmt, query, limit, model_type):
+        for item in _run_query(query, limit, fmt, mt, classify):
             existing = seen.get(item["id"])
             if existing:
                 for f in item["formats"]:
                     if f not in existing["formats"]:
                         existing["formats"].append(f)
-                # A repo in both formats enters via the FIRST (gguf) list, which
-                # carried no size; keep its HF size estimate if the hf pass has one.
+                # A repo entering via a gguf query carried no size; keep the hf
+                # query's size estimate if that pass has one.
                 if existing.get("size_bytes") is None and item.get("size_bytes") is not None:
                     existing["size_bytes"] = item["size_bytes"]
             else:
                 seen[item["id"]] = item
                 lst.append(item)
-        per_format.append(lst)
-    # Round-robin interleave by per-format rank, then trim to `limit`. A plain
-    # merge-then-sort-by-downloads would let the higher-download format (HF repos
-    # routinely dwarf GGUF repacks) crowd the other out of the top `limit`
+        per_query.append(lst)
+
+    # Round-robin interleave by per-query rank, then trim to `limit`. A plain
+    # merge-then-sort-by-downloads would let the highest-download query (HF repos
+    # routinely dwarf GGUF repacks) crowd the others out of the top `limit`
     # entirely, so a "show GGUF" toggle could return zero GGUF. Interleaving keeps
-    # every enabled format visible while still leading each with its most popular.
+    # every enabled query visible while still leading each with its most popular.
     out: list[dict] = []
     rank = 0
-    while len(out) < limit and any(rank < len(lst) for lst in per_format):
-        for lst in per_format:
+    while len(out) < limit and any(rank < len(lst) for lst in per_query):
+        for lst in per_query:
             if rank < len(lst):
                 out.append(lst[rank])
                 if len(out) >= limit:

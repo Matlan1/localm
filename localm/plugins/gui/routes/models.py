@@ -549,21 +549,20 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf",
-                               type: str = "all"):
-        # `formats` is a CSV of {gguf, hf} from the search-page toggles. Empty
-        # tokens are dropped; hf_search raises DiscoverError if none stay valid.
-        # hf_backend_available lets the GUI warn (not block) that a transformers
+                               types: str = ""):
+        # `formats` is a CSV of {gguf, hf} and `types` a CSV of MODEL_TYPES, both
+        # from the search-page checkboxes. Empty tokens are dropped; hf_search
+        # raises DiscoverError if none stay valid. An empty/absent `types` means
+        # the legacy untyped search (model_types=None) - byte-for-byte today's
+        # request shape, so a caller that predates `types` is unaffected.
+        # hf_backend_available lets the GUI warn (not block) that a safetensors
         # model needs the .[gpu] extra to RUN, though it can still be downloaded.
-        # `type` is the "Find models" tab (a MODEL_TYPES value, or "all"/""). "all"
-        # (the default, and the value with no reliable per-type search strategy)
-        # maps to model_type=None - byte-for-byte today's request shape, so a
-        # caller that predates the `type` param (or explicitly picks "all") is
-        # unaffected. hf_search itself rejects any other unrecognized value.
         from localm.discover import fit_label, hf_backend_available, hf_search
         wanted = [f.strip() for f in formats.split(",") if f.strip()]
-        model_type = None if type.strip().lower() in ("", "all") else type.strip().lower()
+        wanted_types = [t.strip().lower() for t in types.split(",") if t.strip()]
+        model_types = wanted_types or None
         results = await _run_discover(
-            lambda: hf_search(q, limit=limit, formats=wanted, model_type=model_type))
+            lambda: hf_search(q, limit=limit, formats=wanted, model_types=model_types))
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata). GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown;
