@@ -448,6 +448,87 @@ def test_real_changelog_is_append_only_against_head():
     assert ch._changelog_append_only() == []
 
 
+# ---- the pending (cut but UNRELEASED) section is a draft, not history --------
+# "## [x.y.z]" alone does not mean x.y.z shipped: the release ritual bumps VERSION and
+# cuts the section BEFORE the tag exists. Freezing that draft protects nothing (nobody
+# can have downloaded a release that does not exist) and blocks the legitimate final
+# cut - re-dating the section on the day it really ships, or folding newer [Unreleased]
+# work into a prep that was never published. These pin BOTH directions: the pending
+# section is editable, and everything else stays frozen even when tags are absent.
+
+def _init_versioned_repo(tmp_path, version, changelog=_BASE_CHANGELOG):
+    """A throwaway repo with a committed CHANGELOG and a VERSION file naming *version*."""
+    _init_changelog_repo(tmp_path, changelog)
+    (tmp_path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+
+
+def _tag(tmp_path, name):
+    import os
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    subprocess.run(["git", "tag", name], cwd=tmp_path, check=True, env=env)
+
+
+def test_pending_unreleased_section_may_be_recut(tmp_path, monkeypatch):
+    """VERSION names 0.1.0 and no v0.1.0 tag exists -> that section is the pending
+    release, still a draft: re-dating it and rewriting its entries is allowed."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_versioned_repo(tmp_path, "0.1.0")
+    assert ch._pending_release_version() == "0.1.0"
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _BASE_CHANGELOG.replace("## [0.1.0] - 2026-07-04", "## [0.1.0] - 2026-07-17")
+                       .replace("- the GUI\n", "- the GUI, reworded\n"),
+        encoding="utf-8")
+    assert ch._changelog_append_only() == [], "an unreleased draft must be re-cuttable"
+
+
+def test_pending_section_refreezes_once_tagged(tmp_path, monkeypatch):
+    """The SAME edit is a history rewrite once v0.1.0 exists: the tag is what makes a
+    section real history, so the guard must bite again the moment it appears."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_versioned_repo(tmp_path, "0.1.0")
+    _tag(tmp_path, "v0.1.0")
+    assert ch._pending_release_version() is None
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _BASE_CHANGELOG.replace("## [0.1.0] - 2026-07-04", "## [0.1.0] - 2026-07-17"),
+        encoding="utf-8")
+    problems = ch._changelog_append_only()
+    assert problems and any("append-only" in p for p in problems), problems
+
+
+def test_older_section_stays_frozen_even_with_no_tags(tmp_path, monkeypatch):
+    """The safety property that makes the tag lookup safe: a section whose version is
+    NOT the current VERSION is frozen unconditionally, so a clone with no tags at all
+    (a --no-tags / shallow clone) can still never rewrite real history."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_versioned_repo(tmp_path, "0.2.0")     # 0.1.0 is NOT the pending release
+    assert ch._pending_release_version() == "0.2.0"
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _BASE_CHANGELOG.replace("- the GUI\n", ""), encoding="utf-8")
+    problems = ch._changelog_append_only()
+    assert problems and any("append-only" in p for p in problems), problems
+
+
+def test_missing_version_file_freezes_everything(tmp_path, monkeypatch):
+    """Fail SAFE: with no VERSION file the guard cannot identify a pending release, so
+    it protects every version section rather than guessing."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _BASE_CHANGELOG)     # no VERSION file written
+    assert ch._pending_release_version() is None
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _BASE_CHANGELOG.replace("- the GUI\n", ""), encoding="utf-8")
+    problems = ch._changelog_append_only()
+    assert problems and any("append-only" in p for p in problems), problems
+
+
 # ---- check 5: raw single-resource accessor guard ----------------------------
 # _raw_accessor_violations enforces that a "single -> combined N resources"
 # capability (vram_info() -> vram_capacity() is the first case) cannot be

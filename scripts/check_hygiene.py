@@ -155,6 +155,9 @@ def _scan(path: Path) -> list[str]:
 
 
 # ---- check 4: CHANGELOG is append-only -------------------------------------
+# "Published" means RELEASED, not merely "carries a version header": the pending
+# release (VERSION's own section, before its tag exists) is still a cuttable draft -
+# see _pending_release_version. Every other version section is frozen unconditionally.
 # The release changelog is the permanent public record of what shipped. Only the
 # PUBLISHED (versioned "## [x.y.z]") sections are frozen: a release ADDS its section
 # on top and its entries (INCLUDING its own version header and any "### " subsection
@@ -171,12 +174,46 @@ def _scan(path: Path) -> list[str]:
 # already-PUBLISHED entry line (body OR header) is caught.
 _CHANGELOG = "CHANGELOG.md"
 _CHANGELOG_LINKREF = re.compile(r"\[[^\]]+\]:\s")
-# An H2 section header opening a PUBLISHED version section, e.g. "## [0.1.1] - date".
-# "## [Unreleased]" does not match (no leading digit), so its section stays editable.
-_CHANGELOG_VERSION_HEADER = re.compile(r"^##\s+\[\d")
+# An H2 section header opening a version section, e.g. "## [0.1.1] - date"; group 1 is
+# the version. "## [Unreleased]" does not match (no leading digit), so its section
+# stays editable.
+_CHANGELOG_VERSION_HEADER = re.compile(r"^##\s+\[(\d[^\]]*)\]")
 
 
-def _changelog_protected_lines(text: str) -> list[str]:
+def _pending_release_version() -> str | None:
+    """The one version whose changelog section is still an editable DRAFT: the version
+    the VERSION file names, when no release tag exists for it yet. None => freeze every
+    version section (the old, unconditional behavior).
+
+    A ``## [x.y.z]`` header alone does NOT mean x.y.z shipped. The release ritual bumps
+    VERSION and cuts the section BEFORE the tag and GitHub release exist, so between the
+    cut and the publish the section is a versioned-but-unshipped draft. Freezing it
+    protects nothing (nobody can have downloaded a release that does not exist) while
+    blocking the legitimate final cut, e.g. re-dating the section on the day it actually
+    ships, or folding newer [Unreleased] work into a prep that was never published.
+
+    Deliberately narrow, so a MISSING tag can never unfreeze real history:
+      - a section whose version != VERSION is ALWAYS frozen, even in a clone with no
+        tags at all, and
+      - the VERSION-matching section re-freezes the moment its tag exists.
+    So at most ONE section - the pending release - is ever editable, and every genuinely
+    published section stays frozen regardless of local tag state. Any uncertainty (no
+    VERSION file, git unavailable, git error) fails SAFE by freezing everything."""
+    try:
+        version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None                     # no VERSION file: freeze every version section
+    if not version:
+        return None
+    tag = _git("tag", "--list", f"v{version}")
+    if tag is None or tag.returncode != 0:
+        return None                     # cannot tell: fail safe, freeze everything
+    if tag.stdout.strip():
+        return None                     # already tagged => really shipped => frozen
+    return version
+
+
+def _changelog_protected_lines(text: str, pending_version: str | None = None) -> list[str]:
     """Lines of the PUBLISHED (versioned) changelog sections whose loss would rewrite
     history: the ``## [x.y.z]`` header line itself, plus every non-blank, non-link-
     reference line sitting under it - INCLUDING a ``### Added``-style subsection
@@ -190,7 +227,12 @@ def _changelog_protected_lines(text: str) -> list[str]:
     number and ship date, and a subsection header carries WHICH CATEGORY an entry
     shipped under (e.g. distinguishing "Added" from "Removed" for the same bullet
     text) - silently rewriting either is exactly the kind of history rewrite this
-    guard exists to catch, the same as editing a bullet's wording."""
+    guard exists to catch, the same as editing a bullet's wording.
+
+    *pending_version* (see _pending_release_version) names the ONE version that is cut
+    but not yet released; its section is still a draft and is NOT protected. None (the
+    default) protects every version section, so the pure-function callers and tests keep
+    the original semantics."""
     out = []
     published = False   # intro + [Unreleased] (before the first version header) are editable
     for raw in text.splitlines():
@@ -201,7 +243,11 @@ def _changelog_protected_lines(text: str) -> list[str]:
         # published, a DEEPER header ("### Added") does NOT change the zone, but is
         # still protected content (handled by the generic append below).
         if stripped.startswith("## "):
-            published = bool(_CHANGELOG_VERSION_HEADER.match(stripped))
+            m = _CHANGELOG_VERSION_HEADER.match(stripped)
+            # The pending (cut but unreleased) version's section is still a draft.
+            published = bool(m) and not (
+                pending_version is not None and m.group(1).strip() == pending_version
+            )
             if published:
                 out.append(line)   # the header itself is part of the published record
             continue
@@ -213,13 +259,17 @@ def _changelog_protected_lines(text: str) -> list[str]:
     return out
 
 
-def _changelog_removed_lines(old_text: str, new_text: str) -> list[str]:
+def _changelog_removed_lines(old_text: str, new_text: str,
+                             pending_version: str | None = None) -> list[str]:
     """Protected content lines present in *old_text* but no longer present (with
     multiplicity) in *new_text*: shipped changelog entries that were DELETED or
-    REWRITTEN rather than left intact with new entries added above them."""
+    REWRITTEN rather than left intact with new entries added above them.
+
+    *pending_version* exempts the cut-but-unreleased section (see
+    _changelog_protected_lines); None protects every version section."""
     from collections import Counter
-    old = Counter(_changelog_protected_lines(old_text))
-    new = Counter(_changelog_protected_lines(new_text))
+    old = Counter(_changelog_protected_lines(old_text, pending_version))
+    new = Counter(_changelog_protected_lines(new_text, pending_version))
     removed = []
     for line, count in old.items():
         removed.extend([line] * (count - new.get(line, 0)))
@@ -270,7 +320,7 @@ def _changelog_append_only() -> list[str]:
         working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
     except OSError:
         working = ""                    # deleted from the tree: every entry is gone
-    removed = _changelog_removed_lines(base.stdout, working)
+    removed = _changelog_removed_lines(base.stdout, working, _pending_release_version())
     if not removed:
         return []
     shown = "; ".join(repr(x.strip()) for x in removed[:4])
