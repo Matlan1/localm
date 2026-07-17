@@ -445,7 +445,11 @@ def _loader_gpu_type() -> int:
         return 1
 
 
-def _check_packages() -> None:
+def _check_packages() -> dict:
+    """Print each package's presence/version line and return the imported
+    module objects (keyed by import name; None where the import failed), so a
+    caller can run a deeper USABILITY check on top of a package this function
+    already confirmed is merely importable (see ``_check_hf_backend_usable``)."""
     import importlib
     import importlib.metadata as _ilm
     packages = [
@@ -462,9 +466,11 @@ def _check_packages() -> None:
     ]
     # Import name -> distribution name where they differ (for version lookup).
     _dist_names = {"huggingface_hub": "huggingface-hub"}
+    modules: dict = {}
     for mod, label in packages + optional_pkgs:
         try:
             m = importlib.import_module(mod)
+            modules[mod] = m
             # Read the version from installed distribution METADATA first, not
             # module.__version__: click deprecated __version__ (removed in Click
             # 9.1) and accessing it emits a DeprecationWarning, so metadata-first
@@ -477,9 +483,62 @@ def _check_packages() -> None:
             sym = _OK_SYM
             ver_str = f" {ver}" if ver else ""
         except ImportError:
+            modules[mod] = None
             sym     = _WARN_SYM if (mod, label) in optional_pkgs else _FAIL_SYM
             ver_str = " - not installed"
         console.print(f"  {sym}  {label}{ver_str}")
+    return modules
+
+
+def _check_hf_backend_usable(torch_mod, transformers_mod) -> None:
+    """Prove the HF (transformers) backend is actually USABLE, not merely
+    importable. ``localm/inference/backends/hf.py`` loads models through
+    ``transformers.AutoTokenizer`` / ``AutoProcessor`` / ``AutoModelForCausalLM``,
+    which transformers resolves through a LAZY module: ``import transformers``
+    only sets up that machinery, and a heavy submodule (e.g. distributed/fsdp)
+    is imported for real only on the FIRST attribute access that needs it. So
+    ``import transformers`` can succeed - and ``_check_packages`` above reports
+    a clean version - while every one of those classes is dead.
+
+    This exact gap shipped in 0.1.2: transformers 5.14 hard-imports fsdp on the
+    tokenizer path, which needs ``torch._C._distributed_c10d`` - absent from the
+    pinned ROCm/Windows torch build - so EVERY HF model load died at "loading
+    processor..." while ``localm doctor`` printed both packages OK (found during
+    the 0.1.2 release verification; see tests/test_gpu_extra_pins.py for the
+    version-pin guard this backs up with a functional one).
+
+    Runs only when both packages actually import; an absent OPTIONAL backend
+    (reported above) is not a fault."""
+    if torch_mod is None or transformers_mod is None:
+        return
+    try:
+        for name in ("AutoTokenizer", "AutoProcessor", "AutoModelForCausalLM"):
+            getattr(transformers_mod, name)
+    except Exception as e:
+        # transformers' lazy loader re-raises a failed submodule import as a
+        # generic ModuleNotFoundError("Could not import module 'X'") chained
+        # (`raise ... from e`) onto the real cause - and since resolving one
+        # lazy attribute can walk through OTHER lazy submodules, that can
+        # repeat several layers deep before reaching the actual error. Printing
+        # only the top frame reproduces exactly the unhelpful message that hid
+        # this regression; walk the chain to the true root instead.
+        root = e
+        seen = {id(root)}
+        while True:
+            nxt = root.__cause__ or root.__context__
+            if nxt is None or id(nxt) in seen:
+                break
+            root = nxt
+            seen.add(id(root))
+        console.print(
+            f"  {_FAIL_SYM}  HF backend (transformers) is installed but UNUSABLE "
+            f"- every HF model load will fail: {type(root).__name__}: {root}"
+        )
+        return
+    console.print(
+        f"  {_OK_SYM}  HF backend (transformers): AutoTokenizer / AutoProcessor / "
+        "AutoModelForCausalLM load OK"
+    )
 
 
 def _check_plugin_deps() -> None:
@@ -553,6 +612,8 @@ def doctor():
         (Vulkan / Metal / bundled-ROCm / CUDA), not just nvidia-smi/rocm-smi/torch
       - Available VRAM
       - Required Python packages (huggingface-hub, torch, uvicorn, fastapi)
+      - The HF (transformers) backend is not just installed but actually
+        USABLE - AutoTokenizer/AutoProcessor/AutoModelForCausalLM really load
       - Enabled plugins have their pip extras installed
     Also surfaces a one-line discovery hint for the opt-in managed ComfyUI.
     """
@@ -574,6 +635,7 @@ def doctor():
     gpu_found = _check_gpu_driver()
     torch_gpu_found = _check_vram_torch()
     _check_gpu_verdict(find_binary_dir, lib_healthy, gpu_found or torch_gpu_found)
-    _check_packages()
+    modules = _check_packages()
+    _check_hf_backend_usable(modules.get("torch"), modules.get("transformers"))
     _check_plugin_deps()
     _check_managed_comfy()
