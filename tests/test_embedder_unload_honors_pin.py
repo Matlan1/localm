@@ -111,13 +111,24 @@ def test_embed_unpins_even_on_failure():
 # --------------------------------------------------------------------------- #
 
 def test_unload_all_models_skips_pinned_embedder(isolated, monkeypatch):
+    """reset_embedder(force=False) now makes the busy/idle decision atomically
+    (see embedder.reset_embedder's docstring - AUDIT-CRIT-1 for the embedder
+    used to be a separate, unlocked active_requests() check before an
+    unconditional reset_embedder() call, a real TOCTOU window); the fake here
+    simulates a pinned embedder by returning False, exactly like the real
+    function would when active_requests() > 0 under the lock."""
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
-    monkeypatch.setattr(emb, "active_requests", lambda: 1)
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    def _fake_reset(force=True):
+        calls.append(force)
+        return False
+
+    monkeypatch.setattr(emb, "reset_embedder", _fake_reset)
 
     res = asyncio.run(hs.unload_all_models())
-    assert calls == [], "a pinned embedder must NOT be released"
+    assert calls == [False], (
+        "unload_all_models must call reset_embedder(force=False), not force=True")
     assert res.get("embedder_unloaded") is False
     assert "embedding model" in res.get("skipped_in_use", [])
     assert res.get("status") == "in_use"
@@ -127,39 +138,99 @@ def test_unload_all_models_releases_idle_embedder(isolated, monkeypatch):
     """Negative control: an idle (unpinned) embedder is still released exactly
     as before - the pin check must not regress the existing happy path."""
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
-    monkeypatch.setattr(emb, "active_requests", lambda: 0)
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    def _fake_reset(force=True):
+        calls.append(force)
+        return True
+
+    monkeypatch.setattr(emb, "reset_embedder", _fake_reset)
 
     res = asyncio.run(hs.unload_all_models())
-    assert calls == [1]
+    assert calls == [False]
     assert res.get("embedder_unloaded") is True
     assert res.get("status") == "unloaded"
 
 
 def test_unload_one_model_skips_pinned_matching_embedder(isolated, monkeypatch):
+    """The ATOMIC layer catches a pin that arrives AFTER the cheap
+    active_requests() precheck (below) already passed - the narrow race
+    window that precheck alone cannot close, which is exactly why
+    reset_embedder(force=False) still makes the authoritative decision under
+    embedder._LOCK rather than the precheck being trusted on its own."""
     monkeypatch.setattr("localm.config.load_registry",
                         lambda: {"emb-model": {"path": "C:/models/emb.gguf"}})
     monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/emb.gguf")
-    monkeypatch.setattr(emb, "active_requests", lambda: 1)
+    monkeypatch.setattr(emb, "active_requests", lambda: 0)  # precheck: idle
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    def _fake_reset(force=True):
+        calls.append(force)
+        return False
+
+    monkeypatch.setattr(emb, "reset_embedder", _fake_reset)
 
     res = asyncio.run(hs.unload_one_model("emb-model"))
-    assert calls == [], "a pinned embedder must NOT be released"
+    assert calls == [False], (
+        "unload_one_model must call reset_embedder(force=False), not force=True")
     assert res.get("status") == "in_use"
+
+
+def test_unload_one_model_precheck_skips_pinned_embedder_without_probing_vram(
+        isolated, monkeypatch):
+    """Regression: _unload_embedder_if_matches must decide busy/idle via the
+    cheap active_requests() precheck BEFORE paying for _vram_free_reading()'s
+    hardware probe, not after. A round-2 review caught that folding the busy
+    check entirely into reset_embedder(force=False) - called AFTER the probe
+    - meant a busy embedder started paying for that probe on every targeted
+    unload, where the original code never reached it at all. That probe is
+    NOT executor-offloaded and can block the whole single-threaded event loop
+    for up to discover._GPU_PROBE_DEADLINE seconds - the identical hazard
+    class test_embedder_event_loop_freeze.py exists to catch, just via a
+    different call shape (an unconditional call instead of a synchronous one)
+    that file's own tests do not cover.
+
+    MUTATION ORACLE: move the active_requests() precheck to after
+    _vram_free_reading() (or delete it and rely on reset_embedder(force=False)
+    alone) and only this test goes red - probe_calls becomes 1."""
+    monkeypatch.setattr("localm.config.load_registry",
+                        lambda: {"emb-model": {"path": "C:/models/emb.gguf"}})
+    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/emb.gguf")
+    monkeypatch.setattr(emb, "active_requests", lambda: 1)  # precheck: busy
+
+    probe_calls = []
+    monkeypatch.setattr("localm.vram._vram_free_reading",
+                        lambda: (probe_calls.append(1), (None, True, None))[1])
+    reset_calls = []
+    monkeypatch.setattr(emb, "reset_embedder",
+                        lambda force=True: (reset_calls.append(force), False)[1])
+
+    res = asyncio.run(hs.unload_one_model("emb-model"))
+    assert res.get("status") == "in_use"
+    assert probe_calls == [], (
+        "a busy embedder must be rejected by the cheap precheck BEFORE the "
+        "VRAM probe runs, not after - probe_calls proves the probe was "
+        f"skipped entirely: {probe_calls}")
+    assert reset_calls == [], (
+        "reset_embedder must not even be attempted once the precheck already "
+        f"knows the embedder is busy: {reset_calls}")
 
 
 def test_unload_one_model_releases_idle_matching_embedder(isolated, monkeypatch):
     monkeypatch.setattr("localm.config.load_registry",
                         lambda: {"emb-model": {"path": "C:/models/emb.gguf"}})
     monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/emb.gguf")
-    monkeypatch.setattr(emb, "active_requests", lambda: 0)
+    monkeypatch.setattr(emb, "active_requests", lambda: 0)  # precheck: idle
     calls = []
-    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+
+    def _fake_reset(force=True):
+        calls.append(force)
+        return True
+
+    monkeypatch.setattr(emb, "reset_embedder", _fake_reset)
 
     res = asyncio.run(hs.unload_one_model("emb-model"))
-    assert calls == [1]
+    assert calls == [False]
     assert res.get("status") == "unloaded"
 
 

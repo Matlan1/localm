@@ -137,14 +137,17 @@ def test_unload_one_model_syncs_registry_off_the_loop(probe):
 
 
 def test_unload_embedder_if_matches_syncs_registry_off_the_loop(probe, monkeypatch, tmp_path):
-    """The targeted-unload counterpart: it already offloads loaded_path(),
-    active_requests(), reset_embedder() and the VRAM wait, each with a comment
-    naming the event-loop freeze hazard - but not the registry sync."""
+    """The targeted-unload counterpart: it already offloads loaded_path(), the
+    cheap active_requests() precheck, reset_embedder(force=False) (which now
+    makes the final busy/idle decision atomically under embedder._LOCK - see
+    its docstring) and the VRAM wait, each with a comment naming the
+    event-loop freeze hazard - but not the registry sync."""
     model = tmp_path / "emb.gguf"
     model.write_bytes(b"x")
     monkeypatch.setattr("localm.inference.embedder.loaded_path", lambda: str(model))
     monkeypatch.setattr("localm.inference.embedder.active_requests", lambda: 0)
-    monkeypatch.setattr("localm.inference.embedder.reset_embedder", lambda: None)
+    monkeypatch.setattr("localm.inference.embedder.reset_embedder",
+                        lambda force=True: True)
     monkeypatch.setattr("localm.config.load_registry",
                         lambda: {"emb": {"path": str(model), "source": "local"}})
     monkeypatch.setattr("localm.model_manager._entry_path", lambda entry: str(model))

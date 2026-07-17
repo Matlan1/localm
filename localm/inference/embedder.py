@@ -878,16 +878,53 @@ def last_error() -> Optional[str]:
         return _LAST_ERROR
 
 
-def reset_embedder() -> None:
-    """Drop the cached embedder and its negative caches (tests / a model change)."""
+def reset_embedder(*, force: bool = True) -> bool:
+    """Drop the cached embedder and its negative caches (tests / a model
+    change). Returns True if an embedder was actually cleared, False if none
+    was loaded or (``force=False``) one was loaded but pinned.
+
+    ``force=False`` checks ``active_requests() == 0`` and clears the embedder
+    in the SAME ``_LOCK`` acquisition, atomically. Every caller that means to
+    skip a BUSY embedder (unload_all_models, _unload_embedder_if_matches,
+    switch_engine's own VRAM-shortfall eviction) used to do that check via a
+    SEPARATE, unlocked ``active_requests()`` call before calling this
+    function unconditionally - a real TOCTOU window, since
+    ``IsolatedEmbedder.embed()`` pins ``active_requests`` without taking
+    ``_LOCK``: a concurrent embed() could start in that window and have its
+    worker torn out from under it by the ``close()`` below. Folding the check
+    into this one locked critical section (no ``await`` between the read and
+    the close - both run synchronously inside a single executor hop) closes
+    that window instead of narrowing it per call site.
+
+    ``force=True`` (the default) keeps the original unconditional-clear
+    behavior, for callers that must tear down regardless of a pin (e.g. an
+    explicit model-selection change) and for the many existing bare
+    ``reset_embedder()`` call sites (tests, the RAG embedding-model-setup
+    route) that predate the pin-aware option and rightly don't need it.
+    ``release_for_exit()`` deliberately does NOT go through this function at
+    all - see its own docstring (taking ``_LOCK`` there risks hanging a
+    stop/restart behind an in-progress load).
+
+    A pinned (``force=False``, busy) embedder is a full no-op, including the
+    negative caches: nothing actually changed, so nothing is cleared.
+    Otherwise ``_LOAD_FAILED``/``_TRIED_DOWNLOAD``/``_LAST_ERROR`` are always
+    cleared alongside ``_EMBEDDER`` - even when no embedder was loaded at
+    all (only a cached load FAILURE), matching the original unconditional
+    behavior: a caller resetting a failed-load state expects the next
+    ``get_embedder()`` to retry fresh, not keep returning the stale cached
+    failure."""
     global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR
     with _LOCK:
-        if _EMBEDDER is not None:
+        if not force and _EMBEDDER is not None and _EMBEDDER.active_requests > 0:
+            return False
+        cleared = _EMBEDDER is not None
+        if cleared:
             _EMBEDDER.close()
         _EMBEDDER = None
         _LOAD_FAILED = False
         _TRIED_DOWNLOAD = False
         _LAST_ERROR = None
+        return cleared
 
 
 def release_for_exit() -> bool:
