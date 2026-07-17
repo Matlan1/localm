@@ -11,7 +11,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **The localm data directory is no longer refused for RAG indexing.** Previously
+  any file under your data directory (LOCALM_HOME) was hard-blocked from being
+  indexed into a knowledge collection, even by you, even explicitly. It is your
+  data and your machine, so it is treated exactly like any other folder now (the
+  usual whitelist/blacklist rules and consent prompts apply, nothing special).
+  Third-party credential folders (`.ssh`, `.aws`, and similar) are still refused.
+
 ### Fixed
+- **Setting up or using an embedding model no longer crashes on some ROCm/HIP
+  GPU installs.** `localm setup-llama` was provisioning `rocblas.dll` and
+  `hipblaslt.dll` without the GPU kernel data files (`rocblas/library/`,
+  `hipblaslt/library/`) they need at runtime - present in the same upstream
+  archive the whole time, just dropped by the copy step, since it only copied
+  `.dll`/`.exe` files. Without that data, any embedding call that dispatched a
+  GEMM through it (the "Set up / apply" test, or real document indexing) hard-
+  crashed the isolated embedding worker instead of failing cleanly. Re-run
+  `localm setup-llama --force` to pick up the fix on an already-provisioned
+  install. As a safety net for installs that have not yet reprovisioned, the
+  embedder now automatically retries once on CPU after a GPU crash and says so
+  in the Knowledge page instead of just failing.
+- **A collection with no documents no longer shows "reindex needed."** The badge
+  meant "this collection predates your embedding model," but an empty,
+  freshly-created collection triggered it too, even though there was nothing to
+  reindex.
+- **A worker crash during embedding no longer surfaces as a bare "Internal
+  server error."** `/v1/embeddings` now returns the actual failure reason, so
+  indexing and reindexing report why semantic search was skipped for a
+  document instead of a meaningless generic message.
 - **Knowledge search no longer lets a filler word outrank the better match.** In a
   RAG collection, a document that shared only a common word like "and" or "the" with
   your query could be ranked above the document that actually matched your meaning -

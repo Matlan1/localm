@@ -116,11 +116,15 @@ def rag_dir() -> Path:
     return home_dir() / "rag"
 
 
-# Well-known credential / secret folders under the user's home that must never
-# be indexed even though they sit inside an allowed root. The localm data dir
-# (home_dir(), holding the API keystore + registry) is denied separately.
+# Well-known THIRD-PARTY credential/secret folders under the user's home that
+# must never be indexed even though they sit inside an allowed root - these hold
+# OTHER services' secrets (SSH, cloud CLIs) that a folder walk could sweep in
+# unnoticed, unrelated to localm's own data. Deliberately does NOT include
+# ".localm" (the conventional default LOCALM_HOME name): localm does not block
+# the owner from indexing their own data directory at all (see
+# confine_index_path's docstring) - it is their machine and their choice.
 _SENSITIVE_HOME_SUBDIRS = (
-    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".localm",
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure",
 )
 # Lower-cased for matching a path component ANYWHERE in a resolved path, so a
 # nested ~/proj/.ssh is caught too, and case-insensitively so a ".SSH"
@@ -237,7 +241,7 @@ def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
 class ConfinementError(ValueError):
     """A path may not be indexed. ``reason`` tells the caller WHY, so the API can
     offer 'add and continue' for a fixable whitelist miss (``outside_allowed``)
-    but hard-refuse the rest (``data_dir`` / ``credential`` / ``denied`` /
+    but hard-refuse the rest (``credential`` / ``secret_file`` / ``denied`` /
     ``invalid``). Subclasses ``ValueError`` so existing ``except ValueError``
     sites keep catching it."""
 
@@ -312,35 +316,37 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     """Resolve *p* and verify it may be indexed, raising ``ConfinementError`` (a
     ``ValueError``) otherwise.
 
-    The HARD FLOOR is enforced ALWAYS, even when *policy* is None: the localm data
-    directory (it holds the API key, registry and config) and well-known
+    The HARD FLOOR is enforced ALWAYS, even when *policy* is None: well-known
     credential folders (``.ssh``, ``.aws``, ...) are never indexable - wherever
     they appear in the resolved path, so a nested ``~/proj/.ssh`` or a symlink
     into one is caught too.
 
+    The localm data directory (LOCALM_HOME) is NOT refused, at all: localm is a
+    local, single-user tool, and it is not localm's place to block the owner
+    from indexing their own files, including config.json/registry.json/auth.json
+    if they explicitly choose to - they already have direct filesystem access to
+    every one of them. Keeping documents in (or portably alongside, as one
+    self-contained folder) the data directory is a legitimate choice, not
+    something to guard against.
+
     With a *policy* (the HTTP API passes ``indexing_policy()``):
       - ``whitelist``: *p* must be within your home folder, the working directory,
         or a ``rag_allowed_roots`` entry, else ``reason='outside_allowed'`` (the
-        route may offer the owner to add it and continue);
+        route may offer the owner to add it and continue) - this applies to
+        LOCALM_HOME exactly like any other folder outside the defaults, not as a
+        special case;
       - ``blacklist``: *p* is allowed unless it is within a ``rag_denied_roots``
         entry, then ``reason='denied'``.
 
     ``policy=None`` means hard-floor only: the local CLI operator, who can already
     read their own files, is otherwise unconfined.
     """
-    from localm.config import home_dir
     try:
         rp = Path(p).expanduser().resolve()
     except (OSError, ValueError):
         raise ConfinementError(f"Invalid path: {p}",
                                path=Path(str(p)), reason="invalid")
 
-    # --- hard floor: always, in every mode and for the CLI ---
-    if _path_within(rp, home_dir()):
-        raise ConfinementError(
-            f"Refusing to index the localm data directory "
-            f"(it holds the API key and registry): {p}",
-            path=rp, reason="data_dir")
     # Credential folders are denied wherever they appear in the resolved path,
     # not only at the home root: ~/proj/.ssh and <cwd>/sub/.aws are as sensitive
     # as ~/.ssh. rp is already resolved, so this also catches a symlink that
