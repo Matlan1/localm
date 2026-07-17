@@ -40,13 +40,14 @@ NOT cpu, or a GPU-path regression is missed. cpu/vulkan is a secondary portabili
 
 ## 0. Cold install (isolated, matches what a user gets)
 ```
-# build the exact artifact for this commit (no publish)
+# build from your current checkout, no publish (a clean, committed tree so the
+# artifact matches a specific commit; --publish later pins the exact commit itself)
 python scripts/make_release.py --key <signing-key>        # -> dist/localm-<ver>.zip
 # cold-install it: fresh venv + install + native runtime (backend defaults to the
 # hardware-detected one, e.g. the AMD GPU - NOT cpu, so the real GPU path is exercised)
 python scripts/release_verify.py cold-install --zip dist/localm-<ver>.zip --dest <TMP>/cold
 # drive everything below from the cold install, with a THROWAWAY home:
-export LOCALM_HOME=<TMP>/home          # never the real ~/.localm or a repo home/
+export LOCALM_HOME=<TMP>/home          # never your real data dir or a repo home/
 PY=<TMP>/cold[/wrapper]/.venv/Scripts/python.exe   # (bin/python on Linux)
 ```
 Add `--extras coder,voice,monitor,rag` to match the target, or `--backend cpu`/`vulkan`

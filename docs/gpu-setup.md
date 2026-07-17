@@ -23,6 +23,7 @@ See the table below for what each backend needs and when to pick it.
 | `amd-rocm` | AMD RX 6000 (gfx103X / RDNA2) | self-contained ROCm build (bundles its runtime); gfx103X-only - other AMD GPUs use `vulkan` or `hip` |
 | `hip` | AMD (any gfx) | upstream ROCm build; needs the ROCm/HIP runtime |
 | `sycl` | Intel Arc | needs the oneAPI runtime |
+| `metal` | Apple Silicon | auto-picked on macOS; experimental and unverified - see the note below |
 | `cpu` | no GPU | always works |
 
 Binaries come from official [llama.cpp](https://github.com/ggml-org/llama.cpp)

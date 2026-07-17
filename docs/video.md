@@ -10,10 +10,10 @@ Four surfaces: the **Video page** in the GUI, the `localm video` **CLI**, the `/
 
 Video is the **slowest and most VRAM-hungry generator** in localm. Unlike ACE-Step music (arbitrary length), a video model attends over all frames at once, so VRAM and time grow with frame count.
 
-**Measured on a 16 GB RDNA2 card (RX 6900 XT, native ROCm, no flash attention):**
+**Measured on a 16 GB RDNA2 card (RX 6900 XT, native ROCm, no flash attention), not independently re-verified since:**
 
-- **1 second at 1280x704, 20 steps: ~7.5 minutes end to end** (~13.5 s per sampler step + ~3 minutes of model loading). Queue this when you can step away.
-- A full 5 s clip at 30 steps is an **hours-scale job** on this class of hardware - consider batch-generating multiple variations overnight or on a faster GPU.
+- **1 second at 1280x704, 20 steps: ~7.5 minutes end to end** (~13.5 s per sampler step + ~3 minutes of model loading). Queue this when you can step away. Note: the current template default is **30** steps (`localm/video_gen/comfy.py`'s `generate_video`), not 20 - at the same per-step cost this scales to roughly ~10 minutes for 1 second at the default step count, but that number is arithmetic from the measurement above, not a fresh benchmark.
+- A full 5 s clip at 30 steps (the default) is an **hours-scale job** on this class of hardware - consider batch-generating multiple variations overnight or on a faster GPU.
 - Sampling cost grows super-linearly with frame count; 8+ second clips lose coherence and should be treated as experimental.
 
 The default poll timeout is 60 minutes; very long/large clips on slow cards can exceed it. In the Python API, pass a larger `max_poll_seconds` to adjust. Shorter clips always finish faster.
@@ -44,7 +44,7 @@ The template expects the public Comfy-Org repackaged files (ComfyUI v0.3.46+ has
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (~6 GB) | `models/text_encoders/` |
 | `wan2.2_vae.safetensors` (~1.4 GB) | `models/vae/` |
 
-The fp16 encoder (`umt5_xxl_fp16.safetensors`, ~11 GB) also works but uses more VRAM; prefer the fp8_scaled file. A different encoder filename needs a `wan_workflow_local.json` override (below).
+The fp16 encoder (`umt5_xxl_fp16.safetensors`, ~11 GB) also works but uses more VRAM; prefer the fp8_scaled file. A different encoder filename needs a custom workflow (see [Using your own workflow](#using-your-own-workflow), below).
 
 ## Usage
 
@@ -99,7 +99,7 @@ Prompt tip: **motion verbs matter**. "a fox" tends to produce a near-static shot
 
 ## Retrieving results
 
-Generated clips are stored at `~/.localm/gui_video/` (or the configured data directory) as MP4 files, each with an optional `.json` sidecar (see [Privacy](#privacy)).
+Generated clips are stored at `<data dir>/gui_video/` as MP4 files, each with an optional `.json` sidecar (see [Privacy](#privacy)).
 
 **Via the GUI Video page:** the history shows all clips with their metadata, and you can play, download, move to a folder, or delete them inline.
 
@@ -113,11 +113,15 @@ Same lifecycle as image and music generation: the chat model is unloaded before 
 
 ## Using your own workflow
 
-Drop a `wan_workflow_local.json` next to `localm/video_gen/wan_workflow.json` (it is gitignored - which models you run stays private). Parameters are injected by role, so node ids do not matter: the graph just needs a `KSampler` wired with `positive` / `negative` / `latent_image` inputs and a `CreateVideo` node for fps. Export a Wan 2.2 workflow from ComfyUI (Save -> API format) and select it, no renumbering needed.
+The **Workflow** card on the Video page is the current way to do this: export your graph from ComfyUI (Save -> API format), upload it there, and select it - or keep the built-in default. Uploaded workflows are stored per-plugin under the localm data directory (`workflows/video/`), which models you run stays private, and the choice survives a self-update (the `localm/` package directory is whole-tree-replaced on update; the data directory is not).
+
+Parameters are injected by role, so node ids do not matter: the graph just needs a `KSampler` wired with `positive` / `negative` / `latent_image` inputs and a `CreateVideo` node for fps.
+
+The older `wan_workflow_local.json` file dropped next to `localm/video_gen/wan_workflow.json` still works (it is gitignored) but is superseded by the Workflow card above: on first load, any existing override there is migrated into the new per-plugin store automatically, keeping it selected and preserving your current setup.
 
 ## Privacy
 
-In privacy mode (the default) no `<clip>.mp4.json` sidecar is written - the prompt never touches disk. The clip itself is an explicit artifact and is always saved; the copy in ComfyUI's own output directory is deleted when `comfy_output_dir` is configured. In `log`/`full` modes the sidecar records prompt, seed, and settings so a clip can be reproduced (`seed` is also shown in the success message either way).
+In privacy mode (the default) no `<clip>.mp4.json` sidecar is written - the prompt never touches disk. The clip itself is an explicit artifact and is always saved. Privacy mode also forces removal of ComfyUI's own on-disk copy of the clip (and any uploaded image-to-video source) - but that removal needs localm to be able to locate ComfyUI's output folder (the `comfy_output_dir` setting, or a derived `<comfy_workdir>/output`); if neither resolves, a warning tells you a copy remains there instead of silently claiming it was removed. Outside privacy mode, the same cleanup is opt-in via the `comfy_delete_outputs` setting (default off, so ComfyUI's own gallery keeps its copy). In `log`/`full` modes the sidecar records prompt, seed, and settings so a clip can be reproduced (`seed` is also shown in the success message either way).
 
 ## Troubleshooting
 

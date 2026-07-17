@@ -4,12 +4,12 @@
 > routes, and the in-app scheduler appear only when it is installed and enabled
 > (`localm plugin install jobs`). The plugin has no pip extra.
 
-A job runs a chat or coder prompt on a repeating schedule: a fixed interval or
-a 5-field cron expression. An in-app scheduler wakes periodically while a
-`localm gui` or `localm serve` process is up, runs every enabled job that is
-due, and records each run's result so you can read it later. Typical uses: a
-nightly "summarise today's changes" coder task, an hourly digest, a weekday
-morning briefing.
+A job runs a chat prompt, a coder task, or a memory-synthesis pass on a
+repeating schedule: a fixed interval or a 5-field cron expression. An in-app
+scheduler wakes periodically while a `localm gui` or `localm serve` process
+is up, runs every enabled job that is due, and records each run's result so
+you can read it later. Typical uses: a nightly "summarise today's changes"
+coder task, an hourly digest, a weekday morning briefing.
 
 Three things to know up front:
 
@@ -65,7 +65,7 @@ localm job remove <job_id>      # delete the job and its stored results
 | `--coder` | Run a coder agent task instead of a chat prompt. |
 | `--cwd DIR` | Working directory for a coder job. |
 | `--scope GLOB` | File-access glob for a coder job. |
-| `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell) unless you pass this. |
+| `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell, no network, no sub-agents) unless you pass this. |
 | `--model M` | Model to run the job with (otherwise the server's active model). |
 | `--disabled` | Create the job disabled; it will not run until you enable it. |
 
@@ -81,23 +81,29 @@ job's past run results. See [gui.md](gui.md).
 When the plugin is active the server mounts a small REST surface, scoped to the
 `jobs` capability (it requires a valid API key only when auth is configured, the
 same as the rest of the management API; see [server-api.md](server-api.md)).
+Each job is bound to the key that created it: a `jobs`-scoped key sees and can
+touch only its own jobs (an owner/`admin` key sees every job); a job created
+with no key configured (open mode) is unrestricted. A foreign job id 404s the
+same as a nonexistent one, so a key can never confirm another principal's job
+even exists.
 
 | Method + path | Purpose |
 |---|---|
-| `GET /api/jobs` | List all jobs. |
+| `GET /api/jobs` | List the caller's own jobs. |
 | `POST /api/jobs` | Create a job. |
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. |
-| `GET /api/jobs/{id}/results` | Past run results, newest first. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress - jobs never stack model loads. |
+| `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
-A create/update body carries: `name`, `task_kind` (`chat` or `coder`),
-`prompt`, `schedule_kind` (`interval` or `cron`), `schedule` (seconds as an
-integer, or a 5-field cron string), and the optional `model`, `cwd`, `scope`,
-`allow_shell`, and `enabled` fields. `allow_shell` (coder jobs only) is
-privileged: setting it requires the owner key or a `coder:full` key, so a
-plain `jobs`-scoped client cannot schedule a shell-capable job.
+A create/update body carries: `name`, `task_kind` (`chat`, `coder`, or
+`memory` - the memory kind mirrors the CLI's `--memory` flag and needs no
+`prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
+(seconds as an integer, or a 5-field cron string), and the optional `model`,
+`cwd`, `scope`, `allow_shell`, and `enabled` fields. `allow_shell` (coder jobs
+only) is privileged: setting it requires the owner key or a `coder:full` key,
+so a plain `jobs`-scoped client cannot schedule a shell-capable job.
 
 ## How scheduling works
 

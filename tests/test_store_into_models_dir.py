@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """BRING-IN-1: `localm add/pull PATH --store copy|move` brings an external model
-file/dir INTO ~/.localm/models before registering it, instead of only ever
+file/dir INTO <data dir>/models before registering it, instead of only ever
 registering it in place. Covers the shared helper (_store_into_models_dir /
 _store_loose_gguf_dir) directly, add_local()'s and pull_model()'s --store
 threading, and the `localm add` / `localm pull` CLI options.
@@ -29,7 +29,7 @@ def isolated_home(tmp_path, monkeypatch):
     # MODELS_DIR/HOME_DIR through the localm.model_manager PACKAGE attribute -
     # a plain-value copy taken once at import time, never refreshed - so it
     # must be patched separately, or a --store copy/move would silently land
-    # in the real ~/.localm/models instead of this test's tmp_path.
+    # in a developer's real data dir instead of this test's tmp_path.
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)

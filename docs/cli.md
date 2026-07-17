@@ -102,9 +102,15 @@ localm pull https://example.com/m.gguf --sha256 <hash>
 
 # Alias for the downloaded model
 localm pull owner/repo --name myalias
+
+# Force a fresh download even if an identical model is already registered
+localm pull owner/repo:model-Q4_K_M.gguf --redownload
+
+# Download an mmproj vision projector alongside the main model
+localm pull owner/repo:model-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf
 ```
 
-Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / skip instead of silently duplicating gigabytes.
+Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes.
 
 ### Search HuggingFace
 
@@ -138,7 +144,7 @@ itself, never from fuzzy tag matching: a GGUF or Ollama blob is an `llm`; a
 HuggingFace directory is read from its `config.json` architectures (or
 `adapter_config.json` for a `lora`). Anything without a hard signal is left as
 `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
-`text-encoder`, `vae`, `lora`, and `unknown`.
+`text-encoder`, `vae`, `lora`, `embedding`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
 API request naming it), but is never auto-picked as the default chat model, so a
@@ -146,7 +152,7 @@ diffusion checkpoint or text encoder cannot get loaded as if it were a chat mode
 Correct a misdetected or `unknown` type at any time:
 
 ```bash
-localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora unknown
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding unknown
 ```
 
 Registering a lone `.safetensors` file scans its parent directory: if that folder
@@ -173,7 +179,7 @@ localm unload [MODEL]           # free VRAM on the running server: all models, o
 These are core CLI commands (they need only a running ComfyUI, not a plugin install). The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](../docs/flux-setup.md) and [docs/video.md](../docs/video.md) for model setup.
 
 ```bash
-localm image "A cat on a sunny beach" -s 1024 1024
+localm image "A cat on a sunny beach"
 localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
@@ -329,6 +335,7 @@ localm plugin install NAME      # copy NAME from the store and enable it
 localm plugin enable NAME       # enable an already-installed plugin
 localm plugin disable NAME      # disable but keep it installed
 localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
+localm plugin refresh [NAME]    # re-sync installed first-party plugin(s) with the bundled store
 localm plugin setup             # pick a starter set interactively
 localm plugin install-deps NAME # install a plugin's pip extras on this host
 localm plugin install-deps --all# fill in missing extras for every enabled plugin

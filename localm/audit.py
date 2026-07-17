@@ -13,15 +13,15 @@ privacy (default)
 
 log
     A JSONL audit trail is appended to
-    ``~/.localm/sessions/<YYYY-MM-DD_HHMMSS>_<pid>_<label>.jsonl``
+    ``<data dir>/sessions/<YYYY-MM-DD_HHMMSS>_<pid>_<label>.jsonl``
     for every session.  One event per line:
     ``{"t": unix_ms, "turn": int, "type": str, "data": any}``
 
 full
     Everything in ``log`` mode, plus a human-readable Markdown transcript:
     - coder:  ``.localcoder/sessions/<ts>.md`` in the project (agent.close())
-    - chat:   ``~/.localm/sessions/<ts>_chat.md``
-    - server: ``~/.localm/sessions/<ts>_server.md`` (per-exchange append)
+    - chat:   ``<data dir>/sessions/<ts>_chat.md``
+    - server: ``<data dir>/sessions/<ts>_server.md`` (per-exchange append)
 
 Mode resolution (``effective_mode(surface)``)
 ---------------------------------------------
@@ -54,7 +54,7 @@ from localm.debuglog import logger
 class SessionMode(str, Enum):
     """Controls what localm persists automatically during a session."""
     PRIVACY = "privacy"   # nothing written automatically
-    LOG     = "log"       # JSONL audit trail to ~/.localm/sessions/
+    LOG     = "log"       # JSONL audit trail to <data dir>/sessions/
     FULL    = "full"      # JSONL + markdown transcript
 
 
@@ -303,7 +303,7 @@ def make_audit_log(mode: SessionMode, label: str = "") -> AuditLogT:
     Return an appropriate audit log object for the given session mode.
 
     ``privacy`` → NullAuditLog (no disk writes)
-    ``log``     → AuditLog (JSONL in ~/.localm/sessions/)
+    ``log``     → AuditLog (JSONL in <data dir>/sessions/)
     ``full``    → AuditLog (JSONL; markdown is the caller's concern)
     """
     if mode == SessionMode.PRIVACY:

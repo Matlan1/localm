@@ -109,7 +109,7 @@ This is a *format*, not a runtime, and it maps to localm almost for free because
 | bundled scripts/resources (L3) | the agent's existing `read_file` / `run_shell` read and run them on demand | clean, reuses existing tools |
 | `allowed-tools` | map to localm capability scopes | clean |
 
-**Verdict:** the cleanest and lowest-risk of the three. The coder gains `list_skills` and `use_skill(name)` tools (see `localm/plugins/coder/skills.py`) that let it discover and load skills from `~/.localm/skills/` and `.localcoder/skills/` (project-local). Lower risk than Open WebUI / oobabooga: the agent *chooses* to run a bundled script through its existing confirm/scope/audit, rather than the host `exec`-ing foreign Python. (For plain non-agentic chat its value drops to a structured persona + context.)
+**Verdict:** the cleanest and lowest-risk of the three. The coder gains `list_skills` and `use_skill(name)` tools (see `localm/plugins/coder/skills.py`) that let it discover and load skills from `<data dir>/skills/` and `.localcoder/skills/` (project-local). Lower risk than Open WebUI / oobabooga: the agent *chooses* to run a bundled script through its existing confirm/scope/audit, rather than the host `exec`-ing foreign Python. (For plain non-agentic chat its value drops to a structured persona + context.)
 
 ## Reachable vs out of reach
 
@@ -123,7 +123,7 @@ This is a *format*, not a runtime, and it maps to localm almost for free because
 
 Leverage-weighted:
 
-1. **Skills importer** - IMPLEMENTED. A coder-surface plugin with two tools (`list_skills`, `use_skill`), zero kernel change. Skills from `~/.localm/skills/` and `.localcoder/skills/` are discovered and loaded on agent start (see `docs/skills.md`).
+1. **Skills importer** - IMPLEMENTED. A coder-surface plugin with two tools (`list_skills`, `use_skill`), zero kernel change. Skills from `<data dir>/skills/` and `.localcoder/skills/` are discovered and loaded on agent start (see `docs/skills.md`).
 2. **Chat-pipeline hook (B)** - IMPLEMENTED. The kernel hook runs on every `/v1/chat/completions` call; the Tools and text-pipeline adapters build on top of it (see the per-ecosystem sections above).
 3. **Open WebUI Tools adapter** - ROADMAP. Reuses the existing tool-adapter machinery (see Open WebUI above).
 4. **Open WebUI Pipes** - ROADMAP. A virtual-model backend (bigger, deferred).

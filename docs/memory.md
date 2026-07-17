@@ -57,7 +57,8 @@ A record also carries a source that governs how much it is trusted:
 - **user** - you typed it (via `/remember` or the memory editor). Trusted; can
   reach full importance.
 - **synth** - the model distilled it from a session. Importance-capped, and a
-  synth fact may never overwrite or delete a user-typed one.
+  synth fact may never overwrite or delete a user-typed one without your
+  approval (see [How memory grows](#how-memory-grows-consolidation) below).
 - **import** - migrated from the legacy flat `chat-memory.md` file (imported
   once, in `log`/`full` mode).
 
@@ -71,8 +72,9 @@ In the GUI:
 
 - `/remember <fact>` adds a fact to the store.
 - `/memory` opens the memory manager: view and edit your facts (one per line;
-  Save replaces the list), and click **Synthesize now** to distil facts from
-  your recent chats immediately.
+  Save replaces the list), click **Synthesize now** to distil facts from your
+  recent chats immediately, and review any **suggested corrections** (see
+  below) - nothing about them changes until you accept or reject each one.
 - The 🧠 toggle in the parameters drawer turns recall on and off (the
   `memory_enabled` setting).
 
@@ -87,6 +89,10 @@ Over the HTTP API (the routes the memory plugin mounts; see
 | `PATCH /api/memory/{id}` | Edit one record's text or importance. |
 | `DELETE /api/memory/{id}` | Delete one record. |
 | `POST /api/memory/consolidate` | Distil durable facts from recent sessions now (needs a loaded model). |
+| `GET /api/memory/forgotten` | List archived (evicted or superseded) records. |
+| `POST /api/memory/forgotten/{id}/restore` | Recover one archived record back into the store. |
+| `POST /api/memory/corrections/{id}/accept` | Apply a suggested correction (see below). |
+| `POST /api/memory/corrections/{id}/reject` | Dismiss a suggested correction; keep the fact as-is. |
 
 Writes are refused with `403` in privacy mode. There is no memory search,
 export, or import yet, and the per-item `PATCH`/`DELETE` routes have no GUI or
@@ -119,10 +125,20 @@ Consolidation asks the model for a small JSON object and parses it best-effort
 (small local models are not airtight, so a chatty or fenced reply is still
 recovered). It is guarded against the failure modes a small local model brings:
 session text is treated as DATA, never as instructions to follow; a synth
-candidate can never rewrite a user-typed fact; an unsure UPDATE keeps both facts
-rather than risk losing a true one; near-duplicates collapse without a model
-call. Episodic capture is watermarked, so a session is summarised exactly once
-and re-running consolidation adds nothing new.
+candidate can never *silently* rewrite or delete a user-typed or imported fact;
+an unsure UPDATE keeps both facts rather than risk losing a true one;
+near-duplicates collapse without a model call. Episodic capture is watermarked,
+so a session is summarised exactly once and re-running consolidation adds
+nothing new.
+
+When a high-confidence candidate would update or delete a user-typed/imported
+fact, consolidation does not apply it - it stores a **pending correction**
+instead and leaves the trusted fact untouched. These surface in the `/memory`
+manager as "Suggested corrections", each with the old text struck through and
+the proposed change beside it; you **Apply** or **Keep as is** per suggestion,
+and accepting one archives the old value to the recoverable forgotten sidecar
+before applying the change. A rejected suggestion is remembered so the same
+contradiction is not re-proposed on the next pass.
 
 In privacy mode, consolidation returns "skipped" and never calls the model.
 

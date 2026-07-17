@@ -728,8 +728,8 @@ def _prompt_duplicate_action(existing_names: List[str], reason: str) -> str:
         return "skip"
 
     choice = click.prompt(
-        "  [a]lias (new name, same file)  [c]opy into ~/.localm/models  "
-        "[m]ove into ~/.localm/models  [r]egister anyway  [s]kip",
+        "  [a]lias (new name, same file)  [c]opy into <data dir>/models  "
+        "[m]ove into <data dir>/models  [r]egister anyway  [s]kip",
         type=click.Choice(["a", "c", "m", "r", "s"], case_sensitive=False),
         default="a",
         show_choices=False,
@@ -1279,7 +1279,7 @@ def remove_model(name: str) -> None:
         )
         return
 
-    # Only delete files that live inside ~/.localm/models/ - never touch
+    # Only delete files that live inside <data dir>/models/ - never touch
     # externally registered paths (Ollama blobs, user model dirs, etc.)
     owned = path.is_relative_to(_mm.MODELS_DIR) if hasattr(path, "is_relative_to") else \
             str(path).startswith(str(_mm.MODELS_DIR))
@@ -1297,7 +1297,7 @@ def remove_model(name: str) -> None:
                     part_path.unlink()
                     console.print(f"[dim]Deleted {part_path}[/dim]")
     elif path.exists():
-        console.print("[dim]Unregistered (file not deleted - lives outside ~/.localm/models)[/dim]")
+        console.print("[dim]Unregistered (file not deleted - lives outside <data dir>/models)[/dim]")
     _mm.update_registry(lambda r: r.pop(name, None))       # atomic RMW
     console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")
 
@@ -1491,7 +1491,7 @@ def add_local(
     otherwise it is rejected with a precise, actionable reason (A3).
 
     *store* is ``"copy"``, ``"move"``, or ``None`` (default: register in place,
-    today's behavior). When set and the path is OUTSIDE ~/.localm/models, the
+    today's behavior). When set and the path is OUTSIDE <data dir>/models, the
     file/dir is brought into managed storage (via _store_into_models_dir) BEFORE
     registration, so the model is treated exactly like a pulled model afterward
     (BRING-IN-1). A failure here (name collision, no disk space, copy corrupted)

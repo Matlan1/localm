@@ -28,8 +28,9 @@ localm is a local-first, single-owner application. API access is gated by a
   an unauthenticated liveness probe that returns the status, model name, and load state.
 
 Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
-mint named, scope-limited keys with `localm key create --scope <scope>` (privileged
-scopes are never minted into a named key).
+mint named, scope-limited keys with `localm key create --scope <scope>` - the CLI
+never mints a privileged scope into a named key; only an owner-authenticated API
+call (`POST /v1/keys`) can (see *Capability scopes* below).
 
 Because the default is fail-open for reads, a network bind without a key is unsafe,
 so **both `localm gui` and `localm serve` refuse to bind past loopback unless an API
@@ -41,15 +42,19 @@ shell commands.
 
 ### State-changing endpoints
 
-Every state-changing endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) except the
-OpenAI-compatible inference API (`/v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`) is **same-origin only** by default, so a web page on another
-`localhost` port (a dev server, an npm postinstall page) cannot drive it from your
-browser. The guard is allowlist-by-default: it covers plugin data routes
-(`/api/rag`, `/api/coder`, ...) too, not just key/config/plugin administration, and
-a new route is protected the moment it is added. The inference API stays
-cross-origin callable so a local app can use it; `"cors_origins"` opts specific
-origins (or `"*"`) into cross-origin use.
+Every state-changing endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) is **same-origin
+only** by default, so a web page on another `localhost` port (a dev server, an
+npm postinstall page) cannot drive it from your browser. The guard is
+allowlist-by-default: it covers plugin data routes (`/api/rag`, `/api/coder`,
+...) too, not just key/config/plugin administration, and a new route is
+protected the moment it is added. Three groups are exempt from the check itself,
+each because it carries its own credential instead: the OpenAI-compatible
+inference API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`),
+left cross-origin callable so a local app can use it; `/v1/surfaces/*`
+(on-demand GUI mount), gated on its own attach token or the owner key; and
+`/v1/instances/*` (multi-instance GPU coordination), gated on a
+per-coordination token. A configured `"cors_origins"` (or `"*"`) opts specific
+origins into cross-origin use for everything else.
 
 When **no key is configured** (open mode), those same state-changing routes also
 require a per-process **shell token** that only the loopback GUI shell carries. So a
@@ -117,10 +122,14 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
 Honest limits: signature verification enforces only while a key is pinned. Shipped
 builds do pin one (a test keeps the pin non-empty), but if the pin were ever empty
 the updater would fall back to transport trust (HTTPS plus the private channel)
-rather than brick itself. And there is no post-restart health check: a build that
-applies cleanly but misbehaves after restart is recovered with `localm update
---rollback` (or by restoring the backup directory the update left behind), not
-automatically.
+rather than brick itself. The GUI "Update now" button's restart (the only
+transition that happens with nobody watching) is followed by a detached watchdog
+that polls the relaunched build's `/whoami` for the expected version and
+auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`
+from the CLI applies the same way but does not restart for you - you relaunch by
+hand, so a build that misbehaves after that manual restart has no automatic
+watchdog and is recovered with `localm update --rollback` (or by restoring the
+backup directory the update left behind).
 
 ## Supported versions
 

@@ -45,7 +45,7 @@ this to your install"). When in doubt, make the example generic.
 Keep personal and local files out of git with `.gitignore`: `config.json`,
 `registry.json`, `*_local.json` personal workflows, `.venv/`, the native
 binaries under `runtime/localm_llama_runtime/lib/`, `home/`, and `.claude/`.
-Also keep out the installed-plugins directory (`~/.localm/plugins/`, the
+Also keep out the installed-plugins directory (`<data dir>/plugins/`, the
 user's own enabled plugins) and any per-plugin local config file that
 overrides a tracked template, such as `flux_workflow.json` (overrides
 `flux_workflow.example.json`). Commit the `*.example.json` templates, never

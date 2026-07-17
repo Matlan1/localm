@@ -3,8 +3,9 @@
 localm is plugin-first. The core is a model loader plus the plugin engine; the
 only always-present feature is **chat**, which itself ships as the protected,
 preinstalled plugin #0. Everything else - the coder agent, image/music/video
-generation, RAG (Knowledge), web access, voice (Whisper STT), text-to-speech
-(Kokoro), and the MCP server - is a plugin you install.
+generation, RAG (Knowledge), web access, durable memory, voice (Whisper STT),
+text-to-speech (Kokoro), scheduled jobs, and the MCP server - is a plugin you
+install.
 
 This guide covers the plugin lifecycle, the `plugin.toml` manifest, the
 `register(host)` contract, the Host API, and how to ship server routes, a GUI
@@ -19,7 +20,7 @@ A plugin moves along two independent axes:
 | Term | Meaning |
 |------|---------|
 | **Available** (store) | Bundled first-party plugins live read-only in `localm/plugins/builtin/` (the "store"). They are NOT loaded from there. |
-| **Installed** | Physically present on disk in the installed folder (`~/.localm/plugins/<name>/` with a `plugin.toml`). Installing copies a plugin from the store into the installed folder. "Installed" is disk presence, not a config flag. |
+| **Installed** | Physically present on disk in the installed folder (`<data dir>/plugins/<name>/` with a `plugin.toml`). Installing copies a plugin from the store into the installed folder. "Installed" is disk presence, not a config flag. |
 | **Enabled** | A config toggle in `config["plugins_enabled"]` (WordPress-style). |
 | **Active** | `installed AND enabled`. Only active plugins are discovered and loaded; their routes, tabs, and assets are mounted on the live server. |
 
@@ -97,7 +98,7 @@ register = "plug"            # module exposing register(host) (default "plugin")
 requires = ["other-plugin"]  # other plugins that must be installed first
 requires_extras = ["myextra"]# pip extras carrying heavy deps (pip install "localm[myextra]")
 capabilities = ["feature"]   # declared capabilities (shown at install)
-data_subdir = "my_data"      # storage under the data dir (~/.localm/my_data); "" = none
+data_subdir = "my_data"      # storage under the data dir (<data dir>/my_data); "" = none
 protected = false            # cannot be disabled/uninstalled (chat only)
 default_enabled = false      # active on first run (chat only)
 cli = "module:attr"          # optional legacy Click command entry point
@@ -279,7 +280,7 @@ localm plugin install /path/to/my-plugin     # --force overwrites an existing in
 
 `plugin install` takes either a first-party plugin NAME (from the bundled store)
 or a path to a DIRECTORY containing a `plugin.toml`; a directory is validated,
-copied into `~/.localm/plugins/`, and enabled, then loaded with the same contract
+copied into `<data dir>/plugins/`, and enabled, then loaded with the same contract
 as a first-party plugin. Third-party plugins run unsandboxed in-process, so
 install only code you trust. See [plugin-interop.md](plugin-interop.md) for the
 adapter approach to wrapping extensions from other ecosystems.

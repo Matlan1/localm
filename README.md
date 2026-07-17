@@ -42,7 +42,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **A coding agent that does the work (coder plugin).** `localm coder` works through a task with tools for files, the shell, search, and tests; you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
 
-- **Media generation (image/music/video plugins).** localm drives a local media-generation server (**ComfyUI is the supported backend today**, with a seam for others later). Point it at your own ComfyUI, or let localm run its **own** managed ComfyUI (opt-in) so it can pin a known-good version and carry fixes without touching your install ([guide](docs/managed-comfyui.md)). Either way localm orchestrates generation and VRAM handover from the LLM, and surfaces it as the Images/Music/Video pages and chat commands.
+- **Media generation (image/music/video plugins).** localm drives a local media-generation server (**ComfyUI is the supported backend today**, with a seam for others later). Point it at your own ComfyUI, or let localm run its **own** managed ComfyUI (opt-in) so it can pin a known-good version and carry fixes without touching your install ([guide](docs/managed-comfyui.md)). Either way localm orchestrates generation and VRAM handover from the LLM, and surfaces it through `localm image` / `music` / `video`, the Images/Music/Video GUI pages, and chat commands.
 
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index whole folders and chat against them with citations (Knowledge), dictate with local Whisper speech-to-text, or have replies read back to you with in-browser Kokoro text-to-speech.
 
@@ -125,9 +125,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `rag` | PDF parsing for Knowledge (`pypdf`); other formats are stdlib |
 | `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper`, CPU, no torch) |
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
-| `qr` | Experimental startup LAN-URL QR for `localm gui --qr` (phone pairing itself needs no extra; `qrcode` is core) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
-| `gguf` | Optional `llama-cpp-python` path (rarely needed; core ships its own ctypes binding) |
 | `cpu` | Explicit CPU-only marker (empty; core already runs GGUF on CPU) |
 | `dev` | Contributor / CI tooling: `ruff` + `pytest` |
 
@@ -203,7 +201,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-The streaming usage block adds `ttft_ms` and `tokens_per_sec`. See [docs/server-api.md](docs/server-api.md) for the full API surface.
+The usage block adds performance numbers - which fields appear depends on streaming and the endpoint; see [docs/server-api.md](docs/server-api.md) for the full breakdown and API surface.
 
 ---
 
@@ -337,6 +335,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
+| [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, and the two independent dials that control it |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |
 | [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
 | [docs/native-app.md](docs/native-app.md) | The native `LocaLM.exe` launcher: how it works, `make-launcher`, the freeze trade-off |

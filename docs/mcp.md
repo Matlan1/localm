@@ -54,7 +54,7 @@ coder client (below) does not read these hints from remote servers; it gates on 
 Options for the server:
 
 ```bash
-localm mcp --model NAME      # default model (else LOCALM_MODEL env, else first registered)
+localm mcp --model NAME      # default model (else LOCALM_MODEL env, else the first chat-eligible registered model)
 localm mcp --no-images       # do not expose generate_image
 localm mcp --no-coder        # do not expose run_coder_task
 ```
@@ -134,7 +134,7 @@ Each `[mcp.servers.NAME]` table declares:
 
 - `command`: the executable to run (must be on PATH or an absolute path)
 - `args`: command-line arguments (optional)
-- `trusted` (optional, default false): if true, the agent can call tools without confirmation; if false, destructive tools trigger a confirmation prompt
+- `trusted` (optional, default false): if true, every tool this server offers runs without confirmation; if false, every one of its tools (whatever it actually does) is treated as destructive and triggers a confirmation prompt - see [Security: trusted vs. untrusted](#security-trusted-vs-untrusted) below
 
 ### How tools appear
 
@@ -163,8 +163,18 @@ MCP server 'search': command not found: npx
 
 ### Security: trusted vs. untrusted
 
-- **untrusted (default)**: Tools that modify files, delete data, or call external APIs are gated by a confirmation prompt. You review each call and decide to allow or skip.
-- **trusted**: Tools run without prompts. Use this only for servers you trust completely (e.g. internal tools you wrote, well-known open-source projects with security track records).
+`trusted` is a per-SERVER flag, not a per-tool one: the coder client does not
+inspect a remote tool's own annotations or guess what it does, it gates ALL of
+a server's tools the same way based on this one setting.
+
+- **untrusted (default)**: every tool the server offers - including a
+  read-only one like a search or query tool - is registered as destructive,
+  so each call is gated by a confirmation prompt. You review each call and
+  decide to allow or skip.
+- **trusted**: every tool from that server runs without prompts. Use this only
+  for servers you trust completely (e.g. internal tools you wrote, well-known
+  open-source projects with security track records) - a single tool call you
+  did not mean to allow cannot be stopped once the server is trusted.
 
 Do not set `trusted = true` for arbitrary code. MCP servers run with your user account and full file access.
 
@@ -267,7 +277,10 @@ The registered name is `mcp_<server>_<tool>`, where `<tool>` is the tool's name 
 
 **Is the tool marked destructive?**
 
-If the server is not marked `trusted = true` in the config, destructive tools require confirmation. The agent will offer to call the tool, and you must approve it in the console before it runs.
+Unless the server is marked `trusted = true` in the config, every one of its
+tools is treated as destructive and needs confirmation - there is no
+per-tool exception. The agent will offer to call the tool, and you must
+approve it in the console before it runs.
 
 ### Image generation fails
 

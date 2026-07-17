@@ -7,9 +7,8 @@ over a pluggable inference backend, and everything above bare chat is a
 plugin. The core design rule: the CLI knows nothing about inference;
 inference knows nothing about CLI. They communicate through `Engine`. CHAT
 is the protected, preinstalled plugin (#0); coder, image, music, video, rag,
-web, voice (Whisper STT), tts (Kokoro in-browser TTS), jobs (scheduled tasks),
-and mcp are all
-plugins layered on top.
+web, memory, voice (Whisper STT), tts (Kokoro in-browser TTS), jobs
+(scheduled tasks), and mcp are all plugins layered on top.
 
 ```
 CLI (localm/cli/)                  Plugin engine (localm/plugins/)
@@ -17,7 +16,7 @@ CLI (localm/cli/)                  Plugin engine (localm/plugins/)
         ├── GgufBackend              ├── contract.py  Host / Surface / PluginSpec
         │     └── LlamaCpp (ctypes)  ├── catalog.py   first-party catalog
         └── HFBackend                ├── builtin/     store (read-only)
-              └── HF Transformers     └── ~/.localm/plugins/  installed
+              └── HF Transformers     └── <data dir>/plugins/  installed
 ```
 
 ## Engine
@@ -77,11 +76,11 @@ and `unregister()`.
 
 **Two locations.** The *store* is `localm/plugins/builtin/` (the bundled,
 read-only first-party plugins listed above). *Installed* plugins live under
-`~/.localm/plugins/`. Installing copies a plugin from the store into the
+`<data dir>/plugins/`. Installing copies a plugin from the store into the
 installed location.
 
 **States.** A plugin is *active* only when it is both installed (present under
-`~/.localm/plugins/`) and enabled (listed in `config["plugins_enabled"]`); the
+`<data dir>/plugins/`) and enabled (listed in `config["plugins_enabled"]`); the
 store also tracks what is *available* (in the catalog but not yet installed).
 By default only chat is active. See [plugins.md](plugins.md) for the full model.
 
@@ -116,7 +115,7 @@ warns and is skipped, never crashing the host.
 ## Debug mode
 
 `debuglog.py` implements `--debug`: a shared log file under
-`~/.localm/logs/` (path carried in `LOCALM_DEBUG` so child processes append
+`<data dir>/logs/` (path carried in `LOCALM_DEBUG` so child processes append
 to the same file), HTTP request timing, and redirection of the native
 llama.cpp stderr into the log so crash abort reasons are captured instead
 of suppressed.
