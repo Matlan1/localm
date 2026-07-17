@@ -68,7 +68,7 @@ def multi(monkeypatch):
     # deadline / wait_for_inflight on this exact path (vram_capacity -> vram_info),
     # and a zero-arg double rejects those kwargs with a TypeError that 500s the
     # chat-completion-driven load this file tests. Same conversion #722 applied
-    # to its ten other status-blind doubles; this file was the one it missed.
+    # across the ten other test files it touched; this file was the one it missed.
     monkeypatch.setattr("localm.discover.vram_info",
                         probe_double({"free": 10 * 1024 ** 3,
                                       "total": 16 * 1024 ** 3}))
