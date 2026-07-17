@@ -8,6 +8,7 @@
 |---|---|
 | `_loader.py` | DLL discovery, dependency-order loading, PATH extension |
 | `_structs.py` | ctypes Structure definitions (sizes probed from the DLL) |
+| `_abi.py` | Runtime ABI self-check: verifies the loaded DLL's struct layout before first use |
 | `_api.py` | Low-level C API bindings (one Python function per C function) |
 | `llama.py` | `LlamaCpp` public class + helpers |
 | `mtmd.py` | Multimodal (vision) support: binds the bundled `mtmd.dll` for GGUF mmproj |
@@ -20,7 +21,7 @@ only - never a sibling folder elsewhere on disk - in this order:
 
 1. `LLAMA_CPP_LIB` environment variable (explicit path to `llama.dll`, for
    one-off use)
-2. the `binary_dir` config key in `~/.localm/config.json`
+2. the `binary_dir` config key in `<data dir>/config.json`
 3. the `localm-llama-runtime` wheel bundled in this venv, populated by
    `localm setup-llama`
 
@@ -186,7 +187,8 @@ Covered functions (grouped):
 **Chat template**: `llama_model_chat_template`, `llama_chat_apply_template`  
 **Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free`  
 **Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  
-**Sampler chain**: `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_penalties` (export-probed)  
+**Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; the only caller is the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations)  
+**Sampler chain**: `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_grammar_lazy_patterns` (export-probed via `has_lazy_grammar()`), `llama_sampler_init_penalties` (export-probed via `has_penalties_sampler()`)  
 **Memory (KV cache)**: `llama_get_memory`, `llama_memory_clear`, `llama_memory_seq_rm` (all probed at runtime via `has_memory_api()`)  
 **Diagnostics**: `llama_print_system_info`
 
@@ -210,6 +212,9 @@ The constructor:
 2. Calls `llama_model_default_params()`, sets `n_gpu_layers`, loads model
 3. Calls `llama_context_default_params()`, sets `n_ctx`, `n_batch`, `offload_kqv`, creates context
 4. Creates `_Tokenizer(model_ptr, ctx_ptr)`
+5. If `mmproj_path` is given, best-effort loads it via `MtmdContext` (`mtmd.py`)
+   for in-process vision; any failure leaves the model text-only rather than
+   raising
 
 ### Chat template
 
@@ -243,8 +248,12 @@ loop:
     token = llama_sampler_sample(chain, ctx, -1)
     if llama_vocab_is_eog(vocab, token): break
     yield token
-    feed token back (llama_batch_get_one + llama_decode)
+    feed token back (llama_batch_init + llama_decode)
 ```
+
+(`llama_batch_get_one` is also bound in `_api.py`, but only the separate
+embedding-model loader uses it - see Known Limitations below; the chat
+generation loop always builds its one-token batch via `llama_batch_init`.)
 
 Do NOT call `llama_sampler_accept` after `llama_sampler_sample`: sample()
 already accepts the token into every stateful sampler in the chain. A second
@@ -271,6 +280,14 @@ Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `<
 
 - The GBNF grammar stage (`llama_sampler_init_grammar`) is added when a
   grammar string is supplied.
+- A LAZY grammar (`llama_sampler_init_grammar_lazy_patterns`, export-probed via
+  `has_lazy_grammar()`) is used instead when the caller passes `grammar_lazy=True`
+  with `grammar_triggers`, and the DLL exports the lazy variant: generation
+  stays unconstrained until the output matches a trigger pattern, then the
+  grammar enforces from there (the "text-or-tool" mechanism, so a strict
+  grammar never stalls a thinking model). Without triggers, or on an older
+  DLL, a lazy request generates unconstrained rather than silently becoming a
+  strict grammar.
 - The repetition-penalty stage is added when `repeat_penalty != 1.0` and
   the DLL exports `llama_sampler_init_penalties`.
 - For `temperature <= 0` the stochastic stages are replaced by `greedy`
@@ -284,8 +301,14 @@ tokens) unless debug mode is active.
 
 ## Known Limitations
 
-- **Single sequence only**: `n_seq_max=1` (the `llama_batch_get_one` path)
-- **No embedding extraction**: the binding has no embedding path yet, so
-  `GgufBackend.embed` raises `NotImplementedError`. HF-format models embed fine.
-  (See server-api.md for the `/v1/embeddings` behavior.)
+- **Single sequence only**: `_create_batch` always calls `llama_batch_init(n, 0, 1)` -
+  the hardcoded final `1` is `n_seq_max`
+- **No embedding extraction via the chat class**: `LlamaCpp`/`GgufBackend` never
+  call the embedding accessors, so `GgufBackend.embed` raises
+  `NotImplementedError` and `GgufBackend.can_embed` is `False`. The low-level
+  binding itself does have a working embeddings path (`has_embeddings_api()` /
+  `llama_get_embeddings_seq` in `_api.py`) - it is used by a separate,
+  dedicated on-device embedding-model loader (`localm.inference.embedder`),
+  loaded independently of whatever chat model is active. HF-format models
+  embed fine. (See server-api.md for the `/v1/embeddings` behavior.)
 - **No speculative decoding / draft models**

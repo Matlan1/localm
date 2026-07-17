@@ -322,7 +322,7 @@ DEFAULT_CONFIG: dict = {
     "comfy_gpu_placement": False,
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
-    #   log     = JSONL audit trail in ~/.localm/sessions/
+    #   log     = JSONL audit trail in <data dir>/sessions/
     #   full    = log + markdown transcript
     # chat_mode / coder_mode override per surface (None = inherit); CLI --mode
     # overrides everything.

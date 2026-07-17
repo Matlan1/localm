@@ -7,7 +7,7 @@ This is a SUPERSET of the legacy CLI manifest in localm/plugins/loader.py. A
 plugin may still expose a Click command (``cli_entry = "module:attr"``), but it
 can also contribute a *server surface* via ``register(host)``: routes, a GUI
 tab, a settings section, and a capability scope. Built-in (in-tree) plugins and
-third-party (~/.localm/plugins) plugins use the same contract. Chat is the
+third-party (<data dir>/plugins) plugins use the same contract. Chat is the
 canonical built-in, *protected* plugin (cannot be disabled or uninstalled).
 
 Phase 0 defines the interfaces only. The engine (PluginManager) and the concrete

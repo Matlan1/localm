@@ -796,7 +796,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "type": "object",
                 "properties": {
                     "prompt":          {"type": "string", "description": "Image description"},
-                    "output_path":     {"type": "string", "description": "Where to save (default: ~/.localm/mcp-images/)"},
+                    "output_path":     {"type": "string", "description": "Where to save (default: <data dir>/mcp-images/)"},
                     "negative_prompt": {"type": "string", "description": "Things to avoid"},
                     "seed":            {"type": "integer", "description": "Reproducibility seed"},
                     "guidance":        {"type": "number", "description": "Guidance scale (default 3.5)"},
@@ -819,7 +819,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         "handler": setup_embeddings,
     }
     tools["remove_model"] = {
-        "description": "Remove a model from the registry (and delete the file if it's in ~/.localm/models/).",
+        "description": "Remove a model from the registry (and delete the file if it's in <data dir>/models/).",
         "inputSchema": {
             "type": "object",
             "properties": {

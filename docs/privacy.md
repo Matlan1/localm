@@ -19,9 +19,12 @@ There are two independent dials:
 Set globally (`mode`), per surface (`chat_mode`, `coder_mode`, which inherit the
 global when unset), by the `--mode` flag on `localm gui` / `serve` / `run`, by the
 `LOCALM_MODE` environment variable, in the desktop launcher's Privacy card, or in
-the app under Settings > Privacy. Precedence: `LOCALM_MODE` env > `--mode` flag >
-per-surface config > global config > **privacy** (the default). See
-`localm/audit.py`.
+the app under Settings > Privacy. The `--mode` flag works by setting the
+`LOCALM_MODE` environment variable for the process (and its children), so the two
+are one precedence level, not two. Precedence: `LOCALM_MODE` env (direct, or via
+`--mode`) > a project's `.localcoder/config.toml` `mode` (coder surface only) >
+per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
+**privacy** (the default). See `localm/audit.py`.
 
 | Mode | What it saves automatically |
 | --- | --- |
@@ -56,8 +59,9 @@ or replies.
 | `0` / `false` / `off` | Off entirely. |
 | `1` / `true` / `on` | Forced on regardless of mode, plus verbose asyncio slow-callback logging. |
 
-`GET /debug/stacks` (loopback-only, owner-gated) returns the current thread stacks
-and asyncio task list on demand, independent of the watchdog.
+`GET /debug/stacks` (loopback-only, gated on full host filesystem access - the
+owner key, open mode, or a key explicitly granted it) returns the current thread
+stacks and asyncio task list on demand, independent of the watchdog.
 
 ### The debug log (`--debug` / `LOCALM_DEBUG`)
 

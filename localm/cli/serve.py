@@ -45,7 +45,7 @@ from ._core import (
               help="Start a private server invisible to discovery (test safety). "
                    "Implies --new.")
 @click.option("--debug", is_flag=True,
-              help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
+              help="Write a debug log (<data dir>/logs/), capture native llama.cpp "
                    "stderr, and log requests.")
 @click.option("--mode", default=None,
               type=click.Choice(["privacy", "log", "full"], case_sensitive=False),

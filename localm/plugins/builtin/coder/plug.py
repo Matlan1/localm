@@ -22,7 +22,7 @@ route above on the ``coder`` capability scope. Live sessions need the kernel GUI
 shared services (``request.app.state.coder_sessions`` / ``.switch_model`` /
 ``.self_url`` / ``.active_model``), published by ``attach_gui``; the routes degrade
 to 503 when those are absent (headless / no GUI). The read-only history endpoints
-read ``~/.localm/sessions/*.jsonl`` directly and work without the GUI.
+read ``<data dir>/sessions/*.jsonl`` directly and work without the GUI.
 """
 
 from __future__ import annotations
@@ -409,7 +409,7 @@ async def session_delete(session_id: str, request: Request):
 # ------------------------------------------------------------------ #
 #  Session history (read-only; works without the GUI services)        #
 # ------------------------------------------------------------------ #
-# Browser for past audit logs (~/.localm/sessions/*.jsonl, written in log/full
+# Browser for past audit logs (<data dir>/sessions/*.jsonl, written in log/full
 # modes). Live sessions have /log; this lists what earlier sessions - including
 # ones from before a server restart - left behind. Privacy mode writes no logs,
 # so the list is simply empty.

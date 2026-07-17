@@ -94,11 +94,6 @@ gpu = [
     "rocm-sdk-core; sys_platform == 'win32'",
     "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
 ]
-# In-process GGUF inference - AMD GPU build:
-#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/rocm602
-gguf = [
-    "llama-cpp-python>=0.3.34",
-]
 # Audio multimodal (Gemma4 unified audio)
 audio = [
     "soundfile>=0.14.0",
@@ -140,13 +135,6 @@ grammar = [
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
 # `pip install "localm[cpu]"` is an explicit, documented choice.
 cpu = []
-# [PoC] Show a scannable QR of the LAN URL at GUI startup (`localm gui --qr`),
-# so a phone on the same network opens localm without typing an IP. Experimental
-# proof-of-concept; pure-Python, no Pillow needed for the terminal QR.
-# Install with:  pip install "localm[qr]"
-qr = [
-    "qrcode>=8.2",
-]
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
     "ruff>=0.15.21",

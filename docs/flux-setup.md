@@ -40,7 +40,7 @@ git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GG
 ### 3. Download model files
 
 These are the exact files the committed example workflow loads, so a fresh
-download matches it on the first run (roughly 20 to 25 GB in total):
+download matches it on the first run (roughly 18 GB in total):
 
 | Component | File | ComfyUI folder |
 | :--- | :--- | :--- |
@@ -120,14 +120,16 @@ setup notes in [gpu-setup.md](gpu-setup.md).
 
 ## How localm drives it
 
-Each frontend is provided by a plugin and shares the same pipeline; a frontend
-appears only when its plugin is installed and enabled:
+All frontends share the same pipeline:
 
+- `localm image "<prompt>"` - a core CLI command, always available (see
+  `localm image --help` for img2img, negative prompt, LoRA, and seed flags).
 - The `image` plugin: its Images page in the GUI (`localm gui`) and the
-  image-generation chat slash command
+  image-generation chat slash command - appears once the plugin is installed
+  and enabled.
 - The `coder` plugin's `generate_image` tool, invoked when you ask the agent
-  for an image
-- The `mcp` plugin's `generate_image` tool (`localm mcp`)
+  for an image (plugin-gated).
+- The `mcp` plugin's `generate_image` tool (`localm mcp`) (plugin-gated).
 
 Features handled for you:
 
@@ -154,11 +156,16 @@ one. If you need filtering, implement it at the ComfyUI pipeline level.
 The committed template, `localm/image_gen/flux_workflow.example.json`, uses
 the vanilla public FLUX stack (`flux1-dev-Q8_0.gguf`, `clip_l`,
 `t5xxl_fp8_e4m3fn`, `ae.safetensors`). To use your own models, encoders, or
-node graph, export your workflow from ComfyUI (Save -> API format) as
-`localm/image_gen/flux_workflow.json` - it takes precedence automatically
-and is **gitignored**, so which models you actually run never leaves your
-machine.
+node graph, export your workflow from ComfyUI (Save -> API format) and
+upload it from the GUI's Images page (its Workflows panel - "Upload + use");
+the file is stored under the localm data folder, never in the repo, so which
+models you actually run never leaves your machine. This selected workflow
+takes precedence over everything below it.
+
+The older method still works: drop the export at
+`localm/image_gen/flux_workflow.json` (it is **gitignored**). localm migrates
+it into the same private, update-surviving location the first time it starts
+and selects it automatically, as long as nothing else is already selected.
 
 Suggested host stack: Stability Matrix managing ComfyUI - on RDNA2 (RX 6xxx)
-combine it with the ROCm/HIP fixes described in the GPU setup section of the
-README.
+combine it with the ROCm/HIP setup notes in [gpu-setup.md](gpu-setup.md).

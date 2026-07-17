@@ -293,7 +293,7 @@ REPL history persists across sessions in log/full modes, never in privacy.[/dim]
              - PSReadLine / bash / zsh history files scrubbed of localcoder
                lines on exit  (cmd.exe: no persistent history anyway)
              - /save requires explicit confirmation
-  log      JSONL audit trail → ~/.localm/sessions/
+  log      JSONL audit trail → <data dir>/sessions/
   full     JSONL audit trail + markdown transcript → .localcoder/sessions/
   Note: privacy mode cannot suppress OS process-creation logs (Event Log /
   auditd) or DNS/network logs from fetch_url.
