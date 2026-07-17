@@ -20,6 +20,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Third-party credential folders (`.ssh`, `.aws`, and similar) are still refused.
 
 ### Fixed
+- **A decoder-based embedding model (Qwen3-Embedding, gte-Qwen2, ...) now
+  works correctly with no setting to discover.** These models are trained for
+  last-token pooling, but with no `embedding_pooling` chosen, localm forced
+  mean pooling on every model - measurably degrading embedding quality for
+  this specific class, silently (the vectors still looked normal). Nothing
+  explicitly configured now correctly uses each model's own declared pooling
+  when it declares last-token specifically; the bundled `bge-small`/`nomic`
+  choices are unaffected (still mean, exactly as every existing index built
+  with them expects). An explicit `embedding_pooling` choice still always
+  wins, as before.
 - **Setting up or using an embedding model no longer crashes on some ROCm/HIP
   GPU installs.** `localm setup-llama` was provisioning `rocblas.dll` and
   `hipblaslt.dll` without the GPU kernel data files (`rocblas/library/`,
