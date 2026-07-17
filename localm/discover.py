@@ -1378,18 +1378,27 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     ``return_status=True`` to receive ``(shortfall, status)`` carrying the underlying
     :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY`.
 
-    Completeness (the blindness axis, orthogonal to freshness). On a backend/OS where
-    a device's ``free`` counts only the server's own allocations - blind to other
-    processes' VRAM, measured on Windows + AMD, where an out-of-process model's VRAM
-    (#606) is invisible - the reading is FRESH yet OVER-states free. ``list_gpus`` tags
-    such a device :data:`FREE_SCOPE_PROCESS`; this gate OMITS it from the per-device
-    check rather than fabricate or quote a shortfall from a figure that is not the
-    board's truth (AGENTS.md rule 5) - the same "omit, do not fabricate" treatment a
-    stale probe gets, applied PER DEVICE so a :data:`FREE_SCOPE_DEVICE` sibling is
-    still checked. Unlike staleness the blindness is NOT retryable (a fresh read is
-    still blind); only a device-global source (the ``free_scope`` tag from
-    ``_apply_device_global_free``) cures it. A device carrying no ``free_scope`` tag is
-    treated as trustworthy - only an explicit PROCESS tag is omitted.
+    Completeness (the blindness axis) is deliberately NOT gated on here, and the
+    asymmetry is the reason. ``list_gpus`` tags each device :data:`FREE_SCOPE_DEVICE`
+    (the board's number) or :data:`FREE_SCOPE_PROCESS` (counts ONLY this process's own
+    allocations - blind to every other process; Windows + AMD with no device-global
+    source). A PROCESS-scoped reading OVER-states free (``total`` minus only OUR use,
+    missing an out-of-process model's VRAM #606 or another app's), so in the REFUSE
+    direction this gate governs, ignoring the tag is SOUND: if even the over-stated
+    ``free`` is short, the real free is shorter still, and the refusal is correct. Only
+    the quoted figure is imprecise, and it errs by over-stating what is available, so it
+    never talks a user out of a load that would in fact fit.
+
+    Do NOT "fix" this by omitting a PROCESS-scoped device from the check: that trades a
+    SOUND refusal for a permit, and the load then reaches llama.cpp too small and dies
+    in the worker instead of returning a clean 503. That was tried in PR #710 and
+    reverted; this comment is the guard rail.
+
+    The blindness that DOES bite is the PERMIT direction - a blind ``free`` can read
+    comfortable while the board is genuinely full - and it is not detectable from the
+    reading itself, so no per-device tag check here can catch it. A permit-side caution
+    (e.g. prefer single-resident on a PROCESS-scoped reading) belongs with the aggregate
+    gate that owns eviction, not with this per-device fit check.
 
     Only meaningful for the GGUF/llama.cpp load path - callers should gate on that
     themselves (e.g. via ``inference.engine._is_gguf``); this function has no way to
@@ -1490,24 +1499,8 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
             # production; it only stops a None-free entry (e.g. test-injected) from
             # crashing the loop.
             continue
-        if g.get("free_scope") == FREE_SCOPE_PROCESS:
-            # This device's "free" is a PROCESS-scoped (blind) reading: it counts only
-            # the server's own allocations, not a loaded model's out-of-process VRAM
-            # (#606) or another app's, so it OVER-states free and is a figure localm
-            # cannot stand behind in a refusal (AGENTS.md rule 5). Same "omit, do not
-            # fabricate/quote a shortfall" treatment as a stale probe (the status != OK
-            # branch), applied PER DEVICE so a FREE_SCOPE_DEVICE sibling is still
-            # checked. Unlike staleness this is NOT retryable (a fresh read is still
-            # blind); only a device-global source (the free_scope tag from
-            # _apply_device_global_free) cures it. A device with no free_scope tag is
-            # treated as trustworthy - only an EXPLICIT PROCESS tag is omitted, matching
-            # that function's own "never assert a blindness we cannot confirm" default.
-            # The isolated worker's contained abort (#606) is the backstop if an omitted
-            # device is in fact full.
-            logger.debug("gpu_split_shortfall: device %s free is PROCESS-scoped (blind "
-                         "to other processes' VRAM); omitting from the per-device check "
-                         "rather than quote a figure that is not the board's", idx)
-            continue
+        # NOTE: deliberately NOT gated on g["free_scope"] - do not "fix" that (see the
+        # blindness paragraph in the docstring; tried in PR #710 and reverted).
         needed = int(vram_required * (ratio / total_ratio))
         free = g["free"]
         if free < needed:
