@@ -255,15 +255,28 @@ def register(app: FastAPI, ctx) -> None:
         """Every GPU device visible right now, plus the currently configured
         main GPU index and multi-GPU split indices. Powers the Settings >
         Live tuning "Main GPU" selector and "Split across GPUs" checkboxes
-        (both hidden/disabled when only one device is detected)."""
+        (both hidden/disabled when only one device is detected).
+
+        ``probe_status`` tells the consumer whether ``gpus`` is a FRESH reading
+        (``ok`` - an empty list then genuinely means no GPU) or an inconclusive
+        one (``timeout``/``busy`` - the driver was wedged or contended, and
+        ``gpus`` is a frozen last-known-good or []). Without it, a timed-out
+        probe was indistinguishable from a GPU-less box, so the Settings GPU
+        controls silently vanished on a slow driver (AGENTS.md rule 5)."""
         from localm.config import load_config
         from localm.discover import list_gpus
         cfg = load_config()
         # list_gpus() probes the GPU driver; offload it so a wedged/slow driver
-        # never blocks the event loop and freezes the whole WebUI.
+        # never blocks the event loop and freezes the whole WebUI. Off-loop and
+        # user-initiated (a Settings page open), this caller can afford to wait:
+        # join an in-flight probe (wait_for_inflight, #701) rather than bounce
+        # off the /api/stats heartbeat's probe with an instant BUSY + [].
         loop = asyncio.get_running_loop()
-        gpus = await loop.run_in_executor(get_plugin_executor(), list_gpus)
+        gpus, probe_status = await loop.run_in_executor(
+            get_plugin_executor(),
+            lambda: list_gpus(return_status=True, wait_for_inflight=True))
         return {"gpus": gpus,
+                "probe_status": probe_status,
                 "main_gpu_index": cfg.get("main_gpu_index"),
                 "gpu_split_indices": cfg.get("gpu_split_indices")}
 
