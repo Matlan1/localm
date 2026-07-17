@@ -2848,11 +2848,49 @@ def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[floa
     return round((first_token_at - gen_start) * 1000, 1)
 
 
-def _tokens_per_sec(completion_tokens: int, elapsed: float) -> Optional[float]:
-    """Generation throughput, or None when not measurable."""
-    if not completion_tokens or elapsed <= 0:
+def _decode_elapsed(first_token_at: Optional[float], gen_end: float) -> Optional[float]:
+    """Wall time spent DECODING: first token -> end of generation. None if nothing
+    was generated. This deliberately EXCLUDES model load + prompt prefill (the span
+    before the first token), which is reported on its own as ttft_ms - so a cold
+    start's multi-second load is never charged against the generation rate."""
+    if first_token_at is None:
         return None
-    return round(completion_tokens / elapsed, 2)
+    return gen_end - first_token_at
+
+
+# A floor on plausible per-token decode time, used to reject an implausible decode
+# window rather than report a nonsensical rate (see _tokens_per_sec). Verified live
+# on real hardware (RX 6900 XT, qwen2.5-0.5b-instruct-q4_k_m) that this floor is
+# necessary, not theoretical: under concurrent GPU load from unrelated processes,
+# a real HTTP request measured decode_elapsed as low as ~0.2ms for 19-29 tokens,
+# reporting 54,786 and 137,701 tok/s. first_token_at is a SINGLE sample - if the
+# GPU scheduler delays token 1 (contended) then delivers the rest in an
+# uncontended burst once its turn comes, the measured decode window collapses
+# toward zero even though every individual timestamp is real. 1ms/token (a 1000
+# tok/s ceiling) is deliberately generous: single-stream autoregressive decode is
+# memory-bandwidth-bound (reading the quantized weights at least once per token),
+# so even a future GPU at multi-TB/s bandwidth plus this architecture's per-token
+# IPC marshaling (the GGUF backend relays each token through a subprocess queue)
+# is not expected to sustain a single request past this ceiling. Below it, no
+# number is more honest than a number that cannot physically be true.
+_MIN_SEC_PER_TOKEN = 0.001
+
+
+def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> Optional[float]:
+    """Decode throughput = generated tokens over the DECODE window only (see
+    _decode_elapsed), NOT over total wall time. Folding the model-load/prefill time
+    into this rate made the first call after a load report a value ~100x too low
+    (e.g. 0.6 tok/s on a warm-64 tok/s GPU), which read as a silent CPU fallback.
+    Matches the `localm bench` convention (cli/models.py): "tok/s measures pure
+    generation after the first token". None when unmeasurable: a non-positive
+    window, fewer than two tokens (one token has no decode interval to time), or a
+    window so short it implies a physically implausible rate (see
+    _MIN_SEC_PER_TOKEN) - a burst-arrival artifact under GPU contention, not a
+    real decode speed."""
+    if (decode_elapsed is None or decode_elapsed <= 0 or completion_tokens < 2
+            or decode_elapsed < completion_tokens * _MIN_SEC_PER_TOKEN):
+        return None
+    return round(completion_tokens / decode_elapsed, 2)
 
 
 def _last_user_text(messages: list) -> str:
@@ -3106,7 +3144,7 @@ async def _stream_sse(
             cancel_event.set()
 
         t.join()
-        gen_elapsed = time.perf_counter() - gen_start
+        gen_end = time.perf_counter()
         # Release any tail held back while disambiguating a partial <think> tag.
         for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
             yield data
@@ -3134,7 +3172,8 @@ async def _stream_sse(
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
         ttft_ms=_ttft_ms(gen_start, first_token_at),
-        tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
+        tokens_per_sec=_tokens_per_sec(
+            completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=engine.context_capacity(),
     )
     # Honesty: a mid-stream error must not report a clean "stop" on the terminal
@@ -3246,7 +3285,7 @@ async def _stream_sse_completion(
             cancel_event.set()
 
         t.join()
-        gen_elapsed = time.perf_counter() - gen_start
+        gen_end = time.perf_counter()
 
     if gen_error is not None:
         err = {
@@ -3279,16 +3318,24 @@ async def _stream_sse_completion(
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
             "ttft_ms": _ttft_ms(gen_start, first_token_at),
-            "tokens_per_sec": _tokens_per_sec(completion_tokens, gen_elapsed),
+            "tokens_per_sec": _tokens_per_sec(
+                completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         },
     }
     yield f"data: {json.dumps(done)}\n\n"
     yield "data: [DONE]\n\n"
 
 
-async def _generate_full(engine, messages: list, request=None, **gen_kwargs) -> str:
+async def _generate_full(engine, messages: list, request=None, *,
+                         timing: Optional[dict] = None, **gen_kwargs) -> str:
     """Consume a whole (non-streaming) generation in an executor while watching for
     a client disconnect, and return the accumulated text.
+
+    ``timing``, when passed, is populated with ``first_token_at`` (a perf_counter
+    stamp of when the FIRST token arrived) so the caller can report ttft_ms and a
+    decode-window throughput even though this path does not stream to the client:
+    the handler still drives ``engine.chat_stream`` internally, so the first token
+    boundary IS observable here. Left absent by callers that do not report metrics.
 
     A non-streaming handler is a plain coroutine, and Starlette does NOT cancel it
     when the client disconnects (unlike a StreamingResponse, whose async generator
@@ -3332,6 +3379,8 @@ async def _generate_full(engine, messages: list, request=None, **gen_kwargs) -> 
             for token in gen:
                 if cancel_event.is_set():
                     break
+                if timing is not None and "first_token_at" not in timing:
+                    timing["first_token_at"] = time.perf_counter()
                 parts.append(token)
         finally:
             # Close from THIS (suspended) worker thread so GeneratorExit propagates
@@ -3444,13 +3493,15 @@ async def _complete(
 
     # Serialise inference - only one request runs at a time
     gen_error: Exception | None = None
+    timing: dict = {}
     async with sem:
         gen_start = time.perf_counter()
         # Cancelable on client disconnect so an aborted request releases the
         # per-model _inference_lock (and this semaphore) instead of generating to
         # end-of-budget behind the next request's back.
         try:
-            text = await _generate_full(engine, messages, request, **gen_kwargs)
+            text = await _generate_full(engine, messages, request,
+                                        timing=timing, **gen_kwargs)
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
             # conversation that outgrew n_ctx_max, a native decode error) is raised
@@ -3464,7 +3515,8 @@ async def _complete(
             _dbg.exception("non-streaming generation failed")
             gen_error = e
             text = f"\n[inference error: {e}]"
-        gen_elapsed = time.perf_counter() - gen_start
+        gen_end = time.perf_counter()
+    first_token_at = timing.get("first_token_at")
 
     # Outlet fully controls the returned content in the non-streaming path (but a
     # failed generation surfaces its error verbatim, not reshaped by the outlet).
@@ -3485,7 +3537,12 @@ async def _complete(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
-        tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
+        # A non-streaming handler still drives chat_stream internally, so the first
+        # token boundary IS observable: report ttft_ms too, and compute tok/s over
+        # the decode window only (never folding the cold-start load into the rate).
+        ttft_ms=_ttft_ms(gen_start, first_token_at),
+        tokens_per_sec=_tokens_per_sec(
+            completion_tokens, _decode_elapsed(first_token_at, gen_end)),
     )
 
     response = ChatResponse(
