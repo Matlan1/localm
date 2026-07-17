@@ -10,13 +10,13 @@ importer (see [docs/plugin-interop.md](plugin-interop.md)).
 
 The agent looks in two places, project overriding global on a name clash:
 
-- **Global** (reusable across projects): `<data dir>/skills/` (e.g. `~/.localm/skills/`)
+- **Global** (reusable across projects): `<data dir>/skills/`
 - **Project** (this repo only): `<project>/.localcoder/skills/`
 
 Each skill is a sub-folder containing a `SKILL.md`:
 
 ```
-~/.localm/skills/
+<data dir>/skills/
   pdf-fill/
     SKILL.md
     fill.py

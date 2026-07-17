@@ -51,6 +51,7 @@ backend (or let auto-detect choose) and it downloads the matching Linux build:
 .venv/bin/localm setup-llama --backend vulkan   # any GPU, no vendor toolkit
 .venv/bin/localm setup-llama --backend cuda      # NVIDIA (needs CUDA runtime)
 .venv/bin/localm setup-llama --backend hip       # AMD ROCm (needs ROCm runtime)
+.venv/bin/localm setup-llama --backend sycl      # Intel Arc (needs the oneAPI runtime)
 .venv/bin/localm setup-llama --backend cpu       # no GPU
 ```
 
@@ -125,5 +126,6 @@ treat it as best-effort until confirmed on real hardware.
 .venv/bin/localm --help      # everything else
 ```
 
-Data lives in `./home` (portable) or `~/.localm` (shared), per your setup choice;
-override with `LOCALM_HOME=/path`.
+Data lives in `./home` (portable, the default) or a custom path you pick during
+setup (recorded in `localm-home.cfg`) - there is no silent per-user fallback to a
+shared `~/.localm`. Override at any time with `LOCALM_HOME=/path`.

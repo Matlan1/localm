@@ -7,9 +7,11 @@ This module adds a stable, app-chosen NAME so a phone or laptop opens
 
   * **LAN (mDNS / Bonjour):** advertise ``<mdns_name>.local`` (default
     ``localm.local``) over multicast DNS. Works with no configuration on
-    Windows 11, macOS, iOS, Android, and Linux with Avahi. This is the portable
-    cross-platform name; a bare ``localm`` with no ``.local`` suffix is not
-    reliably resolvable across machines, so ``.local`` is what we guarantee.
+    Windows 10 (version 1803/RS4 "April 2018 Update" or later, where dnsapi.dll
+    gained native mDNS query support) and 11, macOS, iOS, Android, and Linux
+    with Avahi. This is the portable cross-platform name; a bare ``localm``
+    with no ``.local`` suffix is not reliably resolvable across machines, so
+    ``.local`` is what we guarantee.
   * **Tailscale (MagicDNS):** Tailscale gives each node a name like
     ``<node>.<tailnet>.ts.net`` (and a bare ``<node>`` on tailnet peers). mDNS
     does NOT cross Tailscale, so the name there is the node's MagicDNS name, which

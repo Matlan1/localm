@@ -15,7 +15,7 @@ CDN. Each keeps its own license:
 | marked | Markdown rendering | MIT | (c) 2011-2024 Christopher Jeffrey and contributors |
 | DOMPurify (`purify`) | HTML sanitizing | Apache-2.0 OR MPL-2.0 | (c) Cure53 and contributors |
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
-| KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2024 Khan Academy and contributors |
+| KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2020 Khan Academy and other contributors |
 | Inter (`vendor/inter`, Latin woff2 + `OFL.txt`) | UI typeface | SIL OFL 1.1 | (c) 2016 The Inter Project Authors |
 | jsQR | QR-code camera scanning (phone pairing) | Apache-2.0 | (c) Cosmo Wolfe and contributors |
 
@@ -59,6 +59,14 @@ Each is imported unmodified as a separate library installed from PyPI, at arm's
 length. LGPL-2.1-or-later and MPL-2.0 are both compatible with localm's AGPL-3.0
 license and, used this way, impose no obligation on localm beyond preserving the
 upstream license notices.
+
+One dependency's license is not confirmed here: `rocm`, `rocm-sdk-core`, and
+`rocm-sdk-libraries-gfx103x-all` (pulled in by the optional `[gpu]` extra, for the
+AMD ROCm PyTorch build on Windows) publish no license field or classifier on
+PyPI. They wrap AMD's own ROCm SDK components, which AMD distributes under
+permissive terms upstream, but that is not independently confirmable from the
+PyPI package metadata itself; anyone relying on the `[gpu]` extra on AMD hardware
+should check AMD's ROCm distribution terms directly rather than this notice.
 
 ## Arm's-length tools (not bundled, linked, or redistributed)
 

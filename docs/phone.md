@@ -40,8 +40,11 @@ address*.
      advertisement off with `localm config mdns_enabled false`.
    - *Tip (experimental PoC):* `localm gui -H 0.0.0.0 --qr` prints a scannable QR
      of the address so you can point the phone camera at the terminal instead of
-     typing it. Needs a terminal that renders block glyphs (Windows Terminal is
-     fine).
+     typing it. No extra install needed (`qrcode` ships with localm); it just
+     needs a terminal that renders block glyphs (Windows Terminal is fine). This
+     is separate from the key-pairing QR in step 4 below: this one is the URL to
+     open, that one copies the API key once you are already in the app somewhere
+     else.
 3. **Trust the certificate once.** Because localm signs its certificate with its
    own local CA (not a public one), the first visit shows a one-time "not secure"
    warning - this is a browser rule for any private certificate on a raw IP, not a
@@ -50,7 +53,10 @@ address*.
    that: no warning, and the app installs. See [tls.md](tls.md) for the exact
    per-platform trust step (iOS has an extra toggle).
 4. **Enter your key and install.** Type the `LOCALM_API_KEY` into the key screen
-   (it is sent over the now-encrypted connection and stored only in that browser).
+   (it is sent over the now-encrypted connection and stored only in that browser),
+   or skip the typing: tap **Scan QR code** on that same screen, point the phone
+   at the computer's **Settings -> Companion app** page (it shows a QR of your
+   key once you are signed in there), and the key is copied over automatically.
    Then choose *Install app* / *Add to Home screen* from the browser menu - localm
    gets its own icon.
 

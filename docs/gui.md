@@ -115,7 +115,7 @@ Of the pages below, only **Models** and **Plugins** are part of the core shell. 
 
 **Plugins:** Browse the bundled store, install a plugin, then enable or disable it - all at runtime, no server restart. Installing copies the plugin into the installed folder; enabling mounts its routes, static assets, and tab onto the live app (disabling removes them). This page makes every plugin-contributed surface appear or disappear. See [plugins.md](plugins.md) for authoring.
 
-**Settings:** Edit the server config (`~/.localm/config.json`) and the GUI's API key. Light/dark theme toggle lives in the sidebar.
+**Settings:** Edit the server config (`<data dir>/config.json`) and the GUI's API key. Light/dark theme toggle lives in the sidebar.
 
 ## Math rendering
 
@@ -127,7 +127,7 @@ Chat output renders LaTeX math offline via vendored KaTeX: `$inline$`, `$$displa
 localm gui --debug      # also available on serve and run
 ```
 
-Debug mode writes a timestamped log to `~/.localm/logs/` containing every HTTP request with timing, and captures the native llama.cpp stderr stream (model loading details, KV cache messages, and crash abort reasons). Normal operation strips internal model markers from chat output - thinking-channel tags like `<|channel|>analysis` and reserved placeholder tokens that some finetunings emit. Debug mode shows them raw so model behaviour can be analysed.
+Debug mode writes a timestamped log to `<data dir>/logs/` containing every HTTP request with timing, and captures the native llama.cpp stderr stream (model loading details, KV cache messages, and crash abort reasons). Normal operation strips internal model markers from chat output - thinking-channel tags like `<|channel|>analysis` and reserved placeholder tokens that some finetunings emit. Debug mode shows them raw so model behaviour can be analysed.
 
 If the server dies mid-generation, the native abort message at the end of that file says why.
 

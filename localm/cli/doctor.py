@@ -19,12 +19,16 @@ _HINT_SYM = "[cyan]i[/cyan]"
 
 
 def _check_python() -> None:
+    """Matches pyproject.toml's ``requires-python`` pin exactly (3.12 only, see
+    its comment there): 3.10/3.11 cannot even import localm.plugins.loader, and
+    the AMD [gpu] wheels are cp312-only, so this check must not report an older
+    or newer interpreter as OK."""
     import sys as _sys
     major, minor = _sys.version_info[:2]
-    if (major, minor) >= (3, 10):
+    if (major, minor) == (3, 12):
         console.print(f"  {_OK_SYM}  Python {major}.{minor}")
     else:
-        console.print(f"  {_FAIL_SYM}  Python {major}.{minor} - 3.10+ required")
+        console.print(f"  {_FAIL_SYM}  Python {major}.{minor} - 3.12 required")
 
 
 def _check_llama_lib(find_binary_dir) -> bool:

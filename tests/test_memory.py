@@ -8,8 +8,8 @@ DELETE/NO_OP consolidation loop, decay/forgetting, privacy gating (writes skippe
 the model never called), (principal, agent, scope_key) isolation, poisoning
 resistance, and empty/edge/adversarial inputs.
 
-Stores are constructed with ``root=tmp_path`` so no test touches the real
-``~/.localm``; privacy mode is driven by the LOCALM_MODE env var (which
+Stores are constructed with ``root=tmp_path`` so no test touches a developer's
+real data dir; privacy mode is driven by the LOCALM_MODE env var (which
 ``effective_mode`` honours first), so no config file is needed.
 """
 

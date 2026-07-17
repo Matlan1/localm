@@ -127,12 +127,12 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
 @click.option("--store", default=None,
               type=click.Choice(["copy", "move"], case_sensitive=False),
               help="For a local PATH (not a HF/URL spec): bring the file/dir into "
-                   "~/.localm/models before registering it, instead of registering "
+                   "<data dir>/models before registering it, instead of registering "
                    "it in place at its original location.")
 @click.option("--comfy-dest-dir", default=None, hidden=True,
               type=click.Path(file_okay=False, path_type=Path),
               help="Internal: route a single-file HF pull to this directory "
-                   "instead of ~/.localm/models (used by the GUI's ComfyUI "
+                   "instead of <data dir>/models (used by the GUI's ComfyUI "
                    "missing-model download flow).")
 @click.option("--register/--no-register", default=True, hidden=True,
               help="Internal: whether to add the download to localm's own "
@@ -156,10 +156,10 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
       localm pull https://example.com/model.gguf
 
     \b
-    A local path already on disk (--store brings it into ~/.localm/models):
+    A local path already on disk (--store brings it into <data dir>/models):
       localm pull D:\\models\\mymodel.gguf --store copy
 
-    Models are stored in ~/.localm/models/ and registered automatically.
+    Models are stored in <data dir>/models/ and registered automatically.
     """
     if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                        mmproj_spec=mmproj, model_type=type, store=store,
@@ -268,7 +268,7 @@ def list_cmd(type):
 def relocate_cmd(model, new_path):
     """Re-point a registered MODEL to NEW_PATH after you MOVED its file.
 
-    An externally-referenced model (one whose file lives outside ~/.localm/models)
+    An externally-referenced model (one whose file lives outside <data dir>/models)
     shows as 'missing' when you move it. Instead of re-adding it under a new name,
     relocate re-points the existing registry entry - keeping its name, source, and
     any aliases. NEW_PATH must be a real .gguf file or a HuggingFace model dir.
@@ -303,7 +303,7 @@ def set_type_cmd(model, model_type):
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
 def rm(model, yes):
-    """Remove a model from the registry (and delete the file if it's in ~/.localm).
+    """Remove a model from the registry (and delete the file if it's in <data dir>).
 
     The confirmation prompt describes exactly what will happen (delete vs
     unregister-only). Disable it permanently with:
@@ -334,7 +334,7 @@ def rm(model, yes):
                     size_s = f" ({size:.1f} GB)" if size else ""
                     detail = f"PERMANENTLY deletes {path}{size_s}"
                 else:
-                    detail = "unregisters the name only (file is outside ~/.localm/models)"
+                    detail = "unregisters the name only (file is outside <data dir>/models)"
                 click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)
         else:
             click.confirm(f"Remove '{model}'?", abort=True)
@@ -361,7 +361,7 @@ def rm(model, yes):
                    "(GGUF architecture/pooling signal, HF config.json architectures).")
 @click.option("--store", default=None,
               type=click.Choice(["copy", "move"], case_sensitive=False),
-              help="Bring PATH into ~/.localm/models before registering it, "
+              help="Bring PATH into <data dir>/models before registering it, "
                    "instead of registering it in place at its original location. "
                    "'copy' leaves the original untouched; 'move' relocates it.")
 def add(path, name, no_hash, fast, on_duplicate, type, store):
@@ -378,8 +378,8 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
       localm add D:\\models\\gemma.gguf --name gemma4-12b
       localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
       localm add D:\\models\\bulk-dir --fast
-      localm add D:\\models\\mymodel.gguf --store copy   # copy into ~/.localm/models
-      localm add D:\\models\\mymodel.gguf --store move   # move into ~/.localm/models
+      localm add D:\\models\\mymodel.gguf --store copy   # copy into <data dir>/models
+      localm add D:\\models\\mymodel.gguf --store move   # move into <data dir>/models
     """
     # Resolve add_local from the package at call time so tests that monkeypatch
     # localm.cli.add_local affect this call site.

@@ -39,6 +39,19 @@ Creating or indexing a collection is an explicit action, so it writes to disk
 in every session mode; the privacy contract governs *automatic* traces, not
 things you ask for.
 
+### Where localm may index from
+
+Indexing through the GUI or the HTTP API is confined by a folder policy
+(Settings): **whitelist** mode (the default) allows only your home folder, the
+working directory, and any folders you add to it; **blacklist** mode allows
+everywhere except the folders you deny. In both modes the localm data
+directory (it holds your API key and registry) and well-known credential
+folders (`.ssh`, `.aws`, `.gnupg`, ...) are always refused, wherever they
+appear in the path. Picking a folder outside the whitelist offers an
+"add this folder and continue" prompt rather than a dead end. The local CLI
+(`localm rag add`) is unconfined: the person running it can already read
+their own files.
+
 ## Supported file types
 
 - Plain text & code (stdlib): `.txt .md .rst .csv .json .yaml .toml .py .js
@@ -74,9 +87,10 @@ Semantic vectors come from a small dedicated embedding model, never from the cha
 model. A chat model is a decoder LLM trained to predict the next token, not to
 place related texts near each other, so pooling its hidden states yields vectors
 that look fine (non-zero, normalised) but barely separate related from unrelated
-text: measured on this codebase, Qwen2.5-0.5B's *most unrelated* pair scored
-higher (0.7523 cosine) than its *least related* pair (0.7518), so no threshold
-tells them apart, while `bge-small` leaves a comfortable 0.29 margin. The bundled
+text: measured on this codebase, Qwen2.5-0.5B's highest cosine among genuinely
+*unrelated* pairs (0.7523) came out higher than its lowest cosine among
+genuinely *related* pairs (0.7518), so no threshold separates the two, while
+`bge-small` leaves a comfortable 0.29 margin. The bundled
 GGUF runtime cannot embed a chat model at all; a HuggingFace-format chat model
 technically can, and used to, which is why localm now routes it to the dedicated
 embedder too rather than quietly returning those vectors.

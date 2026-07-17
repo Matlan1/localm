@@ -4,7 +4,7 @@ The plugin engine: discovers, loads, enables/disables, and installs plugins at
 runtime - without restarting the server or reloading the model.
 
 Everything except chat + the model manager is a plugin (first-party in-tree, or
-third-party under ~/.localm/plugins). A plugin ships a ``plugin.toml`` manifest
+third-party under <data dir>/plugins). A plugin ships a ``plugin.toml`` manifest
 and a module exposing ``register(host)`` / ``unregister()``; the engine hands it
 a `PluginHost` to attach routes, a GUI tab, and settings. The host mounts the
 plugin's routes onto the live FastAPI app with the plugin's capability scope

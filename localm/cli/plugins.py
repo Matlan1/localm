@@ -9,7 +9,7 @@ from .errors import run_or_die
 
 
 # ------------------------------------------------------------------ #
-#  Plugin management (external plugins in ~/.localm/plugins/)          #
+#  Plugin management (external plugins in <data dir>/plugins/)         #
 # ------------------------------------------------------------------ #
 
 @main.group()

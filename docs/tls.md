@@ -154,7 +154,7 @@ get cut off.
   host; that should stay a localhost tool unless you trust every device on the
   network.
 - If remote machines need different origins in the browser, set
-  `cors_origins` in `~/.localm/config.json` to an explicit list. Never use
+  `cors_origins` in `<data dir>/config.json` to an explicit list. Never use
   `"*"` on an exposed bind.
 - Firewall the localm port (8642-8741) so only the machines you intend can reach
   it.

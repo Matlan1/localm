@@ -322,7 +322,7 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                     "cmd.exe: no history anyway. "
                     "Online providers are explicit opt-in - warning shown if active."
                 ),
-                "log":     "JSONL audit trail → ~/.localm/sessions/",
+                "log":     "JSONL audit trail → <data dir>/sessions/",
                 "full":    "JSONL audit trail + markdown transcript on exit",
             }
             print_info(f"Session mode: {m}  - {notes.get(m, '')}")
