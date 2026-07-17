@@ -1863,53 +1863,52 @@ class TestGpuSplitShortfall:
         gpu_split_shortfall(4_000_000_000, {"gpu_split_indices": [0, 1]})
         assert seen["deadline"] == "absent"
 
-    # --- Completeness / blindness axis (free_scope, AGENTS.md rule 5) ------------
-    # A FREE_SCOPE_PROCESS device's "free" is blind to other processes' VRAM (it
-    # OVER-states free), so the gate must not fabricate or quote a shortfall from it:
-    # it is omitted per-device, the same as a stale probe, while a FREE_SCOPE_DEVICE
-    # sibling is still checked. Only an EXPLICIT process tag is omitted.
+    # --- Blindness axis (free_scope): the REFUSE direction must stay sound ---------
+    # A FREE_SCOPE_PROCESS reading OVER-states free (total minus only OUR own use), so
+    # a device whose blind free is already short is short FOR REAL: refusing on it is
+    # correct. PR #710 omitted such a device "for rule-5 honesty" and thereby traded a
+    # sound refusal for a permit (the load then dies in the worker instead of getting a
+    # clean 503); it was reverted. These pin that refusal so it cannot regress again.
 
-    def test_process_scoped_blind_device_omitted_device_scoped_sibling_flagged(self, monkeypatch):
-        """Mixed split: device 0 is FREE_SCOPE_PROCESS (blind - its free is not the
-        board's truth) so it is OMITTED even though its number looks short; device 1 is
-        FREE_SCOPE_DEVICE and genuinely short, so it is still flagged. The blind device's
-        figure never reaches a refusal (rule 5); the trustworthy one's signal survives."""
+    def test_blind_process_scoped_device_that_is_short_is_still_flagged(self, monkeypatch):
+        """A PROCESS-scoped (blind) device whose free is already below its share MUST
+        still be flagged. Blind OVER-states free (it misses every other process), so
+        blind-free < needed implies real-free < needed - the refusal is sound and the
+        gate must not drop it. Reverting to PR #710's omit makes this return [] -> RED."""
         gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
                  "free_scope": discover.FREE_SCOPE_PROCESS},
-                {"index": 1, "name": "B", "total": 16_000_000_000, "free": 100_000_000,
-                 "free_scope": discover.FREE_SCOPE_DEVICE}]
-        cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
-        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
-        assert gpu_split_shortfall(20_000_000_000, cfg) == [
-            {"index": 1, "needed": 10_000_000_000, "free": 100_000_000}]
-
-    def test_all_process_scoped_devices_omitted_even_on_a_fresh_probe(self, monkeypatch):
-        """A FRESH (GPU_PROBE_OK) probe whose devices are ALL blind: the freshness gate
-        passes, but every device's free is PROCESS-scoped, so none is quoted and the
-        result is [] with an OK status - fresh but not complete, so omit, do not
-        fabricate a shortfall from a figure that is not the board's."""
-        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
-                 "free_scope": discover.FREE_SCOPE_PROCESS},
-                {"index": 1, "name": "B", "total": 16_000_000_000, "free": 100_000_000,
-                 "free_scope": discover.FREE_SCOPE_PROCESS}]
-        cfg = {"gpu_split_indices": [0, 1]}
-        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
-        assert gpu_split_shortfall(20_000_000_000, cfg) == []
-        assert gpu_split_shortfall(
-            20_000_000_000, cfg, return_status=True) == ([], GPU_PROBE_OK)
-
-    def test_missing_free_scope_tag_is_treated_as_trustworthy(self, monkeypatch):
-        """Only an EXPLICIT FREE_SCOPE_PROCESS tag is omitted. A device with no
-        free_scope key at all is trusted (matching _apply_device_global_free's "never
-        assert a blindness we cannot confirm" default) and a genuine shortfall on it is
-        still flagged - guards against over-omitting."""
-        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000},
                 {"index": 1, "name": "B", "total": 64_000_000_000, "free": 50_000_000_000,
                  "free_scope": discover.FREE_SCOPE_DEVICE}]
         cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
         monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
         assert gpu_split_shortfall(20_000_000_000, cfg) == [
             {"index": 0, "needed": 10_000_000_000, "free": 100_000_000}]
+
+    def test_all_blind_devices_short_are_all_flagged(self, monkeypatch):
+        """Every device PROCESS-scoped and short on a FRESH probe: all are flagged. The
+        blind tag never suppresses a refusal - each device's real free is at most its
+        blind free, so every one of them genuinely cannot cover its share."""
+        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS},
+                {"index": 1, "name": "B", "total": 16_000_000_000, "free": 100_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS}]
+        cfg = {"gpu_split_indices": [0, 1]}
+        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
+        assert {d["index"] for d in gpu_split_shortfall(20_000_000_000, cfg)} == {0, 1}
+
+    def test_blind_device_with_room_is_not_flagged(self, monkeypatch):
+        """The mirror: a blind device whose (over-stated) free covers its share is not
+        flagged. This is the PERMIT direction, where blindness genuinely bites - the
+        board may be full and this cannot see it - but that is undetectable from the
+        reading, so the per-device fit check does not pretend otherwise (a permit-side
+        caution belongs with the aggregate gate that owns eviction)."""
+        gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS},
+                {"index": 1, "name": "B", "total": 16_000_000_000, "free": 15_000_000_000,
+                 "free_scope": discover.FREE_SCOPE_PROCESS}]
+        cfg = {"gpu_split_indices": [0, 1]}
+        monkeypatch.setattr("localm.discover.list_gpus", self._probe(gpus, GPU_PROBE_OK))
+        assert gpu_split_shortfall(20_000_000_000, cfg) == []
 
 
 @pytest.mark.usefixtures("_non_vulkan_host")
