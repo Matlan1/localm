@@ -40,6 +40,15 @@ def home(tmp_path, monkeypatch):
 def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
     """A few transient PermissionErrors from os.replace must not fail the write;
     the file ends up correct."""
+    # This retry is deliberately WINDOWS-ONLY: config.py's transient check returns
+    # False when os.name != "nt", because a POSIX EACCES is a STABLE state that the
+    # retry can never clear, so retrying would just burn ~1s of time.sleep while
+    # holding _io_lock (which serializes config access process-wide, including the
+    # auth path). This test asserts the Windows retry, so pin the platform and give
+    # the error a real winerror - the same pattern the sibling REG-586/REG-566 tests
+    # use. Without the pin it asserted Windows behavior on every platform and failed
+    # on ubuntu CI, where the first PermissionError correctly propagates instead.
+    monkeypatch.setattr(cfg.os, "name", "nt")
     real_replace = cfg.os.replace
     calls = {"n": 0}
 
@@ -49,7 +58,9 @@ def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
         # left alone so we isolate the crash site.
         if str(dst).endswith("config.json") and calls["n"] < 3:
             calls["n"] += 1
-            raise PermissionError(13, "Access is denied")
+            err = PermissionError(13, "Access is denied")
+            err.winerror = 5                # ERROR_ACCESS_DENIED
+            raise err
         return real_replace(src, dst)
 
     monkeypatch.setattr(cfg.os, "replace", flaky_replace)
@@ -77,11 +88,17 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
     import builtins
     real_open = builtins.open
     state = {"n": 0}
+    # Windows-only retry - see the note in
+    # test_atomic_write_rides_out_transient_replace_error above for why the platform
+    # is pinned rather than the assertion relaxed.
+    monkeypatch.setattr(cfg.os, "name", "nt")
 
     def flaky_open(file, *a, **k):
         if str(file).endswith("registry.json") and state["n"] < 2:
             state["n"] += 1
-            raise PermissionError(13, "Access is denied")
+            err = PermissionError(13, "Access is denied")
+            err.winerror = 5                # ERROR_ACCESS_DENIED
+            raise err
         return real_open(file, *a, **k)
 
     monkeypatch.setattr(builtins, "open", flaky_open)
