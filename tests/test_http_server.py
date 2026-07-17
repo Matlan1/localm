@@ -29,6 +29,8 @@ def _make_mock_engine(loaded: bool = True):
     engine.load.side_effect = _load
     engine.chat_stream.side_effect = _chat_stream
     engine.display_name = "test-model"
+    engine.count_tokens.return_value = 2
+    engine.count_messages_tokens.return_value = 3
     type(engine).loaded = property(lambda self: _state["loaded"])
     return engine
 

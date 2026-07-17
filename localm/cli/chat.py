@@ -363,6 +363,50 @@ class _ThinkPrinter:
 
 
 
+# A floor on plausible per-token decode time (mirrors http_server.py's
+# _MIN_SEC_PER_TOKEN - kept local rather than imported, since this module must
+# not pull in the HTTP server's FastAPI/uvicorn import surface just for a single
+# constant). Verified live on real hardware (RX 6900 XT, qwen2.5-0.5b-instruct-
+# q4_k_m) that this is necessary: under concurrent GPU load from unrelated
+# processes, a real request measured a decode window collapsing toward zero,
+# reporting tens of thousands of tok/s. first_at is a SINGLE sample - if the GPU
+# scheduler delays the first token (contended) then delivers the rest in an
+# uncontended burst, the measured window shrinks toward zero even though every
+# timestamp is real. 1ms/token (1000 tok/s ceiling) is deliberately generous for
+# single-stream autoregressive decode (memory-bandwidth-bound: at least one full
+# weight read per token). Below it, omitting the rate is more honest than
+# printing one that cannot physically be true.
+_MIN_SEC_PER_TOKEN = 0.001
+
+
+def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
+               end: float) -> Optional[str]:
+    """One-line perf readout for the REPL, or None when there is nothing worth
+    showing. tok/s is computed over the DECODE window only (first token -> end);
+    the model-load + prompt-prefill time (the wait before the first token) is shown
+    separately as `load` rather than folded into the rate.
+
+    Folding load in made the first call after a load read ~100x too slow (e.g. a
+    cold 0.6 tok/s on a GPU that runs 64 tok/s warm), which tripped the
+    CPU-fallback heuristic in RELEASE.md. This mirrors the server's _tokens_per_sec
+    and the `localm bench` convention: "tok/s measures pure generation after the
+    first token". tok/s is omitted for a single token (no decode interval to time)
+    or an implausibly short decode window (see _MIN_SEC_PER_TOKEN)."""
+    total = end - t0
+    if first_at is None or total <= 0.5:
+        return None
+    load = first_at - t0          # model load + prompt prefill (TTFT)
+    gen = end - first_at          # decode window
+    plausible = n_tokens >= 2 and gen >= n_tokens * _MIN_SEC_PER_TOKEN
+    rate = f"{n_tokens / gen:.1f} tok/s  " if plausible else ""
+    # Show the load/gen split only when the load is a meaningful slice (a cold
+    # start); a warm call's sub-100ms prefill would just be noise, so keep the
+    # familiar single-time form there.
+    if load >= 0.1:
+        return f"{n_tokens} tokens  {rate}(load {load:.1f}s, gen {gen:.1f}s)"
+    return f"{n_tokens} tokens  {rate}({gen:.1f}s)"
+
+
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
@@ -370,8 +414,11 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     parts: list[str] = []
     printer = _ThinkPrinter()
     t0 = _time.monotonic()
+    first_at: Optional[float] = None
     try:
         for token in engine.chat_stream(messages, **kwargs):
+            if first_at is None:
+                first_at = _time.monotonic()
             parts.append(token)
             printer.feed(token)
         printer.flush()
@@ -387,15 +434,13 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # catches Exception; this is the single-prompt path).
         console.print(f"\n[red]{e}[/red]")
         return ""
-    elapsed = _time.monotonic() - t0
+    end = _time.monotonic()
     print()
     full = "".join(parts)
-    if elapsed > 0.5 and full:
-        n_tokens = engine.count_tokens(full)
-        console.print(
-            f"[dim]{n_tokens} tokens  {n_tokens / elapsed:.1f} tok/s  "
-            f"({elapsed:.1f}s)[/dim]"
-        )
+    if full:
+        line = _perf_line(engine.count_tokens(full), t0, first_at, end)
+        if line:
+            console.print(f"[dim]{line}[/dim]")
     return full
 
 
@@ -475,8 +520,11 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         printer = _ThinkPrinter()
         import time as _time
         t0 = _time.monotonic()
+        first_at: Optional[float] = None
         try:
             for token in engine.chat_stream(messages, **gen_opts):
+                if first_at is None:
+                    first_at = _time.monotonic()
                 parts.append(token)
                 printer.feed(token)
             printer.flush()
@@ -488,14 +536,12 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             continue
 
         response = "".join(parts) or "(interrupted)"
-        elapsed = _time.monotonic() - t0
+        end = _time.monotonic()
         print()
-        if elapsed > 0.5 and parts:
-            n_tokens = engine.count_tokens(response)
-            console.print(
-                f"[dim]{n_tokens} tokens  {n_tokens / elapsed:.1f} tok/s  "
-                f"({elapsed:.1f}s)[/dim]"
-            )
+        if parts:
+            line = _perf_line(engine.count_tokens(response), t0, first_at, end)
+            if line:
+                console.print(f"[dim]{line}[/dim]")
         if response:
             # AUD-HIGH-17-2: resend and log only the visible answer, never the raw
             # <think> scratchpad (textnorm.strip_think's docstring: "the one

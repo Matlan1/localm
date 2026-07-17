@@ -60,7 +60,7 @@ the GUI it serves).
 | 1 | `localm doctor` | all core checks green (or a documented, benign note) | |
 | 2 | `localm pull <tiny gguf>` AND a small HF model (`HuggingFaceTB/SmolLM2-135M-Instruct`, ~270MB; or `Qwen/Qwen2.5-0.5B-Instruct`) | both download and register, show in `localm list` | |
 | 3a | GGUF backend: `localm run <gguf> -p "..."` | a REAL answer via the bundled llama.cpp (non-empty, coherent) | |
-| 3b | HF/torch backend: `localm run <hf-model> -p "..."` | a REAL answer via transformers. BOTH inference backends are advertised, so both are verified. Where the `[gpu]` extra is installed, confirm it uses the GPU (SmolLM2-135M at ~1 tok/s means it silently fell back to CPU) | |
+| 3b | HF/torch backend: `localm run <hf-model> -p "..."` | a REAL answer via transformers. BOTH inference backends are advertised, so both are verified. Where the `[gpu]` extra is installed, confirm it uses the GPU. The reported tok/s excludes model-load time (it is the decode rate, shown warm on the first call too, with any load time reported separately as `load`/TTFT), so a genuinely low tok/s (e.g. SmolLM2-135M at ~1 tok/s) is a real signal of a silent CPU fallback - confirm with a free-VRAM delta before/after the load, which is the definitive check | |
 | 4 | `localm gui`, open in a browser, pick the model, send a message | streamed reply in the GUI. The DEFAULT (privacy) mode is session-only: the chat clears on reload and the sidebar shows "privacy mode - this session only". Re-run with `--mode full` (or `log`) and confirm the conversation then persists across a reload | |
 | 5 | `localm serve` + an OpenAI-style `curl /v1/chat/completions` (Bearer key) | a real completion; `/v1/models` marks the active model | |
 
