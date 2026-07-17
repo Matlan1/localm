@@ -36,14 +36,25 @@ Color carries meaning in two independent registers, and they must not be mixed:
 
 ## 2. Every interactive row has hover + an inset accent bar when active
 
-The picker row is canon:
+The picker row is canon for a plain list row: hover and active both tint the
+background, and active adds the inset accent bar:
 
 ```css
-.thing:hover  { background: var(--bg-input); }
-.thing.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); color: var(--accent); font-weight: 600; }
+.thing:hover, .thing.active { background: var(--bg-input); }
+.thing.active { box-shadow: inset 2px 0 0 var(--accent); }
 ```
 
-Nav buttons, table rows, list items, tabs: reuse this exact pattern.
+A `.data-table` active row (`tr:has(.active-tag)`) uses the same inset bar but
+with `background: var(--accent-soft)` instead of `--bg-input`, so an active
+table row reads a shade stronger than an active picker row. Nav buttons and
+settings-nav links (primary navigation, not a data row) go further still,
+pairing that same accent-soft fill and inset bar with `color: var(--accent)`
+and `font-weight: 600`:
+
+```css
+.thing:hover  { background: var(--bg-input); color: var(--text); }
+.thing.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); color: var(--accent); font-weight: 600; }
+```
 
 ## 3. Two button tiers plus danger, one vocabulary
 

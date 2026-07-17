@@ -135,7 +135,7 @@ def _complete_model(ctx, param, incomplete):
               help=(
                   "Session persistence mode [default: privacy]. "
                   "privacy = nothing saved automatically; "
-                  "log = JSONL audit trail to ~/.localm/sessions/; "
+                  "log = JSONL audit trail to <data dir>/sessions/; "
                   "full = log + markdown transcript in .localcoder/sessions/."
               ))
 @click.option("--scope",            default=None,

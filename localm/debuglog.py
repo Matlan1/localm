@@ -5,7 +5,7 @@ Debug mode for localm.
 Enabled with ``--debug`` on ``localm gui`` / ``serve`` / ``run`` or by
 setting ``LOCALM_DEBUG=1``. When active:
 
-- A timestamped log file is created under ``~/.localm/logs/``.
+- A timestamped log file is created under ``<data dir>/logs/``.
 - Python logging (logger ``localm``) writes DEBUG records to it.
 - The native llama.cpp stderr stream - normally suppressed to keep chat
   output clean - is redirected INTO the log file instead of discarded.

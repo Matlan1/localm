@@ -60,13 +60,13 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
 @click.option("--image", "images",   multiple=True, type=click.Path(exists=True),
               help="Local image file to include (repeat for multiple). Use with -p.")
 @click.option("--debug", is_flag=True,
-              help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
+              help="Write a debug log (<data dir>/logs/), capture native llama.cpp "
                    "stderr, and record raw model output (with markers) in the log.")
 @click.option("--mode", default=None,
               type=click.Choice(["privacy", "log", "full"], case_sensitive=False),
               help="Session persistence [default: config 'chat_mode'/'mode', else privacy]. "
                    "privacy = nothing saved automatically; "
-                   "log = JSONL audit trail to ~/.localm/sessions/; "
+                   "log = JSONL audit trail to <data dir>/sessions/; "
                    "full = log + markdown transcript.")
 @click.option("--no-server", is_flag=True,
               help="Load the model in THIS process instead of attaching to a localm "
@@ -113,7 +113,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 "analysis if that matters.")
     else:
         console.print(f"[dim]session mode: {session_mode.value} "
-                      f"(audit trail in ~/.localm/sessions/)[/dim]")
+                      f"(audit trail in <data dir>/sessions/)[/dim]")
 
     # H3 thin-client: ATTACH to the localm server already serving this directory
     # (route chat through its /v1 over HTTP) instead of loading a SECOND in-process

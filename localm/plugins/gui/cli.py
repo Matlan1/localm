@@ -78,11 +78,12 @@ def _mount_remote_gui(entry: dict) -> bool:
 
 def _print_qr(url: str) -> None:
     """[PoC] Print a scannable QR of *url* to the console so a phone can open
-    localm without typing the address. Experimental; needs the optional 'qrcode'
-    dependency (pip install "localm[qr]"). Best-effort and fully guarded: a
-    missing dep or a console that cannot render block glyphs degrades to a hint
-    and NEVER breaks GUI startup. If it does not scan, your terminal's colours
-    may be inverted - try a light-background terminal."""
+    localm without typing the address. Experimental; 'qrcode' is a core
+    dependency, so this needs no separate install. Best-effort and fully
+    guarded: an unexpectedly missing dep (a broken/partial install) or a
+    console that cannot render block glyphs degrades to a hint and NEVER
+    breaks GUI startup. If it does not scan, your terminal's colours may be
+    inverted - try a light-background terminal."""
     import io
     import sys
 
@@ -91,8 +92,11 @@ def _print_qr(url: str) -> None:
     try:
         import qrcode
     except ImportError:
-        con.print('  [yellow][PoC][/yellow] QR needs an optional dep: '
-                  r'[cyan]pip install "localm\[qr]"[/cyan]')
+        # qrcode is a core dependency (pyproject.toml `dependencies`), so this
+        # means the install is broken/partial, not that an extra is missing.
+        con.print('  [yellow][PoC][/yellow] QR unavailable: the "qrcode" '
+                  'package is missing from this install ([cyan]pip install '
+                  'qrcode[/cyan] to fix it)')
         return
     try:
         q = qrcode.QRCode(border=2)
@@ -212,7 +216,7 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
                    "(a HuggingFace repo, repo:file.gguf, or https URL). Lets you "
                    "fetch a first model with a progress bar, no model required.")
 @click.option("--debug", is_flag=True,
-              help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
+              help="Write a debug log (<data dir>/logs/), capture native llama.cpp "
                    "stderr, and log requests. Raw model output is recorded too, "
                    "EXCEPT in privacy mode (chat content is never written there).")
 @click.option("--mode", default=None,
@@ -241,8 +245,7 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
 @click.option("--qr", "show_qr", is_flag=True,
               help="[PoC] Print a scannable QR of the LAN URL at startup so a "
                    "phone can open localm without typing the address. Needs a "
-                   "network bind (-H 0.0.0.0) and the optional 'qrcode' dep "
-                   "(pip install \"localm[qr]\"). Experimental.")
+                   "network bind (-H 0.0.0.0). Experimental.")
 @click.option("--project", default=None, type=click.Path(file_okay=False),
               help="Project root that keys this instance [default: nearest "
                    ".git/.localcoder above the current directory].")
@@ -331,7 +334,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     session_mode = effective_mode("server")
     if session_mode != SessionMode.PRIVACY:
         console.print(f"[dim]session mode: {session_mode.value} "
-                      f"(audit trail in ~/.localm/sessions/)[/dim]")
+                      f"(audit trail in <data dir>/sessions/)[/dim]")
     elif debug:
         console.print(
             "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log records "
