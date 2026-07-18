@@ -68,6 +68,10 @@ from typing import Optional
 # each spawned worker is a fresh process, so it always starts False there.
 _parent_death_watchdog_installed = False
 
+# Set once SetErrorMode has been applied in this process. Same per-process
+# scoping rationale as the watchdog flag above.
+_native_error_dialogs_suppressed = False
+
 
 def real_base_python() -> Optional[Path]:
     """The real base interpreter directly under ``sys.base_prefix``
@@ -160,4 +164,51 @@ def install_parent_death_watchdog() -> bool:
     except Exception:
         return False
     _parent_death_watchdog_installed = True
+    return True
+
+
+def suppress_native_error_dialogs() -> bool:
+    """Stop Windows from popping a blocking modal dialog ("... Entry Point Not
+    Found", "... has stopped working") when a native DLL load fails in THIS
+    process, so the failure surfaces as an ordinary catchable exception
+    instead - matching what every ctypes.CDLL()/load_lib() caller in this
+    codebase already assumes and handles (e.g.
+    VramSizingMixin._free_total_vram_bytes).
+
+    WHY this is needed even though the failure is already caught in Python:
+    ctypes wraps a native DLL load in Windows SEH, so a bad DLL DOES raise a
+    catchable exception rather than crashing the interpreter - but by default
+    Windows' own critical-error handler shows its blocking dialog FIRST, before
+    that exception ever reaches Python. Confirmed live: a worker still finished
+    loading and replying after the box was manually dismissed - the code's
+    "catch and log" handling was working exactly as designed, it just was not
+    preventing the OS from ALSO blocking on a dialog nobody meant to show.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) makes the
+    failing call return an error to its caller instead of ever presenting UI,
+    which is what lets the existing try/except actually behave as intended.
+
+    Call at the very top of a worker's process-main, alongside
+    install_parent_death_watchdog() - a worker process's whole reason to exist
+    is running native code, so suppressing the OS's error UI for its entire
+    lifetime is always correct there, unlike the main process (which stays
+    interactive and may want the standard OS UI for genuine hardware issues
+    unrelated to this codebase's own native bindings).
+
+    Windows-only; a no-op elsewhere. Idempotent (a second call in the same
+    process is a cheap no-op, matching install_parent_death_watchdog's shape).
+    Best-effort: never raises, so it can never block a normal worker start."""
+    global _native_error_dialogs_suppressed
+    if _native_error_dialogs_suppressed:
+        return True
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        SEM_FAILCRITICALERRORS = 0x0001
+        SEM_NOGPFAULTERRORBOX = 0x0002
+        ctypes.windll.kernel32.SetErrorMode(  # type: ignore[attr-defined]
+            SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX)
+    except Exception:
+        return False
+    _native_error_dialogs_suppressed = True
     return True

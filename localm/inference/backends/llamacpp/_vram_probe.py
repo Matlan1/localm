@@ -47,6 +47,12 @@ import sys
 
 
 def main() -> int:
+    from localm._mp_spawn import suppress_native_error_dialogs
+    suppress_native_error_dialogs()   # a native DLL failure loading llama.dll
+                                       # here must degrade to a catchable
+                                       # exception (-> "ERR"), never a blocking
+                                       # modal dialog on this disposable daemon.
+
     from localm.inference.backends.llamacpp._loader import gpu_memory, load_lib
     try:
         load_lib()

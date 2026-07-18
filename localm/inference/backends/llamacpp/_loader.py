@@ -36,6 +36,28 @@ _loaded_lib: Optional[ctypes.CDLL] = None
 _compute_backends_ok: Optional[bool] = None
 
 
+def native_lib_loaded() -> bool:
+    """True once load_lib() has successfully loaded llama.cpp's native library
+    IN THIS PROCESS.
+
+    Lets a caller detect, AHEAD OF TIME, the one precondition under which a
+    LATER ``import torch`` in this same process is unsafe: on this project's
+    Windows + AMD ROCm build, torch's own separately-built ROCm wheel and
+    llama.cpp's HIP-linked runtime resolve some of the same-named native DLLs
+    (e.g. hipsolver.dll) to whichever copy the OS loader already has resident,
+    which can be the wrong version for torch's own expected exports - a real
+    "entry point not found" failure at the OS loader level (confirmed live,
+    reproduced on demand), not a driver hiccup a retry would fix.
+
+    VramSizingMixin._free_total_vram_bytes (llamacpp/_sizing.py) is the
+    consumer: once this is True it skips the torch attempt entirely instead of
+    triggering the conflict and catching it after the fact - a fresh worker
+    process reaches this on every load, so "catch and cache" alone would still
+    trigger the OS-level failure once per worker. gpu_memory_isolated() is
+    always available as a working, torch-free substitute."""
+    return _loaded_lib is not None
+
+
 def lib_filename() -> str:
     """The loadable llama library filename for this platform."""
     if sys.platform == "win32":
