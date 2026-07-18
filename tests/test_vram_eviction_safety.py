@@ -33,19 +33,33 @@ from tests.conftest import probe_double
 
 
 class FakeEngine:
-    def __init__(self, display_name):
+    def __init__(self, display_name, *, fails_to_fit=False):
         self.display_name = display_name
         self._loaded = False
         self.active_requests = 0
         self.supports_images = False
         self.can_be_multimodal = False
         self.model_path = f"models/{display_name}.gguf"
+        # Simulates a REAL backend's OWN final sizing decision (GgufBackend's
+        # _effective_gpu_layers/_check_vram, llamacpp/_sizing.py - already
+        # covered end-to-end by test_auto_gpu_layers.py, not re-derived here):
+        # False (default) means the backend manages to fit the load somehow
+        # (full or partial GPU-layer offload) and succeeds, exactly like a real
+        # too-big-by-switch_engine's-crude-estimate model now can. True
+        # simulates the backend's own "cannot fit even at 0 GPU layers" hard
+        # refusal (_check_vram raises RuntimeError when need > total VRAM).
+        self.fails_to_fit = fails_to_fit
 
     @property
     def loaded(self):
         return self._loaded
 
     def load(self):
+        if self.fails_to_fit:
+            raise RuntimeError(
+                "Context too large for available VRAM: this load needs more "
+                "than this GPU has in total - freeing other VRAM will not "
+                "help, it cannot fit regardless.")
         self._loaded = True
 
     def unload(self):
@@ -70,7 +84,7 @@ class FakeEngine:
         return [[0.1, 0.2, 0.3] for _ in texts]
 
 
-def _install_fakes(monkeypatch, *, free, status=None):
+def _install_fakes(monkeypatch, *, free, status=None, fails_to_fit=False):
     fake_registry = {
         "model-a": {"path": "models/model-a.gguf", "source": "local"},
         "model-b": {"path": "models/model-b.gguf", "source": "local"},
@@ -89,7 +103,9 @@ def _install_fakes(monkeypatch, *, free, status=None):
         info["free"] = free
     monkeypatch.setattr("localm.discover.vram_info",
                         probe_double(lambda: dict(info), status=status))
-    monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+    monkeypatch.setattr(
+        hs, "_engine_factory",
+        lambda name: FakeEngine(name, fails_to_fit=fails_to_fit))
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._inference_sems.clear()
@@ -163,6 +179,35 @@ def test_measurable_vram_allows_coexistence(monkeypatch):
     loaded = sorted(n for n, e in hs._engines.items() if e.loaded)
     assert loaded == ["model-a", "model-b", "model-c"], (
         f"ample VRAM must keep multi-model coexistence; loaded={loaded}")
+
+
+def test_busy_chat_peer_not_evicted_but_new_load_still_succeeds(monkeypatch):
+    """Mirrors test_busy_embedder_not_evicted_for_chat_load's proof, for a
+    busy CHAT peer instead of the shared embedder: with a resident engine
+    pinned (active_requests>0) so local eviction cannot free it, and no
+    cooperative peer configured, local+cooperative eviction is fully
+    exhausted - exactly the case the (now-removed) "VRAM exhausted, all
+    other loaded models are busy" hard refusal used to catch. The incoming
+    load must still succeed via the backend's own partial offload rather
+    than refuse, and the busy peer must survive untouched."""
+    _install_fakes(monkeypatch, free=3 * 1024 ** 3)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    busy = FakeEngine("model-a")
+    busy._loaded = True
+    busy.active_requests = 1
+    hs._engines["model-a"] = busy
+    hs._engines_lru.append("model-a")
+
+    r = _chat(client, "model-b")
+    assert r.status_code == 200, (
+        f"a busy chat peer correctly stays resident, but the incoming load "
+        f"should still succeed via the backend's own partial offload rather "
+        f"than the removed 'all other loaded models are busy' refusal: {r.text}")
+    assert hs._engines["model-a"] is busy and busy.loaded, (
+        "the busy chat engine must not be evicted")
+    assert hs._engines["model-b"].loaded
 
 
 def _install_embedder_fakes(monkeypatch, *, free_with_embedder, free_after_evict,
@@ -247,16 +292,25 @@ def test_idle_embedder_evicted_to_make_room_for_chat_load(monkeypatch):
 def test_busy_embedder_not_evicted_for_chat_load(monkeypatch):
     """AUDIT-CRIT-1 for the embedder: a request mid-embed() (active_requests>0)
     must not have its embedder freed out from under it just because a chat
-    load is short on VRAM. The load fails honestly instead of silently
-    yanking a pinned embedder.
+    load is short on VRAM.
+
+    The chat load itself still SUCCEEDS despite the pin: switch_engine no
+    longer hard-refuses on its own crude whole-model estimate once local +
+    cooperative eviction is exhausted (see the "let the backend try" fix) -
+    it defers to the backend, which fits the model via partial GPU-layer
+    offload using whatever is left (3 GB here), without ever needing the
+    embedder's VRAM. Proves the pin-respecting fix (PR #752) and the
+    partial-offload fallthrough fix compose correctly: a resource the pin
+    protects stays protected, AND the request the pin would have starved
+    still gets served anyway.
 
     Asserts reset_calls == 1, not just embedder_loaded staying True: a
     reset_embedder(force=False) call that correctly declines because the
     embedder is busy is indistinguishable, via embedder_loaded alone, from
     the eviction branch never having been reached at all (e.g. code with no
-    embedder-eviction feature) - both leave embedder_loaded True and return
-    503. reset_calls proves the branch actually executed and consulted the
-    pin, not merely that eviction did not happen to occur."""
+    embedder-eviction feature) - both leave embedder_loaded True. reset_calls
+    proves the branch actually executed and consulted the pin, not merely
+    that eviction did not happen to occur."""
     state = _install_embedder_fakes(
         monkeypatch, free_with_embedder=3 * 1024 ** 3,
         free_after_evict=9 * 1024 ** 3, embedder_active=1)
@@ -264,7 +318,10 @@ def test_busy_embedder_not_evicted_for_chat_load(monkeypatch):
     client = TestClient(app)
 
     r = _chat(client, "model-a")
-    assert r.status_code == 503, r.text
+    assert r.status_code == 200, (
+        f"the busy embedder correctly stays resident, but the chat load "
+        f"should still succeed via the backend's own partial offload rather "
+        f"than needlessly refusing: {r.text}")
     assert state["embedder_loaded"] is True, (
         "a busy (pinned) embedder must not be evicted")
     assert state["reset_calls"] == 1, (
@@ -405,20 +462,47 @@ class TestInconclusiveProbeDoesNotSkipTheGate:
             f"permit a load; got {r.status_code}")
         assert not hs._engines.get("model-a", FakeEngine("x")).loaded
 
-    def test_measured_refusal_still_quotes_the_figure(self, monkeypatch):
-        """Guard the honest refusal: when the probe COMPLETES and genuinely shows
-        too little VRAM, the 503 still refuses AND still quotes the measured figure.
-        Without this, a fix could regress into 'never quote / never refuse' and the
-        rule-5 test above would pass vacuously."""
+    def test_measured_low_reading_defers_to_the_backend_instead_of_refusing(
+            self, monkeypatch):
+        """Contrast with the stale-HIGH-reading test above: a genuinely
+        MEASURED (probe_ok) reading, even a low one, is trustworthy enough to
+        let the backend attempt the load - switch_engine's own crude
+        whole-model estimate (~5.8 GB) is not met by 2 GB free, but that no
+        longer means refuse outright: the backend's own sizing (already
+        proven by test_auto_gpu_layers.py) can still fit a partial-offload
+        load in 2 GB, and this GPU's 16 GB total easily covers it. The stale
+        case above must still refuse (an untrustworthy reading); this one,
+        being trustworthy, gets to try."""
         from localm.discover import GPU_PROBE_OK
-        # 2 GB free, probe OK: below the ~5.8 GB the load needs -> honest refusal.
         _install_fakes(monkeypatch, free=2 * 1024 ** 3, status=GPU_PROBE_OK)
         client = TestClient(hs.create_app(None))
         r = _chat(client, "model-a")
-        assert r.status_code == 503
-        assert _mb_figure_in(r.text), (
-            "a refusal from a COMPLETED probe must quote the measured figure; "
-            f"got: {r.text[:200]}")
+        assert r.status_code == 200, (
+            f"a measured (not stale) low reading should defer to the "
+            f"backend's own sizing rather than refuse outright: {r.text}")
+        assert hs._engines["model-a"].loaded
+
+    def test_backend_refusal_still_produces_a_clean_message(self, monkeypatch):
+        """The backstop: when the backend's OWN sizing decides the model
+        genuinely cannot fit even at 0 GPU layers (GgufBackend._check_vram
+        raising because need > total VRAM - see llamacpp/_sizing.py), the
+        failure must still reach the caller as a clean, specific message, not
+        a raw/generic error. Hits /v1/chat/completions specifically: this
+        OpenAI-compatible route does NOT wrap switch_engine/get_engine in its
+        own try/except (unlike the GUI's load-model button), so before this
+        fix's RuntimeError->HTTPException(503) conversion in switch_engine,
+        this exact case fell through to Starlette's generic "Internal server
+        error" handler, discarding the real reason (AGENTS.md rule 5)."""
+        from localm.discover import GPU_PROBE_OK
+        _install_fakes(monkeypatch, free=2 * 1024 ** 3, status=GPU_PROBE_OK,
+                       fails_to_fit=True)
+        client = TestClient(hs.create_app(None))
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, r.text
+        assert "cannot fit regardless" in r.text, (
+            f"a genuine backend refusal must surface its real message, not a "
+            f"generic 500: {r.text}")
+        assert not hs._engines.get("model-a", FakeEngine("x")).loaded
 
     def test_cannot_measure_still_loads_best_effort(self, monkeypatch):
         """Guard the permanent case: a box that genuinely cannot report free VRAM
@@ -489,7 +573,8 @@ class TestSplitAwareCapacityGate:
         {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3},
     ]
 
-    def _install(self, monkeypatch, tmp_path, *, size_bytes, gpus, gpu_split_indices):
+    def _install(self, monkeypatch, tmp_path, *, size_bytes, gpus, gpu_split_indices,
+                 fails_to_fit=False):
         model_file = tmp_path / "model-a.gguf"
         _fake_stat_size(monkeypatch, model_file, size_bytes)
         fake_registry = {"model-a": {"path": str(model_file), "source": "local"}}
@@ -509,7 +594,9 @@ class TestSplitAwareCapacityGate:
 
         monkeypatch.setattr("localm.config.load_config", _cfg)
         monkeypatch.setattr("localm.discover.list_gpus", probe_double(gpus))
-        monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+        monkeypatch.setattr(
+            hs, "_engine_factory",
+            lambda name: FakeEngine(name, fails_to_fit=fails_to_fit))
         hs._engines.clear()
         hs._engines_lru.clear()
         hs._inference_sems.clear()
@@ -535,16 +622,25 @@ class TestSplitAwareCapacityGate:
 
     def test_same_model_refused_without_a_configured_split(
             self, monkeypatch, tmp_path):
-        """Guard: the fix must not regress to 'always assume combined capacity' -
-        with NO split configured (single GPU only), the same oversized model is
-        still correctly refused against that one GPU's real free VRAM."""
+        """Guard: the fix must not regress to 'always assume combined capacity
+        even with no split configured' - with NO split configured (single GPU
+        only), this model is judged against that ONE GPU's real free VRAM
+        (14 GB), not a fictional combined figure. It is no longer refused
+        outright, though: switch_engine's own crude whole-model estimate
+        (~19 GB) exceeds that 14 GB, but the backend's own partial-offload
+        sizing (already proven by test_auto_gpu_layers.py) can still fit this
+        model on the ONE real GPU by putting some layers on CPU - exactly the
+        behavior the reported bug broke. fails_to_fit=False (the fake's
+        default) stands in for that real capability."""
         self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
                       gpus=self._SPLIT_GPUS[:1], gpu_split_indices=None)
         app = hs.create_app(None)
         client = TestClient(app)
         r = _chat(client, "model-a")
-        assert r.status_code == 503
-        assert "Not enough VRAM" in r.text
+        assert r.status_code == 200, (
+            f"a model too big for full offload on the single real GPU should "
+            f"still load via the backend's own partial offload: {r.text}")
+        assert hs._engines["model-a"].loaded
 
     def test_exceeds_even_the_combined_split_still_refused(
             self, monkeypatch, tmp_path):
@@ -564,16 +660,21 @@ class TestSplitAwareCapacityGate:
         """A gpu_split_indices referencing a device that vanished (e.g. it was
         unplugged) must degrade to single-GPU capacity (resolve_gpu_split's own
         contract - rule 5, do-not-hide-problems), not silently keep using a
-        combined number for hardware that is no longer there."""
+        combined number for hardware that is no longer there - proven by the
+        SAME real-single-GPU outcome as the no-split test above (this model
+        loads via partial offload against the ONE real 14 GB GPU), not the
+        28 GB a still-combined (stale) reading would have granted."""
         self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
                       gpus=self._SPLIT_GPUS[:1],   # device 1 no longer detected
                       gpu_split_indices=[0, 1])
         app = hs.create_app(None)
         client = TestClient(app)
         r = _chat(client, "model-a")
-        assert r.status_code == 503, (
-            "a split referencing a since-removed GPU must fall back to "
-            "single-GPU capacity, not keep refusing/granting off a stale combined number")
+        assert r.status_code == 200, (
+            f"a split referencing a since-removed GPU must degrade to single-"
+            f"GPU capacity and still let the backend try (partial offload "
+            f"against the ONE real 14 GB GPU): {r.text}")
+        assert hs._engines["model-a"].loaded
 
 
 class TestPerDeviceSplitFitGate:
@@ -590,7 +691,7 @@ class TestPerDeviceSplitFitGate:
     a native crash (llama.cpp can hard-abort rather than raise)."""
 
     def _install(self, monkeypatch, tmp_path, *, filename, gpus, gpu_split_indices,
-                 gpu_split_ratios=None):
+                 gpu_split_ratios=None, fails_to_fit=False):
         model_file = tmp_path / filename
         # Unregistered-on-disk path (matches _install_fakes' convention at the
         # top of this file): file_size falls back to the code's own documented
@@ -612,7 +713,9 @@ class TestPerDeviceSplitFitGate:
 
         monkeypatch.setattr("localm.config.load_config", _cfg)
         monkeypatch.setattr("localm.discover.list_gpus", probe_double(gpus))
-        monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+        monkeypatch.setattr(
+            hs, "_engine_factory",
+            lambda name: FakeEngine(name, fails_to_fit=fails_to_fit))
         hs._engines.clear()
         hs._engines_lru.clear()
         hs._inference_sems.clear()
@@ -627,6 +730,29 @@ class TestPerDeviceSplitFitGate:
         # ~5.15 GiB required). GPU1: 30 GiB free (comfortably covers its
         # share). Combined 32 GiB free >> the ~6.15 GiB aggregate threshold -
         # the OLD aggregate-only gate would have let this through.
+        #
+        # DELIBERATE, KNOWN asymmetry with the single-GPU partial-offload fix
+        # (test_vram_eviction_safety.py's TestInconclusiveProbeDoesNotSkipTheGate.
+        # test_measured_low_reading_defers_to_the_backend_instead_of_refusing uses
+        # THIS SAME free/total/model triple - 2 GiB free, 16 GiB total, ~4 GiB
+        # model - on an UNSPLIT GPU 0, and now succeeds via the backend's own
+        # partial-layer offload). Here, with a split CONFIGURED, this still
+        # refuses even though GPU 0 happens to be both the short device and the
+        # resolved main_gpu_index (the common case: a split usually includes
+        # device 0, and resolve_main_gpu_index defaults to 0 regardless of
+        # gpu_split_indices) - a real backend's sizing would very likely fit
+        # this too. The conservative refusal stays intentional, not an
+        # oversight: _auto_gpu_layers/_check_vram (llamacpp/_sizing.py) only
+        # ever reason about ONE device's free VRAM, with zero notion of a
+        # multi-device tensor-split ratio - apply_gpu_split() would still hand
+        # the split's configured RATIO share to each device regardless of what
+        # the single-device sizing decided fits, so deferring here could size a
+        # near-full offload against the wrong (ample) device while the actual
+        # split ratio still demands room on the short one, risking the
+        # unrecoverable native worker abort gpu_split_shortfall's own
+        # docstring warns about. Fixing that asymmetry needs per-device-aware
+        # sizing this PR does not add - a real, scoped follow-up, not a defect
+        # in the current, deliberately conservative choice.
         gpus = [
             {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
             {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},

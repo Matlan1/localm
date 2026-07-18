@@ -664,9 +664,6 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             free_bytes=free_vram, asked=asked_peers))
                     if cooperated:
                         continue
-                    if _engines:
-                        raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). "
-                                            "All other loaded models are busy.")
                     if shortfall:
                         # Aggregate may well be enough - it is specifically the
                         # configured split's per-device share that is short, so name
@@ -677,39 +674,51 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # free=None, so the per-device `free is None` skip above and an
                         # unmeasurable aggregate cannot coexist. Also unreachable now
                         # via the inconclusive branch, which empties shortfall.)
+                        #
+                        # This stays a hard refusal even though everything below it
+                        # now defers to the backend: apply_gpu_split() divides a model
+                        # by a STATIC per-config ratio with no live per-device
+                        # awareness of its own (discover.gpu_split_shortfall's own
+                        # docstring), and neither _auto_gpu_layers nor _check_vram
+                        # (llamacpp/_sizing.py) has any notion of a multi-device split
+                        # at all - they only ever reason about ONE device's free VRAM.
+                        # Letting a real per-device shortfall through would trade
+                        # today's precise, actionable message for a native worker
+                        # abort with no such visibility.
                         detail = "; ".join(
                             f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
                             f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
                         raise HTTPException(
                             503, f"Not enough VRAM on the configured split "
                             f"device(s) to load '{name}' ({detail}).")
-                    # Name what the free figure actually is, so a multi-GPU box does
-                    # not read it as broken detection. free_vram is COMBINED when a
-                    # split resolves across 2+ devices (the case an HF load reaches
-                    # here, since split-fit is only pre-checked for GGUF), else it is
-                    # the single GPU the model loads onto. Gate the wording on the
-                    # same signal vram_capacity() used, and only suggest a split when
-                    # one is not already active (do not tell a split user to make one).
-                    from localm.discover import split_device_count
-                    # No `or 0` fallback: reaching here requires probe_ok and
-                    # measurable (cannot_measure and inconclusive both broke or raised
-                    # above), so free_vram is a real int from a probe that completed.
-                    # A fabricated 0 would print "0 MB free" - a figure nobody
-                    # measured, reading as "no VRAM free" - which is exactly what this
-                    # message must never do (AGENTS.md rule 5).
-                    free_mb = free_vram // 1024 ** 2
-                    need_mb = vram_required // 1024 ** 2
-                    if split_device_count() >= 2:
-                        raise HTTPException(503, f"Not enough VRAM to load '{name}' "
-                                            f"(need ~{need_mb} MB, {free_mb} MB free "
-                                            f"combined across your GPU split). Free "
-                                            f"VRAM (unload another model / close a GPU "
-                                            f"app) or use a smaller quant.")
-                    raise HTTPException(503, f"Not enough VRAM to load '{name}' "
-                                        f"(need ~{need_mb} MB, {free_mb} MB free on "
-                                        f"the GPU it loads onto). With more than one "
-                                        f"GPU, a split can combine them: "
-                                        f"localm config gpu_split_indices 0,1")
+                    # Local + cooperative eviction exhausted, no split-specific
+                    # shortfall - what remains is only this loop's own coarse
+                    # "vram_required = file_size * 1.2" estimate not being met. That
+                    # estimate assumes the WHOLE model lands in VRAM; it has no idea
+                    # the backend's own load() already knows how to make a too-big
+                    # model fit anyway: GgufBackend's n_gpu_layers_auto (default ON -
+                    # _effective_gpu_layers/_auto_gpu_layers/_check_vram in
+                    # llamacpp/_sizing.py) sizes how many layers actually fit free
+                    # VRAM and puts the rest on system RAM, and HFBackend's
+                    # device_map="auto" (hf.py) does the unconditional equivalent -
+                    # both already documented as the promise behind a "too-big"
+                    # discover.fit_label() badge in the GUI's model browser. Refusing
+                    # here, before an engine is ever constructed, broke that promise
+                    # for exactly this case (a model that would fit via partial
+                    # offload, but not by this loop's whole-model estimate).
+                    #
+                    # Fall through to a real load attempt instead: _check_vram() is
+                    # the accurate, backend-owned final gate - it raises only when
+                    # the model genuinely cannot fit even at 0 GPU layers, which the
+                    # except handler around new_engine.load() below turns into the
+                    # same clean 503 shape this refusal used to be, for every caller.
+                    from localm.debuglog import logger as _dbg
+                    _dbg.info(
+                        "switch_engine: '%s' exceeds the whole-model VRAM estimate "
+                        "(need ~%s MB, %s MB free) after eviction - deferring to the "
+                        "backend's own load-time sizing instead of refusing",
+                        name, vram_required // 1024 ** 2, free_vram // 1024 ** 2)
+                    break
 
                 evict_engine = _engines[evict_name]
                 free_before = free_vram
@@ -797,6 +806,22 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             await loop.run_in_executor(None, new_engine.load)
         except ModelLoadCancelled:
             return {"status": "superseded", "model": name, "by": _switch_desired}
+        except RuntimeError as exc:
+            # The backend's own sizing found the model genuinely cannot fit even
+            # with 0 GPU layers (GgufBackend._check_vram - llamacpp/_sizing.py) or
+            # its native worker failed outright (GgufBackend._load_native's own
+            # wrapper, gguf.py) - both raise a plain, already-informative
+            # RuntimeError. Only 2 of the 6 routes that reach switch_engine
+            # currently wrap it in their own try/except to get a clean message
+            # (the GUI's "load model" button, the coder plugin's model switch);
+            # the OpenAI-compatible routes (/v1/chat/completions, /v1/completions,
+            # /v1/embeddings, /v1/models/load) do not, so this exact failure used
+            # to fall through to the generic "Internal server error" 500 there,
+            # discarding the real reason (AGENTS.md rule 5). Converting it to an
+            # HTTPException here, once, gives every caller the same clean message
+            # the existing VRAM-refusal 503s above already get from Starlette's
+            # default HTTPException handling.
+            raise HTTPException(503, f"Failed to load '{name}': {exc}") from exc
         finally:
             if preempt and _switch_cancel is cancel:
                 _switch_cancel = None

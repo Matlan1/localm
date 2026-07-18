@@ -143,6 +143,15 @@ CORE_FIELDS: list = [
                  "GPU runs some layers on CPU (slower) and still loads, instead "
                  "of being refused. An explicit GPU-layers value is left as-is.",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    SettingField("vram_overhead_mb", Widget.NUMBER, "Reserved VRAM overhead (MB)",
+                 "VRAM reserved beyond model weights for the KV cache's compute "
+                 "buffers and llama.cpp's graph/scratch allocations before "
+                 "auto-sizing GPU layers or context. This is real memory the "
+                 "loader needs, not just a safety margin - lowering it risks a "
+                 "native crash or GPU driver hang instead of a slower load; "
+                 "only lower it if you have confirmed your model/context needs "
+                 "less.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=256, step=128),
     # HIDDEN: rendered by a dedicated Main GPU selector in the Live Tuning card
     # (populated from GET /api/gpus), not the generic settings form - a plain
     # number box would not show device names/VRAM. Still accepted by PATCH

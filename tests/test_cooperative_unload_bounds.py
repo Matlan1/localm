@@ -47,16 +47,32 @@ _MAX_COOPERATE = 4
 
 
 class FakeEngine:
-    def __init__(self, name):
+    def __init__(self, name, *, fails_to_fit=False):
         self.display_name = name
         self._loaded = False
         self.active_requests = 0
+        # Simulates a REAL backend's own final sizing decision (GgufBackend's
+        # _check_vram, llamacpp/_sizing.py - covered end-to-end by
+        # test_auto_gpu_layers.py, not re-derived here). Used by the tests
+        # below where cooperative unload is exhausted/skipped and the model
+        # genuinely cannot fit even at 0 GPU layers - switch_engine now defers
+        # to the backend instead of hard-refusing on its own crude estimate,
+        # so these tests need the fake to reproduce that final refusal
+        # themselves to keep testing "cooperation was properly bounded/
+        # skipped, and the load still honestly fails" rather than accidentally
+        # asserting on a fake that always succeeds regardless of VRAM.
+        self.fails_to_fit = fails_to_fit
 
     @property
     def loaded(self):
         return self._loaded
 
     def load(self):
+        if self.fails_to_fit:
+            raise RuntimeError(
+                "Context too large for available VRAM: this load needs more "
+                "than this GPU has in total - freeing other VRAM will not "
+                "help, it cannot fit regardless.")
         self._loaded = True
 
     def unload(self):
@@ -132,8 +148,9 @@ def test_peer_is_not_re_asked_forever_when_it_keeps_advertising_a_model(
             "coordination_token": "x"}
     calls = _install_peers(monkeypatch, [peer], lambda p: True)  # always "freed"
 
+    engine = FakeEngine("incoming", fails_to_fit=True)
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(hs.switch_engine("incoming", {"incoming": FakeEngine("incoming")}.__getitem__))
+        asyncio.run(hs.switch_engine("incoming", {"incoming": engine}.__getitem__))
     assert ei.value.status_code == 503
     assert calls == ["peer-1"], (
         f"the peer must be asked exactly once per load attempt, got {calls}")
@@ -149,8 +166,9 @@ def test_peer_models_are_not_yanked_when_freeing_them_cannot_help(
             "coordination_token": "x"}
     calls = _install_peers(monkeypatch, [peer], lambda p: True)
 
+    engine = FakeEngine("incoming", fails_to_fit=True)
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(hs.switch_engine("incoming", {"incoming": FakeEngine("incoming")}.__getitem__))
+        asyncio.run(hs.switch_engine("incoming", {"incoming": engine}.__getitem__))
     assert ei.value.status_code == 503
     assert calls == [], (
         "a sibling's models were yanked even though freeing them could not "
@@ -164,8 +182,9 @@ def test_peer_on_a_different_gpu_is_not_yanked(coordinated, monkeypatch):
             "coordination_token": "x"}
     calls = _install_peers(monkeypatch, [peer], lambda p: True)
 
+    engine = FakeEngine("incoming", fails_to_fit=True)
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(hs.switch_engine("incoming", {"incoming": FakeEngine("incoming")}.__getitem__))
+        asyncio.run(hs.switch_engine("incoming", {"incoming": engine}.__getitem__))
     assert ei.value.status_code == 503
     assert calls == [], f"a peer on another GPU was yanked: {calls}"
 

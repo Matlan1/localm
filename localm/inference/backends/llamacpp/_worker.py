@@ -47,6 +47,7 @@ class GgufWorker(VramSizingMixin):
         n_ctx_max: Optional[int],
         n_ctx_grow: int,
         cancel_event=None,
+        vram_overhead_bytes: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -58,6 +59,13 @@ class GgufWorker(VramSizingMixin):
         self.n_ctx_max = n_ctx_max
         self.n_ctx_grow = n_ctx_grow
         self.cancel_event = cancel_event
+        # Mirrors the parent's already-resolved overhead (GgufBackend passes its
+        # own self._VRAM_OVERHEAD_BYTES here - see gguf.py's _load_native), so
+        # _check_context_fit's mid-session grow-time VRAM check reasons about the
+        # SAME reserved overhead the initial load's layer-sizing used, not the
+        # class-level default a config override would otherwise silently miss.
+        if vram_overhead_bytes is not None:
+            self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
