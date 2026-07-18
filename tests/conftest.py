@@ -166,7 +166,16 @@ def _neutralise_backend_vram_query():
     gpu_memory() returns None (and _free_vram_bytes falls back to the patched torch
     reader) unless a test opts in by setting the cache / patching gpu_memory itself.
     We do NOT reset _loaded_lib: dropping that reference could unload the DLL out
-    from under an integration test's live model."""
+    from under an integration test's live model.
+
+    _loader.native_lib_loaded() (added by #754) has the SAME collection-time-load
+    exposure in principle, but is deliberately NOT neutralised here (global,
+    autouse, every test): tests/test_native_dll_conflict_guard.py directly unit-
+    tests native_lib_loaded() itself by patching the _loaded_lib variable it reads
+    - a blanket function-level override here would silently defeat that test's own
+    mock instead of the real bug. See test_vram_preflight.py's own
+    _neutralise_native_lib_loaded fixture (module-scoped, not global) for where
+    this IS neutralised, for the specific tests that need it."""
     from localm.inference.backends.llamacpp import _loader
     saved = _loader._gpu_mem_cache
     _loader._gpu_mem_cache = False   # falsy, non-None -> gpu_memory() returns None
