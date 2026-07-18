@@ -364,3 +364,51 @@ class TestModelMetaCache:
             meta.store_n_layers(str(f), 10 + i)
         data = json.loads((tmp_path / "model_meta.json").read_text(encoding="utf-8"))
         assert len(data) == 4
+
+
+class TestVramOverheadConfigResolution:
+    """vram_overhead_mb (config.py) -> GgufBackend._VRAM_OVERHEAD_BYTES, wired
+    through localm.inference.engine.create_backend()'s
+    _resolve_vram_overhead_bytes helper. Normal writes (PATCH /v1/config,
+    `localm config`) already enforce a valid int via
+    settings_schema.validate_update, but a hand-edited config.json is not
+    type-checked on load (config.py's load_config just merges the stored
+    dict) - a present-but-unparseable value must fall back to the built-in
+    default instead of crashing create_backend() (and therefore every
+    subsequent model load) with an uncaught ValueError/TypeError."""
+
+    def test_valid_value_overrides_the_default(self):
+        from localm.inference.engine import _resolve_vram_overhead_bytes
+        assert _resolve_vram_overhead_bytes({"vram_overhead_mb": 900}) == 900 * 1024 ** 2
+
+    def test_missing_key_uses_the_built_in_default(self):
+        from localm.inference.engine import _resolve_vram_overhead_bytes
+        from localm.vram import VRAM_OVERHEAD_BYTES
+        assert _resolve_vram_overhead_bytes({}) == VRAM_OVERHEAD_BYTES
+
+    @pytest.mark.parametrize("bad_value", ["bogus", [], {}, object()])
+    def test_unparseable_value_falls_back_instead_of_raising(self, bad_value):
+        from localm.inference.engine import _resolve_vram_overhead_bytes
+        from localm.vram import VRAM_OVERHEAD_BYTES
+        assert _resolve_vram_overhead_bytes(
+            {"vram_overhead_mb": bad_value}) == VRAM_OVERHEAD_BYTES
+
+    def test_create_backend_does_not_crash_on_a_hand_edited_bad_value(
+            self, tmp_path, monkeypatch):
+        """End-to-end: a malformed value that only a hand-edited config.json
+        (never the validated PATCH/CLI paths) could produce must not brick
+        create_backend() - the exact crash a review caught during this fix's
+        own development (ValueError/TypeError propagating uncaught from
+        engine.py, before switch_engine's own RuntimeError->503 handling
+        even runs, since this isn't a RuntimeError and fires earlier)."""
+        from localm.inference.engine import create_backend
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"x")
+        from localm.config import load_config as real_load_config
+        base = real_load_config()
+        monkeypatch.setattr(
+            "localm.inference.engine.load_config",
+            lambda: {**base, "vram_overhead_mb": "bogus"})
+        backend = create_backend(str(model))
+        from localm.vram import VRAM_OVERHEAD_BYTES
+        assert backend._VRAM_OVERHEAD_BYTES == VRAM_OVERHEAD_BYTES

@@ -53,6 +53,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         n_ctx_grow: int = 4096,
         ctx_auto: bool = False,
         n_gpu_layers_auto: bool = False,
+        vram_overhead_bytes: Optional[int] = None,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -65,6 +66,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # when n_gpu_layers is left at its "everything" default (see
         # _effective_gpu_layers - an explicit -g is never overridden).
         self.n_gpu_layers_auto = n_gpu_layers_auto
+        # Per-instance override of VramSizingMixin's class-level default (config's
+        # vram_overhead_mb - see config.py's docstring on that key for what this
+        # actually funds and the risk of lowering it). None keeps the inherited
+        # class attribute untouched, preserving every existing test's
+        # monkeypatch-the-class-attribute pattern for callers that never pass this.
+        if vram_overhead_bytes is not None:
+            self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
         # The isolated worker process holding the real model - see
@@ -194,6 +202,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             n_gpu_layers=gpu_layers,
             n_ctx_max=ctx_max,
             n_ctx_grow=self.n_ctx_grow,
+            # So the worker's own _check_context_fit (mid-session context grow,
+            # the ONLY VramSizingMixin method it calls - see the module docstring)
+            # uses the SAME reserved overhead this parent already resolved for the
+            # initial load, not the class-level default: an instance-level
+            # override here would otherwise silently not reach the child process.
+            vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
         )
         timeout = self._load_timeout_seconds()
 

@@ -192,6 +192,14 @@ DEFAULT_CONFIG: dict = {
     # being refused. An explicit n_gpu_layers (any value other than 99, e.g.
     # `-g 24`) is always honoured verbatim. Off => request full offload as-is.
     "n_gpu_layers_auto": True,
+    # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
+    # model weights for the GGUF backend, before deciding how many layers fit or
+    # refusing outright. This is NOT a discardable safety margin - it funds the
+    # KV cache's compute buffers and llama.cpp's graph/scratch allocations, real
+    # memory the native loader actually needs. Lowering it risks a native crash
+    # or a GPU driver hang (TDR) instead of a slower but working load; only
+    # lower it if you have confirmed your model/context combination needs less.
+    "vram_overhead_mb": 1500,
     # Ceiling (seconds) for a GGUF model load in its isolated worker process
     # (see llamacpp/_runner.py) before it is treated as hung and killed. A
     # stalled load has no safe "unmeasurable" fallback (unlike a VRAM probe),
