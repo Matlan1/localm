@@ -161,33 +161,50 @@ def test_lru_eviction(setup_multi_model, monkeypatch):
 def test_active_requests_protection_from_eviction(setup_multi_model, monkeypatch):
     app = hs.create_app(None)
     client = TestClient(app)
-    
+
     # 4.8 GB per model. With 10 GB total, loading a second model exceeds VRAM limit.
     def dynamic_vram():
         loaded_count = sum(1 for e in hs._engines.values() if e.loaded)
         free = (10 * 1024 ** 3) - int(loaded_count * 4.8 * 1024 ** 3)
         return {"free": free, "total": 10 * 1024 ** 3}
-        
+
     monkeypatch.setattr("localm.discover.vram_info", probe_double(dynamic_vram))
-    
+
     # Load model-a
     r = client.post("/v1/chat/completions", json={
         "model": "model-a",
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert r.status_code == 200
-    
+
     # Simulate active requests on model-a
     hs._engines["model-a"].active_requests = 1
-    
-    # Attempting to load model-b should fail with 503 since model-a is busy and cannot be evicted
+
+    # model-a stays resident (busy, cannot be evicted) - prove THAT part of the
+    # protection holds regardless of how model-b's own load turns out.
+    # Attempting to load model-b: since #753, switch_engine no longer hard-
+    # refuses on its own crude whole-model estimate once local+cooperative
+    # eviction is exhausted - it falls through and lets the backend's own
+    # sizing decide (partial GPU-layer offload / system-RAM spillover can
+    # still make it fit). Simulate the backend genuinely being unable to fit
+    # it (0 GPU layers included) so this test keeps covering the case where
+    # eviction protection is the ONLY thing standing between the request and
+    # a 503 - a busy peer never gets sacrificed for it either way.
+    def _failing_engine_factory(name):
+        engine = FakeEngine(name)
+        engine.load = lambda: (_ for _ in ()).throw(
+            RuntimeError("VRAM exhausted: cannot fit even at 0 GPU layers"))
+        return engine
+    monkeypatch.setattr(hs, "_engine_factory", _failing_engine_factory)
+
     r = client.post("/v1/chat/completions", json={
         "model": "model-b",
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert r.status_code == 503
     assert "VRAM exhausted" in r.text
-    
+    assert hs._engines["model-a"].loaded, "the busy model-a must not be evicted"
+
     # Clear request lock
     hs._engines["model-a"].active_requests = 0
 

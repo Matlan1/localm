@@ -11,58 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-### Changed
-- **The localm data directory is no longer refused for RAG indexing.** Previously
-  any file under your data directory (LOCALM_HOME) was hard-blocked from being
-  indexed into a knowledge collection, even by you, even explicitly. It is your
-  data and your machine, so it is treated exactly like any other folder now (the
-  usual whitelist/blacklist rules and consent prompts apply, nothing special).
-  Third-party credential folders (`.ssh`, `.aws`, and similar) are still refused.
-
-### Fixed
-- **A decoder-based embedding model (Qwen3-Embedding, gte-Qwen2, ...) now
-  works correctly with no setting to discover.** These models are trained for
-  last-token pooling, but with no `embedding_pooling` chosen, localm forced
-  mean pooling on every model - measurably degrading embedding quality for
-  this specific class, silently (the vectors still looked normal). Nothing
-  explicitly configured now correctly uses each model's own declared pooling
-  when it declares last-token specifically; the bundled `bge-small`/`nomic`
-  choices are unaffected (still mean, exactly as every existing index built
-  with them expects). An explicit `embedding_pooling` choice still always
-  wins, as before.
-- **Setting up or using an embedding model no longer crashes on some ROCm/HIP
-  GPU installs.** `localm setup-llama` was provisioning `rocblas.dll` and
-  `hipblaslt.dll` without the GPU kernel data files (`rocblas/library/`,
-  `hipblaslt/library/`) they need at runtime - present in the same upstream
-  archive the whole time, just dropped by the copy step, since it only copied
-  `.dll`/`.exe` files. Without that data, any embedding call that dispatched a
-  GEMM through it (the "Set up / apply" test, or real document indexing) hard-
-  crashed the isolated embedding worker instead of failing cleanly. Re-run
-  `localm setup-llama --force` to pick up the fix on an already-provisioned
-  install. As a safety net for installs that have not yet reprovisioned, the
-  embedder now automatically retries once on CPU after a GPU crash and says so
-  in the Knowledge page instead of just failing - and that retry genuinely
-  hides the GPU from the runtime rather than only skipping weight offload, so
-  it recovers regardless of which embedding model is selected, not only small
-  ones.
-- **A collection with no documents no longer shows "reindex needed."** The badge
-  meant "this collection predates your embedding model," but an empty,
-  freshly-created collection triggered it too, even though there was nothing to
-  reindex.
-- **A worker crash during embedding no longer surfaces as a bare "Internal
-  server error."** `/v1/embeddings` now returns the actual failure reason, so
-  indexing and reindexing report why semantic search was skipped for a
-  document instead of a meaningless generic message.
-- **Knowledge search no longer lets a filler word outrank the better match.** In a
-  RAG collection, a document that shared only a common word like "and" or "the" with
-  your query could be ranked above the document that actually matched your meaning -
-  most visibly on small or narrowly-focused collections, where a filler word is rare
-  enough to look significant. Those stopwords are now filtered from the keyword half
-  of search (both when indexing and when querying), so a shared filler word alone can
-  no longer push the wrong document to the top. Semantic (embedding-based) matching is
-  unchanged, and collections do not need re-indexing.
-
-## [0.1.2] - 2026-07-17
+## [0.1.2] - 2026-07-18
 
 ### Added
 - **`localm stop`.** `localm run`/`gui`/`serve` start a background server that
@@ -140,6 +89,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   every type consistently.
 
 ### Changed
+- **The localm data directory is no longer refused for RAG indexing.** Previously
+  any file under your data directory (LOCALM_HOME) was hard-blocked from being
+  indexed into a knowledge collection, even by you, even explicitly. It is your
+  data and your machine, so it is treated exactly like any other folder now (the
+  usual whitelist/blacklist rules and consent prompts apply, nothing special).
+  Third-party credential folders (`.ssh`, `.aws`, and similar) are still refused.
 - **Memory recall is now relevant-only.** Chat memory used to inject the same handful
   of remembered facts into every reply regardless of the question, adding noise and
   distracting smaller models. It now surfaces only the facts that actually relate to
@@ -186,6 +141,78 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is no longer a recognized extra.
 
 ### Fixed
+- **A decoder-based embedding model (Qwen3-Embedding, gte-Qwen2, ...) now
+  works correctly with no setting to discover.** These models are trained for
+  last-token pooling, but with no `embedding_pooling` chosen, localm forced
+  mean pooling on every model - measurably degrading embedding quality for
+  this specific class, silently (the vectors still looked normal). Nothing
+  explicitly configured now correctly uses each model's own declared pooling
+  when it declares last-token specifically; the bundled `bge-small`/`nomic`
+  choices are unaffected (still mean, exactly as every existing index built
+  with them expects). An explicit `embedding_pooling` choice still always
+  wins, as before.
+- **Setting up or using an embedding model no longer crashes on some ROCm/HIP
+  GPU installs.** `localm setup-llama` was provisioning `rocblas.dll` and
+  `hipblaslt.dll` without the GPU kernel data files (`rocblas/library/`,
+  `hipblaslt/library/`) they need at runtime - present in the same upstream
+  archive the whole time, just dropped by the copy step, since it only copied
+  `.dll`/`.exe` files. Without that data, any embedding call that dispatched a
+  GEMM through it (the "Set up / apply" test, or real document indexing) hard-
+  crashed the isolated embedding worker instead of failing cleanly. Re-run
+  `localm setup-llama --force` to pick up the fix on an already-provisioned
+  install. As a safety net for installs that have not yet reprovisioned, the
+  embedder now automatically retries once on CPU after a GPU crash and says so
+  in the Knowledge page instead of just failing - and that retry genuinely
+  hides the GPU from the runtime rather than only skipping weight offload, so
+  it recovers regardless of which embedding model is selected, not only small
+  ones.
+- **A collection with no documents no longer shows "reindex needed."** The badge
+  meant "this collection predates your embedding model," but an empty,
+  freshly-created collection triggered it too, even though there was nothing to
+  reindex.
+- **A worker crash during embedding no longer surfaces as a bare "Internal
+  server error."** `/v1/embeddings` now returns the actual failure reason, so
+  indexing and reindexing report why semantic search was skipped for a
+  document instead of a meaningless generic message.
+- **Knowledge search no longer lets a filler word outrank the better match.** In a
+  RAG collection, a document that shared only a common word like "and" or "the" with
+  your query could be ranked above the document that actually matched your meaning -
+  most visibly on small or narrowly-focused collections, where a filler word is rare
+  enough to look significant. Those stopwords are now filtered from the keyword half
+  of search (both when indexing and when querying), so a shared filler word alone can
+  no longer push the wrong document to the top. Semantic (embedding-based) matching is
+  unchanged, and collections do not need re-indexing.
+- **Loading a chat model no longer refuses with "Not enough VRAM" just because the
+  embedder was still resident.** The embedding model has its own separate lifecycle
+  from chat models, so the automatic low-VRAM eviction that frees up space for a new
+  load never considered it a candidate. If you had recently indexed or searched a
+  RAG collection, the idle embedder could sit in VRAM and starve out a chat model
+  load that would otherwise have fit. It is now tried as free-able space before
+  localm falls back to asking another running instance to unload, or refusing.
+- **A model too big for its own VRAM estimate now actually loads with layers spilled
+  to system RAM, instead of being refused outright.** The GUI already tells you a
+  "too big" model will still run with some layers offloaded to system RAM - but the
+  load path used a cruder, separate size estimate and hard-refused before the
+  backend ever got a chance to do that offload. It now attempts the real load, and
+  the backend's own accurate sizing (which already supports partial GPU offload and
+  CPU spillover) decides whether it truly fits, matching what the badge promises.
+- **Loading or embedding on Windows with an AMD GPU no longer risks a blocking
+  Windows error dialog.** The first `import torch` in a fresh worker process could
+  collide with the native runtime llama.cpp had already loaded into that same
+  process, popping a modal dialog that needed a manual click to unstick instead of
+  raising a normal, catchable error. localm now recognizes when a process is in that
+  risky state and skips torch's VRAM probing entirely rather than triggering the
+  collision, and any other native crash in a worker process is also kept from
+  surfacing as a blocking dialog.
+- **A model load queued behind an in-flight eviction of that same model can no
+  longer end up pinned to an engine that gets freed out from under it.**
+  Freeing VRAM for one model can require evicting another; if a second request
+  for the model being evicted arrived while that eviction's native free was
+  still in progress, it could load and register a fresh copy, have it handed
+  back and pinned, and then have the still-finishing eviction release it
+  anyway - the request believed it held a working model when it did not. That
+  request now gets a clean, retryable "currently being freed" response instead
+  of a doomed pin.
 - **`localcoder` now names the real reason when its auto-started server dies
   fast.** The busy-port refusal above meant an auto-started `localm gui` now
   exits immediately instead of relocating - but `localcoder`'s attach loop
@@ -291,6 +318,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and whole-GPU; otherwise the status bar shows total VRAM alone (always correct)
   and the estimate reports "free VRAM unknown" rather than guess. The status bar
   also tints the VRAM figure by how full it is.
+- **The status-bar CPU figure no longer shows a made-up number on the first
+  reading.** The hardware monitor measures CPU use since its previous poll, so the
+  very first reading after opening the page had no earlier sample to compare
+  against and reported whatever the instant happened to be: 0% on an idle machine,
+  or as high as 100% if the page had just loaded a model. It now shows nothing for
+  that first reading and a real percentage once it has two samples to compare, so
+  the CPU number the status bar shows always reflects actual use.
 - **Unloading a model no longer presents a VRAM reading it never took as fact.**
   localm reads free VRAM from the GPU driver with a time limit, and a slow or busy
   driver could not always answer in time. When that happened it quietly reused the
