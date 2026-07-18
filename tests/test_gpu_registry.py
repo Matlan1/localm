@@ -298,6 +298,30 @@ def _make_engine(name):
     return _FakeEngine(name)
 
 
+class _UnfittableEngine(_FakeEngine):
+    """Simulates the backend's OWN final sizing decision genuinely refusing
+    (GgufBackend._check_vram raising because the model cannot fit even at 0
+    GPU layers - llamacpp/_sizing.py). Since #753, switch_engine no longer
+    hard-refuses on its own crude whole-model estimate once local +
+    cooperative eviction is exhausted - it falls through to a real load
+    attempt and lets the backend decide, converting a genuine backend
+    RuntimeError into the same clean 503 shape the old crude refusal used to
+    produce (see switch_engine's `except RuntimeError` around new_engine.load).
+    These cooperative-unload tests are about the COOPERATION SEQUENCING
+    (was the registry queried, did a peer get asked, does failure never
+    escalate past 503), not about whole-model sizing - test_auto_gpu_layers.py
+    already covers that - so the model-b factory here must simulate a load
+    that genuinely cannot fit, or switch_engine's fall-through would just
+    succeed (200) instead of ever reaching a 503 to assert on."""
+
+    def load(self):
+        raise RuntimeError("VRAM exhausted: cannot fit even at 0 GPU layers")
+
+
+def _make_unfittable_engine(name):
+    return _UnfittableEngine(name)
+
+
 @pytest.fixture
 def multi_model_registry(monkeypatch):
     fake_registry = {
@@ -336,8 +360,12 @@ def _dynamic_vram(free_gate=None):
 class TestSwitchEngineCooperativeUnload:
     def test_falls_back_to_503_without_coordination(self, multi_model_registry, monkeypatch):
         """hs._gpu_coord unset (today's default for every existing test and
-        every --isolated run) -> the new branch is a pure no-op and the exact
-        pre-existing 503 behavior is unchanged."""
+        every --isolated run) -> the new branch is a pure no-op, cooperation is
+        never attempted, and the load still ends in a clean 503 when the
+        backend's own sizing (simulated here - see _UnfittableEngine) genuinely
+        cannot fit it (since #753, switch_engine itself no longer hard-refuses
+        on its own crude estimate; it falls through and lets the backend
+        decide)."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
 
@@ -345,7 +373,7 @@ class TestSwitchEngineCooperativeUnload:
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1  # not locally evictable
             with pytest.raises(HTTPException) as exc:
-                await hs.switch_engine("model-b", _make_engine)
+                await hs.switch_engine("model-b", _make_unfittable_engine)
             return exc.value
 
         exc = asyncio.run(scenario())
@@ -355,8 +383,10 @@ class TestSwitchEngineCooperativeUnload:
     def test_cooperation_attempted_but_no_holder_falls_back_to_503(
             self, multi_model_registry, monkeypatch):
         """Coordination IS configured, but no live peer holds a model - the
-        attempt is genuinely made (proving the wiring runs) and still ends in
-        today's exact 503, never a harder failure."""
+        attempt is genuinely made (proving the wiring runs), and the load
+        still ends in a clean 503 once the backend's own sizing (simulated -
+        see _UnfittableEngine) genuinely cannot fit it, never a harder
+        failure."""
         hs._gpu_coord = {"instance_id": "self1", "port": 1, "host": "127.0.0.1",
                          "scheme": "http", "token": "selftok"}
         calls = {"n": 0}
@@ -373,7 +403,7 @@ class TestSwitchEngineCooperativeUnload:
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1
             with pytest.raises(HTTPException) as exc:
-                await hs.switch_engine("model-b", _make_engine)
+                await hs.switch_engine("model-b", _make_unfittable_engine)
             return exc.value
 
         exc = asyncio.run(scenario())
@@ -382,8 +412,9 @@ class TestSwitchEngineCooperativeUnload:
 
     def test_cooperation_failure_falls_back_to_503_not_harder(
             self, multi_model_registry, monkeypatch):
-        """A peer exists but declines/fails cooperation - still exactly the
-        pre-existing 503, never escalated."""
+        """A peer exists but declines/fails cooperation - the load still ends
+        in a clean 503 once the backend's own sizing (simulated -
+        see _UnfittableEngine) genuinely cannot fit it, never escalated."""
         hs._gpu_coord = {"instance_id": "self1", "port": 1, "host": "127.0.0.1",
                          "scheme": "http", "token": "selftok"}
         peer_entry = {"instance_id": "peer1", "port": 9100, "scheme": "http",
@@ -396,7 +427,7 @@ class TestSwitchEngineCooperativeUnload:
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1
             with pytest.raises(HTTPException) as exc:
-                await hs.switch_engine("model-b", _make_engine)
+                await hs.switch_engine("model-b", _make_unfittable_engine)
             return exc.value
 
         exc = asyncio.run(scenario())

@@ -64,6 +64,35 @@ def _reset_torch_broken_flag():
     VramSizingMixin._torch_rocm_init_broken = saved
 
 
+@pytest.fixture(autouse=True)
+def _neutralise_native_lib_loaded():
+    """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY
+    xdist worker that has collected a real_gguf-gated test (conftest.py's
+    _neutralise_backend_vram_query docstring explains why: load_lib() runs once
+    at collection time and _loaded_lib is deliberately never reset). Once True,
+    _free_total_vram_bytes() skips the torch attempt entirely and returns
+    (None, None) - silently defeating every test in this module that mocks
+    torch via patch.dict(sys.modules, ...) to exercise that path (confirmed by
+    bisection: this file passes 100% standalone, only fails once a real-lib-
+    loading file like test_kv_bytes_offload.py lands in the same worker).
+
+    Scoped to THIS module only (not conftest.py's global _neutralise_backend_
+    vram_query): tests/test_native_dll_conflict_guard.py unit-tests
+    native_lib_loaded() itself by patching the _loaded_lib variable it reads,
+    so a global override would silently defeat ITS mock instead of guarding
+    against the real cross-worker pollution. Patches the FUNCTION (there is no
+    separate cache variable here, unlike _gpu_mem_cache) - restored after every
+    test, and any test in this module that wants the real value can still
+    monkeypatch it back locally (monkeypatch.setattr always wins over a plain
+    attribute assignment made before it, same as it does for any other
+    fixture-set attribute)."""
+    from localm.inference.backends.llamacpp import _loader
+    saved = _loader.native_lib_loaded
+    _loader.native_lib_loaded = lambda: False
+    yield
+    _loader.native_lib_loaded = saved
+
+
 class TestVramPreflight:
     def test_warns_when_model_exceeds_free_vram(self, tmp_path, capsys):
         b = _backend(tmp_path, size_bytes=80_000_000)

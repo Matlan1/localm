@@ -49,6 +49,22 @@ from localm.inference.protocol import (
 _engines: dict[str, Engine] = {}
 # Order of model usage (display names, MRU at the end)
 _engines_lru: list[str] = []
+# Display names currently mid-eviction: detached from _engines/_engines_lru
+# already (BUG-9b's fix, so a fast-path lookup correctly sees them as gone),
+# but the native free (evict_engine.unload(), an executor call the eviction
+# loop awaits) has not completed yet. A concurrent switch_engine/get_engine
+# call for THIS SAME name has no other way to see that a free is in flight
+# for it: it would otherwise construct-and-load a brand-new engine for the
+# name while the stale eviction is still running, race it, and (once the
+# stale unload() finally completes) that caller can end up pinning an engine
+# that gets freed out from under it - the exact pin-arrives-during-the-
+# unload-await hazard BUG-9b closed for the FAST path, reopened for this one
+# by #753's fall-through-to-a-real-load-attempt change (confirmed by bisection:
+# test_eviction_victim_race.py::test_eviction_victim_not_pinnable_during_native_free
+# passes at #752, fails at #753). switch_engine consults this before
+# constructing/loading *name* and refuses (503, honest backpressure - the
+# test's own documented acceptable outcome) rather than racing it.
+_evicting_names: set[str] = set()
 # Default/startup model name
 _default_model_name: str | None = None
 # Active model name (most recently used/loaded)
@@ -768,22 +784,44 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 if _engine is evict_engine:
                     _engine = None
                     _inference_sem = None
-                await loop.run_in_executor(None, evict_engine.unload)
+                # See _evicting_names' own docstring: mark THIS name as mid-free so a
+                # concurrent switch_engine/get_engine call for it (a queued reload of
+                # the very model being evicted) refuses instead of racing a fresh
+                # load against this still-running native free. try/finally: every
+                # path out of the free below (success or an unexpected exception from
+                # evict_engine.unload itself) must clear it, or the name would be
+                # permanently unloadable.
+                _evicting_names.add(evict_name)
+                try:
+                    await loop.run_in_executor(None, evict_engine.unload)
 
-                # Wait for the native VRAM free to land before re-checking, so the
-                # next iteration does not see a stale-low reading and over-evict
-                # (driver-hang guard, AUDIT-MED-11). Only meaningful when measurable.
-                if measurable and free_before is not None:
-                    await loop.run_in_executor(
-                        None,
-                        lambda: wait_for_vram_release(
-                            lambda: vram_capacity().get("free"), before_bytes=free_before))
+                    # Wait for the native VRAM free to land before re-checking, so the
+                    # next iteration does not see a stale-low reading and over-evict
+                    # (driver-hang guard, AUDIT-MED-11). Only meaningful when measurable.
+                    if measurable and free_before is not None:
+                        await loop.run_in_executor(
+                            None,
+                            lambda: wait_for_vram_release(
+                                lambda: vram_capacity().get("free"), before_bytes=free_before))
+                finally:
+                    _evicting_names.discard(evict_name)
+
+        # See _evicting_names' own docstring: *name* itself may be the victim
+        # another concurrent switch_engine call just detached and is still
+        # natively freeing - a queued reload landing in exactly that window.
+        # Refuse rather than construct-and-load a fresh engine that races the
+        # still-running free (honest backpressure; the caller may simply
+        # retry once the in-flight eviction finishes).
+        if name in _evicting_names:
+            raise HTTPException(
+                503, f"'{name}' is currently being freed by another request; "
+                f"retry shortly.")
 
         if name in _engines:
             new_engine = _engines[name]
         else:
             new_engine = _engine_factory(name)
-            
+
         cancel = threading.Event()
         # Install the fresh event for EVERY load, preempt or not. An engine object
         # outlives a load (idle-unload keeps it in _engines for lazy reload), so a
