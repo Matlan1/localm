@@ -141,6 +141,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is no longer a recognized extra.
 
 ### Fixed
+- **Semantic search and memory recall no longer silently truncate what they
+  can embed at a flat 512 tokens.** The embedder capped every model at the
+  smallest bundled default's own window regardless of what it actually
+  supports, discarding the back half of anything longer with only a debug
+  log line as evidence. It now sizes to whichever is smaller: the loaded
+  model's own declared training context, or a generous 2048-token ceiling
+  (comfortably above what a knowledge chunk or memory fact ever needs) - so a
+  model built for a longer window, such as nomic-embed-text, bge-m3, or
+  Qwen3-Embedding, actually uses it.
 - **A decoder-based embedding model (Qwen3-Embedding, gte-Qwen2, ...) now
   works correctly with no setting to discover.** These models are trained for
   last-token pooling, but with no `embedding_pooling` chosen, localm forced

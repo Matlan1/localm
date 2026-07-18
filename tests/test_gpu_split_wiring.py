@@ -267,7 +267,7 @@ class TestIsolatedEmbedderGpuSplitPreflight:
 
         def spawn_and_load(self, params, timeout=None):
             type(self).spawned = True
-            return {"dim": 768}
+            return {"dim": 768, "n_ctx": params.get("n_ctx") or 512}
 
     def _build(self, monkeypatch, model_file):
         type(self)._StubRunner.spawned = False
