@@ -639,7 +639,7 @@ class _StubRunner:
 
     def spawn_and_load(self, params, timeout=None):
         self.loaded_params = params
-        return {"dim": 5}
+        return {"dim": 5, "n_ctx": params.get("n_ctx") or 512}
 
     def embed(self, texts, timeout=None):
         self.embed_calls.append(list(texts))
@@ -991,13 +991,39 @@ def _stub_embedder(n_ctx=8):
     e._api = _OverflowApi()
     e._llama_token = ctypes.c_int
     e._lock = threading.RLock()
-    e._n_ctx = n_ctx
+    e.n_ctx = n_ctx
     e._mem = None
     e._vocab = None
     e._ctx = object()                        # truthy: "loaded"
     e.dim = 4
     e.model_path = "<stub>"
     return e
+
+
+class TestResolveEmbedCtx:
+    """The embedding window auto-sizing decision (_resolve_embed_ctx), in
+    isolation from the native load path: a model's own declared training
+    context is honoured up to a ceiling, never a flat guess (see the
+    constants' own docstrings in embedder.py)."""
+
+    def test_native_window_under_ceiling_is_used_as_is(self):
+        assert emb._resolve_embed_ctx(512) == 512
+
+    def test_native_window_over_ceiling_is_capped(self):
+        assert emb._resolve_embed_ctx(32768) == emb._EMBED_CTX_CEILING
+
+    def test_native_window_exactly_at_ceiling(self):
+        assert emb._resolve_embed_ctx(emb._EMBED_CTX_CEILING) == emb._EMBED_CTX_CEILING
+
+    def test_zero_native_window_falls_back(self):
+        """A model that does not usefully declare its own window (a build too
+        old for llama_model_n_ctx_train, or genuinely absent metadata) still
+        gets exactly the flat default that shipped before this fix, not a
+        broken (0-sized) or arbitrary window."""
+        assert emb._resolve_embed_ctx(0) == emb._EMBED_CTX_FALLBACK
+
+    def test_negative_native_window_falls_back(self):
+        assert emb._resolve_embed_ctx(-1) == emb._EMBED_CTX_FALLBACK
 
 
 def test_overlong_inputs_do_not_collide():

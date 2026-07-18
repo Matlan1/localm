@@ -122,7 +122,42 @@ _POOLING_DEFAULT = _POOLING_MEAN
 # than the MEAN override for bge). Internal only: never a user-facing choice
 # in POOLING_CHOICES: the user cannot "select" absence-of-configuration.
 _POOLING_UNSET = "unset"
-_EMBED_CTX = 512          # embedding models cap at 512 tokens; short texts anyway
+# The isolated worker sizes the embedding window to the loaded model's OWN
+# native training context (llama_model_n_ctx_train, read once the model
+# handle exists - see GGUFEmbedder.__init__) instead of a flat guess:
+# different embedding models declare wildly different windows - bge-small-
+# en-v1.5's (the bundled default) native window really is 512, but
+# nomic-embed-text/bge-m3 declare 8192 and Qwen3-Embedding/gte-Qwen2 declare
+# far more - and treating every model as if it matched the smallest bundled
+# default silently truncated, and degraded, every embedding for any larger
+# model with no signal to the user beyond a debug log line.
+#
+# _EMBED_CTX_CEILING bounds how large that auto-sized window is allowed to
+# get: requesting a model's FULL native window (up to 32768 on some) for
+# EVERY embed call, including a one-sentence memory fact, sizes the batch/
+# scratch buffers to match on every single call, not just the rare long one -
+# a real VRAM and per-call latency cost paid every time. 2048 tokens
+# comfortably covers this project's own RAG chunk target (rag/chunk.py's
+# CHUNK_CHARS=1200, observed in practice at 300-650+ tokens depending on text
+# density) with wide headroom, while an explicit n_ctx argument (no in-tree
+# caller passes one today, but the option stays for one that wants a specific
+# window) still wins outright over the auto-sized value.
+_EMBED_CTX_CEILING = 2048
+# Fallback ONLY when a model's native window cannot be read at all (the API
+# call fails, or returns an implausible <= 0 value) - the ORIGINAL flat
+# default, so that narrow case still gets exactly the behavior that shipped
+# before this fix, not a broken or arbitrary one.
+_EMBED_CTX_FALLBACK = 512
+
+
+def _resolve_embed_ctx(native_ctx_train: int) -> int:
+    """The auto-sizing decision itself, isolated as a pure function so it is
+    directly unit-testable without mocking the whole native load path: cap
+    the model's own declared training window at _EMBED_CTX_CEILING, or fall
+    back to _EMBED_CTX_FALLBACK when the model does not usefully declare one
+    (<= 0 - a build too old for llama_model_n_ctx_train, or genuinely absent
+    metadata)."""
+    return min(native_ctx_train, _EMBED_CTX_CEILING) if native_ctx_train > 0 else _EMBED_CTX_FALLBACK
 
 
 def resolve_pooling_setting(spec: object) -> object:
@@ -286,7 +321,7 @@ class GGUFEmbedder:
     """A dedicated embedding GGUF loaded in embeddings mode via the native llama.dll."""
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
-                 n_ctx: int = _EMBED_CTX,
+                 n_ctx: Optional[int] = None,
                  pooling_type: object = _POOLING_DEFAULT) -> None:
         from localm.inference.backends.llamacpp import _api as api
         from localm.inference.backends.llamacpp._structs import llama_token
@@ -294,7 +329,9 @@ class GGUFEmbedder:
         self._llama_token = llama_token
         self.model_path = model_path
         self._lock = threading.RLock()
-        self._n_ctx = n_ctx
+        # Resolved once the model handle exists, below - None here means "not
+        # yet sized"; _embed_one is never reachable before __init__ finishes.
+        self.n_ctx = n_ctx
         self._model = None
         self._ctx = None
         self._vocab = None
@@ -342,10 +379,16 @@ class GGUFEmbedder:
         logger.debug("embedder %s: declared pooling %s, using %s",
                      Path(model_path).name, pooling_name(self.declared_pooling),
                      pooling_name(self.pooling_type))
+        if self.n_ctx is None:
+            native_ctx = int(api.llama_model_n_ctx_train(self._model))
+            self.n_ctx = _resolve_embed_ctx(native_ctx)
+            logger.debug(
+                "embedder %s: native training window %d token(s), using %d",
+                Path(model_path).name, native_ctx, self.n_ctx)
         cp = api.llama_context_default_params()
-        cp.n_ctx = n_ctx
-        cp.n_batch = n_ctx
-        cp.n_ubatch = n_ctx           # non-causal encode needs ubatch >= seq len
+        cp.n_ctx = self.n_ctx
+        cp.n_batch = self.n_ctx
+        cp.n_ubatch = self.n_ctx      # non-causal encode needs ubatch >= seq len
         cp.embeddings = True
         cp.pooling_type = self.pooling_type
         self._ctx = api.llama_init_from_model(self._model, cp)
@@ -360,8 +403,8 @@ class GGUFEmbedder:
         if self._mem is not None:
             api.llama_memory_clear(self._mem, True)
         raw = (text or " ").encode("utf-8")
-        buf = (self._llama_token * self._n_ctx)()
-        n = api.llama_tokenize(self._vocab, raw, len(raw), buf, self._n_ctx,
+        buf = (self._llama_token * self.n_ctx)()
+        n = api.llama_tokenize(self._vocab, raw, len(raw), buf, self.n_ctx,
                                True, True)   # add_special (BERT CLS/SEP), parse_special
         if n < 0:
             # Over-long input: llama_tokenize returns -(tokens needed) and, on
@@ -382,13 +425,13 @@ class GGUFEmbedder:
             # full sequence: with add_special=True on the BERT-family models
             # this embedder serves (bge/nomic), that is the [SEP] the pooled
             # encoding expects; dropping it degrades the embedding.
-            for i in range(self._n_ctx):
+            for i in range(self.n_ctx):
                 buf[i] = full[i]
-            buf[self._n_ctx - 1] = full[n2 - 1]
-            n = self._n_ctx
+            buf[self.n_ctx - 1] = full[n2 - 1]
+            n = self.n_ctx
             logger.debug(
                 "embedder: input of %d tokens truncated to the %d-token window",
-                n2, self._n_ctx)
+                n2, self.n_ctx)
         if n <= 0:
             return [0.0] * self.dim
         arr = (self._llama_token * n)(*buf[:n])
@@ -444,12 +487,26 @@ class IsolatedEmbedder(VramSizingMixin):
     mirroring GgufBackend/GgufWorker's split of responsibilities."""
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
-                 n_ctx: int = _EMBED_CTX,
+                 n_ctx: Optional[int] = None,
                  pooling_type: object = _POOLING_DEFAULT) -> None:
         self.model_path = model_path
         self.n_gpu_layers = n_gpu_layers
         self.effective_gpu_layers = None    # no auto-sizing for the embedder
-        self.n_ctx = n_ctx
+        # None means "auto-size to the model's own native training window"
+        # (see GGUFEmbedder.__init__ / _EMBED_CTX_CEILING) - but ONLY the
+        # child can determine that, since only it ever loads the model. This
+        # parent's own VRAM preflight (_check_vram, inherited from
+        # VramSizingMixin - see _preflight_vram below) needs a concrete
+        # number BEFORE any child spawns, so self.n_ctx starts at the
+        # ceiling: a safe, never-under-estimating placeholder (the child's
+        # real auto-sized value can never exceed it, by construction), later
+        # overwritten with the real figure the child reports back at load
+        # (_reload, mirroring how dim/declared_pooling already flow back).
+        # The ORIGINAL request (None for auto, or an explicit override) is
+        # kept separately so _reload always forwards the user's actual intent
+        # to the child, not this placeholder.
+        self._requested_n_ctx = n_ctx
+        self.n_ctx = n_ctx if n_ctx is not None else _EMBED_CTX_CEILING
         self._pooling_type = pooling_type
         self.dim = 0
         # Reported by the child at load (see _reload): what the GGUF declares and
@@ -534,13 +591,18 @@ class IsolatedEmbedder(VramSizingMixin):
         self._preflight_vram()
         from ._embedder_runner import EmbedderRunner
         params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
-                      n_ctx=self.n_ctx, pooling_type=self._pooling_type,
+                      n_ctx=self._requested_n_ctx, pooling_type=self._pooling_type,
                       cpu_only=self.gpu_fallback_reason is not None)
         self._runner = EmbedderRunner()
         meta = self._runner.spawn_and_load(params)
         self.dim = meta["dim"]
         self.declared_pooling = meta.get("declared_pooling")
         self.effective_pooling = meta.get("effective_pooling")
+        # The child is the only place that ever loads the model, so it is the
+        # only place that can resolve "auto" against the model's real native
+        # window - overwrite the preflight-time ceiling placeholder (see
+        # __init__) with the actual figure it used.
+        self.n_ctx = meta["n_ctx"]
         self._warn_if_mispooled()
 
     def _warn_if_mispooled(self) -> None:
