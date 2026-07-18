@@ -55,12 +55,18 @@ class VramSizingMixin:
     # attribute (not read from the module directly) so tests can monkeypatch it.
     _VRAM_OVERHEAD_BYTES = VRAM_OVERHEAD_BYTES
 
-    # Set once `import torch` is confirmed broken IN THIS PROCESS - see
-    # _free_total_vram_bytes()'s docstring for the exact, root-caused
-    # mechanism. A class attribute (shared across every GgufBackend/GgufWorker
-    # instance in this process, which is exactly the right scope: the
-    # conflict is process-wide, not per-instance) so tests can reset it like
-    # other per-process caches in this codebase.
+    # BACKSTOP, not the primary defense: _free_total_vram_bytes() now skips the
+    # torch attempt entirely whenever _loader.native_lib_loaded() is True (see
+    # its docstring), which is the actual precondition for this conflict and
+    # catches it before it happens on every ordinary worker. This flag remains
+    # for any path that reaches `import torch` some other way (a direct call
+    # in a test, or a future caller of this mixin that does not route through
+    # _free_total_vram_bytes) - it still stops a genuinely-uncaught fault from
+    # retrying and re-faulting on every subsequent call. A class attribute
+    # (shared across every GgufBackend/GgufWorker instance in this process,
+    # which is exactly the right scope: the conflict is process-wide, not
+    # per-instance) so tests can reset it like other per-process caches in
+    # this codebase.
     _torch_rocm_init_broken: bool = False
 
     @staticmethod
@@ -100,6 +106,19 @@ class VramSizingMixin:
         failure stops the pointless, noisy retry loop without hiding the
         underlying incompatibility."""
         if VramSizingMixin._torch_rocm_init_broken:
+            return None, None
+        # ROOT-CAUSE FIX, not a catch: once llama.cpp's own native runtime is
+        # already loaded IN THIS PROCESS (see _loader.native_lib_loaded -
+        # true inside GgufWorker/the embedder's isolated worker, which loaded
+        # it themselves to run their model), a torch import is KNOWN to hit
+        # the DLL-identity conflict below on this platform/build combination -
+        # not sometimes, every time, because each worker is a fresh process so
+        # the _torch_rocm_init_broken cache above never carries over. Skip the
+        # doomed attempt instead of triggering it and catching the aftermath:
+        # gpu_memory_isolated() (this method's own caller falls back to it)
+        # answers exactly as well without ever touching torch.
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
             return None, None
         try:
             import torch
