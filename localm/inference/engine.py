@@ -60,6 +60,29 @@ def _is_gguf(path: str) -> bool:
     return p.suffix.lower() == ".gguf" or (p.is_file() and p.name.startswith("sha256-"))
 
 
+def _resolve_vram_overhead_bytes(cfg: dict) -> int:
+    """``vram_overhead_mb`` (MB) from config, in bytes, or the built-in
+    default on a missing/unparseable value. Same rule-5 reasoning as
+    GgufBackend's own ``_load_timeout_seconds``/``_first_token_timeout_seconds``
+    (gguf.py): normal writes (PATCH /v1/config, ``localm config``) already
+    enforce a valid int via settings_schema.validate_update, but a
+    hand-edited config.json is not type-checked on load (config.py's
+    ``load_config`` just merges the stored dict) - a present-but-unparseable
+    value is a real misconfiguration, not the benign missing case, so it is
+    surfaced under --debug rather than silently bricking every later load."""
+    from localm.vram import VRAM_OVERHEAD_BYTES
+    raw = cfg.get("vram_overhead_mb")
+    if raw is None:
+        return VRAM_OVERHEAD_BYTES
+    try:
+        return int(raw) * 1024 ** 2
+    except (TypeError, ValueError):
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("vram_overhead_mb is set but not a valid number (%r); "
+                     "using the default %.1f GB", raw, VRAM_OVERHEAD_BYTES / 1024 ** 3)
+        return VRAM_OVERHEAD_BYTES
+
+
 def create_backend(
     model_path: str,
     *,
@@ -91,6 +114,7 @@ def create_backend(
             n_ctx_grow=cfg.get("n_ctx_grow", 4096),
             ctx_auto=bool(cfg.get("ctx_auto", False)),
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
+            vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
 
     raise ValueError(
