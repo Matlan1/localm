@@ -379,6 +379,7 @@ class TestCpuOnlyHidesGpuDevices:
                 self.dim = 4
                 self.declared_pooling = None
                 self.pooling_type = 1
+                self.n_ctx = 512
 
         monkeypatch.setattr("localm.inference.embedder.GGUFEmbedder", _StubGGUFEmbedder)
         for var in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
@@ -414,6 +415,7 @@ class TestCpuOnlyHidesGpuDevices:
                 self.dim = 4
                 self.declared_pooling = None
                 self.pooling_type = 1
+                self.n_ctx = 512
 
         monkeypatch.setattr("localm.inference.embedder.GGUFEmbedder", _StubGGUFEmbedder)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)

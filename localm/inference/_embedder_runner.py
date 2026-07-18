@@ -132,13 +132,17 @@ def _runner_main(req_q, resp_q) -> None:
             from localm.inference.embedder import GGUFEmbedder
             try:
                 embedder = GGUFEmbedder(**payload)
-                # The pooling facts travel back with the load so the PARENT can
-                # warn about a mis-pooled model: only the child ever holds the
-                # model handle the declared type is read from.
+                # The pooling facts (and, when n_ctx was None/"auto", the
+                # actual window size resolved from the model's own native
+                # training context) travel back with the load so the PARENT
+                # can warn about a mis-pooled model / report the real window:
+                # only the child ever holds the model handle either is read
+                # from.
                 resp_q.put(("ok", {
                     "dim": embedder.dim,
                     "declared_pooling": embedder.declared_pooling,
                     "effective_pooling": embedder.pooling_type,
+                    "n_ctx": embedder.n_ctx,
                 }))
             except Exception as e:
                 resp_q.put(("error", str(e)))
