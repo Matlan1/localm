@@ -70,12 +70,18 @@ def _runner_main(req_q, resp_q) -> None:
     attach_child_logging()   # native load-failure diagnostics land in the
                               # shared debug log from this process too.
 
-    from localm._mp_spawn import install_parent_death_watchdog
+    from localm._mp_spawn import (install_parent_death_watchdog,
+                                   suppress_native_error_dialogs)
     install_parent_death_watchdog()   # die with the parent even on a hard kill
                                        # (End Task / force-close); daemon=True is
                                        # atexit-gated and does not cover that, so
                                        # else this worker outlives the server
                                        # holding its embedding model in VRAM.
+    suppress_native_error_dialogs()   # a native DLL failure here (loading llama.dll
+                                       # itself, or the torch/ROCm conflict this
+                                       # worker's own VRAM checks are known to hit -
+                                       # see _sizing.py) must degrade to a catchable
+                                       # exception, never a blocking modal dialog.
 
     embedder = None
 
