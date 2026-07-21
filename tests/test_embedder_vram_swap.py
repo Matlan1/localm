@@ -350,3 +350,139 @@ def test_get_embedder_swap_check_does_not_deadlock_cross_thread_lock_use(monkeyp
         "the cross-thread loaded_dim() call never completed within 5s - "
         "get_embedder() is still holding _LOCK while the swap/eviction path "
         "runs, reproducing the 2026-07-14 cross-thread deadlock")
+
+
+# --------------------------------------------------------------------------- #
+#  GPU-vs-CPU placement (_choose_embedder_gpu_layers + get_embedder wiring)    #
+# --------------------------------------------------------------------------- #
+
+class TestChooseEmbedderGpuLayers:
+    """When eviction cannot or should not free room (per-turn memory recall
+    pins the chat engine, so evict_chat_for_embedder returns "in_use"), the
+    embedder used to force-load all layers onto a card that could not hold it,
+    thrashing the resident chat model (measured live: 34 -> 5.0 tok/s).
+    The placement chooser must degrade to CPU instead - without ever
+    overriding an explicit user choice."""
+
+    @staticmethod
+    def _gguf(tmp_path, size=4096):
+        f = tmp_path / "emb.gguf"
+        f.write_bytes(b"\0" * size)
+        return str(f)
+
+    def test_explicit_embedding_gpu_layers_cpu_wins(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"embedding_gpu_layers": 0},
+            read_free=lambda: 64 * GB)
+        assert (ngl, reason) == (0, None)
+
+    def test_explicit_embedding_gpu_layers_gpu_wins_even_when_tight(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"embedding_gpu_layers": 99},
+            read_free=lambda: 1)
+        assert (ngl, reason) == (99, None)
+
+    def test_inherits_explicit_global_n_gpu_layers(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 24}, read_free=lambda: 1)
+        assert (ngl, reason) == (24, None)
+
+    def test_inherits_global_cpu_only(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 0}, read_free=lambda: 64 * GB)
+        assert (ngl, reason) == (0, None)
+
+    def test_auto_fits_stays_on_gpu(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 99},
+            read_free=lambda: 64 * GB)
+        assert (ngl, reason) == (99, None)
+
+    def test_auto_does_not_fit_goes_cpu_with_reason(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        # file 4096 B -> estimate ~4915 B; only 1000 B free
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 99}, read_free=lambda: 1000)
+        assert ngl == 0
+        assert reason is not None and "VRAM" in reason
+
+    def test_auto_unmeasurable_free_keeps_gpu(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 99}, read_free=lambda: None)
+        assert (ngl, reason) == (99, None)
+
+    def test_unreadable_file_keeps_gpu(self, tmp_path):
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        ngl, reason = _choose_embedder_gpu_layers(
+            str(tmp_path / "missing.gguf"), {"n_gpu_layers": 99},
+            read_free=lambda: 1000)
+        assert (ngl, reason) == (99, None)
+
+
+class _FakeEmbedder:
+    """Stands in for IsolatedEmbedder in wiring tests: records construction
+    kwargs, satisfies everything get_embedder touches afterwards."""
+    instances: list = []
+
+    def __init__(self, path, *, n_gpu_layers=99, pooling_type=None,
+                 gpu_fallback_reason=None):
+        self.path = path
+        self.n_gpu_layers = n_gpu_layers
+        self.pooling_type = pooling_type
+        self.gpu_fallback_reason = gpu_fallback_reason
+        self.dim = 3
+        self.effective_pooling = None
+        self.active_requests = 0
+        self._runner = None
+        _FakeEmbedder.instances.append(self)
+
+    def close(self):
+        pass
+
+
+class TestGetEmbedderPlacementWiring:
+    def test_cpu_choice_reaches_the_constructor_with_reason(
+            self, monkeypatch, tmp_path):
+        f = tmp_path / "emb.gguf"
+        f.write_bytes(b"\0" * 4096)
+        calls = []
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: str(f))
+        monkeypatch.setattr(emb, "_maybe_swap_for_embedder",
+                            lambda p, n: calls.append(("swap", n)))
+        monkeypatch.setattr(
+            emb, "_choose_embedder_gpu_layers",
+            lambda p, c, **kw: calls.append(("choose",)) or (0, "no VRAM room"))
+        _FakeEmbedder.instances.clear()
+        monkeypatch.setattr(emb, "IsolatedEmbedder", _FakeEmbedder)
+
+        got = emb.get_embedder()
+
+        assert got is _FakeEmbedder.instances[-1]
+        assert got.n_gpu_layers == 0
+        assert got.gpu_fallback_reason == "no VRAM room"
+        # The eviction swap ran BEFORE placement, so a successful eviction
+        # still yields a GPU choice.
+        assert calls == [("swap", 99), ("choose",)]
+
+    def test_gpu_choice_constructs_without_reason(self, monkeypatch, tmp_path):
+        f = tmp_path / "emb.gguf"
+        f.write_bytes(b"\0" * 4096)
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: str(f))
+        monkeypatch.setattr(emb, "_maybe_swap_for_embedder", lambda p, n: None)
+        monkeypatch.setattr(emb, "_choose_embedder_gpu_layers",
+                            lambda p, c, **kw: (99, None))
+        _FakeEmbedder.instances.clear()
+        monkeypatch.setattr(emb, "IsolatedEmbedder", _FakeEmbedder)
+
+        got = emb.get_embedder()
+
+        assert got.n_gpu_layers == 99
+        assert got.gpu_fallback_reason is None

@@ -34,6 +34,41 @@ from localm.console import console
 from localm.vram import VRAM_OVERHEAD_BYTES
 
 
+def embedder_ctx_reservation_bytes() -> int:
+    """VRAM to hold back from the auto-sized context budget for the CONFIGURED
+    embedding model, so the chat model's window does not claim the room the
+    embedder will need when it loads later (first memory/RAG use).
+
+    Without this, ``ctx_auto`` sized the window from ALL free VRAM at
+    chat-load time, the embedder then found the card full, force-loaded
+    anyway, and Windows/WDDM paged the overcommit to system RAM - measured
+    live 2026-07-18 on a 16 GB card: generation collapsed from ~34 to 5.0
+    tok/s with a 4.3 GB embedder actively embedding per turn, and recovered
+    to 31.9 tok/s once the context was small enough for both to fit.
+
+    Returns the embedder's expected footprint (file size + the 20% KV/compute
+    slop every other embedder estimate in this codebase already uses), or 0
+    when reserving would be wrong: the embedder is ALREADY loaded (the free
+    reading is already paying for it - reserving again would double-count),
+    no embedding model resolves (nothing will ever load), or anything fails
+    (a reservation is an optimization and must never break a chat load -
+    surfaced at debug, not swallowed silently).
+    """
+    try:
+        from localm.inference import embedder as _emb
+        if _emb.loaded_path() is not None:
+            return 0
+        path = _emb.resolve_embedding_model_path(allow_download=False)
+        if not path:
+            return 0
+        return int(Path(path).stat().st_size * 1.2)
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("embedder ctx reservation unavailable (%s); reserving "
+                   "nothing", type(e).__name__)
+        return 0
+
+
 class VramSizingMixin:
     """VRAM measurement, preflight checks, and GPU-layer/context auto-sizing.
 
@@ -513,11 +548,22 @@ class VramSizingMixin:
         """
         Derive a context ceiling from available resources.
 
-        Budget = free VRAM - model weights - fixed overhead. The KV cost per
-        token is estimated from the model's size class (larger models have
-        more layers and wider KV heads; sliding-window models need less, so
-        the estimate is deliberately conservative). The result is clamped to
-        a sane range and rounded to whole KiB of tokens.
+        Budget = free VRAM - model weights - fixed overhead - the configured
+        embedder's expected footprint (see embedder_ctx_reservation_bytes:
+        the embedder loads AFTER the chat model, and a window sized without
+        that reservation hands its room to the KV cache, so the later
+        embedder load oversubscribes the card and WDDM-thrashes generation).
+        The KV cost per token is estimated from the model's size class
+        (larger models have more layers and wider KV heads; sliding-window
+        models need less, so the estimate is deliberately conservative). The
+        result is clamped to a sane range and rounded to whole KiB of tokens.
+
+        The reservation applies HERE only, deliberately not in
+        _auto_gpu_layers: chat weights keep VRAM priority (a partial chat
+        offload to protect the embedder would slow the primary workload on
+        every token), while the context window is the flexible resource -
+        measured live, full weights + a smaller window + the embedder ran at
+        31.9 tok/s where the unreserved window ran at 5.0.
 
         ``capped`` applies the _AUTO_CTX_MAX safety clamp on top of the crude
         KV estimate. It is lifted only when the user explicitly asked for an
@@ -529,7 +575,8 @@ class VramSizingMixin:
         if free is None:
             return self._AUTO_CTX_FALLBACK
         model = self._model_bytes()
-        budget = free - model - self._VRAM_OVERHEAD_BYTES
+        budget = (free - model - self._VRAM_OVERHEAD_BYTES
+                  - embedder_ctx_reservation_bytes())
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
         auto = budget // self._bytes_per_token(model)
