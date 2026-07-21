@@ -195,6 +195,21 @@ def _cli_rag_embed_fn(url):
     base = base.rstrip("/")
     embeddings_url = base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
 
+    # Send the CONFIGURED embedding model name, exactly as the GUI's server-side
+    # self-embed does (plugins/builtin/rag/plug.py _make_self_embed). The old
+    # hardcoded "model": "localm" was the bug: /v1/embeddings routes an embed
+    # request to the dedicated embedder ONLY when the model name matches the
+    # registered embedder OR the configured `embedding_model` (see
+    # inference/routes/chat.py). "localm" matches neither, so with a dedicated
+    # embedder and no chat model loaded it fell through to the chat path and
+    # 503'd - making EVERY `rag add/query --embed` from the CLI silently index
+    # lexical-only, while the GUI (which sends the config name) got real
+    # embeddings. This is the REC-RAG-EMBED-PARITY the docstring promised but the
+    # name broke.
+    from localm.config import load_config as _lc
+    from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+    _emb_model = str(_lc().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip() or "localm"
+
     def _embed(texts: list) -> list:
         import requests
         from localm import tls as _tls
@@ -207,7 +222,7 @@ def _cli_rag_embed_fn(url):
         key = get_api_key()
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        r = requests.post(embeddings_url, json={"input": texts, "model": "localm"},
+        r = requests.post(embeddings_url, json={"input": texts, "model": _emb_model},
                           headers=headers, timeout=120,
                           verify=_tls.requests_verify(embeddings_url))
         r.raise_for_status()

@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **`localm rag add --embed` / `rag query --embed` now actually compute
+  embeddings.** The CLI sent a placeholder model name to the embeddings
+  endpoint instead of your configured embedding model, so with a dedicated
+  embedder set up (the normal case) and no chat model loaded, every `--embed`
+  index silently fell back to lexical-only (BM25) and every `--embed` query
+  scored lexically, with no vectors ever written. It now sends the configured
+  embedding model name, exactly as the GUI does, so CLI indexing/query gets the
+  same hybrid (vector + lexical) retrieval. The GUI path was unaffected.
 - **Downloads and update checks work over HTTPS on a fresh machine now.**
   Provisioning the native llama.cpp runtime with `setup-llama` (and, from the same
   cause, `localm update`, the issues list, and bug-report upload) could fail on a
