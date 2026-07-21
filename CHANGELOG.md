@@ -11,6 +11,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Downloads and update checks work over HTTPS on a fresh machine now.**
+  Provisioning the native llama.cpp runtime with `setup-llama` (and, from the same
+  cause, `localm update`, the issues list, and bug-report upload) could fail on a
+  fresh Windows machine with `CERTIFICATE_VERIFY_FAILED` ("unable to get local
+  issuer certificate") even though a browser downloaded the same file fine. These
+  paths verified against the machine's OS certificate store, which Python's TLS
+  does not keep current on Windows; they now verify against a bundled CA set (the
+  same one your model downloads already use), so they work regardless of the
+  machine's cert-store state.
+
+### Changed
+- **NVIDIA on Windows now recommends CUDA.** The setup menu's default backend for
+  an NVIDIA GPU on Windows is now `cuda` (peak performance) rather than Vulkan: it
+  fetches a self-contained CUDA runtime (no CUDA Toolkit needed) and falls back to
+  Vulkan automatically if your driver is too old. Vulkan is still one keypress
+  away in the menu, and stays the default for Intel GPUs and for NVIDIA/AMD on
+  Linux (where the CUDA build needs a system CUDA runtime).
+
 ## [0.1.2] - 2026-07-18
 
 ### Added

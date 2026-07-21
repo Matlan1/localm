@@ -38,7 +38,7 @@ def test_classify_unwraps_urlerror_reason():
 
 
 def test_upload_report_network_error_carries_stage(monkeypatch):
-    def _boom(req, timeout=None):
+    def _boom(req, timeout=None, context=None):
         raise urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     with pytest.raises(bugreport.LocalmError) as ei:

@@ -53,7 +53,7 @@ def test_resolve_backend_url_cuda_skips_cudart(monkeypatch):
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9842")
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _FakeHTTP({"assets": ASSETS}))
+                        lambda req, timeout=None, context=None: _FakeHTTP({"assets": ASSETS}))
     url = sl._resolve_backend_url("cuda")
     assert url == "https://example/llama-cuda-12.zip"   # NOT the cudart zip
     assert "cudart" not in url
@@ -63,7 +63,7 @@ def test_resolve_backend_url_vulkan_unaffected(monkeypatch):
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9842")
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _FakeHTTP({"assets": ASSETS}))
+                        lambda req, timeout=None, context=None: _FakeHTTP({"assets": ASSETS}))
     assert sl._resolve_backend_url("vulkan") == "https://example/llama-vulkan.zip"
 
 

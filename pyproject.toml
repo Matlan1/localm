@@ -36,6 +36,13 @@ dependencies = [
     "click>=8.4.1",
     "rich>=15.0.0",
     "requests>=2.31",
+    # setup-llama verifies its GitHub downloads against certifi's CA bundle, not
+    # the OS cert store (which Python's TLS does not keep current on Windows, so a
+    # fresh box fails the runtime download with CERTIFICATE_VERIFY_FAILED). It is
+    # already pulled in transitively by requests, but setup_llama imports it
+    # directly, so it is declared directly: never rely on a transitive package
+    # staying present. See localm/setup_llama.py _ssl_context.
+    "certifi>=2023.5.7",
     "huggingface-hub>=1.23.0",
     "pydantic>=2.13.4",
     "fastapi>=0.139.0",

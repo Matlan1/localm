@@ -62,7 +62,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
-- **NVIDIA CUDA (optional, for peak performance):** the default install uses Vulkan (any GPU, driver only). For peak NVIDIA performance choose CUDA in the setup menu (or `localm setup-llama --backend cuda`); no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Details in [GPU setup](#gpu-setup).
+- **NVIDIA CUDA (peak performance):** on **Windows** the installer now recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime, so no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). On **Linux**, NVIDIA uses Vulkan by default (the Linux CUDA build needs a system CUDA runtime). Details in [GPU setup](#gpu-setup).
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
@@ -280,7 +280,7 @@ localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 
 Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
-**NVIDIA users:** the installer recommends **Vulkan** by default (works with just your GPU driver, no CUDA Toolkit) - press Enter to accept it and your GPU is used. For **peak performance choose `cuda`** in the setup menu (or run `localm setup-llama --backend cuda`): it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for CUDA 12.4+.
+**NVIDIA users:** on **Windows** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for CUDA 12.4+. Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`). On **Linux**, NVIDIA uses Vulkan by default (the Linux CUDA build needs a system CUDA runtime present).
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed as a default; an unprovisioned install resolves to nothing and points you at `localm setup-llama`. Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load.
 

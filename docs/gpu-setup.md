@@ -92,9 +92,11 @@ localm run mymodel --gpu-layers 20 --prompt "hello"
 
 ## NVIDIA (CUDA)
 
-The simplest path is `localm setup-llama --backend vulkan` (runs on the NVIDIA
-GPU through the normal driver, no CUDA toolkit) - this is what the installer
-recommends.
+On **Windows** the installer recommends **`cuda`** for NVIDIA (peak performance,
+self-contained - see below). The universal alternative is
+`localm setup-llama --backend vulkan` (runs on the NVIDIA GPU through the normal
+driver, no CUDA toolkit); on **Linux** that Vulkan build is what the installer
+recommends for NVIDIA (the Linux CUDA build needs a system CUDA runtime present).
 
 For peak performance pick `--backend cuda`. On **Windows** this is a guided,
 self-contained path: setup checks your driver, then fetches BOTH the CUDA

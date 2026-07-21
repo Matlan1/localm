@@ -516,6 +516,7 @@ name = "localm"
 version = "0.1.2"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "click" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -573,6 +574,7 @@ voice = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'gpu'", specifier = ">=1.14.0" },
+    { name = "certifi", specifier = ">=2023.5.7" },
     { name = "click", specifier = ">=8.4.1" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.139.0" },

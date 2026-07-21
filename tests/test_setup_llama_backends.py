@@ -6,6 +6,7 @@ URL-resolution FALLBACK path is exercised deterministically.
 
 from __future__ import annotations
 
+import ssl
 import sys
 
 import pytest
@@ -37,8 +38,11 @@ def test_recommended_install_backend_policy(monkeypatch):
     assert rec(["amd"], "amd radeon rx 5700") == "vulkan"
     # AMD on Linux is always vulkan (the self-contained bundle is Windows-only).
     assert rec(["amd"], "amd radeon rx 6900 xt", platform="linux") == "vulkan"
-    # Any other GPU -> vulkan; no GPU -> cpu; Apple Silicon -> metal.
-    assert rec(["nvidia"], "nvidia geforce rtx 4090") == "vulkan"
+    # NVIDIA: cuda on Windows (the release ships a self-contained cudart bundle),
+    # but vulkan on Linux (the Linux cuda build needs a system CUDA toolkit).
+    assert rec(["nvidia"], "nvidia geforce rtx 4090") == "cuda"
+    assert rec(["nvidia"], "nvidia geforce rtx 4090", platform="linux") == "vulkan"
+    # Intel -> vulkan; no GPU -> cpu; Apple Silicon -> metal.
     assert rec(["intel"], "intel arc a770") == "vulkan"
     assert rec([], "") == "cpu"
     assert rec(["apple"], "", platform="darwin") == "metal"
@@ -49,7 +53,7 @@ def test_hwdetect_cli_prints_vendor_and_backend(capsys):
     assert hwdetect.main() == 0
     out = capsys.readouterr().out.strip().split()
     assert len(out) == 2
-    assert out[1] in ("vulkan", "cpu", "metal", "amd-rocm")
+    assert out[1] in ("vulkan", "cuda", "cpu", "metal", "amd-rocm")
 
 
 # --------------------------- auto backend policy -------------------------- #
@@ -65,15 +69,31 @@ def test_auto_backend_no_gpu_is_cpu(monkeypatch):
     assert sl._auto_backend() == "cpu"
 
 
-@pytest.mark.parametrize("vendor", ["nvidia", "intel"])
-def test_auto_backend_single_vendor_is_vulkan(monkeypatch, vendor):
-    monkeypatch.setattr(hwdetect, "detect", _fake_detect([vendor], "vulkan"))
+def test_auto_backend_intel_is_vulkan(monkeypatch):
+    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["intel"], "vulkan"))
     assert sl._auto_backend() == "vulkan"
 
 
-def test_auto_backend_mixed_amd_nvidia_is_vulkan(monkeypatch):
-    # A box with both must use the universal backend, not the AMD-only build.
+def test_auto_backend_nvidia_is_cuda_on_windows(monkeypatch):
+    # bare `setup-llama` (auto) must match the installer: NVIDIA on Windows -> cuda.
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia"], "vulkan"))
+    assert sl._auto_backend() == "cuda"
+
+
+def test_auto_backend_nvidia_is_vulkan_on_linux(monkeypatch):
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia"], "vulkan"))
+    assert sl._auto_backend() == "vulkan"
+
+
+def test_auto_backend_mixed_amd_nvidia(monkeypatch):
+    # A box with both: cuda on Windows (NVIDIA is the priority vendor and its
+    # cudart bundle is self-contained), vulkan on Linux (no self-contained cuda).
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia", "amd"], "vulkan"))
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    assert sl._auto_backend() == "cuda"
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     assert sl._auto_backend() == "vulkan"
 
 
@@ -81,6 +101,58 @@ def test_auto_backend_mixed_amd_nvidia_is_vulkan(monkeypatch):
 def test_auto_backend_amd_only_is_rocm_on_windows(monkeypatch):
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["amd"], "vulkan"))
     assert sl._auto_backend() == "amd-rocm"
+
+
+# --------------------------- TLS verification (SSL) ----------------------- #
+# The SSL context itself is tested in tests/test_http_ssl.py (the shared helper);
+# these two lock that setup-llama's GitHub calls actually PASS a verifying context.
+
+def test_release_assets_passes_verifying_context(monkeypatch):
+    # Regression: the GitHub API lookups MUST present a verifying SSL context.
+    # Without one, a box whose OS cert store lacks the release-CDN CA fails every
+    # call with CERTIFICATE_VERIFY_FAILED (the reported setup-llama failure).
+    seen = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"assets": []}'
+
+    def fake_urlopen(req, timeout=None, context=None):
+        seen["context"] = context
+        return _Resp()
+
+    monkeypatch.setattr(sl.urllib.request, "urlopen", fake_urlopen)
+    sl._release_assets("btag")
+    assert isinstance(seen["context"], ssl.SSLContext)
+    assert seen["context"].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_download_passes_verifying_context(monkeypatch, tmp_path):
+    # Regression: the archive download itself must verify too (it was the raw
+    # urlretrieve call with no context that surfaced in the failure report).
+    seen = {"done": False}
+
+    class _Resp:
+        headers = {"Content-Length": "4"}
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1):
+            if not seen["done"]:
+                seen["done"] = True
+                return b"data"
+            return b""
+
+    def fake_urlopen(req, timeout=None, context=None):
+        seen["context"] = context
+        return _Resp()
+
+    monkeypatch.setattr(sl.urllib.request, "urlopen", fake_urlopen)
+    dest = tmp_path / "a.bin"
+    sl._download("https://example/x.zip", dest)
+    assert dest.read_bytes() == b"data"
+    assert isinstance(seen["context"], ssl.SSLContext)
+    assert seen["context"].verify_mode == ssl.CERT_REQUIRED
 
 
 # --------------------------- URL resolution ------------------------------- #
@@ -164,12 +236,17 @@ def test_download_stall_raises_and_restores_timeout(monkeypatch, tmp_path):
     restored = []
     monkeypatch.setattr(socket, "setdefaulttimeout", lambda v: restored.append(v))
 
-    def _stall(url, dest, hook):
-        # the timeout must be armed to the stall value while the fetch runs
-        assert restored and restored[-1] == sl._DOWNLOAD_STALL_TIMEOUT
-        raise socket.timeout("timed out")
+    class _StallResp:
+        headers = {"Content-Length": "1000000"}
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1):
+            # the timeout must be armed to the stall value while the fetch runs
+            assert restored and restored[-1] == sl._DOWNLOAD_STALL_TIMEOUT
+            raise socket.timeout("timed out")
 
-    monkeypatch.setattr(sl.urllib.request, "urlretrieve", _stall)
+    monkeypatch.setattr(sl.urllib.request, "urlopen",
+                        lambda req, timeout=None, context=None: _StallResp())
 
     with pytest.raises(sl.ArtifactError, match="stalled"):
         sl._download("https://example.invalid/big.zip", tmp_path / "a.zip")
@@ -186,8 +263,20 @@ def test_download_restores_timeout_on_success(monkeypatch, tmp_path):
     monkeypatch.setattr(socket, "getdefaulttimeout", lambda: sentinel)
     restored = []
     monkeypatch.setattr(socket, "setdefaulttimeout", lambda v: restored.append(v))
-    monkeypatch.setattr(sl.urllib.request, "urlretrieve",
-                        lambda url, dest, hook: None)
+
+    class _OkResp:
+        headers = {"Content-Length": "4"}
+        def __init__(self): self._sent = False
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return b"data"
+
+    monkeypatch.setattr(sl.urllib.request, "urlopen",
+                        lambda req, timeout=None, context=None: _OkResp())
 
     sl._download("https://example.invalid/big.zip", tmp_path / "a.zip")
 
