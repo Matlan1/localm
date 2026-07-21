@@ -329,10 +329,14 @@ def raw_reading_is_process_scoped() -> bool:
     probe runs), this is a plain attribute read, no import, no race. If it is
     NOT yet resident, a normal ``import torch`` is safe UNLESS a GPU probe is
     currently in flight (``discover._gpu_probe_inflight``, including an
-    abandoned/timed-out one - the exact hazard above): only THEN does it fall
-    back to the conservative default (False, "cannot confirm a blindness"),
-    same as the exception path below. Reuses discover's existing probe-tracking
-    lock rather than inventing new cross-module coordination."""
+    abandoned/timed-out one - the exact hazard above), or the fresh import is
+    the known-doomed native-runtime DLL conflict
+    (``discover._torch_gpu_probe_known_doomed`` - e.g. inside the GGUF
+    worker, where the bundled HIP runtime is always resident and torch never
+    is): in those two cases it falls back to the conservative default (False,
+    "cannot confirm a blindness"), same as the exception path below. Reuses
+    discover's existing probe-tracking lock rather than inventing new
+    cross-module coordination."""
     import sys
     if sys.platform != "win32":
         return False
@@ -343,6 +347,18 @@ def raw_reading_is_process_scoped() -> bool:
             with _discover._gpu_probe_lock:
                 probe_may_be_mid_import = _discover._gpu_probe_inflight
             if probe_may_be_mid_import:
+                return False
+            if _discover._torch_gpu_probe_known_doomed():
+                # The same known-doomed fresh import _list_gpus_probe skips
+                # (see that predicate's docstring: the bundled HIP runtime is
+                # resident and torch's rocm_sdk preload would collide with
+                # it): attempting it here can only fault - printing the same
+                # stderr trace - and land in the except below anyway. Reached
+                # with the native lib loaded and torch not resident, e.g. the
+                # GGUF worker's sizing gate (_sizing._device_global_free_bytes)
+                # or a direct _apply_device_global_free caller. Same
+                # conservative "cannot confirm a blindness" answer as the two
+                # guards above.
                 return False
             import torch
         return bool(getattr(torch.version, "hip", None))
