@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The GUI can now set up a multi-GPU split on the Vulkan runtime.** On the
+  `vulkan` backend build, the Settings "Main GPU" selector and "Split across
+  GPUs" checkboxes stayed hidden even on a working multi-GPU box, because they
+  listed only the devices torch or nvidia-smi could see, and neither can see
+  Vulkan-only devices at all; a split could only be configured by hand-editing
+  the config. On that build the selectors now list the devices the Vulkan
+  runtime itself registers (read crash-safely out of process), numbered in the
+  runtime's own order (the numbering a model load actually uses), with a note
+  saying so. Other backends are unchanged.
 - **`localm rag add --embed` / `rag query --embed` now actually compute
   embeddings.** The CLI sent a placeholder model name to the embeddings
   endpoint instead of your configured embedding model, so with a dedicated

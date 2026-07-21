@@ -593,6 +593,93 @@ def compute_devices() -> "List[tuple]":
     return devices
 
 
+def native_device_inventory() -> "Optional[list]":
+    """``[{"index", "name", "description", "type", "free", "total"}, ...]`` for
+    every NON-CPU compute device the ACTIVE ggml runtime registers, or ``None``
+    when the core registry symbols are unavailable (an older build without
+    ``ggml_backend_dev_*``). An empty list is a real answer: the runtime
+    registers no non-CPU device.
+
+    ``index`` is the device's position AMONG the non-CPU devices (0-based) -
+    the order llama.cpp's loader walks them, i.e. the index space
+    ``mp.main_gpu`` / ``mp.tensor_split`` (a configured ``gpu_split_indices``)
+    actually consume on this build. That is this inventory's whole point
+    (GPU-SPLIT-VKINDEX): on the vulkan build no torch/nvidia-smi source can
+    see or number these devices. ``description`` is the human device name when
+    the build exposes ``ggml_backend_dev_description`` (ggml-vulkan's terse
+    ``name`` is "Vulkan<n>"), else "". ``free``/``total`` are
+    ``ggml_backend_dev_memory``'s live bytes, 0 when that call fails for a
+    device (fail honest per device, keep the rest - same posture as
+    ``compute_devices`` above).
+
+    Calls ``load_lib()`` and per-device native queries IN-PROCESS: the memory
+    query shares ``gpu_memory()``'s abort risk (see its RISK docstring), so
+    call this ONLY from a process whose crash is acceptable - in practice the
+    disposable probe daemon (``_vram_probe``); parents use
+    ``gpu_devices_isolated()`` below."""
+    load_lib()
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
+    name_fn = _ggml_sym(handles, "ggml_backend_dev_name")
+    if not (cnt and get and type_fn and name_fn):
+        return None
+    desc_fn = _ggml_sym(handles, "ggml_backend_dev_description")
+    mem_fn = _ggml_sym(handles, "ggml_backend_dev_memory")
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+    name_fn.restype = ctypes.c_char_p
+    name_fn.argtypes = [ctypes.c_void_p]
+    if desc_fn is not None:
+        desc_fn.restype = ctypes.c_char_p
+        desc_fn.argtypes = [ctypes.c_void_p]
+    if mem_fn is not None:
+        mem_fn.restype = None
+        mem_fn.argtypes = [ctypes.c_void_p,
+                           ctypes.POINTER(ctypes.c_size_t),
+                           ctypes.POINTER(ctypes.c_size_t)]
+    out: "list" = []
+    try:
+        n = int(cnt())
+    except Exception:
+        return None
+    for i in range(n):
+        try:
+            dev = get(i)
+            dev_type = int(type_fn(dev))
+            if dev_type == GGML_DEV_TYPE_CPU:
+                continue
+            raw = name_fn(dev)
+            name = raw.decode("utf-8", "replace") if raw else f"device{i}"
+            desc = ""
+            if desc_fn is not None:
+                try:
+                    raw_d = desc_fn(dev)
+                    desc = raw_d.decode("utf-8", "replace") if raw_d else ""
+                except Exception:
+                    desc = ""   # optional nicety - the name below still identifies it
+            free = total = 0
+            if mem_fn is not None:
+                try:
+                    f = ctypes.c_size_t(0)
+                    t = ctypes.c_size_t(0)
+                    mem_fn(dev, ctypes.byref(f), ctypes.byref(t))
+                    free, total = int(f.value), int(t.value)
+                except Exception:
+                    free = total = 0   # memory unreadable; the device itself still counts
+            out.append({"index": len(out), "name": name, "description": desc,
+                        "type": dev_type, "free": free, "total": total})
+        except Exception:
+            # One unreadable device must not lose the others (fail honest per
+            # device, not silent for the whole probe).
+            continue
+    return out
+
+
 # Cache of (gpu_device_handle, bound ggml_backend_dev_memory) once resolved, or
 # False when unavailable (no GPU / no symbol / multi-GPU). The native lib is loaded
 # once for the process lifetime, so the device handle is stable.
@@ -804,6 +891,44 @@ def gpu_memory_isolated() -> "Optional[tuple]":
     warm-up state) for the underlying import+load_lib()+query chain the daemon
     itself performs once. Not cached beyond that: each successful query
     reflects current, live VRAM state."""
+    def _parse(line: str):
+        free_s, total_s = line.split()
+        return int(free_s), int(total_s)
+    return _probe_roundtrip("q\n", _parse)
+
+
+def gpu_devices_isolated() -> "Optional[list]":
+    """``native_device_inventory()``, read crash-isolated via the same probe
+    daemon as ``gpu_memory_isolated()`` (the "devices" request line - see
+    _vram_probe.py's protocol). Returns the inventory list (possibly empty),
+    or ``None`` when it cannot be read this call - spawn/write failure,
+    timeout, EOF, an "ERR" reply, or a desynced (non-JSON / wrong-shape)
+    reply. Never raises; safe to call from a process that must not crash."""
+    import json
+
+    def _parse(line: str):
+        devs = json.loads(line)
+        if not isinstance(devs, list) or not all(
+                isinstance(d, dict) and isinstance(d.get("index"), int)
+                for d in devs):
+            raise ValueError("device inventory reply has the wrong shape")
+        return devs
+    return _probe_roundtrip("devices\n", _parse)
+
+
+def _probe_roundtrip(request: str, parse) -> "Optional[object]":
+    """One request/reply round-trip against the long-lived probe daemon
+    (spawning or respawning it as needed), entirely under ``_PROBE_LOCK`` so
+    concurrent callers cannot interleave writes/reads on the shared pipe.
+    Shared by ``gpu_memory_isolated`` and ``gpu_devices_isolated`` so both
+    queries keep the identical daemon lifecycle, lock, and timeout discipline.
+
+    *parse* maps a non-ERR reply line to the caller's result; a *parse* raise
+    means protocol DESYNC - the daemon is killed and cleared so the NEXT call
+    respawns fresh rather than trusting a desynced pipe again. Returns
+    *parse*'s result, or ``None`` on: spawn/write failure, reply timeout, EOF
+    (daemon crashed/exited), an "ERR" reply (the daemon is alive and answered
+    "genuinely unmeasurable" - it is NOT killed), or desync."""
     global _PROBE_PROC
     with _PROBE_LOCK:
         first_spawn = False
@@ -821,7 +946,7 @@ def gpu_memory_isolated() -> "Optional[tuple]":
                 return None
         proc = _PROBE_PROC
         try:
-            proc.stdin.write("q\n")
+            proc.stdin.write(request)
             proc.stdin.flush()
         except Exception:
             _kill_and_clear_probe()
@@ -835,9 +960,8 @@ def gpu_memory_isolated() -> "Optional[tuple]":
         if line == "ERR" or not line:
             return None                  # daemon is alive and answered - genuinely unmeasurable
         try:
-            free_s, total_s = line.split()
-            return int(free_s), int(total_s)
-        except ValueError:
+            return parse(line)
+        except Exception:
             _kill_and_clear_probe()      # protocol desync - do not trust this daemon again
             return None
 

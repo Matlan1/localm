@@ -262,23 +262,53 @@ def register(app: FastAPI, ctx) -> None:
         one (``timeout``/``busy`` - the driver was wedged or contended, and
         ``gpus`` is a frozen last-known-good or []). Without it, a timed-out
         probe was indistinguishable from a GPU-less box, so the Settings GPU
-        controls silently vanished on a slow driver (AGENTS.md rule 5)."""
+        controls silently vanished on a slow driver (AGENTS.md rule 5).
+
+        ``index_space`` (present only as ``"native"``) says the ``gpus``
+        indices are the NATIVE runtime's own device order rather than
+        list_gpus()'s torch/nvidia-smi numbering - see the vulkan branch
+        below; the client labels the numbering accordingly."""
         from localm.config import load_config
-        from localm.discover import list_gpus
+        from localm.discover import GPU_PROBE_OK
         cfg = load_config()
-        # list_gpus() probes the GPU driver; offload it so a wedged/slow driver
-        # never blocks the event loop and freezes the whole WebUI. Off-loop and
-        # user-initiated (a Settings page open), this caller can afford to wait:
-        # join an in-flight probe (wait_for_inflight, #701) rather than bounce
-        # off the /api/stats heartbeat's probe with an instant BUSY + [].
+        # The reads below probe the GPU driver (or spawn the probe daemon);
+        # offload them so a wedged/slow driver never blocks the event loop and
+        # freezes the whole WebUI. Off-loop and user-initiated (a Settings page
+        # open), this caller can afford to wait: join an in-flight probe
+        # (wait_for_inflight, #701) rather than bounce off the /api/stats
+        # heartbeat's probe with an instant BUSY + [].
         loop = asyncio.get_running_loop()
-        gpus, probe_status = await loop.run_in_executor(
-            get_plugin_executor(),
-            lambda: list_gpus(return_status=True, wait_for_inflight=True))
-        return {"gpus": gpus,
-                "probe_status": probe_status,
-                "main_gpu_index": cfg.get("main_gpu_index"),
-                "gpu_split_indices": cfg.get("gpu_split_indices")}
+
+        def _read_devices():
+            # Native-first on the vulkan build: these selectors write indices
+            # the LOADER consumes, and on that build those live in
+            # ggml-vulkan's own index space, which list_gpus() (torch.cuda /
+            # nvidia-smi) can neither see nor order (GPU-SPLIT-VKINDEX) - so
+            # selector rows built from list_gpus() stayed hidden on a fully
+            # working multi-GPU vulkan box. The native registry, read via the
+            # crash-isolated probe daemon, is the one source whose indices
+            # mean what a load will do; a completed registry read is a
+            # conclusive probe (GPU_PROBE_OK - an empty/short list is a real
+            # "that is all there is"). Falls back to the exact pre-existing
+            # list_gpus() behavior, with NO index_space claim, when the
+            # daemon/registry cannot answer (None).
+            from localm.discover import _native_backend_has_vulkan, list_gpus, native_gpu_devices
+            if _native_backend_has_vulkan():
+                native = native_gpu_devices()
+                if native is not None:
+                    return native, GPU_PROBE_OK, "native"
+            gpus, probe_status = list_gpus(return_status=True, wait_for_inflight=True)
+            return gpus, probe_status, None
+
+        gpus, probe_status, index_space = await loop.run_in_executor(
+            get_plugin_executor(), _read_devices)
+        out = {"gpus": gpus,
+               "probe_status": probe_status,
+               "main_gpu_index": cfg.get("main_gpu_index"),
+               "gpu_split_indices": cfg.get("gpu_split_indices")}
+        if index_space:
+            out["index_space"] = index_space
+        return out
 
     # ----------------------- model ops + jobs --------------------- #
 

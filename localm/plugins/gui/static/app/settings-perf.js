@@ -87,6 +87,20 @@ export function setupPerfCard() {
   setupGpuSplitCheckboxes();
 }
 
+/** Show (or remove) the native index-space note under a GPU selector row:
+ *  when /api/gpus says index_space "native", the device numbers are the
+ *  active native (Vulkan) backend's own load-time order - the numbering
+ *  gpu_split_indices / main_gpu_index actually mean - which can differ from
+ *  other tools' GPU numbering, so say so. Idempotent per row, and removes a
+ *  stale note when a later refresh is no longer native-sourced. */
+function setIndexSpaceHint(row, indexSpace) {
+  const existing = row.querySelector(".perf-index-space-hint");
+  if (indexSpace !== "native") { if (existing) existing.remove(); return; }
+  if (existing) return;
+  row.appendChild(el("div", "sub perf-index-space-hint",
+    "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently."));
+}
+
 /** Populate the "Main GPU" selector from GET /api/gpus: one option per detected
  *  device (name + total VRAM), pre-selected on the currently configured index.
  *  Hidden entirely on a single-GPU box (the common case) - there is nothing
@@ -118,6 +132,7 @@ export async function refreshMainGpuSelector() {
     }
     const current = typeof data.main_gpu_index === "number" ? data.main_gpu_index : 0;
     sel.value = String(current);
+    setIndexSpaceHint(row, data.index_space);
     row.hidden = false;
   } catch (e) { row.hidden = true; }   // server unreachable - stay hidden, not broken
 }
@@ -175,6 +190,7 @@ export async function refreshGpuSplitCheckboxes() {
       label.appendChild(document.createTextNode(` ${g.index}: ${g.name || "GPU " + g.index}${gb}`));
       list.appendChild(label);
     }
+    setIndexSpaceHint(row, data.index_space);
     row.hidden = false;
   } catch (e) { row.hidden = true; }   // server unreachable - stay hidden, not broken
 }
