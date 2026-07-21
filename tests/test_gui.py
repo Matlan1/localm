@@ -867,6 +867,85 @@ class TestGpusEndpoint:
         assert data["gpus"] == fake_gpus
 
 
+class TestGpusEndpointNativeIndexSpace:
+    """GET /api/gpus on the vulkan native build (GPU-SPLIT-VKINDEX follow-up):
+    the split/main-GPU selectors write indices the LOADER consumes, and on the
+    vulkan build those live in ggml-vulkan's own index space, which
+    list_gpus() (torch.cuda / nvidia-smi) cannot see - so the route must serve
+    the native registry's devices (via the crash-isolated probe daemon) and
+    say which index space the numbers are in, instead of hiding the selectors
+    on a fully working multi-GPU vulkan box."""
+
+    _NATIVE = [
+        {"index": 0, "name": "AMD Radeon RX 6900 XT (RADV NAVI21)",
+         "total": 16 * 1024 ** 3, "free": 15 * 1024 ** 3},
+        {"index": 1, "name": "llvmpipe (LLVM 19.1.7, 256 bits)",
+         "total": 8 * 1024 ** 3, "free": 7 * 1024 ** 3},
+    ]
+
+    def test_vulkan_build_serves_native_devices_with_index_space(self, gui_app):
+        app, _ = gui_app
+        with patch("localm.discover._native_backend_has_vulkan", return_value=True), \
+             patch("localm.discover.native_gpu_devices",
+                   return_value=list(self._NATIVE)) as native, \
+             patch("localm.discover.list_gpus", new=probe_double([])), \
+             patch("localm.config.load_config",
+                   return_value={"main_gpu_index": None,
+                                 "gpu_split_indices": [0, 1]}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == self._NATIVE
+        assert data["index_space"] == "native"
+        # A completed registry read is a conclusive probe: the JS trusts a
+        # short list only under "ok", same as the list_gpus path.
+        assert data["probe_status"] == GPU_PROBE_OK
+        assert data["gpu_split_indices"] == [0, 1]
+        native.assert_called_once()
+
+    def test_vulkan_build_daemon_unavailable_falls_back(self, gui_app):
+        """native_gpu_devices() -> None (daemon/registry cannot answer): the
+        route degrades to exactly the pre-existing list_gpus() behavior, with
+        NO index_space claim (an honest absence, not a fabricated space)."""
+        app, _ = gui_app
+        torch_view = [{"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3,
+                       "free": 20 * 1024 ** 3}]
+        with patch("localm.discover._native_backend_has_vulkan", return_value=True), \
+             patch("localm.discover.native_gpu_devices", return_value=None), \
+             patch("localm.discover.list_gpus", new=probe_double(torch_view)), \
+             patch("localm.config.load_config",
+                   return_value={"main_gpu_index": None,
+                                 "gpu_split_indices": None}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == torch_view
+        assert "index_space" not in data
+
+    def test_non_vulkan_build_never_touches_the_daemon(self, gui_app):
+        """CUDA/HIP/CPU builds keep the exact pre-existing behavior, and the
+        native enumeration (a daemon spawn) is never even attempted."""
+        app, _ = gui_app
+        torch_view = [{"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3,
+                       "free": 20 * 1024 ** 3}]
+        with patch("localm.discover._native_backend_has_vulkan",
+                   return_value=False), \
+             patch("localm.discover.native_gpu_devices") as native, \
+             patch("localm.discover.list_gpus", new=probe_double(torch_view)), \
+             patch("localm.config.load_config",
+                   return_value={"main_gpu_index": None,
+                                 "gpu_split_indices": None}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == torch_view
+        assert "index_space" not in data
+        native.assert_not_called()
+
+
 class TestCompanionEndpoint:
     """The Companion-app card's phone-reachable address feed (LAN / Tailscale).
     Showing the loopback origin was wrong - a phone cannot reach 127.0.0.1."""
