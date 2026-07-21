@@ -327,7 +327,7 @@ def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
         def __exit__(self, *a):
             return False
 
-    def fake_urlopen(req, timeout=None):
+    def fake_urlopen(req, timeout=None, context=None):
         sent["data"] = req.data
         return _Resp()
 

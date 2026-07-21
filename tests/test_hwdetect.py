@@ -163,10 +163,29 @@ def test_detect_never_raises_even_with_dead_probes(monkeypatch):
 @pytest.mark.parametrize("vendors,expected", [
     (["apple"], "metal"),
     ([], "cpu"),
-    (["nvidia"], "vulkan"),
 ])
 def test_install_backend_early_return_branches(vendors, expected):
+    # apple/no-gpu are platform-independent; nvidia is platform-scoped (cuda on
+    # Windows, vulkan elsewhere) and covered by its own tests below.
     assert hwdetect.recommended_install_backend(Detection(vendors=vendors)) == expected
+
+
+def test_install_backend_win_nvidia_is_cuda(monkeypatch):
+    # NVIDIA on Windows -> cuda: the release ships a self-contained cudart bundle,
+    # so CUDA is out-of-the-box (no Toolkit) AND the fastest path on NVIDIA. The
+    # setup-llama driver preflight + load-test fall back to vulkan if unsupported.
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    d = Detection(vendors=["nvidia"], gpu_names="nvidia geforce rtx 4090")
+    assert hwdetect.recommended_install_backend(d) == "cuda"
+
+
+def test_install_backend_linux_nvidia_is_vulkan(monkeypatch):
+    # NVIDIA on Linux -> vulkan: the Linux cuda build needs a system CUDA toolkit
+    # we cannot self-provide, so vulkan (runs via the display driver) is the
+    # out-of-the-box choice there.
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    d = Detection(vendors=["nvidia"], gpu_names="nvidia geforce rtx 4090")
+    assert hwdetect.recommended_install_backend(d) == "vulkan"
 
 
 def test_install_backend_win_amd_rx6000_is_rocm(monkeypatch):
@@ -193,11 +212,12 @@ def test_install_backend_win_amd_unknown_name_defaults_to_rocm(monkeypatch):
 
 
 def test_install_backend_win_amd_order_must_be_exact(monkeypatch):
-    # The amd-rocm case requires vendors == ["amd"] exactly; a mixed list (even
-    # ["amd", "nvidia"]) falls through to vulkan.
+    # The amd-rocm case requires vendors == ["amd"] exactly. A mixed list that
+    # includes nvidia resolves to cuda on Windows (NVIDIA is the priority vendor
+    # and the self-contained cudart path is the peak choice), NOT the AMD build.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     assert hwdetect.recommended_install_backend(
-        Detection(vendors=["amd", "nvidia"], gpu_names="rx 6800")) == "vulkan"
+        Detection(vendors=["amd", "nvidia"], gpu_names="rx 6800")) == "cuda"
 
 
 def test_install_backend_linux_amd_is_vulkan(monkeypatch):
@@ -304,6 +324,10 @@ def test_torch_pip_args_rocm_win_unknown_amd_is_empty(monkeypatch):
 # ------------------------------- main() CLI -------------------------------
 
 def test_main_prints_vendor_and_backend(monkeypatch, capsys):
+    # Pin Linux so the install-backend is deterministic (this asserts the OUTPUT
+    # FORMAT "<vendor> <backend>"; NVIDIA-on-Linux is vulkan, NVIDIA-on-Windows
+    # would be cuda - both are covered by the policy tests above).
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "detect",
                         lambda: Detection(vendors=["nvidia"], recommended="vulkan"))
     assert hwdetect.main([]) == 0
