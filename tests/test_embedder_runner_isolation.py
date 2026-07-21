@@ -27,11 +27,30 @@ from localm.inference._embedder_runner import EmbedderRunner
 from localm.inference.embedder import IsolatedEmbedder
 
 
+_GPU_VISIBILITY_VARS = (
+    "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
 @pytest.fixture(autouse=True)
 def _clean_fault_env():
+    # TestCpuOnlyHidesGpuDevices drives _runner_main IN-PROCESS, whose cpu_only
+    # path sets the GPU-visibility vars directly on os.environ (a real spawned
+    # child could never leak back, but the in-process dispatch does). Snapshot +
+    # restore them around every test: monkeypatch.delenv(raising=False) does NOT
+    # guard this (on an ABSENT var it is a no-op that records nothing, so the
+    # later direct os.environ[...]="-1" set is never undone), and the leak then
+    # poisons any test sharing the xdist worker that reads these vars - concretely
+    # comfy_child_env() via _amd_rocm_launch_env(), which failed with a stray
+    # CUDA_VISIBLE_DEVICES=-1 (tests/test_media_split_gpu_532.py).
     os.environ.pop(runner_mod._FAULT_ENV, None)
+    saved = {k: os.environ.get(k) for k in _GPU_VISIBILITY_VARS}
     yield
     os.environ.pop(runner_mod._FAULT_ENV, None)
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 _DUMMY_LOAD_PARAMS = dict(

@@ -104,8 +104,12 @@ _BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
 
 def _tracked_files() -> list[Path]:
     try:
-        out = subprocess.run(["git", "ls-files"], cwd=REPO,
-                             capture_output=True, text=True, check=True).stdout
+        # encoding="utf-8" for the same reason as _git: git emits paths as
+        # UTF-8, but a bare text=True decodes with the locale codepage (cp1252
+        # on Windows), which would mangle - or, on a byte outside the codepage,
+        # raise and abort the whole scan for - a non-ASCII tracked filename.
+        out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
+                             text=True, encoding="utf-8", check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return []
     files = []
@@ -749,8 +753,11 @@ def _install_hook() -> int:
     # shared .git for both a normal checkout and a worktree.
     base = REPO / ".git"
     try:
+        # encoding="utf-8" for the same reason as _git: a non-ASCII checkout path
+        # must not be locale-decoded (cp1252 on Windows) into a wrong hooks dir.
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=REPO,
-                             capture_output=True, text=True, timeout=30)
+                             capture_output=True, text=True, encoding="utf-8",
+                             timeout=30)
         if out.returncode == 0 and out.stdout.strip():
             base = Path(out.stdout.strip())
             if not base.is_absolute():
