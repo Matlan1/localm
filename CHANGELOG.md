@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **No more repeated "Windows fatal exception" traces when the native runtime
+  and a ROCm torch share a process.** On Windows with the AMD ROCm install,
+  once the bundled HIP llama.cpp runtime was loaded into a process, every GPU
+  listing in that same process printed a scary `Windows fatal exception: code
+  0xc0000139` trace to the console: the two runtimes' same-named DLLs cannot
+  coexist, so the lister's torch attempt failed identically on every call, and
+  each retry printed a fresh trace. The lister now recognizes that exact
+  combination ahead of time and skips straight to its working fallbacks (the
+  skip is logged in debug mode). Every other setup keeps torch enumeration
+  exactly as before.
 - **The GUI can now set up a multi-GPU split on the Vulkan runtime.** On the
   `vulkan` backend build, the Settings "Main GPU" selector and "Split across
   GPUs" checkboxes stayed hidden even on a working multi-GPU box, because they

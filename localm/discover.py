@@ -813,29 +813,121 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
         return served, GPU_PROBE_TIMEOUT
 
 
+def _torch_gpu_probe_known_doomed() -> bool:
+    """True when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
+    KNOWN, ahead of time, to fail in this exact process state - so the probe
+    skips it at the root instead of triggering the failure and catching the
+    aftermath.
+
+    THE DOOMED COMBINATION (root-caused live, and documented with the same
+    skip in ``_loader.native_lib_loaded`` / ``_sizing._free_total_vram_bytes``):
+    on Windows, once llama.cpp's bundled HIP-linked runtime has been loaded
+    into this process (anything that reaches ``_loader.load_lib()`` -
+    ``compute_devices()`` / ``has_max_devices()``, a worker, a mixed test
+    run), its bundled ROCm/HIP DLLs are resident under the same names a
+    ROCm-for-Windows torch resolves during import via its ``rocm_sdk``
+    preload. The OS loader hands torch the already-resident, ABI-incompatible
+    copies and the import fails with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
+    The failure is caught below and the probe degrades to nvidia-smi, but each
+    attempt prints a "Windows fatal exception" faulthandler trace to stderr,
+    and Python evicts the faulted module from ``sys.modules`` - and list_gpus
+    deliberately re-probes on every call (see the no-TTL note above), so the
+    doomed import re-runs and re-traces for the rest of the process's life
+    (reproduced 2026-07-21: 6 traces from one mixed pytest run). A concurrent
+    second import can even hard-crash the process outright
+    (``gpu_usage.raw_reading_is_process_scoped``); never starting the doomed
+    import removes that trigger as well.
+
+    WHY NARROWER THAN _sizing's blanket ``native_lib_loaded()`` skip (the
+    trade-off, weighed rather than copied): _sizing could skip torch outright
+    because its fallback, ``gpu_memory_isolated()``, answers exactly as well.
+    THIS probe's fallback is nvidia-smi, which cannot see AMD devices, so a
+    blanket skip would trade away real, working torch enumeration on every
+    setup where torch and a resident native runtime coexist. Each condition
+    below narrows the skip to the PROVEN-doomed combination - where the torch
+    attempt fails every time, so skipping provably loses nothing - and any
+    setup outside it keeps today's behavior, torch attempt included:
+
+    - torch not already resident in ``sys.modules``: a resident torch was
+      imported successfully (before the runtime loaded, or on a setup where
+      the two coexist) and importing it again is a free cache hit - no
+      preload runs, nothing can fault, and its working enumeration is kept.
+    - Windows only: the conflict is Windows OS-loader same-name resolution;
+      it has only ever been observed there.
+    - ``native_lib_loaded()``: nothing resident yet means no conflict - a
+      fresh process (the common probe context) keeps its torch enumeration.
+    - The resolved runtime ships a HIP ggml backend (same shipped-DLL-set
+      authority as :func:`_native_backend_has_vulkan`): a vulkan/cpu/cuda
+      build leaves no HIP DLLs resident for torch's preload to collide with.
+      If that ever proves wrong for some exotic build, the cost is today's
+      pre-guard noise, never a lost probe.
+    - ``rocm_sdk`` is importable: the failing preload belongs to the
+      ROCm-for-Windows torch; a CPU/CUDA torch (or no torch at all) never
+      runs it.
+
+    Fails OPEN: if the detector itself errors, the probe proceeds with its
+    normal torch attempt (which catches its own failures) - detection must
+    never break the working path. The skip is surfaced at debug level, not
+    silenced (AGENTS.md rule 5)."""
+    import sys
+    if "torch" in sys.modules:
+        # A resident torch (imported for real before the runtime loaded, or a
+        # test's injected stand-in) makes `import torch` a plain cache hit: no
+        # rocm_sdk preload runs, so the conflict cannot occur and the working
+        # enumeration must be kept. On the doomed combo torch can never BE
+        # resident - the faulted module is evicted on every attempt - so this
+        # never defuses the real guard.
+        return False
+    if sys.platform != "win32":
+        return False
+    try:
+        from localm.inference.backends.llamacpp import _loader
+        if not _loader.native_lib_loaded():
+            return False
+        d = _loader.runtime_binary_dir()
+        if d is None or not any(
+                "hip" in p.name.lower() for p in d.glob(_loader._ggml_glob())):
+            return False
+        import importlib.util
+        if importlib.util.find_spec("rocm_sdk") is None:
+            return False
+    except Exception as e:
+        logger.debug("list_gpus: torch-conflict detector failed (%s); "
+                     "proceeding with the normal torch attempt", type(e).__name__)
+        return False
+    logger.debug(
+        "list_gpus: skipping the torch GPU probe: the bundled HIP llama.cpp "
+        "runtime is already loaded in this process and a ROCm (rocm_sdk) torch "
+        "is installed, so `import torch` here is a known-doomed DLL-identity "
+        "conflict (STATUS_ENTRYPOINT_NOT_FOUND; see "
+        "_torch_gpu_probe_known_doomed's docstring); using the non-torch sources")
+    return True
+
+
 def _list_gpus_probe() -> list:
     """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
     this one has no timeout and can wedge on a busy/broken driver."""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            out = []
-            for i in range(torch.cuda.device_count()):
-                try:
-                    free, total = torch.cuda.mem_get_info(i)
-                except Exception:
-                    continue   # one device failing to report never hides the rest
-                try:
-                    name = torch.cuda.get_device_name(i)
-                except Exception:
-                    name = f"GPU {i}"
-                out.append({"index": i, "name": name,
-                            "total": int(total), "free": int(free)})
-            if out:
-                _apply_device_global_free(out)
-                return out
-    except Exception:
-        pass
+    if not _torch_gpu_probe_known_doomed():
+        try:
+            import torch
+            if torch.cuda.is_available():
+                out = []
+                for i in range(torch.cuda.device_count()):
+                    try:
+                        free, total = torch.cuda.mem_get_info(i)
+                    except Exception:
+                        continue   # one device failing to report never hides the rest
+                    try:
+                        name = torch.cuda.get_device_name(i)
+                    except Exception:
+                        name = f"GPU {i}"
+                    out.append({"index": i, "name": name,
+                                "total": int(total), "free": int(free)})
+                if out:
+                    _apply_device_global_free(out)
+                    return out
+        except Exception:
+            pass
 
     try:
         import subprocess

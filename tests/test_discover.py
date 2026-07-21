@@ -2856,6 +2856,14 @@ class TestGpuUsageSourceRobustness:
         monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
         monkeypatch.delitem(_sys.modules, "torch", raising=False)
         monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
+        # Pin the known-doomed detector False: on a box (or a mixed test run)
+        # where the native HIP runtime is genuinely resident, the REAL
+        # detector would legitimately skip the import, and this test - whose
+        # subject is the inflight-race logic, not the DLL-conflict logic -
+        # would fail order-dependently. The detector's own truth table is
+        # covered by TestTorchProbeKnownDoomedSkip.
+        monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
+                            lambda: False)
 
         class _FakeTorch:
             version = SimpleNamespace(hip="7.13", cuda=None)
@@ -2935,6 +2943,49 @@ class TestGpuUsageSourceRobustness:
             "while a GPU probe was in flight - it can race an abandoned probe "
             "thread mid-import and crash the process (STATUS_ENTRYPOINT_NOT_FOUND, "
             "observed live)")
+        assert result is False
+
+    def test_raw_reading_skips_fresh_import_when_known_doomed(self, monkeypatch):
+        """The SECOND live site of the known-doomed torch import (the first is
+        discover._list_gpus_probe): with the bundled HIP runtime resident and
+        torch not yet imported - e.g. the GGUF worker's sizing gate
+        (_sizing._device_global_free_bytes) or _apply_device_global_free
+        called with no torch loaded - a fresh `import torch` can only fault
+        with the same noisy STATUS_ENTRYPOINT_NOT_FOUND stderr trace and land
+        in this function's own except anyway (reproduced 2026-07-21: 5 of the
+        6 mixed-run traces came through here). It must consult
+        discover._torch_gpu_probe_known_doomed() and answer the conservative
+        False without ever starting the import. The detector is pinned True
+        (its truth table has its own tests in TestTorchProbeKnownDoomedSkip);
+        attempts are recorded, not raised on, per the sibling tests'
+        rationale."""
+        import builtins
+        import sys as _sys
+
+        import localm.discover as _discover
+        import localm.gpu_usage as gu
+
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.delitem(_sys.modules, "torch", raising=False)
+        monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
+        monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
+                            lambda: True)
+
+        _real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *a, **k):
+            attempted.append(name)
+            return _real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+
+        result = gu.raw_reading_is_process_scoped()
+        assert "torch" not in attempted, (
+            "raw_reading_is_process_scoped() started a fresh `import torch` "
+            "despite the known-doomed DLL conflict being detected - that "
+            "attempt faults with a 'Windows fatal exception' trace on every "
+            "call")
         assert result is False
 
 
@@ -3033,3 +3084,150 @@ class TestAdlLatchRobustness:
         state = gu._adl_open()
         assert state and state.get("dll") is not None
         assert gu._adl_state is state, "a successful open must be cached"
+
+
+# ------------------------------------------------------------------ #
+#  The known-doomed torch import skip (native HIP runtime resident)   #
+# ------------------------------------------------------------------ #
+
+class TestTorchProbeKnownDoomedSkip:
+    """_list_gpus_probe() must skip its `import torch` attempt AT THE ROOT
+    exactly when that import is known-doomed: Windows + llama.cpp's bundled
+    HIP runtime already loaded in this process + a ROCm (rocm_sdk) torch
+    installed. There the import can never succeed (the runtime's resident
+    same-named DLLs break torch's rocm_sdk preload with
+    STATUS_ENTRYPOINT_NOT_FOUND), and every attempt prints a "Windows fatal
+    exception" faulthandler trace to stderr - reproduced live 2026-07-21 by
+    running test_gpu_split_wiring.py (whose real has_max_devices() loads the
+    native lib) before this file's real-probe tests in one pytest process
+    (6 traces). See discover._torch_gpu_probe_known_doomed's docstring for
+    the root cause and the trade-off.
+
+    The skip must be exactly as narrow as the proven conflict: with ANY of
+    its narrowing conditions absent (including a torch already resident in
+    sys.modules - importing that again is a free cache hit that cannot
+    fault) the probe must still attempt torch, because
+    the nvidia-smi fallback cannot see AMD devices - a blanket
+    native_lib_loaded() skip (like _sizing's, whose fallback IS lossless)
+    would cost real enumeration on setups where torch and the native runtime
+    coexist (Linux, a CUDA torch, a Vulkan-build runtime).
+
+    Import attempts are RECORDED via a tracking __import__, never raised on:
+    the probe's own broad `except Exception` would mask a raising guard and
+    pass the test either way (same rationale as the tracking-import tests
+    above). A fake torch is served on interception so an attempted import
+    falls through the probe harmlessly - re-importing the REAL torch
+    in-process is exactly the unsafe operation under test (see the sibling
+    tests' docstrings)."""
+
+    def _arm(self, monkeypatch, tmp_path, *, platform="win32",
+             native_loaded=True, hip_dll=True, rocm_sdk_installed=True,
+             torch_resident=False):
+        """Arrange the guard's four conditions (defaults: the doomed combo)
+        and return the list that records every intercepted `import torch`."""
+        import builtins
+        import importlib.util
+
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.native_lib_loaded",
+            lambda: native_loaded)
+        rt = tmp_path / "native-runtime"
+        rt.mkdir()
+        # The flavor signal runs the REAL glob over a real directory: only the
+        # DLL name is faked, not the detection logic.
+        (rt / ("ggml-hip.dll" if hip_dll else "ggml-vulkan.dll")).write_bytes(b"")
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: rt)
+
+        real_find_spec = importlib.util.find_spec
+
+        def _fake_find_spec(name, *args, **kwargs):
+            if name == "rocm_sdk":
+                return object() if rocm_sdk_installed else None
+            return real_find_spec(name, *args, **kwargs)
+
+        monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False))
+        if torch_resident:
+            # The resident stand-down case: a torch already in sys.modules
+            # makes the probe's `import torch` a free cache hit, doom-proof
+            # by construction, so the guard must not fire.
+            monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        else:
+            monkeypatch.delitem(sys.modules, "torch", raising=False)
+        real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *args, **kwargs):
+            if name == "torch":
+                attempted.append(name)
+                # setitem (auto-restored), never a raw assignment - see the
+                # sys.modules leak documented in the tracking-import test above.
+                monkeypatch.setitem(sys.modules, "torch", fake_torch)
+                return fake_torch
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+        return attempted
+
+    def test_skips_torch_on_the_proven_doomed_combo(
+            self, monkeypatch, tmp_path, caplog):
+        attempted = self._arm(monkeypatch, tmp_path)
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            result = discover._list_gpus_probe()
+        assert "torch" not in attempted, (
+            "_list_gpus_probe attempted `import torch` with the native HIP "
+            "runtime resident and a rocm_sdk torch installed - that attempt is "
+            "known-doomed (STATUS_ENTRYPOINT_NOT_FOUND) and prints a 'Windows "
+            "fatal exception' trace on every probe")
+        assert isinstance(result, list)
+        # Rule 5: the skip is surfaced, not silent.
+        assert "skipping the torch GPU probe" in caplog.text
+
+    @pytest.mark.parametrize(
+        "absent", ["platform", "native", "hip", "rocm_sdk", "resident_torch"])
+    def test_attempts_torch_when_any_condition_is_absent(
+            self, monkeypatch, tmp_path, absent):
+        """The trade-off, pinned: the skip fires ONLY on the full proven combo.
+        Anything less (most importantly native_lib_loaded alone - the blanket
+        guard _sizing can afford but this probe cannot) keeps the torch
+        attempt, and with it the enumeration nvidia-smi cannot provide."""
+        kwargs = {}
+        if absent == "platform":
+            kwargs["platform"] = "linux"
+        elif absent == "native":
+            kwargs["native_loaded"] = False
+        elif absent == "hip":
+            kwargs["hip_dll"] = False
+        elif absent == "rocm_sdk":
+            kwargs["rocm_sdk_installed"] = False
+        else:
+            # resident_torch: every doom condition holds, but torch is already
+            # in sys.modules - the import is a free cache hit that cannot run
+            # the rocm_sdk preload, so the guard must stand down and the
+            # resident torch stays in use (TestListGpus's fake-torch
+            # enumeration tests cover the full-enumeration consequence).
+            kwargs["torch_resident"] = True
+        attempted = self._arm(monkeypatch, tmp_path, **kwargs)
+        discover._list_gpus_probe()
+        assert attempted == ["torch"], (
+            f"with {absent!r} absent the combination is not the proven-doomed "
+            "one, so the probe must still attempt torch enumeration")
+
+    def test_detector_failure_fails_open_to_the_torch_attempt(
+            self, monkeypatch, tmp_path):
+        """A broken detector must never cost the working path (fail open)."""
+        attempted = self._arm(monkeypatch, tmp_path)
+
+        def _boom():
+            raise RuntimeError("detector broke")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        discover._list_gpus_probe()
+        assert attempted == ["torch"]
