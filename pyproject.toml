@@ -43,7 +43,7 @@ dependencies = [
     # directly, so it is declared directly: never rely on a transitive package
     # staying present. See localm/setup_llama.py _ssl_context.
     "certifi>=2023.5.7",
-    "huggingface-hub>=1.23.0",
+    "huggingface-hub>=1.24.0",
     "pydantic>=2.13.4",
     "fastapi>=0.139.0",
     "uvicorn>=0.51.0",
