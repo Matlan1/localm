@@ -860,10 +860,18 @@ def _torch_gpu_probe_known_doomed() -> bool:
       authority as :func:`_native_backend_has_vulkan`): a vulkan/cpu/cuda
       build leaves no HIP DLLs resident for torch's preload to collide with.
       If that ever proves wrong for some exotic build, the cost is today's
-      pre-guard noise, never a lost probe.
+      pre-guard noise, never a lost probe. (The glob re-resolves
+      ``runtime_binary_dir()`` at check time, which could in principle drift
+      from the dir the resident lib actually loaded from; no current caller
+      both holds a resident lib and probes here outside a mixed test
+      process, so that drift window is theoretical today.)
     - ``rocm_sdk`` is importable: the failing preload belongs to the
       ROCm-for-Windows torch; a CPU/CUDA torch (or no torch at all) never
-      runs it.
+      runs it. Importability is necessary, not sufficient (the rocm-sdk
+      wheels also serve the HIP llama build itself), but firing with a
+      non-ROCm torch loses nothing material: a CPU torch enumerates no
+      CUDA devices, and a CUDA torch's NVIDIA devices are exactly what the
+      nvidia-smi fallback reports anyway.
 
     Fails OPEN: if the detector itself errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
