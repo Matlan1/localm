@@ -274,6 +274,37 @@ def test_changelog_renumbering_a_published_version_header_fails():
     assert removed == ["## [0.1.0] - 2026-07-04"], removed
 
 
+def test_git_helper_decodes_output_as_utf8_not_locale_default(monkeypatch):
+    """REGRESSION: _git() must decode git's output as UTF-8, not the platform
+    locale default.
+
+    The changelog append-only guard reads the baseline via `git show
+    <ref>:CHANGELOG.md` (through _git) and the working tree via
+    read_text(encoding="utf-8"). With a bare text=True, Python decodes the
+    subprocess output with locale.getpreferredencoding() - cp1252 on Windows -
+    so a UTF-8 line carrying an emoji or an accented character comes back as
+    mojibake and no longer equals the UTF-8 working-tree line, falsely flagging
+    an unchanged PUBLISHED entry as a rewrite. Pinning encoding="utf-8" is what
+    makes the two reads match on every platform; assert it here so the kwarg is
+    never silently dropped (a behavioral test would only bite on a cp1252 box,
+    not on CI Linux)."""
+    ch = _load_check_hygiene()
+    captured = {}
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return _Result()
+
+    monkeypatch.setattr(ch.subprocess, "run", _fake_run)
+    ch._git("show", "HEAD:CHANGELOG.md")
+    assert captured.get("encoding") == "utf-8", captured
+
+
 def test_changelog_renaming_a_published_subsection_header_fails():
     """NEGATIVE (a second confirmed gap, same mechanism): '### Added' etc. inside an
     already-published section was never in the protected set (the 'stripped.

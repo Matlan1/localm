@@ -277,9 +277,18 @@ def _changelog_removed_lines(old_text: str, new_text: str,
 
 
 def _git(*args: str) -> subprocess.CompletedProcess | None:
-    """Run a git subcommand under REPO; None if git is unavailable at all."""
+    """Run a git subcommand under REPO; None if git is unavailable at all.
+
+    Decode git's output as UTF-8 explicitly, NOT the platform default: with a
+    bare text=True, Python decodes with locale.getpreferredencoding() (cp1252 on
+    Windows), which mangles UTF-8 file content from ``git show`` into mojibake.
+    The working tree is read with encoding="utf-8" (see the CHANGELOG check), so
+    the baseline read here must match it or identical non-ASCII lines (an emoji,
+    an accented char) look "changed" and trip a false append-only violation.
+    """
     try:
-        return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+        return subprocess.run(["git", *args], cwd=REPO,
+                              capture_output=True, text=True, encoding="utf-8")
     except (FileNotFoundError, OSError):
         return None
 
