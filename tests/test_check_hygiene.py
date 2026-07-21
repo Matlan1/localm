@@ -472,6 +472,40 @@ def test_changelog_append_only_guard_passes_without_a_git_baseline(tmp_path, mon
     assert ch._changelog_append_only() == []
 
 
+def test_changelog_append_only_no_false_positive_on_non_ascii_under_cp1252(
+        tmp_path, monkeypatch):
+    """A shipped entry with NON-ASCII content (an emoji, an accented word) must
+    not be reported as removed just because the process locale is not UTF-8.
+
+    Regression for the Windows false positive: ``_git`` compares
+    ``git show <ref>:CHANGELOG.md`` against the working file read as UTF-8. git
+    emits UTF-8, but ``subprocess(text=True)`` alone decodes with the locale
+    codepage - cp1252 on Windows - turning every non-ASCII shipped line into
+    mojibake that no longer matched its own UTF-8 working copy, so the guard
+    flagged a byte-identical CHANGELOG. Forcing a cp1252 locale reproduces it on
+    ANY platform (Linux CI decodes UTF-8 by default and never saw it); the fix
+    is ``_git`` decoding explicitly as UTF-8, which this monkeypatch cannot
+    perturb."""
+    import locale
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    # A shipped entry line carrying both an emoji and an accented word - exactly
+    # the shapes the real 0.1.2 changelog carried (a memory-chip glyph, an
+    # accented unicode-key example) that triggered the false failure.
+    non_ascii = _BASE_CHANGELOG.replace(
+        "- the GUI\n",
+        "- the GUI, now with a \U0001f9e0 memory chip and an äccented note\n")
+    _init_changelog_repo(tmp_path, non_ascii)
+    # working tree is byte-identical to HEAD -> nothing removed, on any locale.
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a, **k: "cp1252")
+    assert ch._changelog_append_only() == []
+    # And the raw git read round-trips the non-ASCII intact (the decode itself,
+    # independent of the diff layer above).
+    got = ch._git("show", "HEAD:CHANGELOG.md")
+    assert got is not None and got.returncode == 0
+    assert "\U0001f9e0" in got.stdout and "äccented" in got.stdout
+
+
 def test_real_changelog_is_append_only_against_head():
     """The real repo CHANGELOG must itself satisfy the guard (this PR only adds a
     header note on top, removing nothing)."""
