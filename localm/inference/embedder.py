@@ -547,10 +547,12 @@ class IsolatedEmbedder(VramSizingMixin):
     def _preflight_vram(self) -> None:
         """Refuse a load that cannot fit BEFORE spawning a child. The
         multi-GPU split case needs its own per-device check distinct from
-        VramSizingMixin._check_vram() (which only reasons about the single
-        main GPU device) - see gpu_split_shortfall's docstring (discover.py)
-        for the full rationale. The single-GPU case (the common one) used to
-        have NO real check at all; _check_vram() closes that gap."""
+        VramSizingMixin._check_vram() (which budgets the split's COMBINED
+        capacity - see _split_free_total_bytes - so one device's
+        proportional share can be individually short while its aggregate
+        passes) - see gpu_split_shortfall's docstring (discover.py) for the
+        full rationale. The single-GPU case (the common one) used to have
+        NO real check at all; _check_vram() closes that gap."""
         from localm.config import load_config
         from localm.discover import applied_split_device_count, gpu_split_shortfall
         cfg = load_config()
