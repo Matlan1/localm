@@ -68,3 +68,55 @@ def test_cli_embed_fn_uses_persisted_key(monkeypatch):
     out = embed_fn(["hello"])
     assert out == [[0.1, 0.2]]
     assert captured["headers"]["Authorization"] == "Bearer cli-file-key-123"
+
+
+def _capture_embed_post(monkeypatch):
+    import requests
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1]}]}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs)
+        return _Resp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    return captured
+
+
+def test_cli_embed_fn_sends_the_configured_model_name(monkeypatch):
+    """`rag add/query --embed` must send the CONFIGURED embedding model name, the
+    same as the GUI's server-side self-embed - NOT the hardcoded sentinel
+    "localm". /v1/embeddings routes to the dedicated embedder only when the model
+    name matches the configured `embedding_model` (or a registered embedder);
+    "localm" matches neither, so with a dedicated embedder and no chat model
+    loaded every CLI --embed 503'd and silently indexed lexical-only, while the
+    GUI worked. Regression for that CLI/GUI parity gap."""
+    from localm.cli.rag import _cli_rag_embed_fn
+    monkeypatch.setattr(
+        "localm.config.load_config",
+        lambda: {"embedding_model": "my-custom-embedder", "port": 8642})
+    captured = _capture_embed_post(monkeypatch)
+    embed_fn = _cli_rag_embed_fn("http://127.0.0.1:8642/v1")
+    embed_fn(["hello"])
+    assert captured["json"]["model"] == "my-custom-embedder"
+    assert captured["json"]["model"] != "localm"
+
+
+def test_cli_embed_fn_defaults_to_the_internal_embedder_not_localm(monkeypatch):
+    """With no explicit embedding_model set, the CLI must still send the internal
+    DEFAULT embedder name (bge-small-en-v1.5), which /v1/embeddings can route -
+    never the bare "localm" sentinel that falls through to the chat path."""
+    from localm.cli.rag import _cli_rag_embed_fn
+    from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+    monkeypatch.setattr("localm.config.load_config", lambda: {"port": 8642})
+    captured = _capture_embed_post(monkeypatch)
+    embed_fn = _cli_rag_embed_fn("http://127.0.0.1:8642/v1")
+    embed_fn(["hello"])
+    assert captured["json"]["model"] == DEFAULT_EMBEDDING_MODEL
+    assert captured["json"]["model"] != "localm"
