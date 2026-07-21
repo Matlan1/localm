@@ -328,6 +328,14 @@ CORE_FIELDS: list = [
                  "collections and memory vectors - re-index after you change it.",
                  group="Models", applies=Applies.NEXT_LOAD,
                  options=_EMBEDDING_POOLING),
+    SettingField("embedding_gpu_layers", Widget.NUMBER, "Embedder GPU layers",
+                 "GPU layers for the embedding model. Empty = automatic: full "
+                 "GPU offload when free VRAM holds it, otherwise CPU, so a "
+                 "loaded chat model is not slowed by VRAM oversubscription "
+                 "when a large embedder shares one card. 0 forces CPU; 99 "
+                 "forces full GPU offload regardless of free VRAM.",
+                 group="Models", applies=Applies.NEXT_LOAD,
+                 min=0, max=999, step=1),
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
                  "Ask for confirmation before `localm rm` deletes a model's "

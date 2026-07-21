@@ -412,3 +412,104 @@ class TestVramOverheadConfigResolution:
         backend = create_backend(str(model))
         from localm.vram import VRAM_OVERHEAD_BYTES
         assert backend._VRAM_OVERHEAD_BYTES == VRAM_OVERHEAD_BYTES
+
+
+# --------------------------------------------------------------------------- #
+#  ctx_auto embedder-footprint reservation                                     #
+# --------------------------------------------------------------------------- #
+
+class TestAutoCtxEmbedderReservation:
+    """_auto_ctx_max must hold back room for the CONFIGURED embedder so the
+    context window sized at chat-load time does not claim the VRAM the embedder
+    needs when it loads later (first memory/RAG use) - the oversubscription
+    that collapsed generation from ~34 to 5.0 tok/s on a real 16 GB card
+    (WDDM pages the overcommit to system RAM; measured live 2026-07-18).
+
+    _auto_gpu_layers is deliberately NOT reservation-aware: chat weights keep
+    VRAM priority (a partial chat offload to protect the embedder would slow
+    the primary workload); the context window is the flexible resource."""
+
+    def test_reservation_shrinks_the_auto_ctx_ceiling(self, tmp_path, monkeypatch):
+        from localm.inference.backends.llamacpp import _sizing
+        b = _model(tmp_path, 8 * GB)
+        overhead = b._VRAM_OVERHEAD_BYTES
+        bpt = b._bytes_per_token(8 * GB)
+
+        monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes", lambda: 0)
+        with _vram(12 * GB, 16 * GB):
+            base = b._auto_ctx_max()
+        expected_base = ((12 * GB - 8 * GB - overhead) // bpt) // 1024 * 1024
+        assert base == expected_base
+
+        reservation = int(1.2 * GB)
+        monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes",
+                            lambda: reservation)
+        with _vram(12 * GB, 16 * GB):
+            reserved = b._auto_ctx_max()
+        expected = ((12 * GB - 8 * GB - overhead - reservation) // bpt) // 1024 * 1024
+        assert reserved == expected
+        assert reserved < base
+
+    def test_zero_reservation_leaves_ceiling_unchanged(self, tmp_path, monkeypatch):
+        from localm.inference.backends.llamacpp import _sizing
+        b = _model(tmp_path, 8 * GB)
+        monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes", lambda: 0)
+        with _vram(12 * GB, 16 * GB):
+            first = b._auto_ctx_max()
+        with _vram(12 * GB, 16 * GB):
+            second = b._auto_ctx_max()
+        assert first == second
+
+    def test_gpu_layers_ignore_the_reservation(self, tmp_path, monkeypatch):
+        """Weights keep priority: a huge reservation must not shrink the
+        offloaded layer count."""
+        from localm.inference.backends.llamacpp import _sizing
+        b = _model(tmp_path, 8 * GB)
+        with _vram(12 * GB, 16 * GB):
+            monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes",
+                                lambda: 0)
+            base_layers = b._auto_gpu_layers()
+            monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes",
+                                lambda: 8 * GB)
+            assert b._auto_gpu_layers() == base_layers
+
+
+class TestEmbedderCtxReservationBytes:
+    """The reservation source itself: configured-but-unloaded embedder's file
+    size + the codebase's standing 20% slop; 0 in every case where reserving
+    would be wrong, and 0 (never a crash) on any failure."""
+
+    def test_zero_when_embedder_already_loaded(self, monkeypatch, tmp_path):
+        from localm.inference.backends.llamacpp import _sizing
+        f = tmp_path / "emb.gguf"
+        f.write_bytes(b"\0" * 1000)
+        monkeypatch.setattr("localm.inference.embedder.loaded_path",
+                            lambda: str(f))
+        assert _sizing.embedder_ctx_reservation_bytes() == 0
+
+    def test_zero_when_no_model_resolvable(self, monkeypatch):
+        monkeypatch.setattr("localm.inference.embedder.loaded_path", lambda: None)
+        monkeypatch.setattr(
+            "localm.inference.embedder.resolve_embedding_model_path",
+            lambda **kw: None)
+        from localm.inference.backends.llamacpp import _sizing
+        assert _sizing.embedder_ctx_reservation_bytes() == 0
+
+    def test_reserves_file_size_plus_slop(self, monkeypatch, tmp_path):
+        f = tmp_path / "emb.gguf"
+        f.write_bytes(b"\0" * 1000)
+        monkeypatch.setattr("localm.inference.embedder.loaded_path", lambda: None)
+        monkeypatch.setattr(
+            "localm.inference.embedder.resolve_embedding_model_path",
+            lambda **kw: str(f))
+        from localm.inference.backends.llamacpp import _sizing
+        assert _sizing.embedder_ctx_reservation_bytes() == 1200
+
+    def test_zero_on_resolver_failure(self, monkeypatch):
+        def _boom(**kw):
+            raise RuntimeError("resolver exploded")
+        monkeypatch.setattr("localm.inference.embedder.loaded_path", lambda: None)
+        monkeypatch.setattr(
+            "localm.inference.embedder.resolve_embedding_model_path", _boom)
+        from localm.inference.backends.llamacpp import _sizing
+        assert _sizing.embedder_ctx_reservation_bytes() == 0

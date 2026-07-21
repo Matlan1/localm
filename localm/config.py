@@ -367,6 +367,14 @@ DEFAULT_CONFIG: dict = {
     # <home>/models/embeddings on first use (auto only under net_mode=allow, else
     # run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
     "embedding_model": "bge-small-en-v1.5",
+    # GPU layers for the embedding model. None (default) = automatic placement:
+    # full GPU offload when free VRAM demonstrably holds the model (file size
+    # + 20% slop), else CPU - so a resident chat model is not thrashed by
+    # WDDM oversubscription when a LARGE embedder (e.g. a 4 GB Qwen3-Embedding
+    # Q8) shares one card (measured 34 -> 5 tok/s on 16 GB). 0 forces CPU;
+    # 99 forces full GPU offload regardless. When unset, an explicit global
+    # n_gpu_layers other than 99 is still inherited, as it always was.
+    "embedding_gpu_layers": None,
     # How the embedding model's token states are pooled into one vector. None
     # (nothing explicitly chosen) is NOT the same as "mean": embedder.py's
     # resolve_pooling_setting/_effective_pooling apply the measured-safe

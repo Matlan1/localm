@@ -488,7 +488,8 @@ class IsolatedEmbedder(VramSizingMixin):
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
-                 pooling_type: object = _POOLING_DEFAULT) -> None:
+                 pooling_type: object = _POOLING_DEFAULT,
+                 gpu_fallback_reason: Optional[str] = None) -> None:
         self.model_path = model_path
         self.n_gpu_layers = n_gpu_layers
         self.effective_gpu_layers = None    # no auto-sizing for the embedder
@@ -514,10 +515,14 @@ class IsolatedEmbedder(VramSizingMixin):
         self.declared_pooling: Optional[int] = None
         self.effective_pooling: Optional[int] = None
         # Set once a GPU-offloaded embed() crashes the worker and this embedder
-        # falls back to CPU (see embed()'s crash-recovery branch) - None while
-        # still on GPU, or when configured for CPU from the start. Exposed via
+        # falls back to CPU (see embed()'s crash-recovery branch), or SEEDED at
+        # construction when automatic placement already chose CPU over a full
+        # card (get_embedder -> _choose_embedder_gpu_layers) - None while on
+        # GPU. Seeding it here also makes _reload() pass cpu_only to the child
+        # from the very first spawn (n_gpu_layers=0 alone does not guarantee
+        # zero GPU-backend involvement - see _reload's docstring). Exposed via
         # gpu_fallback_reason() so the GUI can show it, not just a log line.
-        self.gpu_fallback_reason: Optional[str] = None
+        self.gpu_fallback_reason: Optional[str] = gpu_fallback_reason
         self._runner = None
         # Serializes embed() below. The worker protocol has NO request-id
         # correlation (one req_q/resp_q pair, see _embedder_runner.py's module
@@ -765,6 +770,82 @@ _TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode
 _LAST_ERROR: Optional[str] = None   # why the last load failed (for the GUI picker)
 
 
+def _explicit_embedder_gpu_layers(cfg: dict) -> Optional[int]:
+    """The user's EXPLICIT GPU-layer choice for the embedder, or None when the
+    automatic placement below should decide.
+
+    ``embedding_gpu_layers`` (the dedicated key) wins outright. Failing that,
+    a global ``n_gpu_layers`` moved off its "everything" default (99) is
+    inherited exactly as get_embedder() always did - someone who set -g 24 or
+    -g 0 globally expressed an offload preference this load keeps honoring
+    (never silently override an explicit selection). A bool sneaking in via a
+    hand-edited config is not an int choice; malformed values fall through to
+    auto rather than crashing the load."""
+    raw = cfg.get("embedding_gpu_layers")
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return int(raw)
+    try:
+        chat = int(cfg.get("n_gpu_layers", 99))
+    except (TypeError, ValueError):
+        return None
+    if chat != 99:
+        return chat
+    return None
+
+
+def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
+                                read_free=None) -> "tuple[int, Optional[str]]":
+    """Pick the embedder's ``n_gpu_layers``: ``(layers, reason)`` where
+    *reason* is a user-facing explanation only when automatic placement chose
+    CPU over a GPU that cannot hold the model.
+
+    Why this exists: the pre-load eviction (``_maybe_swap_for_embedder``)
+    cannot free room when the chat engine is pinned by an in-flight request -
+    which is the NORMAL case, since per-turn memory recall fires during one.
+    The embedder then force-loaded all layers onto a full card anyway, and
+    Windows/WDDM paged the overcommit to system RAM, thrashing the resident
+    chat model (measured live 2026-07-18: 34 -> 5.0 tok/s; the same load
+    placed on CPU ran at 21 and left chat's VRAM untouched). Degrading THIS
+    load to CPU is the right trade: embeds get slower, the chat model the
+    user is actively talking to does not.
+
+    An explicit user choice (see _explicit_embedder_gpu_layers) is honored
+    verbatim, tight VRAM or not. Unmeasurable free VRAM or an unreadable
+    model file keep the historical full-offload attempt - the load preflight
+    still warns there, so nothing is hidden, and a guess of CPU on a healthy
+    box would silently slow every embed for no reason."""
+    explicit = _explicit_embedder_gpu_layers(cfg)
+    if explicit is not None:
+        return explicit, None
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        size = 0
+    if not size:
+        return 99, None
+    if read_free is None:
+        def read_free() -> Optional[int]:
+            from localm.discover import vram_capacity
+            return vram_capacity().get("free")
+    try:
+        free = read_free()
+    except Exception:
+        free = None
+    if free is None:
+        return 99, None
+    # Same loaded-footprint approximation the swap decision and the split
+    # preflight already use (weights + ~20% KV/compute slop).
+    estimate = int(size * 1.2)
+    if free >= estimate:
+        return 99, None
+    reason = (f"insufficient free VRAM for the embedding model "
+              f"(~{estimate // 1024 ** 2} MB needed, "
+              f"{int(free) // 1024 ** 2} MB free); the embedder runs on CPU "
+              f"so the loaded chat model is not slowed by VRAM "
+              f"oversubscription - set embedding_gpu_layers to override")
+    return 0, reason
+
+
 def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
     """Before the embedder's native load, evict a resident chat model when it
     would not otherwise fit - the SAME VRAM-aware swap the image/music/video
@@ -845,8 +926,15 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
             return None
         from localm.config import load_config
         _cfg = load_config()
-        ngl = int(_cfg.get("n_gpu_layers", 99))
         pooling = resolve_pooling_setting(_cfg.get("embedding_pooling"))
+        # GPU INTENT for the pre-load eviction check below: an explicit user
+        # choice, else full offload. The FINAL placement is chosen after the
+        # swap runs, against post-eviction free VRAM - so a successful
+        # eviction still yields a GPU load, and only a card that stays full
+        # (chat pinned by the very request that triggered this embed) demotes
+        # the embedder to CPU (see _choose_embedder_gpu_layers).
+        explicit = _explicit_embedder_gpu_layers(_cfg)
+        intent_ngl = explicit if explicit is not None else 99
 
     # OUTSIDE _LOCK (see docstring): safe to block here on the cross-thread
     # eviction round trip. Another thread may concurrently reach this same
@@ -854,7 +942,10 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
     # evict_chat_for_embedder()/decide_embedder_swap() are idempotent (a
     # second call simply finds nothing left to evict, or enough VRAM already
     # free) and the actual load below re-checks the singleton state.
-    _maybe_swap_for_embedder(path, ngl)
+    _maybe_swap_for_embedder(path, intent_ngl)
+    ngl, placement_reason = _choose_embedder_gpu_layers(path, _cfg)
+    if placement_reason is not None:
+        logger.warning("embedder placement: %s", placement_reason)
 
     with _LOCK:
         # Re-check: another thread may have completed (or failed) the load
@@ -866,8 +957,9 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
         try:
             from localm.inference.engine import _LOAD_LOCK
             with _LOAD_LOCK:
-                _EMBEDDER = IsolatedEmbedder(path, n_gpu_layers=ngl,
-                                             pooling_type=pooling)
+                _EMBEDDER = IsolatedEmbedder(
+                    path, n_gpu_layers=ngl, pooling_type=pooling,
+                    gpu_fallback_reason=placement_reason)
             # getattr, not attribute access: this status line sits INSIDE the
             # try below, so anything it raises would be caught as a LOAD failure
             # and silently drop embeddings to lexical-only for the rest of the
