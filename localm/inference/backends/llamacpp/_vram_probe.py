@@ -27,9 +27,12 @@ principle narrowly, to just this one call, as a long-lived probe rather than
 the whole model load.
 
 Protocol (newline-delimited, line-buffered, over stdin/stdout): the caller
-writes any line to request a fresh reading; this process replies with
-"<free_bytes> <total_bytes>" on success or "ERR" on failure (load_lib() never
-ran/failed, or the query itself failed), then waits for the next request. Exits
+writes one line per request and reads one reply line. A "devices" line asks
+for the native device inventory (see _loader.native_device_inventory) and is
+answered with its one-line JSON, or "ERR" when it cannot be taken; ANY other
+line is the legacy memory request, answered with "<free_bytes> <total_bytes>"
+on success or "ERR" on failure (load_lib() never ran/failed, or the query
+itself failed). After each reply the daemon waits for the next request. Exits
 cleanly when stdin hits EOF (the caller closed the pipe, e.g. on normal exit OR
 because the OS closed all its handles on a forceful kill - either way this
 process does not outlive its caller). If a query aborts the process outright,
@@ -53,14 +56,28 @@ def main() -> int:
                                        # exception (-> "ERR"), never a blocking
                                        # modal dialog on this disposable daemon.
 
-    from localm.inference.backends.llamacpp._loader import gpu_memory, load_lib
+    import json
+
+    from localm.inference.backends.llamacpp import _loader
+
     try:
-        load_lib()
+        _loader.load_lib()
     except Exception:
         pass  # every query below will just answer ERR - no per-request retry cost
-    for _ in sys.stdin:
+    for line in sys.stdin:
+        if line.strip() == "devices":
+            # Native device inventory (GPU-SPLIT-VKINDEX: the vulkan build's
+            # selectors need the ggml registry's own index space, which no
+            # torch/nvidia-smi source can provide). Same per-query posture as
+            # the memory reply: a failure answers ERR, the daemon stays alive.
+            try:
+                devs = _loader.native_device_inventory()
+            except Exception:
+                devs = None
+            print("ERR" if devs is None else json.dumps(devs), flush=True)
+            continue
         try:
-            mem = gpu_memory()
+            mem = _loader.gpu_memory()
         except Exception:
             mem = None
         if mem is None:

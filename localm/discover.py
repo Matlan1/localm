@@ -1020,6 +1020,47 @@ def _native_backend_has_vulkan() -> bool:
         return False
 
 
+def native_gpu_devices() -> Optional[list]:
+    """Selector-shaped devices from the ACTIVE native runtime's OWN registry,
+    read crash-isolated (the probe daemon - ``_loader.gpu_devices_isolated``):
+    ``[{"index", "name", "total"?, "free"?}, ...]``, or ``None`` when the
+    daemon/registry cannot answer this call. An empty list is a real answer
+    (the runtime registers no non-CPU device).
+
+    The ``index`` values are the native backend's device order - on the
+    ``vulkan`` build the ONLY index space a configured ``gpu_split_indices`` /
+    ``main_gpu_index`` actually means at load time (GPU-SPLIT-VKINDEX;
+    :func:`list_gpus` is structurally blind to it). This is the enumeration
+    source for the GUI's split/main-GPU SELECTORS on that build. Deliberately
+    NOT merged into :func:`list_gpus`: its torch/nvidia-smi index space feeds
+    the torch-side reads (:func:`vram_capacity`'s per-device sums,
+    :func:`gpu_split_shortfall`), and mixing the two spaces is exactly the bug
+    class VKINDEX documents.
+
+    ``name`` prefers the registry's human description ("AMD Radeon RX 6900
+    XT...") over the backend's terse name ("Vulkan0"). ``total``/``free`` are
+    included only when the registry reported positive bytes - the GUI drops
+    its size suffix for an absent key rather than showing "0.0 GB"."""
+    from localm.inference.backends.llamacpp import _loader
+    raw = _loader.gpu_devices_isolated()
+    if raw is None:
+        return None
+    out = []
+    for d in raw:
+        try:
+            entry = {"index": int(d["index"])}
+        except (KeyError, TypeError, ValueError):
+            continue   # defensive: gpu_devices_isolated already shape-checked
+        name = str(d.get("description") or "").strip() or str(d.get("name") or "").strip()
+        entry["name"] = name or f"device {entry['index']}"
+        for key in ("total", "free"):
+            v = d.get(key)
+            if isinstance(v, int) and v > 0:
+                entry[key] = v
+        out.append(entry)
+    return out
+
+
 def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     """The GPU device index to actually use, given the user's ``main_gpu_index``
     config value.
