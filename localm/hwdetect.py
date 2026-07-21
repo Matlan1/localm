@@ -5,12 +5,17 @@ Pure stdlib, and NEVER raises: detection is advisory, so a probe that fails just
 contributes nothing. ``detect()`` reports which GPU vendors are present and the
 recommended llama.cpp backend.
 
-Backend-selection policy (the "anybody, out of the box" rule):
-  * ``vulkan`` is the universal default whenever ANY GPU is present - it runs on
-    AMD, NVIDIA, and Intel through the vendor's normal display driver, with no
+Backend-selection policy (the "anybody, out of the box" rule): pick the backend
+that is fastest AND works with no user-installed toolkit on THIS machine.
+  * NVIDIA on Windows -> ``cuda``: the same llama.cpp release ships a
+    self-contained cudart bundle, so CUDA is out-of-the-box here (no Toolkit) and
+    the fastest path on NVIDIA. (NVIDIA on Linux stays ``vulkan`` - the Linux cuda
+    build needs a system CUDA toolkit we cannot self-provide.)
+  * ``vulkan`` is the universal default for every other GPU - it runs on AMD,
+    NVIDIA (Linux), and Intel through the vendor's normal display driver, with no
     CUDA/ROCm/oneAPI toolkit to install.
-  * vendor-specific backends (``cuda`` for NVIDIA, ``hip`` for AMD, ``sycl`` for
-    Intel) are offered as an opt-in for maximum performance, not the default.
+  * the remaining vendor-specific backends (``hip`` for AMD, ``sycl`` for Intel)
+    are offered as an opt-in for maximum performance, not the default.
   * ``cpu`` when no GPU is detected.
 
 Detection is intentionally conservative: a missing tool or an unparseable name
@@ -152,16 +157,24 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
     setup.bat and setup.sh call, so the two detectors can never drift:
       * Apple Silicon                         -> metal
       * no GPU                                -> cpu
+      * NVIDIA on Windows                      -> cuda      (peak performance; the same
+        llama.cpp release ships a self-contained cudart bundle, so it is out-of-the-box
+        with no CUDA Toolkit, and setup-llama's driver preflight + load-test fall back
+        to vulkan if the driver is too old - never strands a box on a runtime it cannot load)
+      * NVIDIA on Linux                        -> vulkan    (the Linux cuda build needs a
+        system CUDA toolkit we cannot self-provide; vulkan runs via the display driver)
       * AMD on Windows, RX 6000 / unknown     -> amd-rocm  (self-contained gfx103X build)
       * AMD on Windows, clearly not RX 6000    -> vulkan    (gfx103X build won't fit)
-      * any other GPU (NVIDIA, Intel, Linux    -> vulkan    (no vendor toolkit needed)
-        AMD, mixed)
-    The self-contained ROCm bundle is gfx103X + Windows only, hence the narrow amd-rocm case."""
+      * any other GPU (Intel, Linux AMD, mixed)-> vulkan    (no vendor toolkit needed)
+    The self-contained ROCm bundle is gfx103X + Windows only, and self-contained CUDA is
+    Windows only, hence both vendor-optimized cases are narrowed to Windows."""
     d = det or detect()
     if "apple" in d.vendors:
         return "metal"
     if not d.has_gpu:
         return "cpu"
+    if "nvidia" in d.vendors and sys.platform == "win32":
+        return "cuda"
     if (sys.platform == "win32" and d.vendors == ["amd"]
             and not _amd_known_non_gfx103x(d.gpu_names)):
         return "amd-rocm"

@@ -128,7 +128,7 @@ def test_latest_tag_skips_release_with_no_uploaded_assets(monkeypatch):
                      "size": 200_000_000}]},
     ]
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _FakeHTTP(releases))
+                        lambda req, timeout=None, context=None: _FakeHTTP(releases))
     assert sl._latest_tag() == "b9870"     # NOT the not-yet-uploaded b9871
 
 
@@ -142,7 +142,7 @@ def test_latest_tag_skips_draft_and_prerelease(monkeypatch):
          "assets": [{"name": "x", "browser_download_url": "https://x", "size": 1}]},
     ]
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _FakeHTTP(releases))
+                        lambda req, timeout=None, context=None: _FakeHTTP(releases))
     assert sl._latest_tag() == "b9870"
 
 
@@ -152,12 +152,12 @@ def test_latest_tag_falls_back_when_nothing_has_assets(monkeypatch):
         {"tag_name": "b9870", "draft": False, "prerelease": False, "assets": []},
     ]
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _FakeHTTP(releases))
+                        lambda req, timeout=None, context=None: _FakeHTTP(releases))
     assert sl._latest_tag() == sl._FALLBACK_TAG
 
 
 def test_latest_tag_falls_back_on_network_error(monkeypatch):
-    def boom(req, timeout=None):
+    def boom(req, timeout=None, context=None):
         raise OSError("no network")
     monkeypatch.setattr("urllib.request.urlopen", boom)
     assert sl._latest_tag() == sl._FALLBACK_TAG
@@ -173,7 +173,7 @@ def test_release_assets_does_not_scrape_body_when_assets_empty(monkeypatch):
                 "releases/download/b9871/llama-b9871-bin-win-cuda-12.4-x64.zip)",
     }
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=None: _FakeHTTP(payload))
+                        lambda req, timeout=None, context=None: _FakeHTTP(payload))
     assert sl._release_assets("b9871") == []
 
 

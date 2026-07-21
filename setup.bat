@@ -210,9 +210,12 @@ uv pip install -p .venv -e ".\runtime"
 
 rem ---- detect the GPU + recommended backend (the ONE tested policy) ----------
 rem  `python -m localm.hwdetect` prints "<vendor> <install-backend>" - the same
-rem  arch-aware policy setup.sh uses, so the two installers can never drift. It
-rem  knows the self-contained gfx103X ROCm build only fits AMD RX 6000 / unknown
-rem  on Windows; a clearly newer/older AMD card is steered to vulkan instead.
+rem  arch-aware policy setup.sh uses, so the two installers can never drift. On
+rem  Windows NVIDIA gets cuda (the release ships a self-contained cudart bundle,
+rem  so it is out-of-the-box with no Toolkit and setup-llama falls back to vulkan
+rem  if the driver is too old). It also knows the self-contained gfx103X ROCm
+rem  build only fits AMD RX 6000 / unknown on Windows; a clearly newer/older AMD
+rem  card is steered to vulkan instead.
 echo.
 echo  Detecting graphics hardware ...
 set "VENDOR=none"
@@ -229,7 +232,7 @@ if "%VENDOR%"=="" set "VENDOR=none"
 if "%REC%"=="" set "REC=cpu"
 echo  Detected graphics vendor: %VENDOR%
 echo  Recommended inference backend: %REC%
-if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] vulkan works out of the box; pick [3] cuda for peak performance.
+if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] cuda = peak performance, fetches a self-contained runtime (no Toolkit) and falls back to Vulkan if your driver is too old; pick [2] vulkan for the no-download universal build.
 
 rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
 echo.

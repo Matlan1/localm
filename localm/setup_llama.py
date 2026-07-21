@@ -7,16 +7,20 @@ is placed inside the project's own ``localm-llama-runtime`` wheel rather than
 depending on a folder elsewhere on disk.
 
 Backends (``--backend``), so any machine has a working out-of-the-box path:
-  * ``auto`` (default) - detect the GPU and pick the broadest WORKING backend:
-    AMD on Windows -> the self-contained ROCm build (AMD on Linux -> ``vulkan``);
-    any other GPU -> ``vulkan`` (runs on NVIDIA/Intel/AMD through the normal
-    display driver, no vendor toolkit); Apple Silicon -> ``metal``; no GPU ->
-    ``cpu``.
-  * ``vulkan`` - universal GPU build from upstream llama.cpp (recommended for
-    NVIDIA/Intel, and a no-toolkit option for AMD).
-  * ``cuda`` / ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``cuda`` and
-    ``sycl`` deliver peak vendor performance but need that vendor's runtime
-    (CUDA toolkit / oneAPI) present; ``vulkan`` and ``cpu`` are self-contained.
+  * ``auto`` (default) - detect the GPU and pick the fastest backend that works
+    with no user-installed toolkit: NVIDIA on Windows -> ``cuda`` (self-contained
+    cudart fetch, see below); AMD on Windows -> the self-contained ROCm build (AMD
+    on Linux, and NVIDIA on Linux, -> ``vulkan``); other GPUs -> ``vulkan`` (runs
+    on NVIDIA/Intel/AMD through the normal display driver, no vendor toolkit);
+    Apple Silicon -> ``metal``; no GPU -> ``cpu``.
+  * ``vulkan`` - universal GPU build from upstream llama.cpp (a no-toolkit option
+    for any vendor; the default for Intel, and for NVIDIA/AMD on Linux).
+  * ``cuda`` - NVIDIA peak performance. On Windows the matching self-contained
+    ``cudart`` bundle from the same release is fetched too, so NO CUDA Toolkit is
+    needed; a driver preflight + load-test fall back to ``vulkan`` if the driver
+    is too old. On Linux the cuda build needs a system CUDA runtime present.
+  * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
+    Intel performance but needs the oneAPI runtime; ``cpu`` is self-contained.
   * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
     own ROCm runtime; the current default for AMD RX 6000).
 
@@ -53,6 +57,7 @@ from rich.console import Console
 
 from localm import config
 from localm.debuglog import logger
+from localm.http_ssl import client_ssl_context
 
 console = Console(highlight=False)
 
@@ -151,9 +156,9 @@ _UPSTREAM_BACKENDS = ("vulkan", "cuda", "sycl", "hip", "cpu", "metal")
 # live URLs, which move with every upstream release).
 _MIN_ARTIFACT_BYTES = 256 * 1024   # 256 KiB
 
-# Per-read socket timeout for the archive download. urlretrieve honours the
-# default socket timeout as an idle (between-reads) deadline, NOT a total-
-# transfer cap, so a large-but-progressing download is never killed; only a
+# Per-read socket timeout for the archive download. The chunked urlopen read loop
+# honours the default socket timeout as an idle (between-reads) deadline, NOT a
+# total-transfer cap, so a large-but-progressing download is never killed; only a
 # genuinely stalled connection (no bytes for this many seconds) trips it. This
 # turns an indefinite hang on a dropped/throttled transfer into a clear, loud
 # error the caller reports, instead of a frozen progress line with no diagnostic.
@@ -299,11 +304,14 @@ def _runtime_pkg_dir() -> Path:
 # --------------------------------------------------------------------------- #
 
 def _auto_backend() -> str:
-    """Pick the broadest WORKING backend for this machine (see module docstring).
+    """Pick the broadest WORKING backend for this machine - via the SAME policy the
+    installers use (``hwdetect.recommended_install_backend``), so bare
+    ``setup-llama`` and setup.bat / setup.sh can never drift:
 
-    AMD keeps the self-contained ROCm build (no toolkit, current behaviour);
-    every other GPU uses vulkan (no vendor toolkit needed); Apple Silicon uses
-    metal; a machine with no GPU uses cpu."""
+      NVIDIA on Windows -> cuda (self-contained cudart fetch, peak performance);
+      AMD on Windows (RX 6000 / unknown) -> the self-contained ROCm build; Apple
+      Silicon -> metal; every other GPU (incl. NVIDIA on Linux, where cuda needs a
+      system toolkit) -> vulkan; no GPU -> cpu."""
     try:
         from localm import hwdetect
         det = hwdetect.detect()
@@ -313,13 +321,7 @@ def _auto_backend() -> str:
         console.print(f"[yellow]GPU detection failed ({e}); defaulting to CPU - "
                       "override with --backend.[/yellow]")
         return "cpu"
-    if not det.has_gpu:
-        return "cpu" if sys.platform != "darwin" else det.recommended
-    if det.vendors == ["amd"] and sys.platform == "win32":
-        return "amd-rocm"                 # self-contained gfx103X build
-    if "apple" in det.vendors:
-        return "metal"
-    return "vulkan"                       # NVIDIA / Intel / mixed: universal
+    return hwdetect.recommended_install_backend(det)
 
 
 def _latest_tag() -> str:
@@ -339,7 +341,7 @@ def _latest_tag() -> str:
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=client_ssl_context()) as r:
             releases = json.loads(r.read().decode("utf-8"))
         for rel in releases:
             if rel.get("draft") or rel.get("prerelease"):
@@ -441,10 +443,10 @@ def _download(url: str, dest: Path) -> None:
     console.print(f"[dim]Downloading {url}[/dim]")
     last = [-1]
 
-    def _hook(block: int, block_size: int, total: int) -> None:
+    def _report(nread: int, total: int) -> None:
         if total <= 0:
             return
-        pct = min(100, block * block_size * 100 // total)
+        pct = min(100, nread * 100 // total)
         if pct != last[0] and pct % 5 == 0:
             last[0] = pct
             mb = total / 1024 ** 2
@@ -453,7 +455,23 @@ def _download(url: str, dest: Path) -> None:
     prev_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(_DOWNLOAD_STALL_TIMEOUT)
     try:
-        urllib.request.urlretrieve(url, dest, _hook)
+        # certifi-verified so the download does not depend on the machine's OS
+        # cert store (see localm/http_ssl.py). urlopen follows the GitHub -> release-CDN
+        # 302 over HTTPS and the context applies to that hop too. Stream in chunks
+        # so a multi-hundred-MB archive is never held in memory; the default
+        # socket timeout is the between-reads stall deadline (not a total cap).
+        req = urllib.request.Request(url, headers={"User-Agent": "localm-setup-llama"})
+        with urllib.request.urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT,
+                                    context=client_ssl_context()) as r, open(dest, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            nread = 0
+            while True:
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                nread += len(chunk)
+                _report(nread, total)
     except (socket.timeout, TimeoutError) as e:
         raise ArtifactError(
             f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s) - the "
@@ -779,7 +797,7 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=client_ssl_context()) as r:
             data = json.loads(r.read().decode("utf-8"))
             return data.get("assets", [])
     except Exception as e:
@@ -1202,9 +1220,11 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
               type=click.Choice(["auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                                  "metal", "amd-rocm"], case_sensitive=False),
               help="Which prebuilt to fetch. 'auto' detects your GPU and picks "
-                   "the broadest working backend: vulkan for NVIDIA/Intel; the "
-                   "self-contained ROCm build for AMD on Windows (vulkan for AMD "
-                   "on Linux); cpu if no GPU.")
+                   "the fastest no-toolkit-needed backend: cuda for NVIDIA on "
+                   "Windows (self-contained cudart, falls back to vulkan if the "
+                   "driver is too old); vulkan for Intel and for NVIDIA/AMD on "
+                   "Linux; the self-contained ROCm build for AMD on Windows; cpu "
+                   "if no GPU.")
 @click.option("--url", default=None, help="Override with an explicit prebuilt archive URL.")
 @click.option("--sha256", "sha256", default=None,
               help="Expected sha256 of the downloaded archive. When given, the "
