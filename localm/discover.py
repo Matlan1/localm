@@ -1454,7 +1454,8 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
 
 
 def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
-                  deadline: Optional[float] = None, wait_for_inflight: bool = False):
+                  deadline: Optional[float] = None, wait_for_inflight: bool = False,
+                  combined_only: bool = False):
     """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
     right ceiling for any "will this model fit" decision (a pre-load refusal
     gate, a fit badge, a VRAM-estimate readout).
@@ -1492,6 +1493,21 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
     the same longer probe budget and join behaviour whether or not a split is
     configured. Defaults keep list_gpus()'s own cold-init-tolerant deadline and
     no-join.
+
+    ``combined_only`` (opt-in): return the summed figure or NOTHING (``{}``) -
+    never the single-device :func:`vram_info` fallback. For a caller budgeting a
+    load that WILL be tensor-split across the configured devices (the GGUF
+    backend's sizing preflight, ``llamacpp/_sizing.py``), the single main-GPU
+    fallback is not a degraded answer but a wrong one: it would silently
+    substitute one device's capacity for the split's, exactly the split-blind
+    bug that layer exists to avoid, and the caller could not tell the two apart
+    from the dict shape alone. With ``combined_only`` the summed dict also
+    carries ``"devices"`` (how many detected split devices were summed), so the
+    caller can require a genuine 2+-device sum; ``{}`` means "no honest combined
+    figure this call" (no split configured, the split degraded to fewer than 2
+    detected devices, or - visible via ``return_status`` - a non-OK probe served
+    stale data). The classic (default) shape is byte-identical to before this
+    kwarg existed; the ``"devices"`` key is added ONLY under ``combined_only``.
     """
     from localm.config import load_config
     cfg = config if config is not None else load_config()
@@ -1512,8 +1528,13 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
     # Cheap short-circuit for the common (no split configured) case, mirroring
     # resolve_gpu_split's own early return - skips a real hardware probe
     # (list_gpus() -> torch/nvidia-smi) on every request for the vast majority
-    # of single-GPU installs that never configured a split.
+    # of single-GPU installs that never configured a split. Under combined_only
+    # this is a conclusive, probe-free "no combined figure exists" - reported
+    # with GPU_PROBE_OK, same as gpu_split_shortfall's no-split return: a
+    # deterministic routing answer, not an inconclusive reading.
     if not cfg.get("gpu_split_indices"):
+        if combined_only:
+            return ({}, GPU_PROBE_OK) if return_status else {}
         return _vi()
 
     if return_status:
@@ -1534,9 +1555,20 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
         # Split configured but degraded to a single detected device (the other
         # vanished / was never present). Same forwarding as the no-split path, so a
         # cold init on THIS path also completes / joins rather than timing out.
+        # Under combined_only there is nothing honest to sum - return {} with the
+        # probe's REAL status (a TIMEOUT/BUSY here may be why the split looks
+        # degraded, and the caller must be able to tell).
+        if combined_only:
+            return _ret({})
         return _vi()
 
     out = {"total": sum(g["total"] for g in split_gpus)}
+    if combined_only:
+        # See the docstring: lets the caller require a genuine 2+-device sum
+        # (a plain test double's dict, lacking this key, then reads honestly
+        # as "not a combined figure"). Gated so the classic shape stays
+        # byte-identical for every existing caller and test.
+        out["devices"] = len(split_gpus)
     frees = [g.get("free") for g in split_gpus]
     if all(f is not None for f in frees):
         out["free"] = sum(frees)
