@@ -158,7 +158,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # never the "native runtime failed to load" error below.
             raise
         except Exception as exc:
-            free = self._free_vram_bytes()
+            # Same combined-when-split budget as the preflight itself, so this
+            # advisory hint never claims "low on memory" against one card of a
+            # split whose combined free was fine (helper never raises).
+            free, _split_total, _split_devices = self._split_free_total_bytes()
+            if free is None:
+                free = self._free_vram_bytes()
             vram_hint = ""
             if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
                 vram_hint = (

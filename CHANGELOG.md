@@ -38,6 +38,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   does not keep current on Windows; they now verify against a bundled CA set (the
   same one your model downloads already use), so they work regardless of the
   machine's cert-store state.
+- **Multi-GPU split: the GGUF loader's own sizing now budgets the whole split,
+  not one card.** The earlier "Multi-GPU split fit checks" fix taught the
+  pre-load gate and the fit badges to sum capacity across a configured split,
+  but the GGUF backend kept a second, deeper preflight that still budgeted the
+  whole model against the main GPU alone. On a box where the split devices are
+  detectable (for example multiple AMD cards on Windows via the shipped ROCm
+  torch, or any install with a working CUDA torch), the split's headline case -
+  a model larger than one card that fits combined - was defeated three ways:
+  auto GPU-layer sizing silently offloaded only part of the model (a large,
+  silent slowdown), a pinned `n_gpu_layers` load was refused with a factually
+  wrong "it cannot fit regardless", and the auto context ceiling collapsed to
+  the base window despite ample combined headroom. All four sizing checks (auto
+  GPU layers, the VRAM preflight, the auto context ceiling, and the
+  mid-generation context-grow check) now budget against the split's combined
+  free/total, with the same probe-freshness honesty as the admission gate and a
+  fall back to the old single-device behavior whenever the combined reading is
+  unmeasurable; the refusal message on a split box now names the split's
+  combined capacity instead of "this GPU".
 
 ### Changed
 - **NVIDIA on Windows now recommends CUDA.** The setup menu's default backend for

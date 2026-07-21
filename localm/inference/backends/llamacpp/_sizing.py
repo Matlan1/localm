@@ -293,6 +293,104 @@ class VramSizingMixin:
         never fit on this device - see _check_vram()."""
         return cls._free_total_vram_bytes()[1]
 
+    @classmethod
+    def _split_free_total_bytes(cls) -> "tuple[Optional[int], Optional[int], int]":
+        """``(free, total, devices)`` summed across the 2+ devices a configured
+        multi-GPU split will spread this load over, or ``(None, None, 0)`` when
+        no combined budget applies and the caller must fall back to the
+        single-device readings above.
+
+        WHY a combined budget: ``discover.apply_gpu_split`` tensor-splits the
+        WEIGHTS across the configured devices, and llama.cpp places each
+        layer's KV cache on the device that holds the layer (confirmed in a
+        live 2-device native load log: per-layer KV buffers landed on each
+        split device in the split ratio) - so for a split load, weights AND KV
+        both draw on the split's combined capacity, and budgeting the whole
+        model against the single main GPU (what ``_free_vram_bytes`` /
+        ``_total_vram_bytes`` measure) defeats the split's headline case: a
+        model too big for one card that fits combined. The admission gate
+        (``discover.vram_capacity`` + ``gpu_split_shortfall``, see
+        ``http_server.switch_engine``) already learned this; this helper
+        brings the backend's own deeper preflight to the same ceiling.
+
+        Answers ``(None, None, 0)`` - "no combined budget, use the
+        single-device reading" - in every case where a combined figure would
+        be dishonest or unsafe to fetch:
+
+        - The native llama/ggml runtime is loaded IN THIS PROCESS (we are the
+          GgufWorker / an isolated child, where ``_check_context_fit`` runs
+          mid-generation): ``discover.list_gpus``'s probe does ``import
+          torch``, the exact DLL-identity conflict ``_free_total_vram_bytes``
+          documents and guards against, and a multi-second GPU probe has no
+          place deep in the decode path. No probe is attempted at all. The
+          single-device fallback stays honest there by construction: the
+          isolated native probe declines to answer on a 2+-GPU-device box
+          (``_loader._resolve_gpu_memory``), so a genuinely split load can
+          never be mis-judged against one device's reading in the worker.
+        - No ``gpu_split_indices`` configured: the common single-GPU case,
+          answered from config alone with NO hardware probe (mirrors
+          ``vram_capacity``'s own short-circuit).
+        - The probe did not complete fresh this call (non-``GPU_PROBE_OK``):
+          the served figure may be a frozen last-known-good value, and sizing
+          or refusing a load from stale data is the rule-5 gap the admission
+          gate's probe-freshness contract exists to prevent
+          (``gpu_split_shortfall``'s docstring). ``wait_for_inflight=True``
+          with the default cold-init-tolerant deadline makes this rare (we
+          are always off the event loop here - model loads run in an
+          executor/CLI thread), so a non-OK status means a genuinely
+          wedged/contended driver.
+        - Fewer than 2 split devices are detected (``vram_capacity``'s
+          ``combined_only`` contract returns ``{}``): the vulkan build's
+          honest-unknown (list_gpus is structurally blind to its device
+          space - GPU-SPLIT-VKINDEX), a degraded/stale split config, or a
+          box where detection is unmeasurable. The single-device fallback is
+          then today's behavior, which on those boxes is itself honestly
+          unmeasurable or correct.
+        - A test double patched ``vram_capacity`` without the opt-in kwargs
+          (TypeError) or with a plain dict lacking the ``"devices"`` key:
+          treated as "no combined reading" rather than crashing or
+          mis-reading a single-GPU stand-in as combined (the same
+          double-tolerance posture as ``vram._vram_free_reading``).
+
+        Never raises: a combined reading is an upgrade, and failing to fetch
+        one must never break a load that worked before it existed (surfaced
+        at debug, rule 5)."""
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            return None, None, 0
+        try:
+            from localm.config import load_config
+            cfg = load_config()
+            if not cfg.get("gpu_split_indices"):
+                return None, None, 0
+            from localm.discover import GPU_PROBE_OK, vram_capacity
+            try:
+                result = vram_capacity(cfg, return_status=True,
+                                       wait_for_inflight=True,
+                                       combined_only=True)
+            except TypeError:
+                # A test double without the opt-in kwargs cannot answer
+                # "combined or nothing" - so there is no combined reading.
+                return None, None, 0
+            if isinstance(result, tuple) and len(result) == 2:
+                info, status = result
+            else:
+                # A plain-dict double (no return_status support) models a
+                # completed probe, as it always did before the status channel.
+                info, status = result, GPU_PROBE_OK
+            if status != GPU_PROBE_OK or not isinstance(info, dict):
+                return None, None, 0
+            devices = info.get("devices") or 0
+            free, total = info.get("free"), info.get("total")
+            if devices < 2 or free is None or total is None:
+                return None, None, 0
+            return int(free), int(total), int(devices)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("combined split VRAM reading unavailable (%s); sizing "
+                       "against the single main GPU instead", type(e).__name__)
+            return None, None, 0
+
     @staticmethod
     def _vram_levels() -> list:
         """(free, total) bytes per device, [] when not measurable.
@@ -391,6 +489,11 @@ class VramSizingMixin:
         slow system memory or crash the GPU driver outright ("unspecified
         launch failure") with nothing surfaced to the user - see
         dev-notes/ for the real-hardware repro (CHK-KVCACHE-OVERFLOW).
+
+        On a box with an applied multi-GPU split, ``free``/``total`` here are
+        the split's COMBINED figures (see _split_free_total_bytes) and the
+        refusal wording names the split, not "this GPU" - a model that fits
+        combined must not be refused against one card's capacity.
         """
         # Use the resolved offload count when load() already picked it (auto), else
         # the configured value (also covers a direct _check_vram() call in tests).
@@ -399,9 +502,17 @@ class VramSizingMixin:
                       else self.n_gpu_layers)
         if gpu_layers == 0:
             return  # CPU-only run, VRAM is irrelevant
-        free = self._free_vram_bytes()
+        # Budget against the COMBINED capacity of an applied multi-GPU split:
+        # weights and per-layer KV both spread across the split devices, so the
+        # single main-GPU reading under-budgets exactly the split's headline
+        # case (a model too big for one card that fits combined) - see
+        # _split_free_total_bytes for the full contract and fallbacks.
+        free, total, split_devices = self._split_free_total_bytes()
         if free is None:
-            return  # can't measure (no torch / no GPU) - nothing useful to say
+            free = self._free_vram_bytes()
+            if free is None:
+                return  # can't measure (no torch / no GPU) - nothing useful to say
+            total = self._total_vram_bytes()
         model_bytes = self._model_bytes()
         kv_cache = self.n_ctx * self._bytes_per_token(model_bytes)
         # Charge only the offloaded fraction of the weights: a partial load
@@ -417,13 +528,22 @@ class VramSizingMixin:
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
         need = weights + kv_cache + self._VRAM_OVERHEAD_BYTES
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
-        total = self._total_vram_bytes()
         if total is not None and need > total:
+            # On a split box the single-GPU wording ("this GPU only has...")
+            # would be factually wrong - the ceiling being exceeded is the
+            # split's combined one, so say exactly that.
+            ceiling = (
+                f"the {split_devices} GPUs in the configured split only have "
+                f"{total / 1024**3:.1f} GB combined - freeing other VRAM will "
+                f"not help, it cannot fit across this split"
+                if split_devices >= 2 else
+                f"this GPU only has {total / 1024**3:.1f} GB total - freeing "
+                f"other VRAM will not help, it cannot fit regardless"
+            )
             raise RuntimeError(
                 f"Context too large for available VRAM: this load needs "
-                f"roughly {need / 1024**3:.1f} GB ({ctx_hint}) but this GPU "
-                f"only has {total / 1024**3:.1f} GB total - freeing other "
-                f"VRAM will not help, it cannot fit regardless.\n"
+                f"roughly {need / 1024**3:.1f} GB ({ctx_hint}) but "
+                f"{ceiling}.\n"
                 f"  Options:\n"
                 f"    - Lower the context:  -c 32768  (or smaller)\n"
                 f"    - Offload fewer layers:  -g 24  (or -g 0 for CPU-only)\n"
@@ -434,10 +554,12 @@ class VramSizingMixin:
             )
         if free >= need:
             return
+        where = (f" across the {split_devices} GPUs in the configured split"
+                 if split_devices >= 2 else "")
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
             f"[bold]{need / 1024**3:.1f} GB[/bold] ({ctx_hint}) but only "
-            f"[bold]{free / 1024**3:.1f} GB[/bold] is free.\n"
+            f"[bold]{free / 1024**3:.1f} GB[/bold] is free{where}.\n"
             f"  [dim]Likely cause: {self._vram_holder_hint()}[/dim]\n"
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
@@ -483,7 +605,17 @@ class VramSizingMixin:
                       else self.n_gpu_layers)
         if gpu_layers == 0:
             return None  # CPU-only run: KV already lives in RAM, nothing to decide
-        free = self._free_vram_bytes()
+        # Combined split budget first (per-layer KV spreads across the split
+        # devices with the weights - see _check_vram). Inside the WORKER - the
+        # only production caller of this method - the helper answers
+        # (None, None, 0) without probing (its native_lib_loaded guard: no
+        # torch/list_gpus in the decode path), and the single-device fallback
+        # below stays honest on a split box by construction: the isolated
+        # native probe declines at 2+ GPU devices (_loader._resolve_gpu_memory),
+        # so a split load is never mis-judged against one device's free here.
+        free, _split_total, _split_devices = self._split_free_total_bytes()
+        if free is None:
+            free = self._free_vram_bytes()
         if free is None:
             return None  # can't measure (no torch / no GPU) - keep the default (VRAM)
         # KV bytes per token on the GPU: only the offloaded layers keep their KV in
@@ -570,8 +702,15 @@ class VramSizingMixin:
         unlimited ceiling (n_ctx_max=0): then "auto" means the full VRAM-derived
         budget, honoring their "grow until VRAM" choice. The _AUTO_CTX_MIN floor
         always applies.
+
+        On an applied multi-GPU split the budget starts from the split's
+        COMBINED free VRAM (see _split_free_total_bytes): weights and per-layer
+        KV both spread across the split, so the single main-GPU reading would
+        collapse the ceiling to n_ctx on exactly the box the split exists for.
         """
-        free = self._free_vram_bytes()
+        free, _split_total, _split_devices = self._split_free_total_bytes()
+        if free is None:
+            free = self._free_vram_bytes()
         if free is None:
             return self._AUTO_CTX_FALLBACK
         model = self._model_bytes()
@@ -634,8 +773,15 @@ class VramSizingMixin:
         GPU budget left after reserving the KV cache + overhead (conservative: the
         KV cache is charged wholly to the GPU). 0 means even that budget is gone -
         run entirely on CPU, still a working (slow) load, the extreme end of the
-        promised RAM offload."""
-        free = self._free_vram_bytes()
+        promised RAM offload.
+
+        "Free VRAM" is the applied multi-GPU split's COMBINED free when one is
+        measurable (see _split_free_total_bytes) - sizing a split load against
+        the main GPU alone silently halved the offload on exactly the
+        model-bigger-than-one-card case the split exists for."""
+        free, _split_total, _split_devices = self._split_free_total_bytes()
+        if free is None:
+            free = self._free_vram_bytes()
         if free is None:
             return None                       # unmeasurable - honest fallback (A0)
         model = self._model_bytes()
