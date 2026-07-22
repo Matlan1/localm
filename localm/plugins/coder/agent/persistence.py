@@ -5,6 +5,7 @@ cumulative session diff, and undo. Mixed into Agent."""
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import difflib
 import json
@@ -357,6 +358,16 @@ class _PersistenceMixin:
             # The model's own task list (tools/tasks.py). An older build simply
             # ignores the extra key, and an older checkpoint restores as no todos.
             "todos": self.get_todos(),
+            # Pointers to work delegated children COMMITTED on their own branches.
+            # The branches are durable; without this the pointer to them is not,
+            # so a resumed session would show no footer and the user would
+            # reasonably conclude real, committed work had been lost. The
+            # change-sets are small, frozen and JSON-shaped precisely so they can
+            # ride along here.
+            "delegated": [
+                dataclasses.asdict(cs)
+                for cs in (getattr(self, "_delegated", None) or [])
+            ],
         }
         p = self._checkpoint_path
         try:
@@ -401,6 +412,36 @@ class _PersistenceMixin:
         self._turns        = data.get("turns", len(self._messages))
         self._total_tokens = data.get("total_tokens", 0)
         self.set_todos(normalize_todos(data.get("todos")))
+        self._restore_delegated(data.get("delegated"))
+
+    def _restore_delegated(self, raw) -> None:
+        """Rebuild the delegated-work pointers from a checkpoint.
+
+        The file is plain user-writable JSON, so each entry is filtered to the
+        dataclass's own fields and skipped if it does not fit, rather than
+        splatted in and trusted - the same posture normalize_todos takes.
+
+        NOTE ON IN-FLIGHT JOBS: a background sub-agent itself does NOT survive
+        here, and deliberately nothing pretends it does. Its thread dies with the
+        process, so a resumed session records no job id for it - there is no
+        orphaned reference that silently resolves to nothing. What survives is
+        what is genuinely durable: the branch its committed work sits on.
+        """
+        from ..delegated import DelegatedChangeSet
+        if not isinstance(raw, list):
+            return
+        fields = {f.name for f in dataclasses.fields(DelegatedChangeSet)}
+        restored = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                restored.append(DelegatedChangeSet(
+                    **{k: v for k, v in item.items() if k in fields}))
+            except Exception:
+                continue          # a malformed entry must not break the resume
+        if restored:
+            self._delegated = restored
 
     def _undo_one(self, entry: dict) -> tuple[str, bool]:
         """Revert a single undo-stack entry. Returns (description, ok)."""
