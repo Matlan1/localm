@@ -134,9 +134,20 @@ and `POST /v1/comfy/restart`).
 Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load. A handful of settings (the `rag_*` indexing paths,
-`net_allow_private`) widen a trust boundary and are hidden from, and refused
-for, a non-owner `config:write` key - only an `admin`-scoped key or the open-
-mode owner may read or change them.
+`net_allow_private`, and the `bugreport_upload_*` / `update_*` endpoints) widen
+a trust boundary and are hidden from, and refused for, a non-owner
+`config:write` key - only an `admin`-scoped key or the open-mode owner may read
+or change them.
+
+Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
+settings: this endpoint cannot validate what is inside them, and their own write
+surfaces enforce stronger permissions (`POST /v1/tts/config` and `POST
+/v1/media/config/{name}` require an owner for the fields that become a script
+URL, a shell command, or a render target; `POST /api/plugins/{name}/enable`
+requires `plugins:admin`). PATCH therefore refuses both to a non-owner
+`config:write` key, with a 403 naming the endpoint to use instead, so this
+general route cannot be used to bypass a specific one. Their values stay
+readable.
 
 ## Plugin management endpoints
 
