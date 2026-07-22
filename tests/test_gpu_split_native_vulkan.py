@@ -258,3 +258,99 @@ def test_split_load_uses_both_native_devices(vulkan_split_model_path, monkeypatc
         assert any(c.isalpha() for c in text), f"no words in split-load output: {text!r}"
     finally:
         llm.close()
+
+
+def test_auto_split_ratios_from_native_free_vram(
+        vulkan_split_model_path, monkeypatch, capfd, caplog):
+    """End-to-end oracle for the AUTO split distribution on the vulkan build:
+    with gpu_split_indices configured and NO ratios pinned, the parent-side
+    discover.resolve_auto_split_ratios() must read per-device free VRAM from
+    the NATIVE registry (the crash-isolated probe daemon - the only source in
+    ggml-vulkan's own index space, GPU-SPLIT-VKINDEX), and a load pinned with
+    those ratios (exactly what GgufBackend._load_native forwards through
+    GgufWorker/LlamaCpp) must place layers in that proportion - proving the
+    whole "query free vram from each card, compare and distribute" feature
+    against two genuinely distinct native devices, not mocks.
+
+    On the researched setup (a real ~16 GB GPU + lavapipe backed by more
+    system RAM) the free readings are genuinely asymmetric, so the resulting
+    layer split is visibly NOT the historical equal split - but the assertion
+    band is anchored to the ratios THIS run computed, not to any hardcoded
+    hardware expectation."""
+    indices = _split_indices()
+    assert len(indices) >= 2, (
+        "LOCALM_TEST_VULKAN_SPLIT_INDICES must name at least 2 device indices"
+    )
+    cfg = {"gpu_split_indices": indices, "gpu_split_ratios": None}
+    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
+
+    from localm import discover
+
+    with caplog.at_level("INFO"):
+        ratios = discover.resolve_auto_split_ratios(cfg)
+    assert ratios is not None and len(ratios) == len(indices), (
+        f"resolve_auto_split_ratios() declined on the vulkan build "
+        f"(got {ratios!r}) - the native probe daemon should have answered "
+        f"per-device free/total for devices {indices}. Check "
+        f"discover.native_gpu_devices() output and the daemon log."
+    )
+    assert all(r > 0 for r in ratios)
+    assert any("auto" in r.message and "split" in r.message
+               for r in caplog.records), (
+        "the auto distribution decision must be logged at INFO")
+    print(f"\n--- auto ratios computed from native free VRAM: "
+          f"{dict(zip(indices, [f'{r:.3f}' for r in ratios]))} ---")
+
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+    llm = LlamaCpp(
+        vulkan_split_model_path,
+        n_ctx=512,
+        n_gpu_layers=99,
+        verbose=True,                 # native per-layer placement to real fd 2
+        gpu_split_ratios=ratios,       # the parent-pinned auto distribution
+    )
+    try:
+        out = capfd.readouterr()
+        native_log = out.out + out.err
+        print("\n--- captured native load output ---\n" + native_log)
+
+        layer_devices = re.findall(r"dev\s*=\s*Vulkan(\d+)", native_log)
+        assert layer_devices, (
+            f"found no 'dev = Vulkan<n>' per-layer device-assignment lines in "
+            f"the native load log. Captured log:\n{native_log}"
+        )
+        seen = sorted(set(layer_devices))
+        assert len(seen) >= 2, (
+            f"expected the auto split to place layers on >= 2 native devices, "
+            f"all {len(layer_devices)} layers landed on {seen} only. "
+            f"Captured log:\n{native_log}"
+        )
+        # Each device's actual layer share must track the auto ratio this run
+        # computed. 0.15 is a generous band for llama.cpp's whole-layer
+        # rounding on a ~30-layer model (the 9:1 test above uses the same
+        # tolerance philosophy) - it distinguishes "the pinned auto ratios
+        # were honored" from "the equal split or llama.cpp's own fallback
+        # happened instead" without being brittle to rounding.
+        total = len(layer_devices)
+        for idx, ratio in zip(indices, ratios):
+            share = layer_devices.count(str(idx)) / total
+            assert abs(share - ratio) <= 0.15, (
+                f"device {idx}: actual layer share {share:.2f} deviates from "
+                f"the auto ratio {ratio:.2f} by more than 0.15 - the pinned "
+                f"auto distribution was not honored. Placement: "
+                f"{ {i: layer_devices.count(str(i)) for i in indices} } of "
+                f"{total} layers. Captured log:\n{native_log}"
+            )
+
+        # Behavioral half: a real forward pass across the auto split still
+        # produces coherent text.
+        result = llm.create_chat_completion(
+            [{"role": "user", "content": "In one short sentence, what color is grass?"}],
+            max_tokens=40, temperature=0.0, seed=1, stream=False,
+        )
+        text = result["choices"][0]["message"]["content"].strip()
+        assert len(text) >= 10, f"suspiciously short auto-split output: {text!r}"
+        assert any(c.isalpha() for c in text), f"no words in auto-split output: {text!r}"
+    finally:
+        llm.close()

@@ -707,6 +707,11 @@ class VramSizingMixin:
         COMBINED free VRAM (see _split_free_total_bytes): weights and per-layer
         KV both spread across the split, so the single main-GPU reading would
         collapse the ceiling to n_ctx on exactly the box the split exists for.
+        The embedder reservation composes with a split the same way: it is
+        deducted from that combined budget, because a GPU-placed embedder is
+        itself tensor-split across the same devices (apply_gpu_split is shared
+        by both load paths), so its footprint draws on the combined pool, not
+        one card's.
         """
         free, _split_total, _split_devices = self._split_free_total_bytes()
         if free is None:

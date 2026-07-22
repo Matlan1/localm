@@ -99,7 +99,9 @@ def coordinated(monkeypatch):
     # 2 GB free; incoming model is 10 GB * 1.2 + 1 GB headroom -> never fits.
     monkeypatch.setattr("localm.discover.vram_capacity",
                         probe_double({"free": 2 * GB, "total": 16 * GB}))
-    monkeypatch.setattr("localm.discover.gpu_split_shortfall", lambda need: [])
+    monkeypatch.setattr("localm.discover.gpu_split_shortfall",
+                        lambda need, **k: ([], False)
+                        if k.get("return_shares_adaptive") else [])
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
                         lambda free_fn, before_bytes=None: (0, before_bytes))
