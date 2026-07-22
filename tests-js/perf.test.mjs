@@ -152,6 +152,23 @@ test("two detected GPUs with a configured split: the checkbox row shows, both bo
   assert.ok(boxes.every((cb) => cb.checked), "both checkboxes pre-checked from gpu_split_indices");
 });
 
+test("the split row explains the automatic free-VRAM share sizing", () => {
+  // Since the auto-split feature, each checked card's share follows its free
+  // VRAM at load time (equal split only as the unmeasurable fallback or via a
+  // pinned gpu_split_ratios). A user staring at unequal cards must be able to
+  // tell the small/busy one will not be handed an oversized equal share - the
+  // row's own copy is the only place that can say so (gpu_split_ratios is a
+  // HIDDEN, config-file-only field whose schema description never renders in
+  // the GUI). Loads the REAL index.html via the harness, so this pins the
+  // shipped copy, not a fixture.
+  const { window } = loadApp({ fetchImpl: makeFetch([], {}) });
+  const row = window.document.getElementById("perf-gpu-split-row");
+  assert.match(row.textContent, /free VRAM/,
+    "the split row must mention that shares follow free VRAM");
+  assert.match(row.textContent, /gpu_split_ratios/,
+    "the split row must name the config key that pins fixed shares instead");
+});
+
 test("a single detected GPU keeps the split checkbox row hidden", async () => {
   const calls = [];
   const gpus = [{ index: 0, name: "Solo GPU", total: 16 * GIB, free: 12 * GIB }];
