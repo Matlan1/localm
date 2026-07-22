@@ -540,9 +540,16 @@
         <h2>Settings</h2>
         <div class="sub">Stored in <code>config.json</code> in your data directory. Pick a section on the left;
         each one saves on its own. Engine values apply on the next model load.</div>
+        <!-- Searches every group at once, so a setting can be found without
+             knowing which of the seven sections it lives in. -->
+        <input type="search" id="settings-filter" class="settings-filter"
+               placeholder="Search all settings" aria-label="Search all settings"
+               spellcheck="false" autocomplete="off">
         <div class="settings-layout">
           <nav id="settings-nav" class="settings-nav" aria-label="Settings sections"></nav>
           <div id="settings-content" class="settings-content">
+            <!-- Shown only when a search matches nothing (filled by applySettingsFilter). -->
+            <div id="settings-filter-empty" class="sub settings-filter-empty" hidden></div>
             <!-- Schema-driven per-plugin config sections are injected here, each
                  with its own heading + Save button (built by refreshSettingsPage). -->
             <div id="config-form"></div>

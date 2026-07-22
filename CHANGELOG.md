@@ -26,6 +26,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   config.json.
 
 ### Added
+- **Search the Settings page.** A box above the section nav filters every
+  group at once, matching a setting's label, its config key, or its help
+  text, so a setting can be found without knowing which of the seven
+  sections holds it. Matches keep their section heading, so it is still
+  clear what a setting belongs to, and the rows that have no config key
+  behind them (Main GPU, Split across GPUs, the logo style picker, the key
+  presets) are searchable by their own text. A control that is not
+  currently offered - the multi-GPU rows on a single-GPU machine, the keys
+  card for a non-owner key - is deliberately not findable. Clearing the box
+  restores the normal grouped view.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
