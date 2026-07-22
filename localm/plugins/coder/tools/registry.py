@@ -43,6 +43,7 @@ from .env import tool_read_env
 from .web import tool_fetch_url, tool_web_search
 from .agents import tool_spawn_agent
 from .media import tool_generate_image
+from .tasks import tool_read_todos, tool_set_todos
 
 @dataclass
 class ToolDef:
@@ -72,6 +73,12 @@ SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "patch_file", "search_replace",
     "edit_notebook_cell",
     "git_status", "git_diff", "git_log",
+    # The task list is agent state, not a capability: audited against this
+    # allowlist's own criteria, it spawns no process, runs no code, reaches no
+    # network, reads no environment, re-enters no agent, and touches no project
+    # file. Its only disk trace is a key in the checkpoint the session already
+    # writes, so a restricted key gains no reach it did not have.
+    "set_todos", "read_todos",
 })
 # edit_files is on the list deliberately: it is edit_file's exact-string
 # replacement applied to N files in one call, each path put through the same
@@ -444,5 +451,41 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "dry_run":     {"type": "bool",   "description": "Preview without modifying (default: false)", "required": False},
         },
         destructive=True,
+    ),
+    # The task list (tools/tasks.py). NOT destructive, deliberately: it writes no
+    # user file, so a confirmation prompt for it would be noise, and under
+    # auto_approve=off / an unattended run the fail-closed branch in
+    # _execute_tool would DENY the model its own bookkeeping. The flag's other
+    # meaning - "run alone, never in a parallel batch" (agent/loop.py) - is not
+    # needed either: set_todos replaces the whole list under the agent's lock,
+    # so two calls in one batch are last-writer-wins with no torn state, and
+    # read_todos only reads. Compare spawn_agent, which IS destructive because
+    # concurrent children in one cwd break its own invariant.
+    "set_todos": ToolDef(
+        name="set_todos",
+        fn=tool_set_todos,
+        description=(
+            "Record your task list for this session. Pass the COMPLETE list every "
+            "time - it replaces the previous one. Write one task per item, marked "
+            "'[ ]' not started, '[>]' in progress (keep at most one), '[x]' done. "
+            "Use it for any task with more than a couple of steps, and update it as "
+            "you finish each one: this list survives context compaction and a "
+            "pause/resume, the conversation does not."
+        ),
+        params={
+            "items": {"type": "array",
+                      "description": "The complete task list, one task per entry, e.g. "
+                                     '["[x] read the failing test", "[>] fix the parser", "[ ] run the suite"]',
+                      "required": True},
+        },
+    ),
+    "read_todos": ToolDef(
+        name="read_todos",
+        fn=tool_read_todos,
+        description=(
+            "Read back the task list you wrote with set_todos. Use it after "
+            "resuming a session, or whenever you are unsure what is left to do."
+        ),
+        params={},
     ),
 }

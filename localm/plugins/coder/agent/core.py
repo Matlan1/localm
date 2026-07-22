@@ -191,6 +191,12 @@ class Agent(
         # while the loop runs, delivered at the next turn boundary.
         self._queued_messages: list[str] = []
         self._queue_lock = threading.Lock()
+        # The model's own task list (tools/tasks.py). Held HERE, not in
+        # _messages, so compaction cannot summarise the plan away, and written
+        # into the resume checkpoint so it survives pause/resume. The lock guards
+        # it against the parallel non-destructive tool batch (loop.py).
+        self._todos: list[dict] = []
+        self._todos_lock = threading.Lock()
         self._model_name: str = getattr(backend, "model_id", "")
         # Family-detection identity: enrich the (possibly opaque) alias with its
         # registry source (e.g. "hf:google/gemma-4-4b") so family-specific prompt
@@ -472,6 +478,19 @@ class Agent(
     def total_tokens(self) -> int:
         """Cumulative token count across all LLM calls in this session (server estimate)."""
         return self._total_tokens
+
+    def get_todos(self) -> list[dict]:
+        """The model's current task list, as a copy (see :attr:`_todos`)."""
+        with self._todos_lock:
+            return [dict(t) for t in self._todos]
+
+    def set_todos(self, todos: list[dict]) -> None:
+        """Replace the task list. Copies in, so the caller cannot mutate the
+        stored list afterwards; the whole-list swap under the lock is what makes
+        two set_todos calls in one parallel batch last-writer-wins instead of
+        torn."""
+        with self._todos_lock:
+            self._todos = [dict(t) for t in todos]
 
     def _emit(self, event_type: str, **data) -> None:
         """Send a structured event to the registered sink. Never raises."""

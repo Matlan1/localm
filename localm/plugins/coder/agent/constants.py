@@ -161,6 +161,10 @@ _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
 # (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
 _NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})
 
+# Task-list tools (tools/tasks.py). They read and write THIS session's todo
+# state, so the dispatcher injects the Agent as a hidden `_session` arg.
+_TODO_TOOLS: frozenset[str] = frozenset({"set_todos", "read_todos"})
+
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 

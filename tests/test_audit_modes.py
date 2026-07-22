@@ -219,13 +219,18 @@ class TestServerModes:
 
 class TestCheckpointPrivacyGate:
     def _agent(self, tmp_path, mode):
+        import threading
         from localm.plugins.coder.agent import Agent
-        agent = Agent.__new__(Agent)
+        agent = Agent.__new__(Agent)     # deliberately minimal: __init__ skipped
         agent.mode = mode
         agent.cwd = tmp_path
         agent._turns = 1
         agent._total_tokens = 10
         agent._messages = [{"role": "user", "content": "secret stuff"}]
+        # The checkpoint also carries the model's task list (B2), so this
+        # hand-built agent needs the state __init__ would have given it.
+        agent._todos = [{"text": "secret plan step", "status": "in_progress"}]
+        agent._todos_lock = threading.Lock()
         return agent
 
     def test_privacy_mode_writes_no_checkpoint(self, tmp_path, monkeypatch):
@@ -233,7 +238,8 @@ class TestCheckpointPrivacyGate:
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
         agent = self._agent(tmp_path, SessionMode.PRIVACY)
         agent.save_checkpoint()
-        # Nothing in the project tree, nothing under HOME (CODER-4).
+        # Nothing in the project tree, nothing under HOME (CODER-4). The task
+        # list rides in the same file, so it is covered by the same promise (B2).
         assert not (tmp_path / ".localcoder" / "checkpoint.json").exists()
         assert not (tmp_path / "home" / "checkpoints").exists()
 
@@ -248,7 +254,9 @@ class TestCheckpointPrivacyGate:
         path = agent._checkpoint_path
         assert (tmp_path / "home") in path.parents           # under HOME/checkpoints
         assert path.is_file()
-        assert "secret stuff" in path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        assert "secret stuff" in text
+        assert "secret plan step" in text          # the task list rides along (B2)
 
 
 # ------------------------------------------------------------------ #
