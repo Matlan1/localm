@@ -342,11 +342,17 @@ def test_agent_prompt_is_bounded_and_user_is_warned(tmp_path):
     (tmp_path / "LOCALCODER.md").write_text(raw, encoding="utf-8")
 
     agent, warn = _make_agent(tmp_path)
+    prompt = agent._system_prompt
 
-    # The whole file did NOT reach the prompt...
-    assert len(agent._system_prompt) < len(raw)
+    # The whole file did NOT reach the prompt - only the capped version did.
+    # (Comparing len(prompt) to len(raw) would be wrong: the prompt also carries
+    # the ~7650-char base instructions, so it exceeds the memory file either way.)
+    assert raw.strip() not in prompt
+    injected = load_memory(tmp_path)
+    assert injected in prompt
+    assert len(injected) <= _MAX_MEMORY_CHARS + 200
     # ...the model is told the memory it is reading is partial...
-    assert "characters of project memory omitted" in agent._system_prompt
+    assert "characters of project memory omitted" in prompt
     # ...and the human is told which file to fix.
     assert "omitted" in _memory_warnings(warn)
 
