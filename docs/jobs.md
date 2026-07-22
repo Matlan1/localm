@@ -4,7 +4,8 @@
 > routes, and the in-app scheduler appear only when it is installed and enabled
 > (`localm plugin install jobs`). The plugin has no pip extra.
 
-A job runs a chat prompt, a coder task, or a memory-synthesis pass on a
+A job runs a chat prompt, a coder task, a memory-synthesis pass, or a knowledge
+collection re-sync on a
 repeating schedule: a fixed interval or a 5-field cron expression. An in-app
 scheduler wakes periodically while a `localm gui` or `localm serve` process
 is up, runs every enabled job that is due, and records each run's result so
@@ -47,6 +48,9 @@ localm job add nightly-tests \
   --prompt "Run the test suite and summarise any failures." \
   --cron "0 2 * * *"
 
+# A knowledge re-sync: keep an indexed folder current, nightly at 03:00
+localm job add sync-manuals --rag --collection manuals --cron "0 3 * * *"
+
 localm job list                 # id, name, schedule, enabled state, last status
 localm job run <job_id>         # run once now and record the result
 localm job disable <job_id>     # keep it but stop it firing
@@ -60,6 +64,7 @@ localm job remove <job_id>      # delete the job and its stored results
 |---|---|
 | `--prompt` | The prompt to run on schedule (required for chat/coder jobs; omit for `--memory`). |
 | `--memory` | Synthesise durable facts from recent sessions into the assistant memory; needs no `--prompt`. |
+| `--rag --collection NAME` | Re-sync a knowledge collection against the folders it was indexed from; needs no `--prompt`. See [Keeping an indexed folder current](#keeping-an-indexed-folder-current). |
 | `--cron "M H Dom Month Dow"` | A 5-field cron schedule: minute, hour, day-of-month, month, day-of-week (0 = Sunday). Mutually exclusive with `--every`. |
 | `--every SECONDS` | Interval schedule in seconds. Defaults to hourly if neither schedule flag is given. |
 | `--coder` | Run a coder agent task instead of a chat prompt. |
@@ -72,9 +77,9 @@ localm job remove <job_id>      # delete the job and its stored results
 ## From the GUI
 
 The **Jobs** tab (visible once the plugin is enabled) lists every job with its
-schedule and last result. From there you can create a job (chat or coder,
-interval or cron), enable or disable it, edit it, run it now, and browse each
-job's past run results. See [gui.md](gui.md).
+schedule and last result. From there you can create a job (chat, coder, or a
+knowledge re-sync, interval or cron), enable or disable it, edit it, run it now,
+and browse each job's past run results. See [gui.md](gui.md).
 
 ## HTTP API
 
@@ -97,13 +102,59 @@ even exists.
 | `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress - jobs never stack model loads. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
-A create/update body carries: `name`, `task_kind` (`chat`, `coder`, or
-`memory` - the memory kind mirrors the CLI's `--memory` flag and needs no
-`prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
+A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
+`rag` - the memory and rag kinds mirror the CLI's `--memory` / `--rag` flags and
+need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 (seconds as an integer, or a 5-field cron string), and the optional `model`,
-`cwd`, `scope`, `allow_shell`, and `enabled` fields. `allow_shell` (coder jobs
-only) is privileged: setting it requires the owner key or a `coder:full` key,
-so a plain `jobs`-scoped client cannot schedule a shell-capable job.
+`cwd`, `scope`, `collection`, `allow_shell`, and `enabled` fields.
+`allow_shell` (coder jobs only) is privileged: setting it requires the owner key
+or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
+shell-capable job. `collection` is required for a `rag` job and refused at
+creation if it is not a valid collection name.
+
+## Keeping an indexed folder current
+
+A knowledge collection is indexed once, from files and folders you name. Files
+added to (or deleted from) an indexed folder afterwards are not noticed on their
+own: there is no filesystem watcher, deliberately, because a watcher daemon
+would break localm's self-contained design. A **`rag` job** is the supported way
+to keep the index current.
+
+```bash
+localm job add sync-manuals --rag --collection manuals --cron "0 3 * * *"
+localm rag resync manuals        # or run it by hand, any time
+```
+
+Each run re-walks the folders the collection was indexed from and re-indexes
+incrementally: a new file is added, a changed file is re-indexed, and an
+unchanged file is skipped by content hash, so a nightly run over a large folder
+costs a read per file and nothing more. It loads no chat model.
+
+**A deleted file is flagged, not removed.** If a document's source file has
+disappeared, the re-sync marks that entry `missing` and reports it; the document
+stays in the index and stays searchable, and the flag clears by itself if the
+file comes back. This is deliberate: a moved file, an unplugged drive, or a
+half-finished cloud sync must not be able to silently delete part of your index
+(the model registry treats a missing model file the same way). Remove such
+entries when you are sure, with `localm rag resync NAME --prune-missing` or by
+removing the document from the Knowledge page.
+
+**An unreachable folder is skipped whole.** If an indexed folder is not
+available at run time (deleted, unmounted, or replaced by a file), the run
+reports it and touches nothing underneath it - no indexing, no flagging, no
+pruning.
+
+**Confinement still applies.** A scheduled re-sync runs under the same allowed
+or denied folder policy as an interactive add (Settings > Knowledge), including
+the always-refused credential folders. A folder that was legal when it was
+indexed but is outside the policy now is skipped and reported, never indexed.
+Secret-looking files dropped into an indexed folder are filtered exactly as they
+are on a normal add.
+
+Embeddings: a re-sync indexes new documents with the configured embedding model
+when one is available. If it is not, the new documents are indexed lexical-only,
+and the run says so explicitly when that would dilute a collection that has
+semantic search.
 
 ## How scheduling works
 

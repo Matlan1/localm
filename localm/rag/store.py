@@ -4,10 +4,19 @@ Persistent document collections ("knowledge bases").
 
 Layout - one directory per collection under ``<data dir>/rag/``:
 
-    rag/<name>/meta.json      {"name", "created", "docs": {path: {mtime, size, chunks}}}
+    rag/<name>/meta.json      {"name", "created",
+                               "docs": {path: {mtime, size, chunks}},
+                               "roots": {folder: {"added": ts}}}
     rag/<name>/chunks.jsonl   one chunk per line: {"source", "pos", "text"}
     rag/<name>/vectors.json   optional: {"dim", "vectors": [[...]|null, ...]}
                               aligned with chunks.jsonl line order
+
+``roots`` records the FOLDERS that were indexed, alongside the per-file ``docs``
+entries the folder walk produced. Without it an index can only ever be refreshed
+over the files it already knows, so a file ADDED to (or DELETED from) an indexed
+folder after the fact is invisible - which is exactly the drift a folder re-sync
+exists to catch. ``resync()`` re-walks these roots through the ordinary
+incremental path.
 
 Collections are explicit user data (like generated images): indexing writes
 to disk in every session mode. Rewrites are whole-file + atomic rename -
@@ -414,13 +423,24 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
         path=rp, reason="outside_allowed")
 
 
-def _check_name(name: str) -> str:
+def check_collection_name(name: str) -> str:
+    """Validate a collection name, returning it, or raise ``ValueError``.
+
+    Public because callers OUTSIDE this package need the same rule before a
+    collection is touched: the jobs store validates a scheduled re-sync job's
+    ``collection`` at definition time, so a typo is rejected when the job is
+    created rather than failing silently on every unattended tick.
+    """
     if not _NAME_RE.match(name or ""):
         raise ValueError(
             "Collection names must be 1-64 letters, digits, '-' or '_'")
     if name.lower() in _RESERVED_NAMES:
         raise ValueError(f"'{name}' is a reserved device name and cannot be used")
     return name
+
+
+# Internal alias kept for the in-module call sites.
+_check_name = check_collection_name
 
 
 def collection_names(base: Optional[Path] = None) -> list[str]:
@@ -631,6 +651,19 @@ class Collection:
             self._vec_dim = None
         self._bm25 = None
 
+    def _save_meta(self) -> None:
+        """Persist meta.json ONLY, leaving chunks.jsonl / vectors.json alone.
+
+        For a change that touches nothing but metadata (a newly recorded root, a
+        missing/restored flag), this is both sufficient and strictly safer than a
+        full ``_save()``: ``_save`` DELETES vectors.json whenever
+        ``self._vectors`` is None, and ``_load`` sets it to None on purpose when
+        it finds a corrupt or stale vector sidecar (``vector_degrade_reason``).
+        A metadata-only write must not turn that recoverable state into real data
+        loss. Chunks are untouched, so the cached BM25 index stays valid too."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+
     def _atomic_write(self, filename: str, content: str) -> None:
         # storekit.atomic_write: unique temp name + Windows PermissionError
         # retry (an AV real-time scan / Search Indexer can transiently hold a
@@ -680,6 +713,57 @@ class Collection:
             kept.append(p)
         return kept
 
+    def _record_roots(self, paths: list) -> bool:
+        """Persist the FOLDER roots among *paths*. Returns True if anything new
+        was recorded.
+
+        Only directories are recorded. An individually added FILE is already
+        tracked by its own ``docs`` entry, which ``resync`` re-checks directly;
+        recording its parent folder would silently widen the index to every
+        sibling file the user never asked for.
+
+        Called from ``_add_paths_locked`` AFTER the confinement check, so a folder
+        the policy refuses never becomes a persisted root that a later unattended
+        re-sync would walk.
+        """
+        roots = self._meta.setdefault("roots", {})
+        if not isinstance(roots, dict):
+            # A hand-edited / externally written meta.json could hold anything
+            # here. Do not crash and do not silently keep using the bad value:
+            # replace it and say so, the same shape as the other meta guards.
+            _log.warning("RAG collection %r: meta.json 'roots' was not an object "
+                         "(%s); starting a fresh roots map", self.name,
+                         type(roots).__name__)
+            roots = {}
+            self._meta["roots"] = roots
+            self.corrupt = True
+        changed = False
+        for p in paths:
+            try:
+                rp = Path(p).expanduser()
+                if not rp.is_dir():
+                    continue
+                key = str(rp.resolve())
+            except (OSError, ValueError) as e:
+                # An unresolvable path was already skipped by _expand; note why
+                # rather than dropping it without a trace (AGENTS rule 5).
+                _log.debug("rag: could not record %s as an index root: %s", p, e)
+                continue
+            if key not in roots:
+                roots[key] = {"added": time.time()}
+                changed = True
+        return changed
+
+    def roots(self) -> list:
+        """The folders indexed into this collection, resolved and sorted.
+
+        These are what ``resync`` re-walks. Empty for a collection built only
+        from individually named files or uploads, and for one whose meta.json was
+        corrupt (the roots cannot be reconstructed from chunk sources the way the
+        docs map can - re-add the folder to restore them)."""
+        roots = self._meta.get("roots")
+        return sorted(roots) if isinstance(roots, dict) else []
+
     def add_paths(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
                   classify_fn: Optional[ClassifyFn] = None,
                   describe_image_fn: Optional[DescribeImageFn] = None,
@@ -722,8 +806,15 @@ class Collection:
         if policy is not None:
             for p in paths:
                 confine_index_path(p, policy)   # raises ValueError
+        # Persist the FOLDER roots now that confinement has accepted them, so a
+        # later re-sync can re-walk them (module docstring). Done before the
+        # expand so an add that finds no indexable file still records the folder -
+        # an empty folder that gets its first document tomorrow must be picked up.
+        roots_changed = self._record_roots(paths)
         files = self._expand(paths, policy)
         if not files:
+            if roots_changed:
+                self._save_meta()   # metadata only: this add indexed nothing
             return {"added": 0, "updated": 0, "skipped": 0, "failed": [],
                     "chunks": len(self._chunks)}
 
@@ -850,6 +941,233 @@ class Collection:
         self._save()
         return {"added": added, "updated": updated, "skipped": skipped,
                 "failed": failed, "chunks": len(self._chunks)}
+
+    # ------------------------------------------------------------- #
+    #  Folder re-sync                                                #
+    # ------------------------------------------------------------- #
+
+    def resync(self, *, embed_fn: Optional[EmbedFn] = None,
+               classify_fn: Optional[ClassifyFn] = None,
+               describe_image_fn: Optional[DescribeImageFn] = None,
+               on_progress: Optional[ProgressFn] = None,
+               policy: Optional[dict] = None,
+               force: bool = False,
+               prune_missing: bool = False) -> dict:
+        """Bring the index back in line with the folders it was built from.
+
+        Re-walks every persisted root through the ORDINARY incremental path
+        (``add_paths``): a file ADDED to an indexed folder since the last run is
+        picked up, a CHANGED file is re-indexed, an unchanged file is skipped by
+        content hash. Individually indexed files are re-checked too. This is what
+        a scheduled ``rag`` job calls; it is also ``localm rag resync``.
+
+        DELETION SEMANTICS (deliberate, and the reason this is not just
+        ``add_paths(roots)``). A document whose file has VANISHED is FLAGGED
+        (``missing: True`` + ``missing_since``), not dropped: its chunks stay
+        indexed and stay searchable. This mirrors how the model registry treats a
+        model file that disappears (``model_manager/registry.py`` sync_models_dir:
+        "a moved file, unplugged drive, sync hiccup is not silently forgotten") -
+        an unattended job that ran while a network share was mounting must not be
+        able to destroy an index. The flag CLEARS by itself when the file comes
+        back. Actual deletion happens only when the caller passes
+        ``prune_missing=True``.
+
+        Two guards keep a transient condition from being read as deletion at all:
+        a root that is not currently an available directory (deleted, unmounted,
+        unreadable, or replaced by a file) is REPORTED and skipped whole, and
+        every document underneath it is left completely untouched - not indexed,
+        not flagged, not pruned. The same holds for a root the current
+        ``policy`` refuses.
+
+        *policy* is applied exactly as in ``add_paths``: a scheduled re-sync must
+        never index a path an interactive add would refuse, including a root that
+        was legal when it was added but is outside the owner's allowed folders
+        now. Callers that run unattended (the jobs runner) always pass one.
+
+        Returns the ``add_paths`` counters plus ``missing`` (newly flagged),
+        ``missing_total``, ``restored``, ``pruned``, ``roots``,
+        ``unavailable_roots`` and ``blocked_roots`` (each ``{root, reason}``), so
+        the caller can report honestly what the run did and did NOT do.
+        """
+        with _collection_lock(self.name):
+            self._load()
+            return self._resync_locked(
+                embed_fn=embed_fn, classify_fn=classify_fn,
+                describe_image_fn=describe_image_fn, on_progress=on_progress,
+                policy=policy, force=force, prune_missing=prune_missing)
+
+    def _resync_locked(self, *, embed_fn, classify_fn, describe_image_fn,
+                       on_progress, policy, force, prune_missing) -> dict:
+        """The resync body. MUST run under _collection_lock after _load()."""
+        say = on_progress or (lambda _t: None)
+        available, unavailable, blocked = self._partition_roots(policy, say)
+        # Roots we could not judge. Nothing under them is indexed, flagged, or
+        # pruned this run - that is the transient-condition guard.
+        skipped_roots = [Path(r["root"]) for r in (unavailable + blocked)]
+
+        targets: list = list(available)
+        targets.extend(self._resyncable_files(skipped_roots, policy, say))
+
+        # Snapshot the flagged-missing set BEFORE indexing. Re-indexing a
+        # document REPLACES its docs entry wholesale (_add_paths_locked), which
+        # drops the flag as a side effect - so a file that came back CHANGED
+        # would be silently un-flagged and never reported as restored. The
+        # snapshot is what makes "this came back" observable either way.
+        docs_before = self._meta.get("docs", {})
+        was_missing = {k for k, e in docs_before.items()
+                       if isinstance(e, dict) and e.get("missing")}
+
+        if targets:
+            result = self._add_paths_locked(
+                targets, embed_fn=embed_fn, classify_fn=classify_fn,
+                describe_image_fn=describe_image_fn, on_progress=on_progress,
+                policy=policy, force=force)
+        else:
+            result = {"added": 0, "updated": 0, "skipped": 0, "failed": [],
+                      "chunks": len(self._chunks)}
+
+        missing, restored, pruned = self._reconcile_missing(
+            skipped_roots, was_missing=was_missing,
+            prune_missing=prune_missing, say=say)
+        if pruned:
+            self._save()            # chunks and vectors changed
+        elif missing or restored:
+            self._save_meta()       # only flags changed - see _save_meta
+
+        docs = self._meta.get("docs", {})
+        result.update({
+            # Re-read AFTER the reconcile: pruning drops chunks, so the count
+            # _add_paths_locked returned is stale by then.
+            "chunks": len(self._chunks),
+            "roots": self.roots(),
+            "unavailable_roots": unavailable,
+            "blocked_roots": blocked,
+            "missing": missing,
+            "restored": restored,
+            "pruned": pruned,
+            "missing_total": sum(
+                1 for e in docs.values()
+                if isinstance(e, dict) and e.get("missing")),
+        })
+        return result
+
+    def _partition_roots(self, policy: Optional[dict], say: ProgressFn):
+        """Split the persisted roots into (available, unavailable, blocked).
+
+        Availability is checked FIRST and reported, never assumed: an
+        unreachable root is the single most likely reason a re-sync would
+        otherwise conclude that every file under it was deleted."""
+        available: list = []
+        unavailable: list = []
+        blocked: list = []
+        for raw in self.roots():
+            root = Path(raw)
+            if not root.is_dir():
+                # is_dir() is False for gone, unreadable, AND replaced-by-a-file.
+                # They differ in cause but not in the safe response (skip whole,
+                # touch nothing), so branch only to report the right reason.
+                reason = ("the indexed folder is now a file, not a directory"
+                          if root.exists() else
+                          "the indexed folder is not available (deleted, "
+                          "unmounted, or unreadable)")
+                unavailable.append({"root": raw, "reason": reason})
+                say(f"skipping {raw}: {reason} - nothing under it was changed")
+                continue
+            if policy is not None:
+                try:
+                    confine_index_path(root, policy)
+                except ValueError as e:
+                    blocked.append({"root": raw, "reason": str(e)})
+                    say(f"skipping {raw}: {e}")
+                    continue
+            available.append(root)
+        return available, unavailable, blocked
+
+    def _resyncable_files(self, skipped_roots: list, policy: Optional[dict],
+                          say: ProgressFn) -> list:
+        """Existing document source files that are safe to re-index this run.
+
+        Uploads have no source file (``upload:`` keys) and are skipped. So is
+        anything under a skipped root, and anything the current policy refuses -
+        the latter must be filtered HERE rather than handed to
+        ``_add_paths_locked``, whose top-level confinement check raises and would
+        abort the entire re-sync over one now-out-of-bounds file."""
+        out: list = []
+        for key in sorted(self._meta.get("docs", {})):
+            if str(key).startswith("upload:"):
+                continue
+            p = Path(key)
+            if any(_path_within(p, r) for r in skipped_roots):
+                continue
+            try:
+                if not p.is_file():
+                    continue        # gone: the missing pass decides what to do
+            except OSError:
+                continue
+            if policy is not None:
+                try:
+                    confine_index_path(p, policy)
+                except ValueError as e:
+                    say(f"skipping {key}: {e}")
+                    continue
+            out.append(p)
+        return out
+
+    def _reconcile_missing(self, skipped_roots: list, *, was_missing: set,
+                           prune_missing: bool, say: ProgressFn):
+        """Flag documents whose file has vanished, clear the flag on ones that
+        came back, and prune only when explicitly asked. Returns
+        (newly_missing, restored, pruned) as lists of doc keys.
+
+        *was_missing* is the flagged set as it stood BEFORE this run indexed
+        anything: a document that came back CHANGED has already been re-indexed
+        (which rewrites its entry and drops the flag), so the live entry can no
+        longer tell us it was ever missing.
+
+        Mutates ``self._meta`` / ``self._chunks`` in place; the caller saves."""
+        docs = self._meta.get("docs", {})
+        newly_missing: list = []
+        restored: list = []
+        pruned: list = []
+        for key in sorted(docs):
+            entry = docs.get(key)
+            if not isinstance(entry, dict) or str(key).startswith("upload:"):
+                continue
+            p = Path(key)
+            if any(_path_within(p, r) for r in skipped_roots):
+                continue        # unreachable root: no verdict, no change
+            try:
+                present = p.exists()
+            except (OSError, ValueError):
+                # We could not even ask. Treat it as present: the whole point of
+                # this pass is that an unanswerable question must never be
+                # resolved in the destructive direction.
+                present = True
+            if present:
+                entry.pop("missing", None)
+                entry.pop("missing_since", None)
+                if key in was_missing:
+                    restored.append(key)
+                    say(f"back: {key}")
+                continue
+            if prune_missing:
+                pruned.append(key)
+            elif not entry.get("missing"):
+                entry["missing"] = True
+                entry["missing_since"] = time.time()
+                newly_missing.append(key)
+                say(f"missing: {key} (kept in the index, flagged)")
+        if pruned:
+            drop = set(pruned)
+            keep = [i for i, c in enumerate(self._chunks)
+                    if c.get("source") not in drop]
+            self._chunks = [self._chunks[i] for i in keep]
+            if self._vectors is not None:
+                self._vectors = [self._vectors[i] for i in keep]
+            for key in pruned:
+                docs.pop(key, None)
+                say(f"pruned: {key} (file is gone)")
+        return newly_missing, restored, pruned
 
     def add_uploads(self, uploads: list, *, embed_fn: Optional[EmbedFn] = None,
                     classify_fn: Optional[ClassifyFn] = None,
@@ -1110,10 +1428,19 @@ class Collection:
 
     def stats(self) -> dict:
         present = [v for v in (self._vectors or []) if v]
+        docs = self._meta.get("docs", {})
         return {
             "name": self.name,
             "created": self._meta.get("created"),
-            "n_docs": len(self._meta.get("docs", {})),
+            "n_docs": len(docs),
+            # Indexed documents whose source file was gone at the last resync.
+            # They are still counted in n_docs and still searchable - the flag
+            # says the index is ahead of the disk, it does not remove anything
+            # (see resync's deletion semantics). Reported so a stale index is
+            # visible instead of quietly drifting (AGENTS rule 5).
+            "n_missing": sum(1 for e in docs.values()
+                             if isinstance(e, dict) and e.get("missing")),
+            "n_roots": len(self.roots()),
             "n_chunks": len(self._chunks),
             # "has vectors" = whether query() will actually blend embeddings: the
             # same >=80% coverage threshold _vector_scores uses, NOT "every chunk

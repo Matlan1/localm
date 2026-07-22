@@ -31,6 +31,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and how it was decided - for example "Split: GPU 0 33% · GPU 1 67% (by
   free VRAM)", or "(pinned)" for manual ratios and "(equal)" when free VRAM
   could not be measured. Single-GPU setups see no change.
+- **Scheduled knowledge re-sync: an indexed folder can now stay current on its
+  own.** Indexing a folder into a collection records the folder itself, not
+  just the files it happened to hold, so localm can re-walk it later.
+  `localm rag resync NAME` does that by hand, and a new `rag` job kind puts it
+  on a schedule -
+  `localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"`, or the
+  Jobs tab's new "rag" task. A run re-indexes incrementally (new files added,
+  changed files re-indexed, unchanged files skipped by content hash) and loads
+  no chat model. A document whose file has vanished is FLAGGED, not deleted:
+  its chunks stay searchable, the flag clears by itself if the file comes back,
+  and only `--prune-missing` actually removes it - so a moved file, an
+  unplugged drive, or a half-finished cloud sync can never silently delete part
+  of an index. A folder that is unreachable at run time is reported and skipped
+  whole, with nothing under it indexed, flagged, or pruned. Scheduled runs
+  apply the same allowed/denied folder policy as an interactive add, so a
+  folder that has since fallen outside it is skipped and reported rather than
+  indexed. There is still no filesystem watcher, deliberately: a watcher daemon
+  would break the self-contained design.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
@@ -64,6 +82,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   background server for a caller without a terminal (an MCP client, CI, a
   script), the server's output is now captured and its actual error shown on
   failure, instead of opening a console window nobody can look at.
+- **Creating a memory job over the HTTP API no longer needs a dummy prompt.**
+  The docs said the `memory` task kind needs no prompt, and the CLI's
+  `--memory` flag honoured that, but `POST /api/jobs` still rejected a body
+  without a `prompt` field. The prompt requirement now lives in one place (the
+  job definition), which accepts a promptless `memory` or `rag` job and still
+  refuses a promptless chat or coder one.
 - **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
   long conversation grows the context window mid-generation, the model worker
   decides whether the grown KV cache still fits in VRAM or must move to system
