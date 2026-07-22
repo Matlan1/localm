@@ -135,9 +135,9 @@ def render_footer(items: list[DelegatedChangeSet]) -> str:
 def record(agent, changeset: DelegatedChangeSet) -> None:
     """Attach *changeset* to *agent*'s delegated list.
 
-    The list is created on first use rather than in ``Agent.__init__`` so this
-    feature does not edit agent/core.py, which a separate in-flight change is
-    already modifying. Promote it to ``__init__`` once both have landed.
+    ``Agent.__init__`` creates the list, but this still tolerates its absence:
+    the parent here is whatever object the tool was handed, and the test doubles
+    that stand in for an Agent do not inherit its ``__init__``.
     """
     existing = getattr(agent, "_delegated", None)
     if existing is None:

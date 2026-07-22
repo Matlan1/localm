@@ -13,6 +13,10 @@ from typing import Any, Optional
 from .base import ToolResult
 from .files import tool_read_file
 
+# Sentinel: "no explicit scope given, inherit the parent's". A plain None cannot
+# serve, because None is itself a meaningful scope value (no confinement).
+_INHERIT = object()
+
 
 def _inherited_confirm_handler(parent: Any):
     """The channel the CHILD asks for approval on: the parent's REAL one.
@@ -45,6 +49,87 @@ def _inherited_confirm_handler(parent: Any):
     if getattr(parent, "_interactive", False):
         return getattr(parent, "_confirm_tool", None)
     return None
+
+
+def inherited_child_kwargs(
+    parent: Any,
+    *,
+    backend: Any,
+    cwd: Path,
+    name: str,
+    max_turns: int,
+    confirm_handler: Any,
+    scope: Any = _INHERIT,
+    role: Any = None,
+) -> dict:
+    """The kwargs every child Agent is constructed with, in one place.
+
+    Shared by ``spawn_agent`` and by worktree-isolated parallel dispatch so the
+    two cannot drift: a safety property added to one path but not the other is
+    exactly the kind of gap that produced the scope hole this consolidates.
+
+    A child must be no LESS confirmed than its parent: inherit the parent's
+    confirmation posture instead of hardcoding auto_approve=True, or a parent that
+    requires confirmation (auto_approve=False), is running --dry-run, or has a GUI
+    confirm_handler wired up would still spawn a child that freely executes
+    write_file/run_shell/git_push/etc. with zero confirmation. confirm_handler is
+    a synchronous callback, so passing it through works even though the child runs
+    non-interactively (run_task -> _loop(interactive=False)): the child calls it in
+    the same call stack the parent's tool call is already on.
+
+    A child must also be no MORE capable than its parent, along BOTH axes the
+    parent is confined on:
+     - restricted / disabled_tools: a restricted session cannot spawn a child that
+       re-enables run_shell etc., which would be an RCE escape from a shareable
+       key. (spawn_agent is itself disabled for a restricted session, so that half
+       is belt-and-suspenders.)
+     - scope: scope and restricted are independent request fields, and spawn_agent
+       is only disabled for a RESTRICTED session, so a scoped, non-restricted
+       session (the owner working under --scope) would otherwise spawn a child with
+       no path confinement at all - the child could read and write anywhere under cwd.
+
+    Note the two KINDS of argument here, because they behave differently:
+    everything derived from *parent* is INHERITED (and read with getattr AND a
+    default, because *parent* is whatever the caller passed and a duck-typed or
+    partial parent must fall back rather than raise). Everything else - backend,
+    cwd, name, max_turns, confirm_handler, role - is PER-SPAWN and belongs to the
+    individual call. *role* in particular is an argument of spawn_agent, not a
+    property of the parent, so it has no getattr form.
+
+    This helper only ASSEMBLES kwargs. It deliberately does no toolset resolution:
+    a role's narrowing is applied inside ``Agent`` after ``_apply_restricted_toolset``
+    and after MCP/plugin/skill registration. Pre-computing a toolset here would move
+    the narrowing BEFORE dynamic registration and silently let MCP/plugin tools
+    through - a capability leak dressed as an optimisation.
+
+    *scope* defaults to inheriting the parent's. A caller may pass an explicit
+    value, but note that OVERRIDING it with something broader would discard a
+    narrowing the parent had, which is a confinement regression dressed as
+    isolation. Worktree-isolated dispatch deliberately still inherits: cwd is what
+    confines the file tools there, so re-scoping would buy nothing and cost the
+    parent's narrowing.
+    """
+    from ..audit import SessionMode as _SessionMode
+    return dict(
+        backend=backend,
+        cwd=cwd,
+        name=name,
+        max_turns=max_turns,
+        verbose=False,
+        auto_approve=getattr(parent, "auto_approve", True),
+        dry_run=getattr(parent, "dry_run", False),
+        always_confirm=getattr(parent, "always_confirm", None),
+        confirm_handler=confirm_handler,
+        parent=parent,
+        mode=getattr(parent, "mode", _SessionMode.PRIVACY),
+        restricted=getattr(parent, "restricted", False),
+        disabled_tools=getattr(parent, "disabled_tools", frozenset()),
+        scope=(getattr(parent, "scope", None) if scope is _INHERIT else scope),
+        # Narrows FURTHER still: the role's allowlist is subtracted from the live
+        # registry on top of the inherited disabled set, never in place of it, so
+        # this line can only ever take capability away from the child.
+        role=role,
+    )
 
 
 def tool_spawn_agent(
@@ -121,49 +206,11 @@ def tool_spawn_agent(
     if preload_text:
         full_task = f"Context files:\n{preload_text}\n\nTask:\n{task}"
 
-    from ..audit import SessionMode as _SessionMode
-    inherited_mode = getattr(_parent_agent, "mode", _SessionMode.PRIVACY)
-
-    child = Agent(
-        backend=backend,
-        cwd=cwd,
-        name=name,
-        max_turns=max_turns,
-        verbose=False,
-        # A child must be no LESS confirmed than its parent: inherit the parent's
-        # confirmation posture instead of hardcoding auto_approve=True, or a
-        # parent that requires confirmation (auto_approve=False), is running
-        # --dry-run, or has a GUI confirm_handler wired up would still spawn a
-        # child that freely executes write_file/run_shell/git_push/etc. with zero
-        # confirmation. confirm_handler is a synchronous callback, so passing it
-        # through works even though the child runs non-interactively (run_task ->
-        # _loop(interactive=False)): the child calls it in the same call stack the
-        # parent's spawn_agent tool call is already on.
-        auto_approve=getattr(_parent_agent, "auto_approve", True),
-        dry_run=getattr(_parent_agent, "dry_run", False),
-        always_confirm=getattr(_parent_agent, "always_confirm", None),
+    child = Agent(**inherited_child_kwargs(
+        _parent_agent, backend=backend, cwd=cwd, name=name, max_turns=max_turns,
         confirm_handler=_inherited_confirm_handler(_parent_agent),
-        parent=_parent_agent,
-        mode=inherited_mode,
-        # A child must be no MORE capable than its parent, along BOTH axes the
-        # parent is confined on:
-        #  - restricted / disabled_tools: a restricted session cannot spawn a child
-        #    that re-enables run_shell etc., which would be an RCE escape from a
-        #    shareable key. (spawn_agent is itself disabled for a restricted
-        #    session, so that half is belt-and-suspenders.)
-        #  - scope: this half was NOT covered until now. scope and restricted are
-        #    independent request fields, and spawn_agent is only disabled for a
-        #    RESTRICTED session, so a scoped, non-restricted session (the owner
-        #    working under --scope) spawned a child with no path confinement at
-        #    all - the child could read and write anywhere under cwd.
-        restricted=getattr(_parent_agent, "restricted", False),
-        disabled_tools=getattr(_parent_agent, "disabled_tools", frozenset()),
-        scope=getattr(_parent_agent, "scope", None),
-        # Narrows FURTHER still: the role's allowlist is subtracted from the live
-        # registry on top of the inherited disabled set, never in place of it, so
-        # this line can only ever take capability away from the child.
         role=role,
-    )
+    ))
     result_text = child.run_task(full_task)
     turns_used  = child.turns
 

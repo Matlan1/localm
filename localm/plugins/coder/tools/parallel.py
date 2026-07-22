@@ -220,7 +220,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     diffed, and removed.
     """
     from ..agent import Agent
-    from ..audit import SessionMode as _SessionMode
+    from .agents import inherited_child_kwargs
 
     backend = parent.backend
     model = spec.get("model")
@@ -243,42 +243,23 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
 
     outcome.model = getattr(backend, "model_id", "") or ""
 
-    child = Agent(
+    # One shared constructor for every child agent, so this path and spawn_agent
+    # cannot drift apart on a safety property. scope is INHERITED, not set to the
+    # worktree: cwd is what confines the file tools here (each resolves through
+    # _confine), so re-scoping would add nothing and would DISCARD a narrowing the
+    # parent had. An inherited glob like "src/**" stays meaningful only because the
+    # child sits at the same relative position inside its worktree as the parent
+    # occupies in the repo - which is why that mirroring above matters.
+    child = Agent(**inherited_child_kwargs(
+        parent,
         backend=backend,
         cwd=child_cwd,
         name=spec["name"],
         max_turns=max_turns,
-        verbose=False,
-        # Same posture inheritance spawn_agent uses: a child is never LESS confirmed
-        # than its parent, and never MORE capable. The confirm handler is the
-        # serialising wrapper so concurrent children cannot talk over each other.
-        auto_approve=getattr(parent, "auto_approve", True),
-        dry_run=getattr(parent, "dry_run", False),
-        always_confirm=getattr(parent, "always_confirm", None),
+        # The serialising wrapper, so concurrent children cannot talk over each
+        # other on the parent's single confirmation channel.
         confirm_handler=_serialised_confirm_handler(parent, spec["name"]),
-        parent=parent,
-        mode=getattr(parent, "mode", _SessionMode.PRIVACY),
-        restricted=getattr(parent, "restricted", False),
-        disabled_tools=getattr(parent, "disabled_tools", frozenset()),
-        # DELIBERATE: inherit the parent's scope rather than overwriting it with the
-        # worktree path. Two reasons, and this is a choice, not an oversight.
-        #
-        # 1. cwd is what actually confines the file tools - every one of them
-        #    resolves through _confine(cwd, path) - so the worktree isolation is
-        #    already enforced without touching scope. Setting scope to the worktree
-        #    would add nothing and would DISCARD a narrowing the parent had.
-        # 2. A scope is a glob relative to the agent's own cwd. Because the child is
-        #    placed at the SAME relative position inside its worktree as the parent
-        #    occupies in the repo, an inherited glob like "src/**" still designates
-        #    the corresponding files. That equivalence is exactly why the mirroring
-        #    above matters; without it an inherited scope would silently point
-        #    somewhere else.
-        #
-        # Note this OVERRIDES an inherited value rather than filling an empty one:
-        # spawn_agent also passes the parent's scope down, so the attribute is
-        # normally already set. Passing it explicitly keeps the two paths agreeing.
-        scope=getattr(parent, "scope", None),
-    )
+    ))
     # Make the child's location introspectable: a caller that reports on a finished
     # child needs to know which worktree and branch its diff belongs to.
     child.worktree_path = outcome.worktree or str(child_cwd)
