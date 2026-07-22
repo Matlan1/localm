@@ -304,9 +304,33 @@ class _PersistenceMixin:
         self._turns        = data.get("turns", len(self._messages))
         self._total_tokens = data.get("total_tokens", 0)
 
+    def _undo_one(self, entry: dict) -> tuple[str, bool]:
+        """Revert a single undo-stack entry. Returns (description, ok)."""
+        path: Path = entry["path"]
+        old: bytes | None = entry["old_content"]
+        try:
+            if old is None:
+                # File didn't exist before - delete it
+                if path.exists():
+                    path.unlink()
+                return f"deleted {path} (file was new)", True
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old)
+            lines = old.count(b"\n") + 1
+            return f"restored {path} ({lines} lines)", True
+        except Exception as e:
+            return f"FAILED to restore {path}: {e}", False
+
     def undo(self) -> str | None:
         """
-        Revert the last undoable file operation (write_file, edit_file, patch_file).
+        Revert the last undoable file operation (write_file, edit_file,
+        edit_files, patch_file, edit_notebook_cell).
+
+        A multi-file call (edit_files) pushes one stack entry PER FILE but is a
+        single operation, so all entries sharing its call id are reverted
+        together. Undoing only the last of them would leave the other files
+        edited while reporting the operation undone - a half-undone state the
+        caller was told does not exist.
 
         Returns a human-readable summary of what was restored, or None if the
         undo stack is empty.
@@ -314,19 +338,26 @@ class _PersistenceMixin:
         if not self._undo_stack:
             return None
         entry = self._undo_stack.pop()
-        path: Path    = entry["path"]
-        old: bytes | None = entry["old_content"]
-        tool: str     = entry["tool"]
-        try:
-            if old is None:
-                # File didn't exist before - delete it
-                if path.exists():
-                    path.unlink()
-                return f"Undid {tool}: deleted {path} (file was new)"
-            else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(old)
-                lines = old.count(b"\n") + 1
-                return f"Undid {tool}: restored {path} ({lines} lines)"
-        except Exception as e:
-            return f"Undo failed: {e}"
+        tool: str = entry["tool"]
+        call_id = entry.get("call_id")
+        group = [entry]
+        # An entry with no call id is never grouped (single-file tools, and any
+        # entry predating call ids), so their behaviour is unchanged.
+        if call_id is not None:
+            while self._undo_stack and self._undo_stack[-1].get("call_id") == call_id:
+                group.append(self._undo_stack.pop())
+
+        parts, failures = [], []
+        for item in group:
+            desc, ok = self._undo_one(item)
+            (parts if ok else failures).append(desc)
+
+        if len(group) == 1 and not failures:
+            return f"Undid {tool}: {parts[0]}"
+        summary = f"Undid {tool}: {len(parts)} of {len(group)} file(s) - " + "; ".join(parts)
+        if failures:
+            # RULE 5: a partial undo must never read as a complete one.
+            summary += ("\nWARNING: the undo did NOT fully succeed: "
+                        + "; ".join(failures)
+                        + " - these files still hold the change.")
+        return summary

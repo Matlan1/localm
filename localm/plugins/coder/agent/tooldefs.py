@@ -30,7 +30,9 @@ def _build_openai_tool_defs() -> list:
                 "array": "array",
             }.get(raw_type, "string")
             if raw_type == "array":
-                prop["items"] = {"type": "string"}
+                # Honour a declared item schema (edit_files' array is objects, not
+                # strings); default to strings for the array params that are.
+                prop["items"] = meta.get("items") or {"type": "string"}
             properties[param_name] = prop
             if meta.get("required"):
                 required.append(param_name)

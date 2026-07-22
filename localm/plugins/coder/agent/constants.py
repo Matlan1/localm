@@ -7,19 +7,57 @@ former single-file agent.py."""
 from __future__ import annotations
 
 # Tools that mutate files - trigger a project map refresh after they run
-_MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_shell"})
+_MUTATING_TOOLS: frozenset[str] = frozenset({
+    "write_file", "edit_file", "edit_files", "run_shell",
+})
 
 # Tools whose file changes can be undone (we snapshot before they run).
 # These are also the tools recorded in the changed-files tracker.
 _UNDOABLE_TOOLS: frozenset[str] = frozenset({
-    "write_file", "edit_file", "patch_file", "edit_notebook_cell",
+    "write_file", "edit_file", "edit_files", "patch_file", "edit_notebook_cell",
 })
+
+# Tools whose target paths are NESTED inside a collection arg rather than sitting
+# in a top-level `path` arg. Maps tool name -> (collection arg, key within each
+# item). Every path-consuming site (scope check, undo snapshot, changed-file
+# tracker, map refresh) resolves paths through _call_target_paths(), so a tool
+# listed here is confined and tracked exactly like a single-path one. Without
+# this, a nested-path tool passes the scope check by having no `path` arg at all
+# - a silent fail-OPEN, which is why the resolution lives in one shared helper.
+_NESTED_PATH_TOOLS: dict[str, tuple[str, str]] = {
+    "edit_files": ("edits", "path"),
+}
+
+
+def _call_target_paths(tool_name: str, args: dict) -> list[str]:
+    """Every filesystem path a tool call targets, in call order.
+
+    One `path` arg for most tools; for a tool in _NESTED_PATH_TOOLS, each
+    item's path inside its collection arg. Malformed items are skipped here
+    (the tool itself reports them); duplicates are preserved so a caller can
+    count edits, and callers that need unique files de-duplicate.
+    """
+    nested = _NESTED_PATH_TOOLS.get(tool_name)
+    if nested is None:
+        value = args.get("path", "")
+        return [str(value)] if value else []
+    coll_arg, item_key = nested
+    items = args.get(coll_arg)
+    if not isinstance(items, list):
+        return []
+    paths = []
+    for item in items:
+        if isinstance(item, dict):
+            value = item.get(item_key)
+            if value:
+                paths.append(str(value))
+    return paths
 
 # File-access tools whose target path must match the active scope glob. Keys on
 # the `path` arg; a tool whose real target is a `glob`/`output_path` arg has that
 # checked too (see _SCOPE_PATH_ARGS). run_shell is unscoped (see _INTENTIONALLY_UNSCOPED).
 _SCOPED_TOOLS: frozenset[str] = frozenset({
-    "read_file", "write_file", "edit_file", "patch_file",
+    "read_file", "write_file", "edit_file", "edit_files", "patch_file",
     "list_dir", "tree",
     # FAC-8: the rest of the file-reading/writing tools.
     "grep", "search_files", "search_replace", "read_env",

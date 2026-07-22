@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .diffutil import compute_tool_diff, read_old_content
+from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
 # Overridable via the "coder_confirm_timeout" config key (seconds).
@@ -213,6 +213,12 @@ class CoderSession:
         try:
             if call.name == "patch_file":
                 return compute_tool_diff(call.name, call.args, "")
+            # edit_files spans several files, so it has no single old_content.
+            # Without this the GUI approval card gets diff: null and falls back
+            # to a raw JSON dump of the args - the one write tool asking for
+            # blind approval.
+            if call.name == "edit_files":
+                return compute_multifile_diff(self.cwd, call.args.get("edits"))
             path_arg = call.args.get("path", "")
             if not path_arg or call.name not in ("write_file", "edit_file"):
                 return None
