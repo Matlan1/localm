@@ -26,12 +26,30 @@ from ..backends.base import BaseLLMBackend
 from ..indexer import ProjectMap
 from ..tools import SAFE_RESTRICTED_TOOLS
 from ..audit import AuditLogT, SessionMode
+from .constants import _SHELL_EXEC_TOOLS
 from .loop import _LoopMixin
 from .execution import _ExecutionMixin
 from .context import _ContextMixin
 from .persistence import _PersistenceMixin
 from .session import _SessionMixin
 from .tooldefs import _build_openai_tool_defs
+
+
+def _expand_shell_disable(disabled: frozenset) -> frozenset:
+    """Disabling any shell-execution tool disables the whole family.
+
+    A caller that passes ``{"run_shell"}`` means "this session must not execute
+    arbitrary commands" (that is exactly how the shareable-key path uses it).
+    Honouring that literally, tool-name by tool-name, would leave
+    ``run_shell_background`` - the same capability minus the wait - enabled, so
+    the safety choice would be silently defeated by a tool added after the
+    caller was written. Expand the intent instead. The background job-control
+    tools go with it: they are useless without a way to start a job, and
+    offering them would only invite a confusing failure.
+    """
+    if disabled & _SHELL_EXEC_TOOLS:
+        return disabled | _SHELL_EXEC_TOOLS | {"check_shell_job", "kill_shell_job"}
+    return disabled
 
 
 class Agent(
@@ -123,7 +141,7 @@ class Agent(
         self.restricted = restricted
         # Tools removed from THIS session: hidden from the model and hard-refused
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
-        self.disabled_tools = frozenset(disabled_tools or ())
+        self.disabled_tools = _expand_shell_disable(frozenset(disabled_tools or ()))
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
         # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)

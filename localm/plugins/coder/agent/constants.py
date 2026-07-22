@@ -27,14 +27,15 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
 })
 
 # Tools deliberately NOT confined by the scope glob: git_diff / git_log take a git
-# PATHSPEC (not a filesystem path), and run_tests / run_shell EXECUTE a process (a
-# path-arg check cannot confine arbitrary code). Any OTHER registry tool with a
-# path-like arg MUST be in _SCOPED_TOOLS above; the contract test
+# PATHSPEC (not a filesystem path), and run_tests / run_shell / the background-shell
+# trio EXECUTE a process (a path-arg check cannot confine arbitrary code). Any OTHER
+# registry tool with a path-like arg MUST be in _SCOPED_TOOLS above; the contract test
 # test_coder_scope_default_deny enforces this, so a new file tool is a test failure,
 # not "unconfined by omission" (AUD-CODERTOOLS: default-deny at authoring time, not
 # reliant on a human remembering).
 _INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
     "run_shell", "run_tests", "git_diff", "git_log",
+    "run_shell_background", "check_shell_job", "kill_shell_job",
 })
 
 # The subset of _INTENTIONALLY_UNSCOPED that EXECUTES a process, and so is the
@@ -44,17 +45,31 @@ _INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
 # a user running under --scope had no runtime signal at all that their shell was
 # unconfined. These tools get a one-per-session notice plus a best-effort argv
 # path check (see _ExecutionMixin._warn_shell_outside_scope). Warn, never block.
-_SHELL_UNSCOPED_TOOLS: frozenset[str] = frozenset({"run_shell", "run_tests"})
+# run_shell_background belongs here for exactly the same reason as run_shell: it
+# runs the user's command line, it just does not wait for it.
+_SHELL_UNSCOPED_TOOLS: frozenset[str] = frozenset({
+    "run_shell", "run_tests", "run_shell_background",
+})
 
 # Args of the shell tools that can carry a path. run_shell has a whole command
 # line to tokenise; run_tests takes a target path plus free-form extra args.
+# check_shell_job / kill_shell_job take only a job id, so they start no new
+# command and have no path to flag.
 _SHELL_COMMAND_ARGS: dict[str, tuple[str, ...]] = {
     "run_shell": ("command",),
+    "run_shell_background": ("command",),
     "run_tests": ("path", "extra_args"),
 }
 
 # How many out-of-scope paths one warning names before it says "and N more".
 _MAX_SHELL_SCOPE_FLAGS = 3
+
+# Tools that execute an arbitrary user command, blocking or in the background.
+# They are the same capability (RCE) and so must be gated identically everywhere:
+# privacy-env injection, the episodic git baseline, and the CLI confirmation gates.
+# A background variant that any of those forgets is a bypass of that gate, not a
+# missing nicety.
+_SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
 # For each scoped tool, the arg names holding a path/glob to enforce scope against.
 # Any present arg outside the scope rejects the call (order only sets which value is

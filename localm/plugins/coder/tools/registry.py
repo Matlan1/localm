@@ -23,7 +23,13 @@ from .files import (
     tool_tree,
     tool_write_file,
 )
-from .shell import tool_run_shell, tool_run_tests
+from .shell import (
+    tool_check_shell_job,
+    tool_kill_shell_job,
+    tool_run_shell,
+    tool_run_shell_background,
+    tool_run_tests,
+)
 from .git import (
     tool_git_commit,
     tool_git_create_branch,
@@ -123,6 +129,46 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         params={
             "command": {"type": "string", "description": "Shell command",      "required": True},
             "timeout": {"type": "int",    "description": "Timeout in seconds", "required": False},
+        },
+        destructive=True,
+    ),
+    "run_shell_background": ToolDef(
+        name="run_shell_background",
+        fn=tool_run_shell_background,
+        description=(
+            "Start a shell command in the background and get a job id back "
+            "immediately, without waiting for it to finish. Use for a dev server "
+            "you then want to talk to, a long build, or a watcher; poll it with "
+            "check_shell_job and stop it with kill_shell_job. Use run_shell "
+            "instead when you just need the command's result."
+        ),
+        params={
+            "command": {"type": "string", "description": "Shell command", "required": True},
+        },
+        destructive=True,
+    ),
+    "check_shell_job": ToolDef(
+        name="check_shell_job",
+        fn=tool_check_shell_job,
+        description=(
+            "Check a background job started by run_shell_background: whether it "
+            "is still running, its exit code once finished, and the output "
+            "captured so far."
+        ),
+        params={
+            "job_id": {"type": "string", "description": "Job id from run_shell_background", "required": True},
+        },
+        destructive=True,
+    ),
+    "kill_shell_job": ToolDef(
+        name="kill_shell_job",
+        fn=tool_kill_shell_job,
+        description=(
+            "Stop a background job and its whole process tree, and report its "
+            "final state and output."
+        ),
+        params={
+            "job_id": {"type": "string", "description": "Job id from run_shell_background", "required": True},
         },
         destructive=True,
     ),

@@ -59,6 +59,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   currently offered - the multi-GPU rows on a single-GPU machine, the keys
   card for a non-owner key - is deliberately not findable. Clearing the box
   restores the normal grouped view.
+- **The coder can run shell commands in the background.** `run_shell` waits for
+  the command to finish, so the agent could not start a dev server and then talk
+  to it, or run a long build while doing anything else. Three new tools fix
+  that: `run_shell_background` starts a command and returns a job id
+  immediately, `check_shell_job` reports whether it is still running (plus its
+  exit code and captured output once done), and `kill_shell_job` stops it. So
+  the coder can now start a server, curl it, and shut it down in one session.
+  Output is captured into a capped buffer, so a chatty process cannot grow
+  memory without limit; anything dropped is reported rather than presented as
+  the whole output. Stopping a job kills its entire process tree, so a build
+  that spawned children does not leave them running, and any job still running
+  is stopped when localm exits rather than being orphaned. Up to four
+  background commands run at once; asking for a fifth is refused with a clear
+  message instead of quietly queueing. These tools execute arbitrary code, so
+  they carry exactly the same confirmation and privacy handling as `run_shell`:
+  they prompt before running, they are unavailable to shareable (restricted)
+  coder sessions, and turning `run_shell` off turns them off too.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
