@@ -824,6 +824,14 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 .confirm-card .title { font-weight: 600; margin-bottom: 8px; }
 .confirm-card .title .name { font-family: var(--mono); color: var(--yellow); }
+/* Which sub-agent is asking (parallel dispatch). Only rendered when a child is
+   the asker, so an ordinary prompt keeps its original spacing. */
+.confirm-card .asker {
+  font-size: 0.88em;
+  color: var(--text-dim);
+  margin: -4px 0 8px;
+}
+.confirm-card .asker .name { font-family: var(--mono); color: var(--text); }
 .confirm-card pre.diff {
   background: var(--code-bg);
   border: 1px solid var(--border);

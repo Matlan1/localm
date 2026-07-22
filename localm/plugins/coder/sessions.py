@@ -193,16 +193,27 @@ class CoderSession:
             except queue.Full:
                 pass
 
-    def _confirm(self, call) -> bool:
+    def _confirm(self, call, agent: Optional[str] = None) -> bool:
         """
         Block the agent thread until the browser approves or rejects this
         destructive tool call. Sends a confirm_request event with a diff
         preview for file-writing tools.
+
+        *agent* names the sub-agent asking, or is None when this session's own
+        agent is. It is the optional attribution keyword of the confirm-handler
+        protocol (coder/confirm.py) and reaches the browser on the event, because
+        concurrent sub-agents share this one channel: worktree-isolated parallel
+        dispatch serialises their prompts, so without a label the user gets two
+        identical "Approve run_shell?" cards in a row with no way to tell which
+        child each belongs to. A child's own tool_call events are NOT forwarded
+        here (children do not inherit on_event), so the card is the only place
+        that context can appear at all.
         """
         # Tools granted "always allow" earlier in the session skip the flow
         if call.name in self.allowed_tools:
+            who = f"sub-agent '{agent}': " if agent else ""
             self._push({"type": "info",
-                        "text": f"{call.name} auto-approved "
+                        "text": f"{who}{call.name} auto-approved "
                                 "(always-allow granted this session)"})
             return True
         pending = _PendingConfirm(
@@ -219,6 +230,9 @@ class CoderSession:
             "tool": pending.tool,
             "args": pending.args,
             "diff": pending.diff,
+            # Absent (None) for the session's own agent, so an ordinary prompt is
+            # byte-for-byte the event it always was.
+            "agent": agent,
         })
         answered = pending.answered.wait(timeout=_confirm_timeout())
         with self._lock:
@@ -235,8 +249,10 @@ class CoderSession:
             "timed_out": not answered,
         })
         if not answered:
+            who = f" (sub-agent '{agent}')" if agent else ""
             self._push({"type": "info",
-                        "text": f"Confirmation for {call.name} timed out - rejected."})
+                        "text": f"Confirmation for {call.name}{who} timed out "
+                                "- rejected."})
             return False
         return pending.approved
 

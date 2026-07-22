@@ -113,6 +113,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   labelled "Delegated work (NOT in your working tree)" section naming the branch
   that holds each change. Capped at two children at a time, shared across every
   way the coder spawns them, matching what one GPU can actually keep resident.
+  When a child needs your approval to run something, the request queues up behind
+  any other child's and says WHICH child is asking - on the approval card in the
+  browser as well as at the terminal - so two children's requests can never be
+  mistaken for each other.
   Note the isolation is real for file tools but best-effort for shell: a child
   can still run a command that reaches outside its worktree.
 - **The sidebar shows the GPU split your loaded model actually got.** With a
