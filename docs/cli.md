@@ -286,9 +286,11 @@ A model too large for any single card's VRAM can load using the combined VRAM of
 ```bash
 localm gpus                              # (split) marks any device in the split
 localm config gpu_split_indices 0,1      # split the model across devices 0 and 1
-localm config gpu_split_ratios 3,1       # optional: weight device 0 three times device 1 (default: even split)
+localm config gpu_split_ratios 3,1       # optional: PIN device 0 to three times device 1's share
 localm config gpu_split_indices ""       # clear the split - back to a single GPU (main_gpu_index)
 ```
+
+How much of the model lands on each card is figured out automatically: at load time localm reads every split device's free VRAM and sizes each card's share proportionally, so a card that is half-occupied gets a half-sized share instead of an equal one that would not fit. Set `gpu_split_ratios` only to pin exact weights (that disables the automatic distribution); when free VRAM cannot be measured per device, the split falls back to even shares, and the decision is logged either way.
 
 GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. Fewer than 2 currently-detected devices in `gpu_split_indices` (a stale index, or only one still present) falls back to the single-GPU behavior above, with a logged warning - it never crashes a load. On the `vulkan` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only devices, so there is nothing to cross-check them against); there the numbers mean the Vulkan backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown, and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
 

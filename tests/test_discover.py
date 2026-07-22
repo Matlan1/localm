@@ -2126,11 +2126,15 @@ class TestGpuSplitShortfallVulkan:
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestGpuSplitShortfall:
     """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not
-    enough for a GGUF-backend load - apply_gpu_split() divides a model by a
-    STATIC per-config ratio with no live per-device capacity awareness, so an
-    asymmetric split (e.g. another already-loaded model sits on one device
-    more than another) can pass the aggregate check while one device's actual
-    share is short. This is the per-device gate that catches that case."""
+    enough for a GGUF-backend load - with PINNED gpu_split_ratios,
+    apply_gpu_split() divides a model by that static per-config ratio with no
+    live per-device capacity awareness, so an asymmetric split (e.g. another
+    already-loaded model sits on one device more than another) can pass the
+    aggregate check while one device's actual share is short. This is the
+    per-device gate that catches that case. With ratios UNSET the gate (and
+    the loader) now use the auto free-VRAM-proportional shares instead - see
+    tests/test_gpu_split_auto_ratios.py's TestShortfallAutoShares - so the
+    static-share cases here pin ratios explicitly."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 16_000_000_000, "free": 2_000_000_000},
@@ -2144,22 +2148,24 @@ class TestGpuSplitShortfall:
         assert gpu_split_shortfall(10_000_000_000) == []
 
     def test_equal_split_both_devices_sufficient_returns_empty(self, monkeypatch):
-        # 4 GB required, equal 50/50 split -> 2 GB needed per device; both
-        # GPUs (2 GB and 14 GB free) have enough.
+        # 4 GB required, PINNED equal 50/50 split -> 2 GB needed per device;
+        # both GPUs (2 GB and 14 GB free) have enough.
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
         monkeypatch.setattr(
             "localm.config.load_config",
-            lambda: {"gpu_split_indices": [0, 1]})
+            lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
         assert gpu_split_shortfall(4_000_000_000) == []
 
-    def test_equal_split_one_device_short_is_flagged(self, monkeypatch):
-        # 8 GB required, equal 50/50 split -> 4 GB needed per device. GPU 0
-        # only has 2 GB free (short by 2 GB); GPU 1's 14 GB free easily covers
-        # its 4 GB share. Only GPU 0 should be flagged.
+    def test_pinned_equal_split_one_device_short_is_flagged(self, monkeypatch):
+        # 8 GB required, PINNED equal 50/50 split -> 4 GB needed per device.
+        # GPU 0 only has 2 GB free (short by 2 GB); GPU 1's 14 GB free easily
+        # covers its 4 GB share. Only GPU 0 should be flagged. (Unpinned, the
+        # auto free-proportional split gives GPU 0 a 1 GB share instead and
+        # nothing is short - the feature this pin deliberately opts out of.)
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
         monkeypatch.setattr(
             "localm.config.load_config",
-            lambda: {"gpu_split_indices": [0, 1]})
+            lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
         result = gpu_split_shortfall(8_000_000_000)
         assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]
 
@@ -2228,7 +2234,8 @@ class TestGpuSplitShortfall:
         """Matches vram_capacity()/apply_gpu_split()'s existing config= convention."""
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
         result = gpu_split_shortfall(
-            8_000_000_000, config={"gpu_split_indices": [0, 1]})
+            8_000_000_000,
+            config={"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
         assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]
 
     # --- Probe-freshness contract (AGENTS.md rule 5) ----------------------------

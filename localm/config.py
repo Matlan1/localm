@@ -227,7 +227,12 @@ DEFAULT_CONFIG: dict = {
     "gpu_split_indices": None,
     # Optional relative weight per entry in gpu_split_indices (same length,
     # any positive numbers - llama.cpp treats them as proportions, not values
-    # that must sum to 1). None, or a length mismatch, means an equal split.
+    # that must sum to 1). None means AUTOMATIC distribution: each card's
+    # share is proportional to its free VRAM measured at load time
+    # (discover.resolve_auto_split_ratios), falling back to an equal split
+    # when per-device free cannot be measured. A length mismatch also falls
+    # back to the equal split (warned). Set explicit ratios (e.g. [1, 1])
+    # to pin exact shares and opt out of the automatic distribution.
     "gpu_split_ratios": None,
     # Default system prompt for chat. The GUI's per-chat System prompt field
     # OVERRIDES this when set; a blank field inherits this. Empty by default.

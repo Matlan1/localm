@@ -336,7 +336,10 @@ def test_idle_embedder_evicted_for_split_per_device_shortfall(monkeypatch, tmp_p
     (discover.gpu_split_shortfall), not just the aggregate, that goes from
     short to sufficient once the embedder is evicted - proving the
     embedder-eviction branch composes correctly with the split-aware gate,
-    not just the plain single-GPU path the other embedder tests here use."""
+    not just the plain single-GPU path the other embedder tests here use.
+    Ratios are PINNED equal: with them unset the auto free-VRAM-proportional
+    split shrinks GPU 0's share below its free and no per-device pressure
+    exists to drive this eviction (see tests/test_gpu_split_auto_ratios.py)."""
     model_a_file = tmp_path / "model-a.gguf"
     fake_registry = {"model-a": {"path": str(model_a_file), "source": "local"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
@@ -347,7 +350,8 @@ def test_idle_embedder_evicted_for_split_per_device_shortfall(monkeypatch, tmp_p
     base_cfg = real_load_config()
     monkeypatch.setattr(
         "localm.config.load_config",
-        lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+        lambda: {**base_cfg, "gpu_split_indices": [0, 1],
+                 "gpu_split_ratios": [1.0, 1.0]})
 
     # GPU 0 holds the embedder: short on its own ~equal-split share of the
     # ~6.15 GiB aggregate threshold (4 GiB default file size * 1.2 + 1 GiB
@@ -642,18 +646,27 @@ class TestSplitAwareCapacityGate:
             f"still load via the backend's own partial offload: {r.text}")
         assert hs._engines["model-a"].loaded
 
-    def test_exceeds_even_the_combined_split_still_refused(
+    def test_exceeds_even_the_combined_split_defers_to_backend(
             self, monkeypatch, tmp_path):
-        """Guard: combined capacity is a bigger ceiling, not an unlimited one -
-        a model too big even for both configured GPUs together is still 503'd."""
+        """Combined capacity is a bigger ceiling, not an unlimited one - but
+        exceeding it is no longer a gate-level 503 with UNSET ratios: the
+        auto free-VRAM-proportional split defers to the backend's own
+        split-aware sizing (#770), which partial-offloads or refuses with
+        the accurate figure - the same #753 posture as the single-GPU
+        too-big case above. FakeEngine's default load() stands in for a
+        successful partial offload; the pinned-ratio hard refusal and the
+        backend's own clean refusal are covered in
+        tests/test_gpu_split_auto_ratios.py's TestSwitchEngineAutoDefer."""
         # 40 GB file -> needs ~49 GB, exceeds the 28 GB combined free.
         self._install(monkeypatch, tmp_path, size_bytes=40 * 1024 ** 3,
                       gpus=self._SPLIT_GPUS, gpu_split_indices=[0, 1])
         app = hs.create_app(None)
         client = TestClient(app)
         r = _chat(client, "model-a")
-        assert r.status_code == 503
-        assert "Not enough VRAM" in r.text
+        assert r.status_code == 200, (
+            f"an auto-split combined-short load must defer to the backend's "
+            f"split-aware sizing (partial offload), not 503: {r.text}")
+        assert hs._engines["model-a"].loaded
 
     def test_stale_split_index_not_currently_detected_falls_back_to_single_gpu(
             self, monkeypatch, tmp_path):
@@ -681,14 +694,18 @@ class TestPerDeviceSplitFitGate:
     """AUDIT-GPU-SPLIT-2: vram_capacity()'s AGGREGATE check alone is not
     enough for a GGUF-backend load - apply_gpu_split() divides a model by a
     STATIC per-config ratio with no live per-device capacity awareness of its
-    own (unlike the HF backend's device_map="auto", which self-corrects from
-    live per-device free VRAM instead). An asymmetric split - e.g. another
-    already-loaded model sits on one configured device more than another -
-    can pass the aggregate check while one device's actual proportional
-    share is short, reaching the native loader with too little room on that
-    device. discover.gpu_split_shortfall() is the per-device gate that
-    catches this before the native load, refusing cleanly instead of risking
-    a native crash (llama.cpp can hard-abort rather than raise)."""
+    own when gpu_split_ratios is PINNED (unlike the HF backend's
+    device_map="auto", which self-corrects from live per-device free VRAM
+    instead). An asymmetric split - e.g. another already-loaded model sits on
+    one configured device more than another - can then pass the aggregate
+    check while one device's actual pinned share is short, reaching the
+    native loader with too little room on that device.
+    discover.gpu_split_shortfall() is the per-device gate that catches this
+    before the native load, refusing cleanly instead of risking a native
+    crash (llama.cpp can hard-abort rather than raise). With ratios UNSET
+    the loader adapts (auto free-VRAM-proportional split), so the
+    static-share cases here pin ratios explicitly; the auto behavior is
+    covered below and in tests/test_gpu_split_auto_ratios.py."""
 
     def _install(self, monkeypatch, tmp_path, *, filename, gpus, gpu_split_indices,
                  gpu_split_ratios=None, fails_to_fit=False):
@@ -725,34 +742,47 @@ class TestPerDeviceSplitFitGate:
         hs._engine = None
         hs._inference_sem = None
 
-    def test_aggregate_fits_but_one_device_short_is_refused(self, monkeypatch, tmp_path):
-        # GPU0: 2 GiB free (short of its ~2.58 GiB equal-split share of the
-        # ~5.15 GiB required). GPU1: 30 GiB free (comfortably covers its
+    def test_aggregate_fits_but_one_device_short_is_refused_pinned(
+            self, monkeypatch, tmp_path):
+        # GPU0: 2 GiB free (short of its ~2.58 GiB PINNED equal-split share of
+        # the ~5.15 GiB required). GPU1: 30 GiB free (comfortably covers its
         # share). Combined 32 GiB free >> the ~6.15 GiB aggregate threshold -
         # the OLD aggregate-only gate would have let this through.
         #
-        # DELIBERATE, KNOWN asymmetry with the single-GPU partial-offload fix
-        # (test_vram_eviction_safety.py's TestInconclusiveProbeDoesNotSkipTheGate.
-        # test_measured_low_reading_defers_to_the_backend_instead_of_refusing uses
-        # THIS SAME free/total/model triple - 2 GiB free, 16 GiB total, ~4 GiB
-        # model - on an UNSPLIT GPU 0, and now succeeds via the backend's own
-        # partial-layer offload). Here, with a split CONFIGURED, this still
-        # refuses even though GPU 0 happens to be both the short device and the
-        # resolved main_gpu_index (the common case: a split usually includes
-        # device 0, and resolve_main_gpu_index defaults to 0 regardless of
-        # gpu_split_indices) - a real backend's sizing would very likely fit
-        # this too. The conservative refusal stays intentional, not an
-        # oversight: _auto_gpu_layers/_check_vram (llamacpp/_sizing.py) only
-        # ever reason about ONE device's free VRAM, with zero notion of a
-        # multi-device tensor-split ratio - apply_gpu_split() would still hand
-        # the split's configured RATIO share to each device regardless of what
-        # the single-device sizing decided fits, so deferring here could size a
-        # near-full offload against the wrong (ample) device while the actual
-        # split ratio still demands room on the short one, risking the
-        # unrecoverable native worker abort gpu_split_shortfall's own
-        # docstring warns about. Fixing that asymmetry needs per-device-aware
-        # sizing this PR does not add - a real, scoped follow-up, not a defect
-        # in the current, deliberately conservative choice.
+        # PINNED ratios keep this hard refusal on purpose: the loader will
+        # apply the user's static shares regardless of live free VRAM, and
+        # the backend's sizing (_auto_gpu_layers/_check_vram,
+        # llamacpp/_sizing.py) budgets the split's COMBINED capacity - never
+        # one pinned share - so this per-device gate remains the only
+        # protection against the unrecoverable native worker abort
+        # gpu_split_shortfall's docstring warns about. (The historical
+        # asymmetry note that lived here - "fixing this needs per-device-aware
+        # sizing, a scoped follow-up" - is resolved for UNSET ratios by the
+        # auto free-VRAM-proportional split; see the test below.)
+        gpus = [
+            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
+            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+        ]
+        self._install(monkeypatch, tmp_path, filename="model-a.gguf",
+                      gpus=gpus, gpu_split_indices=[0, 1],
+                      gpu_split_ratios=[1.0, 1.0])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, (
+            f"aggregate free (32GiB) covers the ~6.15GiB threshold, but GPU 0's "
+            f"own pinned equal share does not fit its 2GiB free - must still "
+            f"refuse rather than reach the native loader: {r.text}")
+        assert "configured split" in r.text
+        assert "GPU 0" in r.text
+
+    def test_aggregate_fits_one_device_occupied_loads_via_auto_ratio(
+            self, monkeypatch, tmp_path):
+        """THE feature's headline case, end to end through switch_engine: the
+        SAME asymmetric occupancy that the pinned test above refuses now
+        LOADS with ratios unset - the auto free-VRAM-proportional split gives
+        the occupied GPU 0 only its ~6% share (~0.4 GiB vs 2 GiB free), so no
+        device is short and no eviction pressure exists."""
         gpus = [
             {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
             {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
@@ -762,12 +792,10 @@ class TestPerDeviceSplitFitGate:
         app = hs.create_app(None)
         client = TestClient(app)
         r = _chat(client, "model-a")
-        assert r.status_code == 503, (
-            f"aggregate free (32GiB) covers the ~6.15GiB threshold, but GPU 0's "
-            f"own equal-split share does not fit its 2GiB free - must still "
-            f"refuse rather than reach the native loader: {r.text}")
-        assert "configured split" in r.text
-        assert "GPU 0" in r.text
+        assert r.status_code == 200, (
+            f"with ratios unset, the auto split adapts each device's share to "
+            f"its free VRAM - this load fits and must not 503: {r.text}")
+        assert hs._engines["model-a"].loaded
 
     def test_per_device_fit_satisfied_with_asymmetric_ratio_loads(self, monkeypatch, tmp_path):
         """Guard: the new gate must not over-correct into refusing every
@@ -797,7 +825,10 @@ class TestPerDeviceSplitFitGate:
         actually runs); model-a's load then hits a per-device shortfall on
         GPU 0 even though AGGREGATE free is already sufficient, and must
         evict the idle model-b to relieve it - proving the per-device gate
-        genuinely drives additional eviction, not just a one-shot refusal."""
+        genuinely drives additional eviction, not just a one-shot refusal.
+        Ratios PINNED equal: unset, the auto proportional split would shrink
+        GPU 0's share below its post-load free and remove the very pressure
+        this test exists to exercise."""
         model_a_file = tmp_path / "model-a.gguf"
         fake_registry = {
             "model-a": {"path": str(model_a_file), "source": "local"},
@@ -813,7 +844,8 @@ class TestPerDeviceSplitFitGate:
         base_cfg = real_load_config()
         monkeypatch.setattr(
             "localm.config.load_config",
-            lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+            lambda: {**base_cfg, "gpu_split_indices": [0, 1],
+                     "gpu_split_ratios": [1.0, 1.0]})
 
         # Three-phase GPU state, driven by model-b's REAL load()/unload()
         # events (not a call-count guess): plenty of room on both devices

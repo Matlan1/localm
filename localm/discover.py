@@ -1377,6 +1377,129 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
     return list(zip(valid, ratios))
 
 
+def resolve_auto_split_ratios(config: Optional[dict] = None, *,
+                              gpus: Optional[list] = None,
+                              wait_for_inflight: bool = False) -> Optional[list]:
+    """Free-VRAM-proportional split ratios for the configured
+    ``gpu_split_indices``, or ``None`` when automatic distribution does not
+    apply - the parent-side decision behind "query free vram from each card,
+    compare and distribute" (the auto-split feature request).
+
+    Returns a list of positive floats aligned 1:1 BY POSITION with
+    ``cfg["gpu_split_indices"]`` (the exact shape a configured
+    ``gpu_split_ratios`` would have, so :func:`resolve_gpu_split`'s
+    re-pair-by-original-position logic applies unchanged), normalized to sum
+    1.0 and proportional to each device's CURRENT free VRAM. Callers pin the
+    result into the isolated load worker (``gguf.py`` -> ``GgufWorker`` ->
+    ``LlamaCpp``; ``IsolatedEmbedder._reload`` -> ``GGUFEmbedder``) via
+    ``apply_gpu_split(ratios_override=...)`` - the worker itself never probes
+    (a torch import inside a native-runtime process is the Windows + AMD DLL
+    conflict #754/#771 exists to prevent, and only the parent has the
+    #697/#700 device-global corrected readings anyway).
+
+    ``None`` (caller keeps today's config-driven behavior, i.e. the equal
+    split) in every case where auto would be dishonest or unwanted:
+
+    - Fewer than 2 configured indices, or non-integer indices: no split will
+      be applied at all (``resolve_gpu_split`` warns/degrades on its own).
+      Answered from config alone, with NO hardware probe.
+    - ``gpu_split_ratios`` is explicitly configured: the user pinned the
+      shares, and an explicit choice is never silently overridden.
+    - Per-device free VRAM is not measurable for EVERY configured device
+      (all-or-nothing, mirroring ``vram_capacity``'s "free" key): guessing a
+      share for a blind device could overload it.
+    - The probe did not complete fresh this call (non-``GPU_PROBE_OK``):
+      distributing by a frozen last-known-good snapshot is the same rule-5
+      gap ``gpu_split_shortfall``'s probe-freshness contract closes.
+
+    On the ``vulkan`` build the reading comes from
+    :func:`native_gpu_devices` (the crash-isolated probe daemon's view of
+    ggml's own registry, #768) - the ONLY per-device source in ggml-vulkan's
+    index space, which is the space ``tensor_split`` actually consumes
+    (GPU-SPLIT-VKINDEX; ``list_gpus()`` is structurally blind there and
+    speaks torch's index space). Everywhere else the reading is
+    ``list_gpus()``'s, reusing the caller-injected *gpus* snapshot when given
+    (``gpu_split_shortfall`` passes its own fresh ``GPU_PROBE_OK`` reading,
+    so gate and shares are computed from ONE snapshot).
+
+    A device reporting 0 bytes free keeps a tiny positive share (1-byte
+    floor) instead of a 0.0 ratio: ``resolve_gpu_split`` discards the WHOLE
+    ratio list on any entry <= 0, which would silently hand a completely
+    full card an EQUAL share - the exact overload auto exists to avoid.
+
+    The successful distribution, and a fallback on a configured-but-
+    unmeasurable split, are logged at INFO (the always-on ring buffer is
+    INFO+, so a bug report about a lopsided split shows what was decided
+    and from which readings - rule 5, surface the decision)."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    indices = cfg.get("gpu_split_indices")
+    if not indices or cfg.get("gpu_split_ratios"):
+        return None
+    try:
+        idx_list = [int(i) for i in indices]
+    except (TypeError, ValueError):
+        # resolve_gpu_split itself warns and drops the split for this case -
+        # there will be no split to distribute, so stay silent here.
+        return None
+    if len(idx_list) < 2:
+        return None
+
+    def _fallback(reason: str) -> None:
+        logger.info(
+            "auto GPU split: cannot distribute by free VRAM (%s); "
+            "falling back to the equal split", reason)
+        return None
+
+    frees: list = []
+    if _native_backend_has_vulkan():
+        # GPU-SPLIT-VKINDEX: the configured indices live in ggml-vulkan's own
+        # index space, so only the native registry's reading can be paired
+        # with them; a list_gpus() (torch-space) reading here would compute
+        # shares for the WRONG cards.
+        devices = native_gpu_devices()
+        if devices is None:
+            return _fallback("the native device registry did not answer")
+        by_index = {d.get("index"): d for d in devices}
+        for i in idx_list:
+            d = by_index.get(i)
+            free = d.get("free") if isinstance(d, dict) else None
+            if not isinstance(free, int):
+                return _fallback(
+                    f"device {i} reported no free-VRAM figure")
+            frees.append(free)
+    else:
+        if gpus is None:
+            # wait_for_inflight (load-path callers pass True): a concurrent
+            # probe (the GUI's 2.5s stats heartbeat) holding the slot would
+            # otherwise hand this an instant BUSY + stale reading, silently
+            # degrading the load to the equal split on exactly the asymmetric
+            # box auto exists for. Joining is safe: every probing caller here
+            # is off the event loop (executor / CLI thread).
+            gpus, status = _list_gpus_reading(wait_for_inflight=wait_for_inflight)
+            if status != GPU_PROBE_OK:
+                return _fallback(
+                    f"no fresh per-device VRAM reading (probe status {status})")
+        by_index = {g.get("index"): g for g in gpus}
+        for i in idx_list:
+            g = by_index.get(i)
+            free = g.get("free") if isinstance(g, dict) else None
+            if not isinstance(free, int):
+                return _fallback(
+                    f"device {i} is not detected or reported no free VRAM")
+            frees.append(free)
+
+    floored = [max(f, 1) for f in frees]
+    total = sum(floored)
+    ratios = [f / total for f in floored]
+    logger.info(
+        "auto GPU split: distributing by free VRAM - %s",
+        ", ".join(
+            f"device {i}: {r * 100:.0f}% ({f / 1024 ** 3:.1f} GB free)"
+            for i, r, f in zip(idx_list, ratios, frees)))
+    return ratios
+
+
 def _tensor_split_capacity(min_len: int) -> int:
     """Float-slot count to allocate for ``tensor_split``: the native loader's
     own answer when available (authoritative - see the capacity comment
@@ -1393,13 +1516,27 @@ def _tensor_split_capacity(min_len: int) -> int:
     return max(_TENSOR_SPLIT_FALLBACK_CAPACITY, min_len)
 
 
-def apply_gpu_split(mp, *, config: Optional[dict] = None):
+def apply_gpu_split(mp, *, config: Optional[dict] = None,
+                    ratios_override: Optional[list] = None):
     """Set ``mp.split_mode``/``mp.tensor_split`` from the configured
     ``gpu_split_indices``/``gpu_split_ratios``, validated via
     :func:`resolve_gpu_split`. Leaves native defaults (a single active GPU -
     whatever :func:`apply_main_gpu` already set) untouched when fewer than 2
     valid devices are configured. Shared by the llama.cpp chat backend and the
     embedder, same as ``apply_main_gpu``.
+
+    ``ratios_override`` (when non-empty) replaces the config's
+    ``gpu_split_ratios`` for THIS load: it carries the PARENT's already-
+    resolved effective ratios (:func:`resolve_auto_split_ratios`) into the
+    isolated worker, which must not probe for them itself (see that
+    function's docstring). It takes precedence over a config value read
+    here - the parent's admission gate checked THOSE shares, and a config
+    edited between the parent's read and this one must not produce a split
+    the gate never saw. Validated by the exact same
+    :func:`resolve_gpu_split` path as a configured value (a malformed
+    override degrades to the equal split with a WARNING, never a crash).
+    ``None``/empty keeps the config-driven behavior byte-identical to before
+    the kwarg existed.
 
     Returns the ctypes float array backing ``mp.tensor_split`` (or ``None``
     when no split was applied) - the CALLER MUST keep this referenced until
@@ -1409,7 +1546,8 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None):
     call, not the loaded model's lifetime."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
-    pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"))
+    ratios = ratios_override if ratios_override else cfg.get("gpu_split_ratios")
+    pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), ratios)
     if len(pairs) < 2:
         return None
 
@@ -1764,7 +1902,8 @@ def applied_split_device_count(config: Optional[dict] = None) -> int:
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios")))
 
 
-def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
+def _list_gpus_reading(deadline: Optional[float] = None, *,
+                       wait_for_inflight: bool = False) -> tuple:
     """``(gpus, status)`` from :func:`list_gpus`, tolerant of a test double patched
     in as a plain no-kwarg callable - the historical bare-list contract that the
     ~28 test modules stubbing ``list_gpus`` rely on. A double whose signature does
@@ -1782,22 +1921,35 @@ def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
     default cap untouched), so an OFF-event-loop caller can spend a longer budget on
     a cold driver init that overruns the short server cap - the only way to get a
     FRESH first-load reading (a timed-out probe cannot be retried: it is abandoned,
-    not cancelled, and a retry short-circuits to the frozen last-known-good)."""
+    not cancelled, and a retry short-circuits to the frozen last-known-good).
+
+    *wait_for_inflight* (opt-in, off-loop callers only - see :func:`list_gpus`)
+    JOINS a probe another caller already holds (e.g. the GUI's 2.5s stats
+    heartbeat) instead of taking an instant BUSY + stale reading. Forwarded only
+    when the callable's signature can accept it (a named parameter or
+    ``**kwargs``), so a status-capable test double without it keeps working."""
     try:
-        accepts = "return_status" in inspect.signature(list_gpus).parameters
+        params = inspect.signature(list_gpus).parameters
+        accepts = "return_status" in params
+        accepts_wfi = ("wait_for_inflight" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()))
     except (TypeError, ValueError):
         accepts = False
+        accepts_wfi = False
     if accepts:
         kw = {"return_status": True}
         if deadline is not None:
             kw["deadline"] = deadline
+        if wait_for_inflight and accepts_wfi:
+            kw["wait_for_inflight"] = True
         return list_gpus(**kw)
     return list_gpus(), GPU_PROBE_OK
 
 
 def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
                         *, return_status: bool = False,
-                        deadline: Optional[float] = None):
+                        deadline: Optional[float] = None,
+                        return_shares_adaptive: bool = False):
     """``[{"index", "needed", "free"}, ...]`` for every configured split device
     whose free VRAM, read from a FRESH probe this call (:data:`GPU_PROBE_OK`),
     cannot cover its proportional share of *vram_required*. Empty when no split is
@@ -1808,10 +1960,11 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     measurement a caller may quote to the user as fact.
 
     ``vram_capacity()`` is an AGGREGATE check: it proves total combined free VRAM
-    across the split is enough, but ``apply_gpu_split()`` (the GGUF/llama.cpp
-    backend's tensor_split writer) divides a model by a STATIC per-config ratio with
-    NO live per-device capacity awareness of its own - unlike the HF/transformers
-    backend, whose ``device_map="auto"`` is built from live per-device
+    across the split is enough, but with a PINNED ``gpu_split_ratios``,
+    ``apply_gpu_split()`` (the GGUF/llama.cpp backend's tensor_split writer)
+    divides a model by that static per-config ratio with NO live per-device
+    capacity awareness of its own - unlike the HF/transformers backend, whose
+    ``device_map="auto"`` is built from live per-device
     ``torch.cuda.mem_get_info()`` free VRAM instead (see ``backends/hf.py``'s
     ``_cuda_device_map``), so it already self-corrects. Without this check, a model
     too big for one device's actual share could still pass the aggregate check (e.g.
@@ -1820,9 +1973,31 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     - not always a catchable Python exception, since the native loader can hard-abort
     the WORKER process rather than return NULL (that abort is contained to the
     isolated load worker, never the server - PR #606, see
-    ``backends/llamacpp/_runner.py``). Callers should treat any non-empty result as a
-    hard refusal for a GGUF-backend load (see ``http_server.switch_engine``), not
-    merely a warning.
+    ``backends/llamacpp/_runner.py``). Callers should treat a non-empty result on a
+    pinned-ratio split as a hard refusal for a GGUF-backend load (see
+    ``http_server.switch_engine``), not merely a warning.
+
+    With ratios UNSET the loader itself now adapts: the parent pins
+    :func:`resolve_auto_split_ratios`'s free-VRAM-proportional shares into the
+    load, and this gate computes its per-device shares with the SAME auto
+    ratios (from its own fresh reading, below). When those adaptive shares
+    are in effect, the asymmetric-occupancy refusal is structurally
+    impossible (a device's proportional share fits its free whenever the
+    aggregate fits), so a non-empty result means the COMBINED estimate is
+    short - which ``switch_engine`` defers to the backend's split-aware
+    sizing (#770) instead of hard-refusing, the same #753 posture as the
+    single-GPU path. But auto can DECLINE (a configured index not currently
+    detected, a device without a free reading) and fall back to the equal-
+    share math, where that invariant does NOT hold and a non-empty result is
+    exactly the pre-feature per-device hazard - so a caller deciding
+    refuse-vs-defer MUST know which math produced the result, not infer it
+    from the config shape. ``return_shares_adaptive=True`` appends that
+    fact: ``True`` only when live auto ratios were actually used for the
+    shares below; ``False`` for pinned ratios, the equal fallback, and every
+    early return (no split, vulkan skip, non-OK probe - where the list is
+    empty anyway). Appended AFTER ``status`` when both opt-ins are set:
+    ``(shortfall, status, shares_adaptive)``; alone:
+    ``(shortfall, shares_adaptive)``. The bare-call shape is untouched.
 
     Probe freshness (AGENTS.md rule 5). ``list_gpus()`` is deadline-bounded: on a
     TIMEOUT/BUSY it serves a FROZEN last-known-good reading. The default deadline
@@ -1886,8 +2061,13 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     from localm.config import load_config
     cfg = config if config is not None else load_config()
 
-    def _ret(shortfall, status):
-        return (shortfall, status) if return_status else shortfall
+    def _ret(shortfall, status, shares_adaptive=False):
+        out = [shortfall]
+        if return_status:
+            out.append(status)
+        if return_shares_adaptive:
+            out.append(shares_adaptive)
+        return out[0] if len(out) == 1 else tuple(out)
 
     if not cfg.get("gpu_split_indices"):
         # No split configured: a conclusive answer that needs no hardware probe.
@@ -1941,8 +2121,28 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
                      "unverified this call", status)
         return _ret([], status)
 
+    # Judge each device by the share the loader will ACTUALLY give it. With
+    # ratios unset the loader gets the auto free-VRAM-proportional split
+    # (resolve_auto_split_ratios, computed here from THIS SAME fresh reading,
+    # so gate and shares come from one snapshot) - under which a device's
+    # share is needed_i = R * free_i / total_free <= free_i whenever the
+    # aggregate R fits, making the asymmetric-occupancy refusal structurally
+    # impossible; a non-empty result then means the COMBINED estimate is
+    # short. Pinned ratios keep the historical static-share math (the loader
+    # will not adapt for them). Auto declining (a device's free unmeasurable,
+    # a configured index not detected) falls back to the historical
+    # equal-split math unchanged - and shares_adaptive stays False there, so
+    # a refuse-vs-defer caller (switch_engine) can tell a genuine adaptive
+    # all-short result from the pre-feature static-share hazard (see the
+    # docstring: the invariant above holds ONLY for adaptive shares).
+    cfg_ratios = cfg.get("gpu_split_ratios")
+    shares_adaptive = False
+    if not cfg_ratios:
+        auto_ratios = resolve_auto_split_ratios(cfg, gpus=gpus)
+        shares_adaptive = auto_ratios is not None
+        cfg_ratios = auto_ratios
     pairs = resolve_gpu_split(
-        cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
+        cfg.get("gpu_split_indices"), cfg_ratios, gpus=gpus)
     if len(pairs) < 2:
         return _ret([], status)
     by_index = {g.get("index"): g for g in gpus}
@@ -1966,7 +2166,7 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
         free = g["free"]
         if free < needed:
             shortfall.append({"index": idx, "needed": needed, "free": free})
-    return _ret(shortfall, status)
+    return _ret(shortfall, status, shares_adaptive)
 
 
 def _device_choice_configured(cfg: dict) -> bool:
