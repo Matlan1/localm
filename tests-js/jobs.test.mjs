@@ -163,6 +163,93 @@ test("the Model field is a dropdown populated from /api/models", async () => {
     "the dropdown is sourced from GET /api/models");
 });
 
+// --- the rag (knowledge re-sync) task kind ---------------------------------
+// A rag job re-syncs a NAMED COLLECTION against the folders it was indexed
+// from, so it is fully specified without a prompt - but it is useless without
+// the collection. The form has to invert its required-field rule for that kind,
+// which is exactly the kind of branch that silently rots.
+
+async function openForm() {
+  const env = makeEnv();
+  const mod = await importJobs();
+  const toasts = [];
+  await mod.register({ toast: (m, bad) => toasts.push({ m, bad }),
+                       authHeaders: () => ({}) });
+  env.win.onViewShown("jobs");
+  await settle();
+  return { ...env, toasts };
+}
+
+function setField(win, id, value) {
+  const node = win.document.getElementById(id);
+  assert.ok(node, `the form has a #${id} field`);
+  node.value = value;
+  return node;
+}
+
+test("a rag job posts task_kind + collection and needs no prompt", async () => {
+  const { win, calls } = await openForm();
+
+  const task = win.document.getElementById("jobs-task");
+  assert.ok([...task.options].some((o) => o.value === "rag"),
+    "the Task dropdown offers the rag kind");
+  setField(win, "jobs-name", "sync manuals");
+  task.value = "rag";
+  setField(win, "jobs-collection", "manuals");
+  // Prompt deliberately left empty.
+  win.document.getElementById("jobs-add").click();
+  await settle();
+
+  const post = calls.find((c) => c.method === "POST" && /\/api\/jobs$/.test(c.url));
+  assert.ok(post, "adding a rag job POSTs to /api/jobs");
+  const body = JSON.parse(post.body);
+  assert.equal(body.task_kind, "rag");
+  assert.equal(body.collection, "manuals");
+});
+
+test("a rag job without a collection is refused before any POST", async () => {
+  const { win, calls, toasts } = await openForm();
+
+  setField(win, "jobs-name", "sync nothing");
+  win.document.getElementById("jobs-task").value = "rag";
+  win.document.getElementById("jobs-add").click();
+  await settle();
+
+  assert.ok(!calls.some((c) => c.method === "POST" && /\/api\/jobs$/.test(c.url)),
+    "no job is created without a collection");
+  assert.ok(toasts.some((t) => t.bad && /collection/i.test(t.m)),
+    "the user is told a collection is required");
+});
+
+test("a chat job still requires a prompt", async () => {
+  // Negative control: relaxing the prompt rule for rag must not relax it for
+  // every other kind.
+  const { win, calls, toasts } = await openForm();
+
+  setField(win, "jobs-name", "no prompt");
+  win.document.getElementById("jobs-task").value = "chat";
+  win.document.getElementById("jobs-add").click();
+  await settle();
+
+  assert.ok(!calls.some((c) => c.method === "POST" && /\/api\/jobs$/.test(c.url)),
+    "no chat job is created without a prompt");
+  assert.ok(toasts.some((t) => t.bad && /prompt/i.test(t.m)),
+    "the user is told a prompt is required");
+});
+
+test("a rag job row shows which collection it re-syncs", async () => {
+  const { win } = makeEnv({ jobs: [{ ...JOB, task_kind: "rag",
+                                     collection: "manuals", prompt: "" }] });
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  win.onViewShown("jobs");
+  await settle();
+
+  const view = win.document.getElementById("view-jobs");
+  assert.match(view.textContent, /collection: manuals/,
+    "the job row names the collection");
+});
+
 test("authHeaders() is applied to the list fetch", async () => {
   const { win, calls } = makeEnv();
   const mod = await importJobs();

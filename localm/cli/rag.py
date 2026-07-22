@@ -173,6 +173,89 @@ def rag_repair(collection, embed, url, yes):
 
 
 
+@rag_group.command("resync")
+@click.argument("collection")
+@click.option("--embed", is_flag=True,
+              help="Also compute embeddings for newly indexed documents, via a "
+                   "running localm server - matching 'rag add --embed' / the GUI. "
+                   "Without it, new documents are indexed lexical-only.")
+@click.option("--url", default=None,
+              help="Server base URL for --embed (default: auto-discover a running "
+                   "instance, else the configured port on localhost).")
+@click.option("--prune-missing", is_flag=True,
+              help="Also REMOVE index entries whose source file is gone. Off by "
+                   "default: a vanished file is flagged, not deleted, so an "
+                   "unplugged drive or a mid-sync folder cannot destroy the index.")
+def rag_resync(collection, embed, url, prune_missing):
+    """Re-sync COLLECTION with the folders it was indexed from.
+
+    Re-walks each indexed folder, so a file ADDED to it since the last index is
+    picked up, a changed file is re-indexed, and an unchanged file is skipped by
+    content hash (the same incremental path `rag add` uses). Individually
+    indexed files are re-checked too.
+
+    A document whose file has VANISHED is flagged, not removed: its chunks stay
+    searchable and the flag clears by itself if the file comes back, so a moved
+    file or an unplugged drive is never silently forgotten. Pass --prune-missing
+    to actually delete those entries. A folder that is not currently reachable is
+    reported and skipped WHOLE - nothing under it is touched.
+
+    Schedule this instead of running it by hand:
+    `localm job add sync-docs --rag --collection COLLECTION --cron "0 3 * * *"`.
+    """
+    from rich.console import Console
+    from ..rag import Collection
+    from .errors import _report_add_paths_result, run_or_die
+    console = Console()
+    coll = run_or_die(Collection, collection)
+    if not coll.exists():
+        console.print(f"[red]No such collection:[/red] {collection}")
+        sys.exit(1)
+    if not coll.roots():
+        # Not an error: the collection works, it just has no folder to re-walk,
+        # so a re-sync can only refresh the files it already knows. Say which it
+        # is rather than reporting a bare "0 added" that looks like a no-op.
+        console.print(
+            f"[yellow]'{collection}' has no indexed folders recorded, so this "
+            f"only re-checks its {len(coll.documents())} known document(s). "
+            f"Index a folder (localm rag add {collection} <folder>) to have new "
+            f"files in it picked up.[/yellow]")
+    embed_fn = _cli_rag_embed_fn(url) if embed else None
+    # policy=None, exactly like `rag add` from the CLI: the local operator can
+    # already read their own files, so they stay unconfined (the credential-dir
+    # hard floor still applies inside confine_index_path). The SCHEDULED job path
+    # is different on purpose and passes indexing_policy() - it is not a local
+    # operator and can be created through the API by a scoped key.
+    result = coll.resync(embed_fn=embed_fn, policy=None,
+                         prune_missing=prune_missing,
+                         on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+    console.print(f"[green]{result['added']} added, {result['updated']} updated, "
+                  f"{result['skipped']} unchanged[/green] - "
+                  f"{result['chunks']} chunks in '{collection}' over "
+                  f"{len(result['roots'])} folder(s)")
+    if result["restored"]:
+        console.print(f"[green]{len(result['restored'])} previously missing "
+                      f"document(s) are back.[/green]")
+    if result["missing"]:
+        console.print(
+            f"[yellow]{len(result['missing'])} document(s) are no longer on "
+            f"disk. They are flagged, NOT removed - re-run with --prune-missing "
+            f"to delete them from the index:[/yellow]")
+        for p in result["missing"][:10]:
+            console.print(f"  [yellow]missing:[/yellow] {p}")
+    if result["pruned"]:
+        console.print(f"[yellow]pruned {len(result['pruned'])} entr"
+                      f"{'y' if len(result['pruned']) == 1 else 'ies'} whose file "
+                      f"is gone.[/yellow]")
+    for r in result["unavailable_roots"] + result["blocked_roots"]:
+        console.print(f"[yellow]skipped folder {r['root']}: {r['reason']} - "
+                      f"nothing under it was indexed, flagged, or removed."
+                      f"[/yellow]")
+    _report_add_paths_result(result)
+
+
+
+
 def _cli_rag_embed_fn(url):
     """Build a query embedder that calls a running localm server's
     /v1/embeddings (for `rag query --embed`), so the CLI gets the same hybrid

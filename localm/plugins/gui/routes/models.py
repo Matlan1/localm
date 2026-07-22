@@ -121,7 +121,20 @@ def register(app: FastAPI, ctx) -> None:
                 "loaded": loaded,
                 "model_type": mtype,
             })
-        return {"models": models, "active": current}
+        out = {"models": models, "active": current}
+        # The multi-GPU split distribution the ACTIVE model's load actually
+        # applied (GgufBackend.applied_gpu_split - auto free-VRAM-proportional,
+        # pinned, or the equal fallback), for the sidebar's loaded-model
+        # status. Absent whenever there is nothing to show - no active engine,
+        # no split, or a backend that does not record one (HF's
+        # device_map="auto" placement is torch-internal) - so old clients and
+        # single-GPU boxes receive the exact pre-existing payload shape.
+        active_engine = _hs._engines.get(current) if current else None
+        split = getattr(getattr(active_engine, "_backend", None),
+                        "applied_gpu_split", None)
+        if split:
+            out["active_gpu_split"] = split
+        return out
 
     @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_scan_models(request: Request, req: ScanRequest | None = None):

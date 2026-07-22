@@ -72,10 +72,13 @@
 // controls a multi-GPU box owns.
 // v68: knowledge.js changed (reindex-needed badge fix + gpu_fallback_reason
 // surfacing) - bump so an already-installed PWA picks up the new bytes.
-// v72: index.html, pages/settings.js and style.css changed (the Settings page
+// v73: knowledge.js now surfaces documents a folder re-sync found missing from
+// disk (flagged, not deleted) - a stale-cached client would show the collection
+// as fully healthy while part of its index no longer matches the filesystem.
+// v74: index.html, pages/settings.js and style.css changed (the Settings page
 // gained a search box that filters every group at once) - a stale-cached client
 // would keep the old markup, so the box would be missing entirely.
-const CACHE = "localm-shell-v72";
+const CACHE = "localm-shell-v74";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

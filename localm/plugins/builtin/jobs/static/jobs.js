@@ -93,9 +93,10 @@ export function register(ctx) {
   view.replaceChildren(page);
   page.appendChild(el("h2", null, "Jobs"));
   page.appendChild(el("div", "sub",
-    "Scheduled recurring tasks. Each job runs a chat or coder prompt on an " +
-    "interval or cron schedule. Runs happen in the background while the server " +
-    "is up; use Run now to trigger one immediately."));
+    "Scheduled recurring tasks. Each job runs a chat or coder prompt, or " +
+    "re-syncs a knowledge collection, on an interval or cron schedule. Runs " +
+    "happen in the background while the server is up; use Run now to trigger " +
+    "one immediately."));
 
   // Add-job form card.
   page.appendChild(buildForm());
@@ -168,6 +169,12 @@ export function register(ctx) {
     const meta = el("div", "job-meta sub");
     meta.appendChild(el("span", null, fmtSchedule(job)));
     meta.appendChild(el("span", null, "task: " + job.task_kind));
+    // Which collection a rag job re-syncs is the one thing that distinguishes
+    // two otherwise identical rows, so show it rather than making the user open
+    // the job to find out.
+    if (job.task_kind === "rag" && job.collection) {
+      meta.appendChild(el("span", null, "collection: " + job.collection));
+    }
     meta.appendChild(el("span", null, "last run: " + fmtTime(job.last_run)));
     row.appendChild(meta);
 
@@ -297,6 +304,7 @@ export function register(ctx) {
     const taskKind = selectRow("Task", "jobs-task", [
       ["chat", "chat - run a prompt through the model"],
       ["coder", "coder - run a coder agent in a directory"],
+      ["rag", "rag - re-sync a knowledge collection with its folders"],
     ]);
     const prompt = el("div", "");
     prompt.appendChild(el("label", null, "Prompt"));
@@ -374,14 +382,16 @@ export function register(ctx) {
       "required for coder jobs");
     const scope = inputRow("Scope glob (optional, coder)", "text", "jobs-scope",
       "file-access glob for coder");
+    const collection = inputRow("Collection (rag jobs)", "text", "jobs-collection",
+      "required for rag jobs");
 
     const actions = el("div", "actions");
     const add = el("button", "btn-primary", "Add job");
     add.id = "jobs-add";
     actions.appendChild(add);
 
-    [name, taskKind, prompt, schedContainer, model, cwd, scope, actions]
-      .forEach((n) => card.appendChild(n));
+    [name, taskKind, prompt, schedContainer, model, cwd, scope, collection,
+      actions].forEach((n) => card.appendChild(n));
 
     add.onclick = async () => {
       const preset = schedKind.querySelector("select").value;
@@ -425,15 +435,27 @@ export function register(ctx) {
         model: model.querySelector("select").value.trim() || null,
         cwd: cwd.querySelector("input").value.trim() || null,
         scope: scope.querySelector("input").value.trim() || null,
+        collection: collection.querySelector("input").value.trim() || null,
       };
       if (!payload.name) { toast("A job name is required", true); return; }
-      if (!String(payload.prompt).trim()) { toast("A prompt is required", true); return; }
+      // A rag job re-syncs a named collection against the folders it was indexed
+      // from, so it is fully specified without a prompt (same as the backend's
+      // memory kind). Every other kind still needs one.
+      if (payload.task_kind === "rag") {
+        if (!payload.collection) {
+          toast("A rag job needs a collection to re-sync", true);
+          return;
+        }
+      } else if (!String(payload.prompt).trim()) {
+        toast("A prompt is required", true); return;
+      }
       try {
         await api("", { method: "POST", body: JSON.stringify(payload) });
         toast(`Job "${payload.name}" added`);
         // Reset the text fields so the form is ready for the next job.
         name.querySelector("input").value = "";
         promptTa.value = "";
+        collection.querySelector("input").value = "";
         refresh();
       } catch (e) {
         toast(`Could not add job: ${e.message}`, true);
