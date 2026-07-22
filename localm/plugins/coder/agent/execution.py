@@ -18,6 +18,7 @@ from ..diffutil import (
     compute_multifile_diff, compute_tool_diff, read_old_content,
     resolve_new_content,
 )
+from ..confirm import invoke_confirm
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..audit import SessionMode
@@ -289,7 +290,8 @@ class _ExecutionMixin:
         )
         if needs_confirm:
             if self.confirm_handler is not None:
-                approved = self.confirm_handler(call)
+                approved = invoke_confirm(self.confirm_handler, call,
+                                          agent=self._confirm_agent_label())
             elif interactive:
                 approved = self._confirm_tool(call)
             else:
@@ -478,6 +480,21 @@ class _ExecutionMixin:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(content, encoding="utf-8")
         return content
+
+    def _confirm_agent_label(self) -> Optional[str]:
+        """Who is asking, for a confirmation prompt: this sub-agent's name, or None.
+
+        ``parent`` is set only when this Agent IS a sub-agent, so it - not the name,
+        which every Agent has - is what distinguishes "a child is asking on the
+        human's shared confirmation channel" from "the session the human started is
+        asking for itself". The top-level agent deliberately gets None so its own
+        prompts are worded exactly as they always were.
+
+        This is the ONE place a child's identity enters the confirm chain, so every
+        delegation path (worktree-isolated parallel dispatch, spawn_agent, background
+        sub-agents) is attributed by construction rather than each re-implementing it.
+        """
+        return self.name if self.parent is not None else None
 
     def _confirm_tool(self, call: ToolCall) -> bool:
         """
