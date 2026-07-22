@@ -326,9 +326,11 @@ class TestShellArgvScopeHeuristicPrecision:
     def repo(self, tmp_path):
         """An utterly ordinary layout: these directory names are exactly the ones
         common command verbs collide with."""
-        for name in ("src", "test", "tests", "docs", "build"):
+        for name in ("src", "test", "tests", "docs", "build", "scripts", "tools"):
             (tmp_path / name).mkdir()
         (tmp_path / "secrets.txt").write_text("token\n")
+        (tmp_path / "build" / "run.sh").write_text("#!/bin/sh\n")
+        (tmp_path / "tools" / "gen.py").write_text("pass\n")
         return tmp_path
 
     def _flagged(self, cwd, tool="run_shell", **args):
@@ -359,12 +361,47 @@ class TestShellArgvScopeHeuristicPrecision:
         "make docs",                 # docs/ exists
         "cargo build",               # build/ exists
         "npm run build",             # a dispatch subcommand, then a script name
-        "uv run pytest",
+        "uv run build",              # the same, for a non-npm runner
         "npm --silent test",         # a flag does not take the subcommand slot
         "echo start && make docs",   # && starts a new command, so make is a program
+        "CI=1 npm test",             # an env assignment is not the program word
+        "NODE_ENV=test make docs",
+        "sudo npm test",             # nor is a transparent wrapper
+        "time make docs",
+        "env CI=1 npm test",
     ])
     def test_a_command_verb_is_not_read_as_a_path(self, repo, command):
         assert self._flagged(repo, command=command) == []
+
+    def test_a_token_with_a_path_separator_is_never_a_command_verb(self, repo):
+        """`sub/dir/script.sh` is the ordinary way to run a script (the leading
+        ./ is optional once the path has a separator). Suppressing the program
+        word must not suppress those: a bare verb never contains a separator, so
+        the presence of one settles it."""
+        assert self._flagged(repo, command="build/run.sh --fast") == ["build/run.sh"]
+        assert self._flagged(repo, command="uv run tools/gen.py") == ["tools/gen.py"]
+        assert self._flagged(repo, command="docker run build/run.sh") == [
+            "build/run.sh"]
+
+    def test_a_path_valued_flag_still_has_its_value_checked(self, repo):
+        """`git -C dir` and `make -C dir` move the process's working directory
+        outside the scope, which is the strongest signal this warning exists for.
+        The flag itself is skipped, so without care its VALUE lands in the
+        suppressed subcommand slot and the reference disappears."""
+        assert self._flagged(repo, command="git -C docs status") == ["docs"]
+        assert self._flagged(repo, command="make -C build all") == ["build"]
+        assert self._flagged(repo, command="npm --prefix docs test") == ["docs"]
+        # The subcommand slot survives the flag: `status` is still a verb.
+        assert self._flagged(repo, command="git -C C:/other status") == ["C:/other"]
+
+    def test_a_colon_delimiter_holding_slashes_is_not_a_drive_path(self, repo):
+        """A colon is chosen as the sed delimiter precisely BECAUSE the pattern
+        contains slashes, so this is the common form. A real drive-qualified path
+        carries exactly one colon."""
+        assert self._flagged(
+            repo, command="sed s:/usr/local:/opt:g notes.txt") == []
+        assert self._flagged(
+            repo, command="sed -i s:/old/path:/new/path: notes.txt") == []
 
     def test_the_same_word_is_still_flagged_in_argument_position(self, repo):
         """Fires-control for the case above: ``docs`` is quiet as a make target and

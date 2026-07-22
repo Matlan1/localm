@@ -25,7 +25,8 @@ from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_EXEC_TOOLS,
-    _SHELL_NESTED_RUNNER_WORDS, _SHELL_SEPARATORS, _SHELL_SUBCOMMAND_RUNNERS,
+    _SHELL_NESTED_RUNNER_WORDS, _SHELL_PATH_VALUE_FLAGS, _SHELL_SEPARATORS,
+    _SHELL_SUBCOMMAND_RUNNERS, _SHELL_TRANSPARENT_PREFIXES,
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
@@ -41,12 +42,32 @@ def _looks_like_drive_path(tok: str) -> bool:
     ``s:old:new:`` (a sed delimiter) were all reported as out-of-scope paths.
     ``C:foo``, drive-relative with no separator, is given up deliberately: it is
     rare and cannot be told apart from an ordinary key:value argument.
+
+    A real drive-qualified path carries exactly ONE colon, so requiring that
+    also rejects ``s:/usr/local:/opt:g``. That is the COMMON sed form (a colon
+    delimiter is chosen precisely because the pattern contains slashes), and the
+    separator rule alone would still have read it as a drive path.
     """
-    if len(tok) < 2 or tok[1] != ":":
+    if len(tok) < 2 or tok[1] != ":" or tok.count(":") != 1:
         return False
     if not (tok[0].isascii() and tok[0].isalpha()):
         return False
     return len(tok) == 2 or tok[2] in "/\\"
+
+
+def _is_command_prefix(tok: str) -> bool:
+    """True for a token that precedes the real program word without being it.
+
+    An environment assignment (``CI=1 npm test``) or a transparent wrapper
+    (``sudo``/``env``/``time``). Without this the prefix takes the program slot,
+    the real runner is never recognised, and ``CI=1 npm test`` goes on warning
+    about a ``test/`` directory - the very false positive this check exists to
+    stop.
+    """
+    if tok.lower() in _SHELL_TRANSPARENT_PREFIXES:
+        return True
+    name, sep, _ = tok.partition("=")
+    return bool(sep) and name.isidentifier()
 
 
 class _ExecutionMixin:
@@ -160,25 +181,37 @@ class _ExecutionMixin:
             cmdline = call.name in _SHELL_EXEC_TOOLS and arg == "command"
             at_program = True
             after_runner = False
+            path_flag = False
             for tok in tokens:
                 tok = tok.strip("'\"")
                 if not tok:
                     continue
                 if cmdline and tok in _SHELL_SEPARATORS:
-                    at_program, after_runner = True, False
+                    at_program, after_runner, path_flag = True, False, False
                     continue
                 if tok.startswith("-"):
-                    continue    # a flag never takes the program/subcommand slot
-                command_word = cmdline and (at_program or after_runner)
-                if at_program:
-                    prog = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
-                    after_runner = prog in _SHELL_SUBCOMMAND_RUNNERS
-                    at_program = False
+                    # A flag never takes the program/subcommand slot, but one that
+                    # takes a PATH value means the NEXT token is that path.
+                    path_flag = tok.split("=", 1)[0] in _SHELL_PATH_VALUE_FLAGS
+                    continue
+                if path_flag:
+                    # "git -C docs status": the value is a path to check, and the
+                    # subcommand slot is still waiting for `status`.
+                    path_flag = False
+                    command_word = False
+                elif cmdline and at_program and _is_command_prefix(tok):
+                    continue    # "CI=1 npm test": the real program is still to come
                 else:
-                    # "npm run build": a dispatch subcommand hands off to one more
-                    # name, which is a script, not a path.
-                    after_runner = (after_runner
-                                    and tok.lower() in _SHELL_NESTED_RUNNER_WORDS)
+                    command_word = cmdline and (at_program or after_runner)
+                    if at_program:
+                        prog = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                        after_runner = prog in _SHELL_SUBCOMMAND_RUNNERS
+                        at_program = False
+                    else:
+                        # "npm run build": a dispatch subcommand hands off to one
+                        # more name, which is a script, not a path.
+                        after_runner = (after_runner
+                                        and tok.lower() in _SHELL_NESTED_RUNNER_WORDS)
                 if tok in flagged:
                     continue
                 norm = tok.replace("\\", "/")
@@ -186,7 +219,10 @@ class _ExecutionMixin:
                             or "/../" in norm
                             or _looks_like_drive_path(tok))
                 if not explicit:
-                    if command_word:
+                    # A command word is a bare VERB. A token carrying a path
+                    # separator never is, even in the program slot, so it stays
+                    # checked ("build/run.sh", "uv run tools/gen.py").
+                    if command_word and "/" not in norm:
                         continue   # a verb ("npm test"), not a path
                     try:
                         if not (self.cwd / tok).exists():

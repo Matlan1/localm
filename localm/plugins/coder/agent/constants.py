@@ -129,6 +129,25 @@ _SHELL_NESTED_RUNNER_WORDS: frozenset[str] = frozenset({
     "run", "run-script", "exec", "x", "dlx",
 })
 
+# Flags whose VALUE is a path, so the token after one is that path and not a
+# subcommand. Without this "git -C docs status" reads `docs` as git's subcommand
+# and never checks it, which is backwards: -C and --directory move the process's
+# working directory, the strongest out-of-scope signal there is. Case-sensitive:
+# `-C` (git/make/tar) changes directory, while `-c` (sh/python) takes code.
+_SHELL_PATH_VALUE_FLAGS: frozenset[str] = frozenset({
+    "-C", "--directory", "--cwd", "--chdir", "--prefix", "--manifest-path",
+    "--project-dir", "--workdir",
+})
+
+# Tokens that sit in front of the real program word without being it, so the
+# program slot survives them: an env assignment (handled by shape, see
+# _is_command_prefix) or one of these transparent wrappers. Without it
+# "CI=1 npm test" never recognises npm as the runner and keeps warning about a
+# test/ directory.
+_SHELL_TRANSPARENT_PREFIXES: frozenset[str] = frozenset({
+    "sudo", "doas", "env", "time", "nice", "nohup", "command", "exec",
+})
+
 # Tools that execute an arbitrary user command, blocking or in the background.
 # They are the same capability (RCE) and so must be gated identically everywhere:
 # privacy-env injection, the episodic git baseline, and the CLI confirmation gates.
