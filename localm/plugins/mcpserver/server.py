@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -51,6 +52,38 @@ SERVER_VERSION = "0.1.2"
 def _log(msg: str) -> None:
     """Server-side logging - stderr only, stdout belongs to the protocol."""
     print(f"[localm-mcp] {msg}", file=sys.stderr, flush=True)
+
+
+def _child_identity_env() -> dict:
+    """Env for a ``-m localm`` helper process so it is THE SAME localm as this
+    server: same data home, same code.
+
+    Both are otherwise re-resolved from ambient state at every process
+    boundary: the data home falls back to a contained default derived from the
+    running code's location when nothing is configured, and ``-m`` puts the
+    child's cwd first on ``sys.path``, where a ``localm/`` directory in that
+    cwd (any other checkout) silently swaps which CODE runs. run_coder_task
+    deliberately runs its child in the TASK's directory (see its cwd comment),
+    so a server whose own home came from ITS location - exactly the documented
+    "run ``localm mcp`` from a source checkout" setup - handed the coder chain
+    a DIFFERENT, empty home: a model registered moments earlier via pull_model
+    did not exist there, and the coder's auto-started server died with "Model
+    not found" (exit 1) into a console window an MCP client never sees
+    (reproduced live 2026-07-21).
+
+    LOCALM_HOME pins the data home; PYTHONSAFEPATH stops ``-m`` from putting
+    the child's cwd on ``sys.path``; the PYTHONPATH entry keeps this server's
+    own package importable regardless of cwd (PYTHONSAFEPATH only drops the
+    implicit cwd entry, explicit PYTHONPATH entries still apply)."""
+    import localm as _pkg
+    from localm.config import home_dir
+    env = dict(os.environ)
+    env["LOCALM_HOME"] = str(home_dir())
+    env["PYTHONSAFEPATH"] = "1"
+    pkg_root = str(Path(_pkg.__file__).resolve().parent.parent)
+    prior = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = pkg_root + ((os.pathsep + prior) if prior else "")
+    return env
 
 
 def _redirect_consoles_to_stderr() -> None:
@@ -500,8 +533,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             # this and the auto-spawned server registers under the MCP server's
             # own directory instead, so the coder's own attach-back lookup can
             # never find it (looks like a timeout; it is a project-root mismatch).
+            # env=_child_identity_env(): that same deliberate cwd change must
+            # NOT drag the child onto a different data home or different localm
+            # code - see the helper's docstring for the live-reproduced failure.
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                                  cwd=str(cwd_path))
+                                  cwd=str(cwd_path), env=_child_identity_env())
         except subprocess.TimeoutExpired:
             return _text_result(f"coder task timed out after {timeout}s", is_error=True)
 
@@ -573,7 +609,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
     def run_doctor(args: dict) -> dict:
         cmd = [sys.executable, "-m", "localm", "doctor"]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            # env=_child_identity_env(): a doctor that re-resolves home/code
+            # from ambient state reports on the WRONG install whenever this
+            # server's home came from its own location (source-checkout setup).
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                                  env=_child_identity_env())
             output = proc.stdout
             if proc.stderr:
                 output += "\n\nStderr:\n" + proc.stderr
