@@ -340,6 +340,25 @@ def _log_progress(text: str) -> None:
     logger.warning("rag index (headless): %s", text)
 
 
+async def _write_off_loop(call):
+    """Run a blocking collection WRITE on the plugin pool and map a lock refusal
+    to 409.
+
+    Every write now waits a bounded time for any other process holding the
+    collection (localm.rag.collection_lock), so what used to be a quick
+    load-modify-save can legitimately sit for seconds. On the single-worker event
+    loop that would stall the whole server, so these calls go to the same pool
+    /extract and the headless index path already use. 409 (not 500) because
+    "someone else is writing this collection, try again shortly" is exactly a
+    conflict, and the message names the holder."""
+    from localm.rag import CollectionLockedError
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(get_plugin_executor(), call)
+    except CollectionLockedError as e:
+        raise HTTPException(409, str(e))
+
+
 async def _index_sync(index_call):
     """Run a blocking ``coll.add_*`` index on the plugin pool (off the single-worker
     event loop, exactly like /extract) and return its result as the HTTP response.
@@ -350,9 +369,8 @@ async def _index_sync(index_call):
     off the inference pool so a slow index never starves chat completions; a
     concurrent self-embed HTTP call back to /v1/embeddings is handled by the event
     loop while this runs, the same threading model the background-job path uses."""
-    loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(get_plugin_executor(), index_call)
+        result = await _write_off_loop(index_call)
     except ValueError as e:
         # e.g. an embedding-model dimension change (C3): a clean 400, not a crash -
         # mirrors the background path's "error" line, surfaced synchronously here.
@@ -381,7 +399,9 @@ async def rag_create(req: RagCreateRequest):
         raise HTTPException(400, str(e))
     if coll.exists():
         raise HTTPException(409, f"Collection already exists: {coll.name}")
-    coll.create()
+    # Off the loop like every other write: create() takes the collection write
+    # lock (it can race a delete of the same name), so it can block.
+    await _write_off_loop(coll.create)
     return coll.stats()
 
 
@@ -395,7 +415,7 @@ async def rag_detail(name: str):
 async def rag_delete(name: str):
     from localm.rag import delete_collection
     try:
-        if not delete_collection(name):
+        if not await _write_off_loop(lambda: delete_collection(name)):
             raise HTTPException(404, f"No such collection: {name}")
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -404,6 +424,7 @@ async def rag_delete(name: str):
 
 @_router.post("/api/rag/collections/{name}/add")
 async def rag_add(name: str, req: RagAddRequest, request: Request):
+    from localm.rag import CollectionLockedError
     coll = _get_collection(name)
     paths = [Path(p).expanduser() for p in req.paths if p.strip()]
     if not paths:
@@ -478,8 +499,11 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
                 describe_image_fn=self_describe,
                 policy=policy, force=req.reindex,
                 on_progress=lambda t: job.push({"type": "line", "text": t}))
-        except ValueError as e:
-            # e.g. an embedding-model dimension change (C3) - report, don't crash.
+        except (ValueError, CollectionLockedError) as e:
+            # e.g. an embedding-model dimension change (C3), or another process
+            # still writing this collection - report, don't crash. The stream is
+            # the only place the user sees this run, so the reason has to land
+            # there, not just in a log (AGENTS rule 5).
             job.push({"type": "line", "text": f"error: {e}"})
             return False
         summary = (f"done: {result['added']} added, "
@@ -511,6 +535,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     and per-request caps are then checked on the base64 STRING length BEFORE
     decoding, so no oversized payload is ever materialized in memory; a zip bomb is
     caught during extraction."""
+    from localm.rag import CollectionLockedError
     coll = _get_collection(name)
     if not req.files:
         raise HTTPException(400, "No files given")
@@ -555,8 +580,9 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
                 describe_image_fn=self_describe,
                 force=req.reindex,
                 on_progress=lambda t: job.push({"type": "line", "text": t}))
-        except ValueError as e:
-            # e.g. an embedding-model dimension change (C3) - report, don't crash.
+        except (ValueError, CollectionLockedError) as e:
+            # As in rag_add's _index: a dimension change, or another process still
+            # writing this collection. Reported on the stream, not a crash.
             job.push({"type": "line", "text": f"error: {e}"})
             return False
         summary = (f"done: {result['added']} added, "
@@ -694,7 +720,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 @_router.post("/api/rag/collections/{name}/remove-doc")
 async def rag_remove_doc(name: str, req: RagRemoveDocRequest):
     coll = _get_collection(name)
-    if not coll.remove_doc(req.path):
+    if not await _write_off_loop(lambda: coll.remove_doc(req.path)):
         raise HTTPException(404, f"Not in this collection: {req.path}")
     return {"status": "removed", "path": req.path}
 

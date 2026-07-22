@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import localm.plugins.builtin.tts.plug as tts_plug
+import localm.plugins.builtin.tts.settings as tts_settings
 from localm.voice import VoiceError
 
 
@@ -30,7 +31,13 @@ class TestTtsTemplateDiagnostics:
         path = tmp_path / filename
         if write_corrupt:
             path.write_text("{ not json", encoding="utf-8")
-        monkeypatch.setattr(tts_plug, "_TEMPLATE", path)
+        # Patch the module that OWNS the global, not the one that re-exports the
+        # function: plug.py does `from ...settings import defaults as _defaults`,
+        # so _defaults resolves _TEMPLATE in settings' namespace. #793 moved the
+        # loader there and this patch kept naming plug, which simply added an
+        # attribute nobody reads (monkeypatch.setattr raises for a missing one,
+        # which is what turned it red rather than silently vacuous).
+        monkeypatch.setattr(tts_settings, "_TEMPLATE", path)
         with caplog.at_level(logging.WARNING, logger="localm"):
             assert tts_plug._defaults() == {}
         assert any(filename in r.message for r in caplog.records), \

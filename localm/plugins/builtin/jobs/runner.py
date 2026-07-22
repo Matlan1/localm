@@ -382,7 +382,7 @@ def _run_rag(job: Job) -> str:
     Privacy: a collection is explicit user data and is written in every session
     mode (the localm.rag docstring), exactly as an interactive add is; this path
     adds no session trace of its own."""
-    from localm.rag import Collection
+    from localm.rag import Collection, CollectionLockedError
     from localm.rag.store import indexing_policy
 
     name = (job.collection or "").strip()
@@ -399,8 +399,17 @@ def _run_rag(job: Job) -> str:
     had_vectors = bool(coll.stats().get("has_vectors"))
     embed_fn = _rag_embed_fn()
     lines: list = []
-    result = coll.resync(embed_fn=embed_fn, policy=indexing_policy(),
-                         on_progress=lines.append)
+    try:
+        result = coll.resync(embed_fn=embed_fn, policy=indexing_policy(),
+                             on_progress=lines.append)
+    except CollectionLockedError as e:
+        # Somebody is hand-running `localm rag add|resync` on this collection (or
+        # another localm process is). The scheduled tick waits a bounded time and
+        # then stands down rather than interleaving with them - recorded as an
+        # error, never as a quiet success, because the job history is the only
+        # place an unattended run is ever seen (AGENTS.md rule 5). Nothing is lost
+        # by standing down: the next tick re-walks the same folders.
+        raise RuntimeError(f"{e} The next scheduled run will pick this up.") from e
     return _format_rag_result(name, result, lines,
                               embedded=embed_fn is not None,
                               had_vectors=had_vectors)

@@ -158,17 +158,23 @@ policy as an interactive add. Full details in
   query-time index cache), so retrieval is brute force by design: fast at home
   scale (thousands of chunks), but query latency grows with collection size and
   it is not built for millions of chunks.
-- **One writer per collection at a time.** Writes are serialised inside a single
-  localm process, so the server's own API adds and scheduled re-syncs cannot lose
-  each other's changes, and every file is rewritten atomically, so a concurrent
-  query always sees a consistent snapshot. That serialisation does not reach
-  across processes: `localm rag add` and `localm rag resync` run in their own
-  process and open the collection directly, so running one by hand while the
-  server is re-syncing the *same* collection lets the two interleave and one
-  update win. Let a scheduled re-sync finish, or work on a different collection,
-  rather than racing it. If it does happen the result is a lost update, not a
-  destroyed index: a vector index that no longer matches its chunks is detected
-  and reported, never silently used or deleted (see Troubleshooting).
+- **One writer per collection at a time, enforced.** Writes to a collection are
+  serialised both inside a localm process and BETWEEN processes, so the server's
+  API adds, its scheduled re-syncs and a hand-run `localm rag add|resync|repair|rm`
+  cannot lose each other's changes. Every file is rewritten atomically too, so a
+  concurrent query always sees a consistent snapshot, and queries never wait for a
+  writer at all. The two cases wait differently, on purpose. Two writers *inside
+  one localm process* (say two indexing jobs started from the Knowledge page)
+  simply queue: the one holding the collection is getting on with it, so waiting
+  always ends and the work still happens. A writer in *another process* cannot be
+  trusted that way, since it may be hung or already gone, so it waits a bounded 30
+  seconds, says so while it waits, and then REFUSES with a message naming the
+  process that holds the collection rather than interleaving with it. A refused
+  command has changed nothing, and the API answers 409. There is no wall-clock
+  limit on how long a collection may be HELD, so an hours-long index of a big
+  folder is safe: the holder keeps reporting in, and only a holder that stops
+  reporting (a crash, a killed process) has its lock reclaimed. Collections are
+  independent, so work on a different one never waits.
 - `POST .../add` accepts up to 50 paths per request (a path may itself be a
   folder); `POST .../upload` accepts up to 50 files per request, 30 MB each
   and 100 MB total. Split a larger batch across multiple calls.
@@ -185,6 +191,22 @@ policy as an interactive add. Full details in
 - **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
   snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
   are an unreadable/encrypted file or a missing `[rag]` extra for PDF parsing.
+- **"Collection X is being written by another localm process".** Something else
+  is indexing that collection right now, most often a scheduled re-sync or an add
+  from the Knowledge page, and the command you ran waited for it and then stood
+  down without changing anything. The message names the process holding it and
+  how long it has been running. Let that run finish and repeat the command; a
+  scheduled job that hits this says so in its output and picks the folder up on
+  its next run. If the holder is gone (the machine lost power mid-index, say), the
+  lock is reclaimed by itself about a minute after that process stopped reporting,
+  so a crash cannot wedge a collection. The one case that needs you is a lock file
+  localm cannot even read the timestamp of, which means something is wrong with
+  the file itself (permissions, a damaged filesystem): the message then names the
+  file, and deleting it releases the collection once you are sure no localm
+  process is using it. Two environment variables tune this for unusual setups:
+  `LOCALM_RAG_LOCK_WAIT` (seconds to wait before refusing, default 30) and
+  `LOCALM_RAG_LOCK_STALE` (seconds without a heartbeat before a holder counts as
+  crashed, default 60; raise it on a very slow or heavily contended disk).
 - **"Semantic search is degraded".** localm checked the stored vector index
   against the chunks and refused to use it (unreadable, malformed, or no longer
   lining up), and answered lexically instead. Nothing is deleted to make that go
@@ -192,4 +214,12 @@ policy as an interactive add. Full details in
   `vectors.json.rejected` in the collection folder if the chunks were rewritten
   in the meantime, and the reason is repeated by the Knowledge page, `rag resync`
   and every scheduled run until you rebuild the index with
-  `localm rag repair NAME --embed`.
+  `localm rag repair NAME --embed`. Only a rebuild that covers **every** chunk
+  clears it. Indexing one more document meanwhile does not, even with embeddings
+  on: that leaves the older chunks without vectors, which is a thinner index than
+  you had, not a repaired one. Each incident keeps its own set-aside copy
+  (`vectors.json.rejected`, then `.rejected.2`, and so on), and they stay after a
+  successful rebuild as a record of what happened - delete them yourself if you
+  want the space back. The one time localm removes them is when the collection
+  has no documents left at all, since stored vectors are positional and there is
+  then nothing they could ever be matched back up with.

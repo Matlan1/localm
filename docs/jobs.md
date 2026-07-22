@@ -154,11 +154,15 @@ vector file on disk, moved aside as `vectors.json.rejected` if the chunks had to
 be rewritten. Search keeps working lexically meanwhile. Rebuild the index with
 `localm rag repair NAME --embed`.
 
-**Do not run manual `rag` writes on a collection the server is re-syncing.**
-`localm rag add` and `localm rag resync` run in their own process, and write
-serialisation is per process, so a hand-run command overlapping a scheduled run
-on the *same* collection can lose one of the two updates. Wait for the scheduled
-run, or trigger it from the Jobs tab, rather than racing it by hand.
+**A manual `rag` write and a scheduled run cannot corrupt each other.** They are
+separate processes, and writes to one collection are serialised across processes:
+whichever starts second waits for the collection and then stands down rather than
+interleaving. A scheduled run that stands down says so in its output ("is being
+written by ...") and re-walks the same folders on its next run, so nothing is
+lost - and a hand-run `localm rag add|resync` that hits a running job refuses
+without changing anything, naming the job's process. Holding a collection has no
+time limit, so a long index is never cut short; a holder that dies stops
+reporting and its lock is reclaimed automatically.
 
 **Confinement still applies.** A scheduled re-sync runs under the same allowed
 or denied folder policy as an interactive add (Settings > Knowledge), including
