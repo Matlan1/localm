@@ -141,7 +141,11 @@ export async function refreshKnowledgePage() {
             "/api/rag/collections/" + encodeURIComponent(c.name), {
               method: "DELETE", headers: authHeaders() });
           if (r.ok) { toast("Deleted " + c.name); refreshKnowledgePage(); }
-          else toast("Delete failed", true);
+          // Show the server's reason: a 409 here names the localm process that
+          // is writing this collection right now (most often a scheduled
+          // re-sync), which turns a dead end into "try again in a moment".
+          else toast((await r.json().catch(() => ({}))).detail || "Delete failed",
+                     true);
         });
     };
     actions.appendChild(del);
@@ -648,7 +652,8 @@ export async function kbInfoModal(name) {
             body: JSON.stringify({ path: d.path }),
           });
         if (rr.ok) { toast("Removed"); kbInfoModal(name); refreshKnowledgePage(); }
-        else toast("Remove failed", true);
+        else toast((await rr.json().catch(() => ({}))).detail || "Remove failed",
+                   true);
       };
       row.appendChild(rm);
       body.appendChild(row);
