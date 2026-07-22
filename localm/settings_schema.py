@@ -89,6 +89,14 @@ class SettingField:
     # WRITE it via PATCH /v1/config (it widens a trust boundary). Distinct from
     # `owner` above, which only records the plugin section a setting belongs to.
     admin_only: bool = False
+    # Engine/plugin STATE, not a setting: validate_update has no schema for what
+    # is INSIDE it and stores what it is given VERBATIM (the container tail of
+    # the HIDDEN branch in _validate_one). Its real write surface lives elsewhere
+    # and enforces a STRONGER gate, so a non-ADMIN config:write caller must not
+    # reach it through the generic PATCH /v1/config - that would let the generic
+    # route outrank the specific one. WRITE-gated only: unlike admin_only the
+    # value stays readable (see engine_managed_keys for the full rationale).
+    engine_managed: bool = False
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
@@ -101,6 +109,8 @@ class SettingField:
         }
         if self.admin_only:
             d["admin_only"] = True
+        if self.engine_managed:
+            d["engine_managed"] = True
         if self.options is not None:
             d["options"] = self.options
         for attr in ("min", "max", "step"):
@@ -380,7 +390,7 @@ CORE_FIELDS: list = [
     SettingField("plugins_enabled", Widget.HIDDEN, "Enabled plugins",
                  "Names of enabled engine plugins. Managed by the Plugins page "
                  "and `localm plugin enable/disable`, not edited here.",
-                 group="Plugins"),
+                 group="Plugins", engine_managed=True),
     # ---- Bug-report upload (deployment config) ----
     # HIDDEN: the maintainer sets these in config.json when preparing a tester
     # build (see tools/bugreport-proxy/). Not rendered in the form, so a tester on
@@ -404,7 +414,7 @@ CORE_FIELDS: list = [
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
-                 group="Plugins"),
+                 group="Plugins", engine_managed=True),
     SettingField("key_presets", Widget.HIDDEN, "Key presets",
                  "Quick-select scope bundles for the Keys & devices manager. "
                  "Edited there, not in this form.",
@@ -942,6 +952,34 @@ def admin_only_keys() -> set:
     they widen a trust boundary (e.g. the rag_* indexing settings define which
     host folders the indexer may read). The single source of truth for both gates."""
     return {f.key for f in CORE_FIELDS if f.admin_only}
+
+
+def engine_managed_keys() -> set:
+    """Config keys that hold engine/plugin STATE rather than a setting, and that
+    PATCH /v1/config must therefore refuse to a non-ADMIN caller.
+
+    validate_update has no schema for what lives INSIDE these keys, so the HIDDEN
+    branch stores them verbatim (``plugins``) or with only a per-element str()
+    (``plugins_enabled``). Their real write surfaces DO validate, and each guards
+    a boundary the generic settings route knows nothing about:
+
+      - ``plugins``         -> POST /v1/tts/config requires an owner for
+                               library/wasm_paths (a script every browser
+                               imports), and POST /v1/media/config/<name>
+                               requires one for launch_cmd/api_url (a shell
+                               command / a render target).
+      - ``plugins_enabled`` -> POST /api/plugins/<name>/enable requires the
+                               PLUGINS_ADMIN scope, which a config:write key
+                               need not hold.
+
+    Without this gate the generic route outranks the specific one: a non-owner
+    config:write key could write the same state and skip both the value check and
+    the stronger scope (X8, dev-notes/review-drain-merges-2026-07-22.md).
+
+    Unlike admin_only_keys these are WRITE-gated only - the values stay readable,
+    because the finding is an escalation on write and nothing reads them off
+    GET /v1/config anyway. Keep this derived from the flag, not a literal set."""
+    return {f.key for f in CORE_FIELDS if f.engine_managed}
 
 
 def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list:

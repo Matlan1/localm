@@ -74,7 +74,8 @@ def register(app: FastAPI, ctx) -> None:
         dropped first, so a client that round-trips the whole config object is
         not rejected for echoing back values it never edited."""
         from localm.config import update_config
-        from localm.settings_schema import validate_update, admin_only_keys
+        from localm.settings_schema import (validate_update, admin_only_keys,
+                                            engine_managed_keys)
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
                     "instance_id"}
         body = {k: v for k, v in body.items() if k not in readonly}
@@ -95,6 +96,27 @@ def register(app: FastAPI, ctx) -> None:
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
                     "owner (admin) key: it widens a trust boundary (which host "
                     "folders the server may read, or its network reach).")
+        # X8: `plugins` / `plugins_enabled` are plugin STATE, not settings, and
+        # validate_update has no schema for their contents - it stores them
+        # verbatim. Their real write surfaces enforce STRONGER gates
+        # (/v1/tts/config and /v1/media/config/<name> require an owner for the
+        # script-URL and launch_cmd/api_url fields; /api/plugins/<name>/enable
+        # requires plugins:admin), so without this check the generic route is a
+        # back door around the specific one: a non-owner config:write key could
+        # set config["plugins"]["tts"]["library"] and have every browser import
+        # that script. Same shape and same placement as the admin_only gate above
+        # - on the RAW body, before validation. Open mode is the trusted local
+        # owner (caller_scopes None) and passes.
+        managed = engine_managed_keys() & set(body)
+        if managed:
+            held = _hs.caller_scopes(request)
+            if held is not None and scopes.ADMIN not in held:
+                raise HTTPException(
+                    403, "Changing " + ", ".join(sorted(managed)) + " requires an "
+                    "owner (admin) key: it is plugin state, not a setting. Use the "
+                    "plugin's own endpoint (/v1/tts/config, /v1/media/config/"
+                    "<plugin>, /api/plugins/<name>/enable), which validates the "
+                    "value and enforces its own permission.")
         try:
             validated = validate_update(body)
         except ValueError as e:

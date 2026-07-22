@@ -557,6 +557,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when you run `/remember` or `/forget` (or edit it yourself), and the agent's
   close-time reflection is stored in the localm data directory, not in your repo.
 
+### Security
+- **A scoped "settings" key can no longer change plugin settings the plugin's own
+  page reserves for you.** Text-to-speech asks for an owner key before it will
+  change the script every browser loads, the media backends ask for one before
+  they will change a launch command or render target, and enabling a plugin needs
+  a plugin-admin key. The general settings endpoint did not ask: it accepted the
+  whole per-plugin block and the enabled-plugins list as ordinary settings, so a
+  key you had created with permission to change settings but deliberately WITHOUT
+  owner rights could write exactly those values through the general route instead
+  and skip the check, including pointing text-to-speech at a script hosted
+  somewhere else that the browser would then load. Both are now owner-only on that
+  route, and the refusal names the endpoint to use instead. Reading settings is
+  unchanged. This needed a key you had minted yourself with settings-write but not
+  owner rights (no key preset localm ships grants that combination), so a default
+  install was not exposed.
+
 ## [0.1.2] - 2026-07-18
 
 ### Added
