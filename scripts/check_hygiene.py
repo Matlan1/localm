@@ -377,7 +377,13 @@ def _changelog_append_only() -> list[str]:
 #   - Occurrences are counted on both sides (Counter), so a draft line whose
 #     text also appears in a published section is still reported when the DRAFT
 #     copy is the one deleted - the surviving published copy cannot satisfy its
-#     count.
+#     count. The converse is the accepted cost of counting: when a line is
+#     duplicated EXACTLY across sections, deleting the OTHER copy warns as well,
+#     because counting alone cannot tell two identical lines apart. Warning is
+#     the safe direction (the alternative attribution silently misses the real
+#     incident case), and such a deletion is either already a hard append-only
+#     FAILURE or an edit inside the pending cut section, so the extra line is
+#     noise on a run that is already asking for a human look.
 #   - Only bullet/continuation CONTENT lines are watched. Headers ("### Added"),
 #     blank lines and link-reference definitions are scaffolding a draft may
 #     freely reorganize; warning on those would be noise that trains people to
