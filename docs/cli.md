@@ -409,8 +409,13 @@ the command exits 0, and a run that never gets there exits non-zero rather than
 claiming success. Interactive sessions (the REPL and the GUI coder) run the same check
 at the moment the agent would otherwise finish a turn that changed files. The command
 defaults to the project's obvious one - `cargo test`, `go test ./...`, `npm test` when
-package.json defines a test script, or pytest when the project has a pytest setup - and
-a project with no detectable check simply runs without one. Override it with
+package.json defines a test script, or pytest when the project has a pytest setup -
+and only when that runner is actually installed: a Rust project on a machine without
+cargo gets no check rather than one that can only fail. A project with no detectable
+check simply runs without one. If the command cannot be started at all, that is
+reported as "could not run - nothing was actually verified", which is neither a pass
+nor a failure charged to the agent; a command that runs and fails is retried as
+normal, including when it fails because something it calls is missing. Override it with
 `--verify COMMAND`, a `verify = "..."` key in `.localcoder/config.toml`, or `/verify`
 mid-session; turn it off with `--no-verify` or `/verify off`. When the check keeps
 failing, the agent is told (and told not to edit the check to force a pass); when the

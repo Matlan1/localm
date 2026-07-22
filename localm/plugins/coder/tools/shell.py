@@ -266,15 +266,44 @@ def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
                       summary=f"{job_id} {outcome}", truncated=trunc)
 
 
+def resolve_runner(name: str) -> "str | None":
+    """The launchable path to *name*, or None when it is not installed.
+
+    Returns the RESOLVED path rather than the bare name because these commands
+    are run as an argv list, and argv-list execution on Windows goes through
+    CreateProcess, which only launches real executables. npm, yarn and npx ship
+    as `.CMD` shims, so `['npm', ...]` raises WinError 2 even with npm installed
+    and on PATH, while the full `...\\npm.CMD` path runs fine (both measured).
+    That is why a bare `shutil.which` truthiness check is not enough here: which
+    finds npm.CMD, and the argv that names it `npm` still cannot start.
+
+    Absolutised, because which() on Windows searches the CURRENT directory first
+    and returns what it joined, so the answer can be a relative `.\\npm.CMD`.
+    The result is stored on the session and run later with cwd set to the
+    PROJECT directory, which is not always the directory which() searched - a
+    relative answer would then resolve somewhere else, or against a same-named
+    file the project happens to contain."""
+    import os
+    import shutil as _shutil
+    found = _shutil.which(name)
+    return os.path.abspath(found) if found else None
+
+
 def _detect_test_runner(cwd: Path) -> list[str]:
-    """Return the command list for the most appropriate test runner in *cwd*."""
+    """Return the command list for the most appropriate test runner in *cwd*.
+
+    Always returns a command (pytest is the fallback), so callers that want
+    positive evidence of a runnable check must gate separately - the verify
+    oracle does exactly that in ``verify._has_project_check``. When a runner is
+    not on PATH the bare name is kept, so the caller's "runner not found"
+    message names something the user recognises."""
     if (cwd / "Cargo.toml").exists():
-        return ["cargo", "test", "--color=never"]
+        return [resolve_runner("cargo") or "cargo", "test", "--color=never"]
     if (cwd / "go.mod").exists():
-        return ["go", "test", "./..."]
+        return [resolve_runner("go") or "go", "test", "./..."]
     if (cwd / "package.json").exists():
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
-        return [lock, "test", "--passWithNoTests"]
+        return [resolve_runner(lock) or lock, "test", "--passWithNoTests"]
     # Python - prefer pytest; fall back to unittest. Use the SAME interpreter that
     # runs localm (sys.executable), not a bare "python" off PATH - on many machines
     # PATH `python` is a different env (uv/conda/system) without pytest or the
@@ -307,11 +336,13 @@ def tool_run_tests(
     elif runner == "pytest":
         cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header"]
     elif runner == "cargo":
-        cmd = ["cargo", "test", "--color=never"]
+        cmd = [resolve_runner("cargo") or "cargo", "test", "--color=never"]
     elif runner == "go":
-        cmd = ["go", "test", "./..."]
+        cmd = [resolve_runner("go") or "go", "test", "./..."]
     elif runner in ("npm", "yarn"):
-        cmd = [runner, "test", "--passWithNoTests"]
+        # Resolved for the same reason as the auto branch: an explicitly asked
+        # for `npm` is no more launchable as a bare argv[0] on Windows.
+        cmd = [resolve_runner(runner) or runner, "test", "--passWithNoTests"]
     else:
         return ToolResult.error(
             f"Unknown runner '{runner}'. Use: auto, pytest, cargo, go, npm, yarn"

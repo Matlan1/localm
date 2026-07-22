@@ -426,7 +426,12 @@ export function handleCoderEvent(s, ev) {
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) $("coder-state").textContent = "idle";
       renderSessionSelect();
-      let finalLine = (ev.ok ? "Task finished" : "Task ended") +
+      // "inconclusive" means the check could not run or collected nothing, so
+      // an unqualified "Task finished" would claim a verification that never
+      // happened. ok stays the run's own outcome; this names the gate's.
+      const verifyNote = ev.verify_state === "inconclusive"
+        ? " (not verified)" : "";
+      let finalLine = (ev.ok ? "Task finished" : "Task ended") + verifyNote +
         ` - ${ev.turns} turns, ${ev.total_tokens} tokens`;
       if (ev.changed_files?.length) {
         finalLine += ` · ${ev.changed_files.length} file(s) changed (see "files")`;

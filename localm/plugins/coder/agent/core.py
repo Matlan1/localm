@@ -180,6 +180,14 @@ class Agent(
         # turn as a failure - the GUI reports this per turn ("ok" on the final
         # event) and the CLI turns it into an exit code.
         self._last_run_ok: bool = True
+        # Per-run outcome of the exit-code oracle: "passed", "failed",
+        # "inconclusive", or None when no check ran. A THIRD state because
+        # _last_run_ok is a boolean and "the check could not run" is neither of
+        # its two answers: reporting it as a failure bills the model for an
+        # unfixable condition, reporting it as ok claims a verification that
+        # never happened. Consumers that want "was this verified" read this;
+        # _last_run_ok keeps meaning "did the run itself complete".
+        self._last_verify_state: Optional[str] = None
         # Session-level: True once ANY run this session failed. _last_run_ok alone
         # used to carry both meanings because nothing ever re-armed it; the
         # close-time episodic reflection (session.py) needs the session-wide answer
@@ -507,6 +515,15 @@ class Agent(
         in the same session reports ok. ``_had_any_failure`` is the session-wide
         answer."""
         return self._last_run_ok
+
+    @property
+    def last_verify_state(self) -> Optional[str]:
+        """How the exit-code oracle ended for the LAST run.
+
+        ``"passed"`` (exited 0), ``"failed"`` (still failing after the retries),
+        ``"inconclusive"`` (the command could not run, or collected nothing), or
+        None when no check ran at all. Per-run, like ``last_run_ok``."""
+        return self._last_verify_state
 
     @property
     def total_tokens(self) -> int:

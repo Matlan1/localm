@@ -28,6 +28,12 @@ class _SessionMixin:
         self._last_response_fp = ""
         self._repeat_response_count = 0
         self._last_run_ok = True
+        # Goes with it: a verdict about a run whose conversation has just been
+        # dropped is not a verdict about anything. _loop re-arms this too, so
+        # nothing reads a stale value today - but leaving it set here is the
+        # exact one-way-flag shape that made a failed turn poison every later
+        # one (#792), and the field is new enough to close it before it bites.
+        self._last_verify_state = None
         # Clearing the conversation also drops the evidence a failure lesson would
         # be built from (history, error trace), so the session-level failure marker
         # goes with it - otherwise /clear would leave a close-time reflection armed
