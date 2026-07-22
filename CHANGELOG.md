@@ -355,6 +355,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   absolute root, undoing that in the same prompt. The map header is now
   home-anchored too, so a model that echoes its context back cannot disclose the
   path.
+- **The shell scope warning no longer fires on ordinary commands.** Its
+  path-spotting read two things as paths that never are. Any argument with a
+  colon in second position counted as a Windows drive path, so an ffmpeg
+  offset (`-ss 5:30`), an aspect ratio (`4:3`) and a `sed s:old:new:`
+  delimiter were all reported as being outside the scope. And a command word
+  that happens to match a directory name counted as a path argument, so `npm
+  test` in a repo with a `test/` folder, `make docs` with `docs/`, and `cargo
+  build` with `build/` each drew a warning about a path that was never
+  referenced. A drive letter must now be a single letter followed by a
+  separator or nothing, and the program and subcommand words of a command line
+  are no longer guessed at from directory names. Real references are untouched:
+  an explicitly written path is still reported everywhere, including in the
+  program position (`./build/run.sh`), as is any existing out-of-scope file
+  named as an argument.
 - **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
   long conversation grows the context window mid-generation, the model worker
   decides whether the grown KV cache still fits in VRAM or must move to system
