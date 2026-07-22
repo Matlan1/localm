@@ -205,6 +205,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   documented default behind the per-plugin "Model weight dtype" setting) a
   real, settable key - previously it could only be created by hand-editing
   config.json.
+- **The coder's "do not fail me for having no tests yet" flag now actually
+  reaches your test runner.** When the coder picks `npm test` as a project's
+  check, it adds `--passWithNoTests` so that a project whose suite is still
+  empty is not reported as a failed verification. npm never passed that flag
+  along: it reads an option it does not recognise as one of its own settings and
+  forwards only plain arguments to your `test` script, so the runner never saw
+  it. Against real jest in a project with no test files, the check failed
+  exactly as if the flag had never been there. It now goes through the `--`
+  separator npm documents for this, so it arrives. yarn is deliberately left
+  alone: it already forwarded the flag correctly, and it warns that a future
+  version will pass an explicit `--` straight through to your runner, which
+  would break a case that works today. The flag is also only sent to a runner
+  that has it (jest, vitest); any other project gets a plain `npm test`, because
+  a runner that does not know the option can stop outright rather than ignore it
+  (`node --test` exits with "bad option"). On Windows none of this was visible
+  until the previous fix, because the command could not start at all.
 
 ### Added
 - **The coder can hand a sub-task off and keep working instead of waiting.**
