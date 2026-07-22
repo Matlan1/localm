@@ -6,6 +6,9 @@ When an agent has a scope glob set, file-access tools that target a path
 outside the glob pattern must be rejected without reaching the tool function.
 """
 
+import contextlib
+import os
+import os.path
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,11 +16,62 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.plugins.coder.agent import Agent, _SCOPED_TOOLS
+from localm.plugins.coder.agent.execution import (
+    _is_path_like, _looks_like_drive_path,
+)
 
 
 # ---------------------------------------------------------------------------
 #  Helpers
 # ---------------------------------------------------------------------------
+
+def _outside_scope(tmp_path: Path, name: str = "x.txt") -> str:
+    """An absolute path OUTSIDE the ``src/**`` scope, owned and created by the
+    test in its own tmp_path.
+
+    Every "out of scope" target in this file is a real but disposable file the
+    test made. A system path (a real ``/etc/...`` or drive-anchored OS file) must
+    never be used as one: the code under test path-processes what it is handed,
+    so such a target makes the suite itself reach out and touch a real OS file,
+    and at the access point a legitimate test, a command gone wrong, and a live
+    injection are indistinguishable.
+    """
+    outside = tmp_path / "outside" / name
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("disposable\n", encoding="utf-8")
+    return str(outside)
+
+
+@contextlib.contextmanager
+def _no_filesystem():
+    """Turn any filesystem access inside the block into an immediate failure.
+
+    Asserting that a check is lexical means asserting the ABSENCE of a
+    capability, so the guard has to see the syscalls. Audit hooks cannot:
+    ``Path.exists()``, ``Path.resolve()`` and ``os.stat()`` emit no audit event
+    (measured on py3.12) - only ``open`` does. Patching these does see them,
+    because ``Path.exists`` routes to ``os.stat`` and ``Path.resolve`` to
+    ``os.path.realpath``.
+    """
+    targets = [(os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
+               (os, "listdir"), (os.path, "realpath")]
+
+    def _forbid(label):
+        def _boom(path, *a, **kw):
+            raise AssertionError(
+                f"filesystem access inside a purely lexical check: "
+                f"{label}({path!r})")
+        return _boom
+
+    saved = [(mod, name, getattr(mod, name)) for mod, name in targets]
+    for mod, name in targets:
+        setattr(mod, name, _forbid(f"{mod.__name__}.{name}"))
+    try:
+        yield
+    finally:
+        for mod, name, original in saved:
+            setattr(mod, name, original)
+
 
 def _make_agent_with(tmp_path: Path, **kwargs) -> Agent:
     """Return an Agent with a mock backend and any extra constructor kwargs."""
@@ -67,7 +121,7 @@ class TestScopeEnforcement:
         registered dynamically in production; here a stub reaches the scope gate.)"""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
-        call = _make_tool_call("mcp_fs_read_file", path="/etc/passwd")   # outside scope
+        call = _make_tool_call("mcp_fs_read_file", path=_outside_scope(tmp_path))
         with patch.dict(_agent.TOOL_REGISTRY,
                         {"mcp_fs_read_file": MagicMock(destructive=False)}, clear=False):
             result = agent._execute_tool(call, interactive=False)
@@ -77,7 +131,7 @@ class TestScopeEnforcement:
         """A path under an uncommon MCP arg name (source_path) is still scoped."""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
-        call = _make_tool_call("mcp_fs_copy", source_path="/etc/shadow")  # outside scope
+        call = _make_tool_call("mcp_fs_copy", source_path=_outside_scope(tmp_path))
         with patch.dict(_agent.TOOL_REGISTRY,
                         {"mcp_fs_copy": MagicMock(destructive=False)}, clear=False):
             result = agent._execute_tool(call, interactive=False)
@@ -90,7 +144,7 @@ class TestScopeEnforcement:
         previously they were the one dynamic file-tool family the scope check missed."""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
-        call = _make_tool_call("plugin_fs_read_file", path="/etc/passwd")   # outside scope
+        call = _make_tool_call("plugin_fs_read_file", path=_outside_scope(tmp_path))
         with patch.dict(_agent.TOOL_REGISTRY,
                         {"plugin_fs_read_file": MagicMock(destructive=False)}, clear=False):
             result = agent._execute_tool(call, interactive=False)
@@ -100,7 +154,7 @@ class TestScopeEnforcement:
         """A path under an uncommon plugin arg name (source_path) is still scoped."""
         from localm.plugins.coder import agent as _agent
         agent = _make_agent(tmp_path, scope="src/**")
-        call = _make_tool_call("plugin_disk_copy", source_path="/etc/shadow")
+        call = _make_tool_call("plugin_disk_copy", source_path=_outside_scope(tmp_path))
         with patch.dict(_agent.TOOL_REGISTRY,
                         {"plugin_disk_copy": MagicMock(destructive=False)}, clear=False):
             result = agent._execute_tool(call, interactive=False)
@@ -238,9 +292,9 @@ class TestShellArgvScopeCheck:
         return result, [str(c.args[0]) for c in warn.call_args_list], agent._audit
 
     def test_out_of_scope_path_is_flagged(self, tmp_path):
-        (tmp_path / "secrets.txt").write_text("token\n")
+        secrets = _outside_scope(tmp_path, "secrets.txt")
         _, warnings, audit = self._run_shell(
-            tmp_path, "src/**", "cat secrets.txt")
+            tmp_path, "src/**", f'cat "{secrets}"')
         hits = [w for w in warnings if "outside the active scope" in w]
         assert hits, f"no warning for an out-of-scope path; got {warnings}"
         assert "secrets.txt" in hits[0]
@@ -250,24 +304,35 @@ class TestShellArgvScopeCheck:
     def test_the_command_still_runs(self, tmp_path):
         """Warn, do not block: escalating a legitimate command into a hard failure
         would break working setups for a heuristic's benefit."""
-        (tmp_path / "secrets.txt").write_text("token\n")
+        Path(_outside_scope(tmp_path, "secrets.txt")).write_text(
+            "token\n", encoding="utf-8")
         # This is the one test here that asserts the command really EXECUTED, so
         # it needs a command that exists on the platform. `cat` is not a cmd.exe
         # builtin and is not on a stock Windows PATH: it resolves only when
         # Git-for-Windows' usr/bin happens to be there, so this passed under Git
         # Bash and redded under PowerShell on the same machine. `type` is the
         # cmd equivalent and needs nothing installed.
-        read_file = ("type secrets.txt" if sys.platform == "win32"
-                     else "cat secrets.txt")
+        #
+        # Written explicitly-relative and UNQUOTED. Explicitly-relative so the
+        # lexical check sees a path at all; unquoted because _shell_argv splits
+        # with posix=False on Windows, which KEEPS the quotes in the token, and a
+        # quoted path then goes through `cmd /C` with quotes cmd strips wrongly.
+        # The other tests here never execute, so only this one is exposed to it.
+        read_file = (r"type .\outside\secrets.txt" if sys.platform == "win32"
+                     else "cat ./outside/secrets.txt")
         result, warnings, _ = self._run_shell(tmp_path, "src/**", read_file)
         assert [w for w in warnings if "outside the active scope" in w]
         assert result.ok, result.output           # it executed
         assert "token" in result.output           # and really did read the file
 
-    def test_absolute_path_outside_cwd_is_flagged(self, tmp_path):
+    def test_absolute_path_outside_cwd_is_flagged(self, tmp_path, tmp_path_factory):
+        # A disposable file the test owns, in a temp dir that is genuinely outside
+        # the agent's cwd - never a real OS path.
+        outside = tmp_path_factory.mktemp("outside_cwd") / "elsewhere.txt"
+        outside.write_text("disposable\n", encoding="utf-8")
         _, warnings, _ = self._run_shell(
-            tmp_path, "src/**", "cat /etc/passwd")
-        assert [w for w in warnings if "/etc/passwd" in w], warnings
+            tmp_path, "src/**", f'cat "{outside}"')
+        assert [w for w in warnings if "elsewhere.txt" in w], warnings
 
     def test_parent_traversal_is_flagged_even_if_absent(self, tmp_path):
         _, warnings, _ = self._run_shell(
@@ -279,8 +344,11 @@ class TestShellArgvScopeCheck:
         is noise the user learns to ignore."""
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("pass\n")
+        # Written explicitly-relative so it IS path-like under the lexical rule:
+        # a bare `src/main.py` would now be skipped as not-a-path, which would
+        # make this control pass without testing anything.
         _, warnings, _ = self._run_shell(
-            tmp_path, "src/**", "cat src/main.py")
+            tmp_path, "src/**", "cat ./src/main.py")
         assert not [w for w in warnings if "outside the active scope" in w], warnings
 
     def test_no_check_without_a_scope(self, tmp_path):
@@ -347,13 +415,15 @@ class TestShellArgvScopeHeuristicPrecision:
     def test_a_colon_token_is_not_read_as_a_drive_path(self, repo, command):
         assert self._flagged(repo, command=command) == []
 
-    def test_a_real_drive_path_is_still_flagged(self, repo):
+    def test_a_real_drive_path_is_still_flagged(self, repo, tmp_path_factory):
         """Fires-control for the case above: the same colon check, still loud on a
-        genuinely drive-qualified path."""
-        assert self._flagged(repo, command=r"cat C:\Windows\win.ini") == [
-            r"C:\Windows\win.ini"]
-        assert self._flagged(repo, command="cat D:/other/file.txt") == [
-            "D:/other/file.txt"]
+        genuinely drive-qualified path. The target is a disposable file the test
+        owns (drive-qualified on Windows, absolute on POSIX), never a real OS
+        file: the check must be provable without the suite itself reaching out."""
+        outside = tmp_path_factory.mktemp("drive_qualified") / "file.txt"
+        outside.write_text("disposable\n", encoding="utf-8")
+        assert self._flagged(repo, command=f'cat "{outside}"') == [str(outside)]
+        # A bare drive letter is drive-qualified too, and names nothing.
         assert self._flagged(repo, command="cat E:") == ["E:"]
 
     @pytest.mark.parametrize("command", [
@@ -373,26 +443,32 @@ class TestShellArgvScopeHeuristicPrecision:
     def test_a_command_verb_is_not_read_as_a_path(self, repo, command):
         assert self._flagged(repo, command=command) == []
 
-    def test_a_token_with_a_path_separator_is_never_a_command_verb(self, repo):
-        """`sub/dir/script.sh` is the ordinary way to run a script (the leading
-        ./ is optional once the path has a separator). Suppressing the program
-        word must not suppress those: a bare verb never contains a separator, so
-        the presence of one settles it."""
-        assert self._flagged(repo, command="build/run.sh --fast") == ["build/run.sh"]
-        assert self._flagged(repo, command="uv run tools/gen.py") == ["tools/gen.py"]
-        assert self._flagged(repo, command="docker run build/run.sh") == [
-            "build/run.sh"]
+    def test_a_bare_relative_path_is_no_longer_flagged(self, repo):
+        """The documented cost of dropping the filesystem probe, made executable.
 
-    def test_a_path_valued_flag_still_has_its_value_checked(self, repo):
-        """`git -C dir` and `make -C dir` move the process's working directory
-        outside the scope, which is the strongest signal this warning exists for.
-        The flag itself is skipped, so without care its VALUE lands in the
-        suppressed subcommand slot and the reference disappears."""
-        assert self._flagged(repo, command="git -C docs status") == ["docs"]
-        assert self._flagged(repo, command="make -C build all") == ["build"]
-        assert self._flagged(repo, command="npm --prefix docs test") == ["docs"]
-        # The subcommand slot survives the flag: `status` is still a verb.
-        assert self._flagged(repo, command="git -C C:/other status") == ["C:/other"]
+        `build/run.sh` and `tools/gen.py` exist here and are outside the scope,
+        and they are no longer reported. Telling them apart from `npm test` in a
+        repo that has a `test/` folder is exactly what the exists-under-cwd stat
+        did, and that same stat read whatever a drive-anchored token named,
+        anywhere on the machine. A separator rule is no substitute: it re-flags
+        `sed s/foo/bar/` and a quoted `-m 'fix a/b handling'`. Write the path
+        explicitly and it is loud again, and reaching OUT of the workspace - the
+        case this warning exists for - is unaffected."""
+        assert self._flagged(repo, command="build/run.sh --fast") == []
+        assert self._flagged(repo, command="uv run tools/gen.py") == []
+        assert self._flagged(repo, command="./build/run.sh --fast") == [
+            "./build/run.sh"]
+
+    def test_a_path_valued_flag_is_caught_when_written_as_a_path(self, repo):
+        """`git -C dir` moves the process's working directory, the strongest
+        out-of-scope signal there is. A bare `docs` cannot be told from a
+        subcommand without asking the filesystem, so it goes unreported like any
+        other bare word; written as a path - which is the form that can actually
+        leave the workspace - it is still caught, in the flag's value position
+        like anywhere else."""
+        assert self._flagged(repo, command="git -C docs status") == []
+        assert self._flagged(repo, command="git -C ./docs status") == ["./docs"]
+        assert self._flagged(repo, command="make -C ../other all") == ["../other"]
 
     def test_a_colon_delimiter_holding_slashes_is_not_a_drive_path(self, repo):
         """A colon is chosen as the sed delimiter precisely BECAUSE the pattern
@@ -403,37 +479,148 @@ class TestShellArgvScopeHeuristicPrecision:
         assert self._flagged(
             repo, command="sed -i s:/old/path:/new/path: notes.txt") == []
 
-    def test_the_same_word_is_still_flagged_in_argument_position(self, repo):
-        """Fires-control for the case above: ``docs`` is quiet as a make target and
-        loud as a real argument, so the check became precise rather than mute."""
-        assert self._flagged(repo, command="make docs") == []
-        assert self._flagged(repo, command="cp -r docs backup") == ["docs"]
-        assert self._flagged(repo, command="git add docs") == ["docs"]
+    def test_position_no_longer_changes_the_answer(self, repo):
+        """The old check answered differently depending on where a word sat in the
+        command line (program slot, subcommand slot, argument), which is what all
+        the runner/wrapper/flag tables were for. Classification is by syntax now:
+        `docs` is quiet everywhere and `./docs` is loud everywhere. One rule, with
+        no positional exceptions left to get wrong."""
+        for command in ("make docs", "cp -r docs backup", "git add docs"):
+            assert self._flagged(repo, command=command) == [], command
+        for command in ("cp -r ./docs backup", "git add ./docs", "./docs/gen.sh"):
+            assert self._flagged(repo, command=command) != [], command
 
-    def test_an_explicit_path_in_command_position_is_still_flagged(self, repo):
-        """Only the exists-under-cwd guess is skipped for a command word. Running a
-        script written out as an out-of-scope path is what the warning is for."""
+    def test_an_explicit_path_in_command_position_is_still_flagged(
+            self, repo, tmp_path_factory):
+        """Running a script written out as an out-of-scope path is what the
+        warning is for, wherever it sits in the command line. The absolute target
+        is a disposable file the test owns, never a real OS binary."""
+        deploy = tmp_path_factory.mktemp("deploy_bin") / "deploy.sh"
+        deploy.write_text("#!/bin/sh\n", encoding="utf-8")
         assert self._flagged(repo, command="./build/run.sh --fast") == [
             "./build/run.sh"]
-        assert self._flagged(repo, command="/usr/local/bin/deploy") == [
-            "/usr/local/bin/deploy"]
+        assert self._flagged(repo, command=f'"{deploy}"') == [str(deploy)]
         assert self._flagged(repo, command="make ../other/target") == [
             "../other/target"]
 
-    def test_a_real_out_of_scope_reference_still_warns(self, repo):
-        """The #781 behaviour restated against this layout: an existing relative
-        path and an absolute path, both outside the scope, both still reported."""
-        assert self._flagged(repo, command="cat secrets.txt") == ["secrets.txt"]
-        assert self._flagged(repo, command="cat /etc/passwd") == ["/etc/passwd"]
+    def test_a_real_out_of_scope_reference_still_warns(self, repo, tmp_path_factory):
+        """The #781 behaviour restated for the lexical rule: an explicitly written
+        relative path, a parent traversal, and an absolute path outside cwd are all
+        still reported. The absolute target is a disposable file the test owns."""
+        secrets = tmp_path_factory.mktemp("absolute_target") / "secrets.txt"
+        secrets.write_text("disposable\n", encoding="utf-8")
+        assert self._flagged(repo, command="cat ./secrets.txt") == ["./secrets.txt"]
+        assert self._flagged(repo, command=f'cat "{secrets}"') == [str(secrets)]
         assert self._flagged(repo, command="cat ../../elsewhere.txt") == [
             "../../elsewhere.txt"]
 
-    def test_run_tests_args_are_not_treated_as_a_command_line(self, repo):
-        """run_tests passes a target PATH plus extra args, not a command line, so
-        the program-word suppression must not reach either of them."""
+    def test_run_tests_path_is_a_declared_path_arg(self, repo):
+        """run_tests' `path` is declared a path by the tool's own schema, so it
+        needs no path-likeness guess at all: it is checked WHOLE (spaces and all)
+        and a bare `tests` is still reported there, unlike the same word inside a
+        command line. `extra_args` is free-form (a -k expression, a marker name),
+        so it follows the command-line rule."""
         assert self._flagged(repo, tool="run_tests", path="tests") == ["tests"]
+        assert self._flagged(repo, tool="run_tests", path="my tests") == ["my tests"]
         assert self._flagged(repo, tool="run_tests",
-                             path="tests", extra_args="docs") == ["tests", "docs"]
+                             path="tests", extra_args="docs") == ["tests"]
+        assert self._flagged(repo, tool="run_tests", path="tests",
+                             extra_args="./docs") == ["tests", "./docs"]
+
+
+class TestPathLikeSyntax:
+    """`_is_path_like` and `_looks_like_drive_path` are pure STRING classifiers,
+    and they are the whole reason the scope check no longer needs the filesystem,
+    so they are tested as strings. The drive letters below are tokens: never used
+    as paths, never joined, never resolved."""
+
+    @pytest.mark.parametrize("tok", [
+        "./a", "../a", "~/a", "/a/b", "a/../b",          # explicit relative / absolute
+        "Q:", "Q:/a", r"Q:\a", "q:/a",                   # drive-qualified
+    ])
+    def test_path_like_by_syntax(self, tok):
+        assert _is_path_like(tok)
+
+    @pytest.mark.parametrize("tok", [
+        "test", "docs",              # bare words (the accepted trade-off)
+        "build/run.sh",              # a bare relative path, likewise
+        "a:b", "5:30", "4:3",        # colon-bearing non-paths
+        "s:old:new:", "s/foo/bar/",  # sed forms
+        "Q:a",                       # drive-RELATIVE, deliberately given up
+    ])
+    def test_not_path_like_by_syntax(self, tok):
+        assert not _is_path_like(tok)
+
+    def test_drive_qualification_needs_a_letter_and_one_colon(self):
+        assert _looks_like_drive_path("Q:/a") and _looks_like_drive_path("Q:")
+        assert not _looks_like_drive_path("5:30")
+        assert not _looks_like_drive_path("s:/usr/local:/opt:g")
+
+
+class TestShellScopeCheckIsPurelyLexical:
+    """The scope warning evaluates a command the model has only PROPOSED: before
+    any confirmation, before anything executes. Doing that must not touch the
+    filesystem. `(self.cwd / tok).exists()` discards cwd entirely for a
+    drive-anchored token, so merely READING a proposed command stat-ed whatever
+    the model named, anywhere on the machine - and at the access point a
+    legitimate probe, a command gone wrong, and a live injection attempt are
+    indistinguishable, so the capability has to be absent rather than careful.
+
+    Absence of a capability is the property under test, so these assert it
+    directly instead of inferring it from a correct answer. Every target is a
+    disposable file the test created in its own temp dir."""
+
+    @pytest.fixture
+    def agent(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        with patch("localm.plugins.coder.agent.print_warning"):
+            return _make_agent_with(tmp_path, scope="src/**")
+
+    def test_the_guard_itself_fires(self, tmp_path):
+        """Fires-control for `_no_filesystem`. Without it, every test below could
+        be green because the guard never armed."""
+        with pytest.raises(AssertionError, match="filesystem access"):
+            with _no_filesystem():
+                (tmp_path / "anything.txt").exists()
+        with pytest.raises(AssertionError, match="filesystem access"):
+            with _no_filesystem():
+                (tmp_path / "anything.txt").resolve()
+        # ...and it puts the real functions back.
+        assert (tmp_path).exists()
+
+    def test_classifying_a_command_touches_no_files(self, agent, tmp_path_factory):
+        outside = tmp_path_factory.mktemp("lexical_target") / "secrets.txt"
+        outside.write_text("disposable\n", encoding="utf-8")
+        call = _make_tool_call(
+            "run_shell", command=f'cat "{outside}" ./notes.txt ../up.txt')
+        with _no_filesystem():
+            flagged = agent._shell_paths_outside_scope(call)
+        assert flagged == [str(outside), "./notes.txt", "../up.txt"]
+
+    def test_an_in_scope_command_touches_no_files(self, agent):
+        with _no_filesystem():
+            assert agent._shell_paths_outside_scope(
+                _make_tool_call("run_shell", command="cat ./src/main.py")) == []
+
+    def test_a_declared_path_arg_touches_no_files(self, agent):
+        with _no_filesystem():
+            assert agent._shell_paths_outside_scope(
+                _make_tool_call("run_tests", path="tests")) == ["tests"]
+
+    def test_the_whole_warning_path_touches_no_files(self, agent, tmp_path_factory):
+        """Not only the classifier: formatting the warning and recording the audit
+        notice run on the same proposed command, so they must stay clean too."""
+        outside = tmp_path_factory.mktemp("warn_target") / "s.txt"
+        outside.write_text("disposable\n", encoding="utf-8")
+        agent._audit = MagicMock()
+        call = _make_tool_call("run_shell", command=f'cat "{outside}"')
+        with patch("localm.plugins.coder.agent.print_warning") as warn, \
+             _no_filesystem():
+            agent._warn_shell_outside_scope(call)
+        assert [w for w in (str(c.args[0]) for c in warn.call_args_list)
+                if "outside the active scope" in w]
+        assert "scope_shell_path" in [
+            c.args[0] for c in agent._audit.notice.call_args_list]
 
 
 class TestScopedToolsSet:
