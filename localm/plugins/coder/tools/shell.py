@@ -132,8 +132,15 @@ def _job_not_found(registry, job_id: str) -> ToolResult:
         f"No background job with id '{job_id}'. Known job ids: {listing}.")
 
 
-def _render_job(job) -> tuple[str, str, bool]:
-    """Render a job as ``(output, summary, truncated)`` for a ToolResult."""
+def _render_job(job) -> tuple[str, str, bool, dict]:
+    """Render a job as ``(output, summary, truncated, status)`` for a ToolResult.
+
+    The status snapshot is RETURNED rather than left for the caller to re-read.
+    A second ``job.status()`` would be an independent read of state the watcher
+    thread mutates, so a job finishing between the two calls would render a
+    "running" body while the caller's ok/exit-code logic saw the finished one.
+    One snapshot, one story.
+    """
     st = job.status()
     out, err, dropped = job.output()
 
@@ -171,7 +178,7 @@ def _render_job(job) -> tuple[str, str, bool]:
     else:
         status = st["state"]
     summary = f"{st['id']} $ {st['label'][:40]}  [{status}]"
-    return "\n".join(lines), summary, trunc
+    return "\n".join(lines), summary, trunc, st
 
 
 def tool_run_shell_background(
@@ -234,8 +241,10 @@ def tool_check_shell_job(cwd: Path, job_id: str) -> ToolResult:
     if job is None:
         return _job_not_found(registry, job_id)
 
-    output, summary, trunc = _render_job(job)
-    st = job.status()
+    # The SAME snapshot the body was rendered from: re-reading here would let a
+    # job that finished in between be described as running while ok said it
+    # failed, and that ok=False then feeds the consecutive-failure breaker.
+    output, summary, trunc, st = _render_job(job)
     # Mirror run_shell: a finished job that FAILED reports ok=False, so the model
     # sees the failure rather than a green "check succeeded". A job the model
     # killed on purpose is not a failure though - reporting one would feed the
@@ -258,7 +267,7 @@ def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
         return _job_not_found(registry, job_id)
 
     outcome = job.kill()
-    output, summary, trunc = _render_job(job)
+    output, summary, trunc, _st = _render_job(job)
     output = f"<kill_result>{outcome}</kill_result>\n" + output
     # A kill that could not stop the process must never report success.
     ok = not outcome.startswith("kill FAILED")
