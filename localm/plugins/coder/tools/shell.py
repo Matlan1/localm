@@ -275,9 +275,18 @@ def resolve_runner(name: str) -> "str | None":
     as `.CMD` shims, so `['npm', ...]` raises WinError 2 even with npm installed
     and on PATH, while the full `...\\npm.CMD` path runs fine (both measured).
     That is why a bare `shutil.which` truthiness check is not enough here: which
-    finds npm.CMD, and the argv that names it `npm` still cannot start."""
+    finds npm.CMD, and the argv that names it `npm` still cannot start.
+
+    Absolutised, because which() on Windows searches the CURRENT directory first
+    and returns what it joined, so the answer can be a relative `.\\npm.CMD`.
+    The result is stored on the session and run later with cwd set to the
+    PROJECT directory, which is not always the directory which() searched - a
+    relative answer would then resolve somewhere else, or against a same-named
+    file the project happens to contain."""
+    import os
     import shutil as _shutil
-    return _shutil.which(name)
+    found = _shutil.which(name)
+    return os.path.abspath(found) if found else None
 
 
 def _detect_test_runner(cwd: Path) -> list[str]:

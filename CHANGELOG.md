@@ -42,11 +42,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a Rust project without cargo, a Go project without go, and a Python project
   whose interpreter has no pytest.
 - **"The check could not run" is no longer reported as either a pass or a
-  failure.** An exit code meaning the command never started is now treated as
-  inconclusive, like a test run that collects nothing: the coder says plainly
-  that nothing was verified instead of blaming the model, and it does not spend
-  fix attempts on it. It is still never called a success. Sessions in the app
-  now also carry that third answer, so a finished task whose check never ran is
+  failure.** A command that never started is now treated as inconclusive, like a
+  test run that collects nothing: the coder says plainly that nothing was
+  verified instead of blaming the model, and it does not spend fix attempts on
+  it. It is still never called a success. This is decided from what actually
+  happened when the command was launched, not from its exit code, so a check
+  that ran and failed because something it calls was missing (a script that is
+  not there yet, an uninstalled dependency) is still reported as the failure it
+  is, and the coder still gets its attempts to fix it. Sessions in the app now
+  also carry that third answer, so a finished task whose check never ran is
   labelled "not verified" rather than reading as a clean finish.
 - **The coder's forgotten-lessons archive no longer reports "nothing here" when
   it simply could not be read.** `localm coder --episodes-archive` printed "No

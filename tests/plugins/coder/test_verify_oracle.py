@@ -166,32 +166,44 @@ class TestLaunchFailureIsInconclusive:
     cannot start; run_verify returned 125; 125 was not inconclusive, so it took
     the FAILURE branch and correct work ended "NOT verified"."""
 
-    @pytest.mark.parametrize("code", [125, 126, 127])
-    def test_launch_failure_codes_are_inconclusive(self, code):
-        assert verify.is_launch_failure(code) is True
-        assert verify.is_inconclusive(["npm", "test"], code) is True
-        assert verify.is_inconclusive("make check", code) is True
+    def test_the_launch_fact_travels_on_the_outcome_not_in_the_exit_code(
+            self, tmp_path):
+        """Through the REAL primitive: run_verify is the only thing that knows
+        the launch raised, so it has to say so directly."""
+        outcome = verify.run_verify(["definitely-not-a-real-binary-xyz"],
+                                    tmp_path)
+        code, out = outcome                       # still unpacks as a 2-tuple
+        assert verify.launch_failed(outcome) is True
+        assert "failed to run verification command" in out
+        assert verify.is_inconclusive(["x"], code, True) is True
 
-    @pytest.mark.parametrize("code", [1, 2, 3, 4, 6, 124, 128])
-    def test_a_genuine_failure_is_still_a_failure(self, code):
-        """FIRES-CONTROL for the whole class: widening "inconclusive" must not
-        swallow the exit codes a real failing suite returns, or the oracle stops
-        being an oracle. 124 is our own timeout marker - a check that ran."""
-        assert verify.is_launch_failure(code) is False
+    def test_a_command_that_ran_reports_no_launch_failure(self, tmp_path):
+        outcome = verify.run_verify([sys.executable, "-c",
+                                     "raise SystemExit(1)"], tmp_path)
+        assert verify.launch_failed(outcome) is False
+        assert verify.is_inconclusive(["x"], outcome[0],
+                                      verify.launch_failed(outcome)) is False
+
+    @pytest.mark.parametrize("code", [1, 2, 5, 125, 126, 127, 124, 128])
+    def test_no_exit_code_alone_makes_a_run_inconclusive(self, code):
+        """THE CORRECTION. 125/126/127 are POSIX's "could not execute" codes, but
+        a command that ran perfectly well can return them: npm exits 127 when a
+        test script's binary is missing, and `npm test` is exactly what
+        auto-detection produces. Reading the code as evidence would report a real
+        failure as "nothing was verified" - the same dishonesty as X4, pointed
+        the other way. Only the out-of-band fact counts (exit 5 stays a separate,
+        pytest-specific rule and is covered above)."""
         assert verify.is_inconclusive(["npm", "test"], code) is False
 
     def test_the_reason_distinguishes_the_two_inconclusive_cases(self):
-        assert verify.inconclusive_reason(["npm", "test"], 125) == "could not run"
+        assert verify.inconclusive_reason(
+            ["npm", "test"], 125, True) == "could not run"
         assert verify.inconclusive_reason("pytest -q", 5) == "collected no tests"
 
-    def test_a_command_that_cannot_launch_reports_inconclusive_end_to_end(
-            self, tmp_path):
-        """Through the REAL primitive, not a hand-written 125: an argv naming a
-        binary that does not exist must come back classified as "did not run"."""
-        cmd = ["definitely-not-a-real-binary-xyz"]
-        code, out = verify.run_verify(cmd, tmp_path)
-        assert verify.is_inconclusive(cmd, code) is True
-        assert "failed to run verification command" in out
+    def test_a_plain_tuple_never_claims_a_launch_failure(self):
+        """A patched cli._run_verify returns a bare 2-tuple; it must read as
+        "the command ran" rather than silently disarming the oracle."""
+        assert verify.launch_failed((127, "boom")) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -537,7 +549,6 @@ class TestVerifyGate:
         with patch("localm.plugins.coder.agent.print_warning"):
             agent._run_verify_gate("done", False, _fresh_state(agent))
         assert agent.last_verify_state == "inconclusive"
-        assert agent.last_verify_state != "passed"
 
     def test_verify_state_records_a_pass(self, tmp_path):
         agent = _make_agent(tmp_path, verify_cmd="exit 0")
@@ -546,8 +557,24 @@ class TestVerifyGate:
         assert agent.last_verify_state == "passed"
 
     def test_verify_state_is_none_when_no_check_ran(self, tmp_path):
-        agent = _make_agent(tmp_path, self._NO_TOOL_SCRIPT)
+        """Not just "None from __init__": drive it to a real verdict first, so a
+        field that is never assigned cannot pass this by accident."""
+        agent = _make_agent(tmp_path, self._NO_TOOL_SCRIPT, verify_cmd="exit 0")
+        _record_write(agent)
+        agent._run_verify_gate("done", False, _fresh_state(agent))
+        assert agent.last_verify_state == "passed"      # a verdict is now set
+        agent.verify_cmd = None                         # this run has no oracle
         agent.chat("just answer")
+        assert agent.last_verify_state is None
+
+    def test_clearing_the_session_drops_the_stale_verdict(self, tmp_path):
+        """reset() re-arms last_run_ok; the new field has to go with it, or /clear
+        leaves a verdict about a conversation that no longer exists."""
+        agent = _make_agent(tmp_path, verify_cmd="exit 0")
+        _record_write(agent)
+        agent._run_verify_gate("done", False, _fresh_state(agent))
+        assert agent.last_verify_state == "passed"
+        agent.reset()
         assert agent.last_verify_state is None
 
     def test_verify_state_is_per_run_like_last_run_ok(self, tmp_path):

@@ -75,15 +75,21 @@ def test_goal_loop_gives_up_honestly_at_the_cap(tmp_path, monkeypatch):
 
 
 def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
-                                                             monkeypatch):
-    """X4 in the --until path: 125 means the command never started, so no fix
-    turn can reach it. Iterating burns the whole budget asking the model to fix
-    a condition it cannot touch."""
+                                                              monkeypatch):
+    """X4 in the --until path: the command never STARTED, so no fix turn can
+    reach it. Iterating burns the whole budget asking the model to fix a
+    condition it cannot touch.
+
+    The launch fact rides on the outcome, so build a real VerifyOutcome rather
+    than a bare tuple - a bare tuple means "it ran", which is the point of the
+    companion test below."""
+    from localm.plugins.coder.verify import VerifyOutcome
     calls = []
 
     def _verify(cmd, wd):
         calls.append(cmd)
-        return (125, "failed to run verification command: [WinError 2]")
+        return VerifyOutcome(125, "failed to run: [WinError 2]",
+                             launch_failed=True)
 
     monkeypatch.setattr(cli, "_run_verify", _verify)
     agent = _FakeAgent()
@@ -93,14 +99,20 @@ def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
     assert agent.continue_calls == []    # the model is not billed for it
 
 
-def test_goal_loop_still_retries_a_genuine_failure(tmp_path, monkeypatch):
-    """FIRES-CONTROL for the test above: a real failing check must still drive
-    fix turns, or the --until oracle has been disarmed rather than corrected."""
-    monkeypatch.setattr(cli, "_run_verify", lambda cmd, wd: (1, "1 failed"))
+def test_goal_loop_still_retries_a_command_not_found_that_ran(tmp_path,
+                                                              monkeypatch):
+    """FIRES-CONTROL, and the correction that matters. Exit 127 from a check
+    that DID start (a shell whose script is missing, npm whose test binary is
+    missing) is fixable by the model - it has a shell and can create the script,
+    chmod +x, or install the dependency. Short-circuiting on the exit code would
+    throw the entire iteration budget away on exactly the failures goal mode
+    exists to fix."""
+    monkeypatch.setattr(cli, "_run_verify",
+                        lambda cmd, wd: (127, "sh: ./check.sh: not found"))
     agent = _FakeAgent()
-    success, _ = cli._run_goal_loop(agent, "do it", "pytest -x", 3, tmp_path)
+    success, _ = cli._run_goal_loop(agent, "do it", "./check.sh", 3, tmp_path)
     assert success is False
-    assert len(agent.continue_calls) == 2
+    assert len(agent.continue_calls) == 2       # retried, not abandoned
 
 
 def test_goal_task_wrap_forbids_editing_the_check():

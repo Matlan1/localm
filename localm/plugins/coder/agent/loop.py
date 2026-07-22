@@ -556,7 +556,12 @@ class _LoopMixin:
         self._emit("info", text=f"verification: running `{label}`")
         if interactive:
             print_info(f"(verification: running `{label}`)")
-        code, output = _verify.run_verify(cmd, self.cwd)
+        outcome = _verify.run_verify(cmd, self.cwd)
+        code, output = outcome
+        # Whether the command STARTED is the runner's own knowledge, carried on
+        # the outcome; inferring it from the exit code would misread a genuine
+        # 127 from a check that ran as "nothing was verified".
+        did_not_start = _verify.launch_failed(outcome)
 
         if code == 0:
             # Passing is not terminal: anything written AFTER this point (a fix
@@ -574,7 +579,7 @@ class _LoopMixin:
                 print_success(f"Verification passed: `{label}` exited 0.")
             return None
 
-        if _verify.is_inconclusive(cmd, code):
+        if _verify.is_inconclusive(cmd, code, did_not_start):
             # Not a pass and not a fixable failure: the check either could not
             # start or collected nothing. Retrying would burn every attempt on
             # something no code change can affect, so stop - but say plainly that
@@ -584,8 +589,8 @@ class _LoopMixin:
             st.verify_settled = True
             self._last_verify_state = "inconclusive"
             msg = (f"verification inconclusive: `{label}` "
-                   f"{_verify.inconclusive_reason(cmd, code)} (exit {code}) - "
-                   "nothing was actually verified")
+                   f"{_verify.inconclusive_reason(cmd, code, did_not_start)} "
+                   f"(exit {code}) - nothing was actually verified")
             self._emit("info", text=msg)
             _agent.print_warning(msg)
             return None

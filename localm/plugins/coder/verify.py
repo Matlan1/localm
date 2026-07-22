@@ -29,8 +29,35 @@ VerifyCommand = Union[str, list]
 VERIFY_TIMEOUT_S = 600
 
 
+class VerifyOutcome(tuple):
+    """``(exit_code, output)``, plus the one fact an exit code cannot carry.
+
+    Every caller keeps unpacking this as the 2-tuple it has always been. What is
+    added is ``launch_failed``: the command never STARTED, which :func:`run_verify`
+    knows directly (it caught the OSError) and which NO exit code can be trusted
+    to encode. That distinction has to travel out of band because the obvious
+    shortcut is wrong in the dangerous direction: npm returns 127 when a test
+    script's binary is missing, a check that very much RAN and FAILED, and
+    `npm test` is exactly what auto-detection produces. Reading 127 as "could not
+    run" would report a real failure as "nothing was verified" - the mirror image
+    of the bug this module was fixed for.
+
+    A plain tuple (a test double patching ``cli._run_verify``) simply has no such
+    attribute, and :func:`launch_failed` reads it as False."""
+
+    def __new__(cls, code: int, output: str, launch_failed: bool = False):
+        outcome = super().__new__(cls, (code, output))
+        outcome.launch_failed = launch_failed
+        return outcome
+
+
+def launch_failed(outcome) -> bool:
+    """Did *outcome*'s command fail to start? False for anything not saying so."""
+    return bool(getattr(outcome, "launch_failed", False))
+
+
 def run_verify(command: VerifyCommand, work_dir: Path,
-               timeout: int = VERIFY_TIMEOUT_S) -> "tuple[int, str]":
+               timeout: int = VERIFY_TIMEOUT_S) -> VerifyOutcome:
     """Run the verification *command* in *work_dir*; return (exit_code, output).
 
     A STRING command is run through the platform shell wrapper (the same list
@@ -45,13 +72,17 @@ def run_verify(command: VerifyCommand, work_dir: Path,
     result = run_subprocess(command, work_dir, timeout=timeout,
                             shell_wrap=isinstance(command, str))
     if result.timed_out:
-        return 124, (
+        return VerifyOutcome(124, (
             "verification command timed out after %ds%s"
-            % (timeout, _partial_on_timeout(result)))
+            % (timeout, _partial_on_timeout(result))))
     if result.not_found or result.error is not None:
-        return 125, "failed to run verification command: %s" % (
-            result.error or "command not found")
-    return result.returncode, (result.stdout or "") + (result.stderr or "")
+        # The launch itself raised, so this is the ONE place that knows, first
+        # hand, that nothing ran. Say so on the outcome; 125 remains only a
+        # display code, never the evidence (see VerifyOutcome).
+        return VerifyOutcome(125, "failed to run verification command: %s" % (
+            result.error or "command not found"), launch_failed=True)
+    return VerifyOutcome(result.returncode,
+                         (result.stdout or "") + (result.stderr or ""))
 
 
 def command_text(command: VerifyCommand) -> str:
@@ -74,28 +105,15 @@ def verify_feedback(until_cmd: VerifyCommand, code: int, output: str) -> str:
     )
 
 
-# Exit codes meaning the command never started: 125 is what run_verify returns
-# when the launch itself raised, 126 ("found but not executable") and 127 ("not
-# found") are what a POSIX shell returns for a shell-string command.
-#
-# Honest limit, because no exit code can fix it: Windows `cmd /C <missing>`
-# returns 1, which is indistinguishable from a genuine test failure (measured).
-# Auto-detected commands are argv lists, so their launch failure surfaces as a
-# FileNotFoundError -> 125 and IS distinguishable; a user-supplied shell string
-# on Windows is not, and is left to be reported as the failure it looks like.
-LAUNCH_FAILURE_CODES = frozenset({125, 126, 127})
+def is_inconclusive(command: VerifyCommand, code: int,
+                    did_not_start: bool = False) -> bool:
+    """True when the check did not actually run anything.
 
+    Two cases. The command never STARTED - which the caller must pass in as
+    *did_not_start*, from :func:`launch_failed` on the outcome, because it is
+    knowledge only :func:`run_verify` has and no exit code reliably carries. And
+    pytest's exit 5 (no tests collected).
 
-def is_launch_failure(code: int) -> bool:
-    """True when *code* means the verification command could not be started."""
-    return code in LAUNCH_FAILURE_CODES
-
-
-def is_inconclusive(command: VerifyCommand, code: int) -> bool:
-    """True when *code* means "the check did not actually run anything".
-
-    Two cases: the command could not be STARTED at all (see
-    :data:`LAUNCH_FAILURE_CODES`), and pytest's exit 5 (no tests collected).
     Neither is a failure the model can fix by editing code, so looping on one
     would burn every retry to no purpose; neither is a pass either, so neither
     may be reported as one. "Not reported as a pass" is concrete: the caller
@@ -103,14 +121,25 @@ def is_inconclusive(command: VerifyCommand, code: int) -> bool:
     ``last_verify_state == "inconclusive"`` so a programmatic consumer (the GUI's
     final event) can tell this apart from a green run rather than reading an
     unqualified ok. ``tool_run_tests`` makes the same distinction for the same
-    reason."""
-    return is_launch_failure(code) or (
-        code == 5 and "pytest" in command_text(command))
+    reason.
+
+    What is deliberately NOT here: guessing from 125/126/127. Those are the
+    POSIX conventions for "could not execute", but a command that ran perfectly
+    well can return them - npm exits 127 when a test script's binary is missing,
+    and `npm test` is exactly what auto-detection produces. Calling that "could
+    not run, nothing was verified" would hide a real failure, which is the same
+    dishonesty as billing the model for a check that never started, pointed the
+    other way. When the launch genuinely fails we KNOW it, so we do not guess;
+    when we do not know, the check is reported as the failure it looks like and
+    the model gets its retries (it can often fix these: create the missing
+    script, chmod +x, install the dependency)."""
+    return did_not_start or (code == 5 and "pytest" in command_text(command))
 
 
-def inconclusive_reason(command: VerifyCommand, code: int) -> str:
+def inconclusive_reason(command: VerifyCommand, code: int,
+                        did_not_start: bool = False) -> str:
     """Why :func:`is_inconclusive` held, phrased for the user and the log."""
-    if is_launch_failure(code):
+    if did_not_start:
         return "could not run"
     return "collected no tests"
 
@@ -189,7 +218,7 @@ def _runner_available(name: str) -> bool:
 
 
 def _pytest_importable() -> bool:
-    """True when pytest can be imported by the interpreter the check would use.
+    """True when pytest is importable HERE, in the running localm process.
 
     The detected python command runs ``sys.executable -m pytest``, so the
     interpreter is always launchable - but with no pytest importable in it the
@@ -197,7 +226,15 @@ def _pytest_importable() -> bool:
     unfixable-by-the-model condition as a missing binary, only wearing an exit
     code that looks like a real test failure, which makes it worse. It is a live
     case rather than a hypothetical one: localm's own interpreter is what runs
-    the coder, and a user's Python project is not obliged to share it."""
+    the coder, and a user's Python project is not obliged to share it.
+
+    Same interpreter, but NOT quite the same question, so do not read more into
+    a True than it carries: ``-m`` prepends the project directory to sys.path,
+    while this asks about the localm process's own import state. A project with
+    a vendored pytest can therefore be declined here even though the command
+    would have worked. Erring that way costs an oracle; erring the other way
+    costs every retry on an unfixable failure, which is the harm this gate
+    exists for."""
     import importlib.util
     try:
         found = importlib.util.find_spec("pytest") is not None
