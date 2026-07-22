@@ -217,7 +217,13 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         params={
             "job_id": {"type": "string", "description": "Job id from run_shell_background", "required": True},
         },
-        destructive=True,
+        # NOT destructive, unlike its two siblings: this only reads a status field
+        # and an output buffer - it starts nothing, kills nothing, writes nothing.
+        # Marking it destructive would put a confirmation card in front of EVERY
+        # poll of a running build, and would deny it outright in an unattended run
+        # (the gate fails closed), making a started job impossible to observe.
+        # The capability that needs gating is starting and killing, and those two
+        # are gated.
     ),
     "kill_shell_job": ToolDef(
         name="kill_shell_job",

@@ -72,10 +72,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that spawned children does not leave them running, and any job still running
   is stopped when localm exits rather than being orphaned. Up to four
   background commands run at once; asking for a fifth is refused with a clear
-  message instead of quietly queueing. These tools execute arbitrary code, so
-  they carry exactly the same confirmation and privacy handling as `run_shell`:
-  they prompt before running, they are unavailable to shareable (restricted)
-  coder sessions, and turning `run_shell` off turns them off too.
+  message instead of quietly queueing. Starting a background command is
+  arbitrary code execution and stopping one tears down a process tree, so both
+  ask for confirmation exactly like `run_shell` does and get the same privacy
+  handling; checking on a job only reads its status and output, so it does not
+  prompt (otherwise every poll of a long build would need approval). All three
+  are unavailable to shareable (restricted) coder sessions, and turning
+  `run_shell` off turns them off too.
 - **The coder's past lessons no longer expire by age alone, and nothing it
   forgets is gone for good.** Episodic memory used to be a plain queue: at 200
   stored lessons the oldest was discarded, however useful it was, with no
