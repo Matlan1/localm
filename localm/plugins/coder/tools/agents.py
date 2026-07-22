@@ -338,7 +338,9 @@ def _finalize_isolated_child(info: dict):
     """
     def _finalize(child) -> dict:
         from .base import _truncate
-        from .git import _git, git_commit_all_in, git_worktree_prune, git_worktree_remove
+        from .git import (
+            _git, git_commit_all_in, git_prune_child_worktrees, git_worktree_remove,
+        )
 
         worktree, repo, base = info["worktree"], info["repo"], info["base"]
         out: dict = {"branch": info["branch"], "base": base,
@@ -367,10 +369,14 @@ def _finalize_isolated_child(info: dict):
             # it. Report it so the operator can reap it; never --force past it.
             prior = out.get("cleanup_warning")
             out["cleanup_warning"] = f"{prior}; {removed}" if prior else removed
-        try:
-            git_worktree_prune(repo)
-        except Exception:
-            pass
+        # SCOPED prune, and its outcome is reported rather than discarded. A bare
+        # `git worktree prune` is repo-wide and would drop the record of a USER's
+        # worktree that merely sits on an unmounted drive; and swallowing the
+        # result made a failed prune invisible.
+        pruned, pok = git_prune_child_worktrees(repo)
+        if not pok:
+            prior = out.get("cleanup_warning")
+            out["cleanup_warning"] = f"{prior}; {pruned}" if prior else pruned
         return out
 
     return _finalize

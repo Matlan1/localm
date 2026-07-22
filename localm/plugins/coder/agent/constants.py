@@ -142,12 +142,26 @@ _SHELL_JOB_TOOLS: frozenset[str] = frozenset({"check_shell_job", "kill_shell_job
 # on set intersection, so one combined family would mean disabling spawn_agent
 # also disabled run_shell (and vice versa) - welding two unrelated capabilities
 # together.
+# dispatch_parallel belongs here too: it spawns children with the same inherited
+# write+shell reach, so a caller that switched delegation off must not keep it.
 _AGENT_EXEC_TOOLS: frozenset[str] = frozenset(
-    {"spawn_agent", "spawn_agent_background"})
+    {"spawn_agent", "spawn_agent_background", "dispatch_parallel"})
 
 # check_agent_job is useless without a way to start a job, so it follows the
 # delegation family wherever that is disabled - same rule as _SHELL_JOB_TOOLS.
 _AGENT_JOB_TOOLS: frozenset[str] = frozenset({"check_agent_job"})
+
+# Tools that are handed the running Agent as a hidden ``_parent_agent`` argument
+# by the dispatcher. Every one of them GUARDS on it and returns an error when it
+# is None, so a tool MISSING from this set is not degraded, it is dead: still
+# advertised in every system prompt, still confirmed by the user, and failing on
+# 100% of real calls. dispatch_parallel shipped exactly that way through two PRs
+# (#794 registered it without touching the set; #796 edited the set itself to add
+# spawn_agent_background and still did not add it), because every test called the
+# tool function directly instead of going through Agent._execute_tool. A named
+# set plus the registry-wide dispatch test is what keeps it from drifting again.
+_PARENT_AGENT_TOOLS: frozenset[str] = frozenset(
+    {"spawn_agent", "spawn_agent_background", "dispatch_parallel"})
 
 
 def expand_shell_disable(disabled: frozenset) -> frozenset:

@@ -828,7 +828,12 @@ class AgentJob(BackgroundJob):
         the parent's _changed_files / _error_trace from here."""
         try:
             text = self._child.run_task(self._task)
-            outcome = {"summary": text, "turns": getattr(self._child, "turns", 0)}
+            # run_task RETURNS its failure message rather than raising (max_turns
+            # reached, circuit breaker tripped), so reaching this line is not the
+            # same as succeeding. Record the child's OWN verdict, or the parent
+            # cannot tell a failed sub-agent from a finished one and reports it ok.
+            outcome = {"summary": text, "turns": getattr(self._child, "turns", 0),
+                       "ok": bool(getattr(self._child, "last_run_ok", True))}
         except Exception as exc:                      # noqa: BLE001 - recorded
             # Surfaced as the job's terminal error, never swallowed.
             outcome = {"error": f"{type(exc).__name__}: {exc}"}

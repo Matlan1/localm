@@ -255,7 +255,72 @@ def git_worktree_remove(repo: Path, path: Path) -> tuple[str, bool]:
 
 
 def git_worktree_prune(repo: Path) -> tuple[str, bool]:
-    """Drop administrative records for worktrees whose directories are gone."""
+    """Drop administrative records for worktrees whose directories are gone.
+
+    REPO-WIDE and unscopable. Prefer :func:`git_prune_child_worktrees`, which
+    refuses to run this when it would destroy a record we do not own.
+    """
+    return _git(repo, "worktree", "prune", timeout=30)
+
+
+# `git worktree prune -n -v` reports each record it WOULD drop as
+# "Removing worktrees/<name>: <reason>", where <name> is the administrative
+# record under .git/worktrees/ and derives from the worktree directory's own
+# basename. Verified against git 2.54.0.
+_PRUNE_RECORD_RE = re.compile(r"^Removing\s+worktrees/(?P<name>.+?):")
+
+
+def git_prune_child_worktrees(repo: Path) -> tuple[str, bool]:
+    """Prune stale worktree records, but ONLY when every one of them is ours.
+
+    `git worktree prune` takes no pathspec (`usage: git worktree prune [-n] [-v]
+    [--expire <expire>]`), so a bare call drops the administrative record of
+    EVERY registered worktree whose directory is currently missing - in the
+    USER's repo, not just ours. Git's own documentation names the victim: a
+    worktree "stored on a portable device or network share which is not always
+    mounted" is indistinguishable from an abandoned one, and recovering it needs
+    `git worktree repair`. Tidying up after our own children is not worth
+    silently discarding a user's worktree; that is the same class of bug #795
+    fixed for RAG, where an unplugged drive must not be able to destroy the index.
+
+    So: ask git what it WOULD prune, and prune only when every record listed is
+    one of ours (the ``coder-child-`` prefix). Anything else, INCLUDING a line we
+    cannot parse, fails CLOSED - we skip the prune and say why. A leftover record
+    of our own is harmless and already surfaced in the dispatch report; a dropped
+    foreign record cannot be recovered from here.
+
+    Returns (message, ok). ok=False means nothing was pruned and the message says
+    what stopped it, for the caller to surface rather than swallow.
+    """
+    out, ok = _git(repo, "worktree", "prune", "-n", "-v", timeout=30)
+    if not ok:
+        return f"could not check what `git worktree prune` would remove: {out}", False
+
+    ours: list[str] = []
+    foreign: list[str] = []
+    for line in out.splitlines():
+        text = line.strip()
+        if not text or text == "(no output)":
+            continue
+        match = _PRUNE_RECORD_RE.match(text)
+        if match is None:
+            # An unrecognised line (a git output-format change, or a translated
+            # build) means we cannot tell whose record it is. Fail closed.
+            foreign.append(text)
+        elif match.group("name").startswith(WORKTREE_PREFIX):
+            ours.append(match.group("name"))
+        else:
+            foreign.append(match.group("name"))
+
+    if foreign:
+        return (
+            "skipped `git worktree prune`: it would also drop worktree records "
+            "this plugin does not own (" + "; ".join(foreign) + "). A worktree on "
+            "an unmounted drive or network share looks missing to git, so pruning "
+            "would discard it; restore one with `git worktree repair`."
+        ), False
+    if not ours:
+        return "(nothing to prune)", True
     return _git(repo, "worktree", "prune", timeout=30)
 
 
