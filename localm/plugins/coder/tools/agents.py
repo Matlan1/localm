@@ -132,6 +132,79 @@ def inherited_child_kwargs(
     )
 
 
+def _prepare_child(
+    cwd: Path,
+    task: str,
+    name: str,
+    files: Optional[list],
+    model: Optional[str],
+    max_turns: int,
+    role: Optional[str],
+    parent: Any,
+    *,
+    confirm_handler: Any,
+    tool: str,
+):
+    """Build the child Agent and its full task, shared by BOTH spawn paths.
+
+    Returns ``(child, full_task)`` on success or ``(None, ToolResult)`` on a
+    failure the caller should return verbatim.
+
+    ONE construction path on purpose. Every safety property a child needs -
+    scope (#781), role (#786), restricted/disabled_tools, the confirmation
+    posture - flows through ``inherited_child_kwargs``. A second, parallel
+    construction site is precisely how the scope hole and then the role hole
+    were introduced, so the background variant reuses this rather than
+    assembling its own kwargs.
+    """
+    from ..roles import resolve_role
+    try:
+        resolve_role(role)
+    except ValueError as exc:
+        return None, ToolResult.error(f"{tool}: {exc}")
+
+    from ..agent import Agent
+
+    backend = parent.backend
+    if model and model != backend.model_id:
+        from ..backends.http import make_localm_backend
+        raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
+        try:
+            port = int(raw_url.split(":")[-1].split("/")[0])
+        except Exception:
+            port = 8642
+        try:
+            backend = make_localm_backend(model, port=port)
+        except Exception:
+            backend = parent.backend
+
+    preload_text = ""
+    if files:
+        failed: list[str] = []
+        for fp in files:
+            r = tool_read_file(cwd, fp)
+            if not r.ok:
+                failed.append(f"{fp}: {r.output}")
+                continue
+            preload_text += f"\n{r.output}\n"
+        if failed:
+            # Fail BEFORE spawning: silently feeding the read error to the
+            # child as "file content" poisons its context, and the parent is
+            # the one who can fix the path and retry.
+            return None, ToolResult.error(
+                f"{tool}: could not pre-load file(s):\n  " + "\n  ".join(failed))
+
+    full_task = task
+    if preload_text:
+        full_task = f"Context files:\n{preload_text}\n\nTask:\n{task}"
+
+    child = Agent(**inherited_child_kwargs(
+        parent, backend=backend, cwd=cwd, name=name, max_turns=max_turns,
+        confirm_handler=confirm_handler, role=role,
+    ))
+    return child, full_task
+
+
 def tool_spawn_agent(
     cwd: Path,
     task: str,
@@ -160,57 +233,18 @@ def tool_spawn_agent(
     if _parent_agent is None:
         return ToolResult.error("spawn_agent requires a running parent agent")
 
-    # Validate before any work: an unknown role must not quietly fall back to a
-    # full-capability child, which is the exact over-capable delegate roles exist
-    # to prevent. Report the valid names so the model can retry.
-    from ..roles import resolve_role
-    try:
-        resolve_role(role)
-    except ValueError as exc:
-        return ToolResult.error(f"spawn_agent: {exc}")
-
-    from ..agent import Agent
-
-    backend = _parent_agent.backend
-    if model and model != backend.model_id:
-        from ..backends.http import make_localm_backend
-        raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
-        try:
-            port = int(raw_url.split(":")[-1].split("/")[0])
-        except Exception:
-            port = 8642
-        try:
-            backend = make_localm_backend(model, port=port)
-        except Exception:
-            backend = _parent_agent.backend
-
-    preload_text = ""
-    if files:
-        failed: list[str] = []
-        for fp in files:
-            r = tool_read_file(cwd, fp)
-            if not r.ok:
-                failed.append(f"{fp}: {r.output}")
-                continue
-            preload_text += f"\n{r.output}\n"
-        if failed:
-            # Fail BEFORE spawning: silently feeding the read error to the
-            # child as "file content" poisons its context, and the parent is
-            # the one who can fix the path and retry.
-            return ToolResult.error(
-                "spawn_agent: could not pre-load file(s):\n  "
-                + "\n  ".join(failed)
-            )
-
-    full_task = task
-    if preload_text:
-        full_task = f"Context files:\n{preload_text}\n\nTask:\n{task}"
-
-    child = Agent(**inherited_child_kwargs(
-        _parent_agent, backend=backend, cwd=cwd, name=name, max_turns=max_turns,
+    # Validation (unknown role -> error, not a quiet full-capability child) and
+    # construction both live in the shared helper, so this path and the
+    # background one cannot drift.
+    child, prepared = _prepare_child(
+        cwd, task, name, files, model, max_turns, role, _parent_agent,
         confirm_handler=_inherited_confirm_handler(_parent_agent),
-        role=role,
-    ))
+        tool="spawn_agent",
+    )
+    if child is None:
+        return prepared
+    full_task = prepared
+
     result_text = child.run_task(full_task)
     turns_used  = child.turns
 
@@ -236,3 +270,135 @@ def tool_spawn_agent(
         neutralise(result_text),
         summary=f"sub-agent '{name}' finished in {turns_used} turn(s)",
     )
+
+
+def tool_spawn_agent_background(
+    cwd: Path,
+    task: str,
+    name: str = "subagent",
+    files: Optional[list] = None,
+    model: Optional[str] = None,
+    max_turns: int = 10,
+    role: Optional[str] = None,
+    _parent_agent: Optional[Any] = None,
+) -> ToolResult:
+    """
+    Start a sub-agent in the BACKGROUND and get a job id back immediately.
+
+    Same child as ``spawn_agent`` - same inherited scope, role, restrictions and
+    confirmation posture - but the parent does not wait for it. Poll with
+    ``check_agent_job``; a finished job is also folded into the parent
+    automatically at the start of its next turn.
+
+    CONFIRMATION HAPPENS ONCE, AT DISPATCH. This tool is destructive, so starting
+    a background sub-agent goes through the confirmation gate exactly like
+    ``spawn_agent``. But a backgrounded child cannot come back and ask: the
+    single approval you give here covers EVERYTHING the child later does -
+    every write, shell command and git operation, for its whole run. That is a
+    real widening compared with the synchronous ``spawn_agent``, where a child
+    reaches the same human mid-run. It is the background extension of the
+    invariant already stated for the synchronous path: an unattended parent has
+    nobody to ask, so it must fail closed rather than self-approve (the
+    2026-07-09 bypass fix). Hence the refusal below when no confirmation channel
+    exists at all - this never self-approves, it declines to start.
+
+    A background sub-agent CANNOT be stopped once running (there is no
+    cooperative cancellation in ``Agent.run_task``), which is why there is no
+    kill tool for it.
+    """
+    if _parent_agent is None:
+        return ToolResult.error(
+            "spawn_agent_background requires a running parent agent")
+
+    # REFUSE TO LAUNCH when there is no channel to ask on, rather than launching
+    # and relying on the child hitting the fail-closed branch later. The
+    # synchronous path may borrow the parent's terminal precisely BECAUSE the
+    # parent is blocked on the same call stack; a background child has no such
+    # claim - the parent may be mid-turn or streaming to a browser - so
+    # inheriting the terminal prompt (_confirm_tool) is specifically forbidden
+    # here. An explicit confirm_handler (GUI/web) is a real async channel and is
+    # fine; auto_approve means the user already said yes to everything.
+    explicit_handler = getattr(_parent_agent, "confirm_handler", None)
+    if explicit_handler is None and not getattr(_parent_agent, "auto_approve", True):
+        return ToolResult.error(
+            "spawn_agent_background: this session confirms tools at the terminal, "
+            "and a background sub-agent cannot prompt there while you are still "
+            "working. Use spawn_agent (synchronous) instead, or start the session "
+            "with --yes to pre-approve.")
+
+    child, prepared = _prepare_child(
+        cwd, task, name, files, model, max_turns, role, _parent_agent,
+        confirm_handler=explicit_handler, tool="spawn_agent_background",
+    )
+    if child is None:
+        return prepared
+    full_task = prepared
+
+    # The AUTHORITATIVE ceiling: one shared gate across every kind of concurrent
+    # child, so background jobs and worktree-isolated parallel dispatch cannot
+    # each admit their own quota and jointly overrun the box. Acquired here,
+    # released when the job FINISHES (see AgentJob._finish).
+    from ..child_limit import describe_holders, release, try_acquire
+    token = try_acquire("background", name)
+    if token is None:
+        return ToolResult.error(
+            "spawn_agent_background: the concurrent sub-agent limit is full "
+            f"({describe_holders()}). Wait for one to finish, or run this task "
+            "with spawn_agent instead.")
+
+    from ..background import AgentJob, get_registry
+    try:
+        job = get_registry().submit(
+            lambda: AgentJob(child, full_task, label=name, token=token),
+            kind="agent")
+    except Exception as exc:                          # noqa: BLE001 - reported
+        # Never leak the slot when the submit is refused or the factory raises.
+        release(token)
+        return ToolResult.error(f"spawn_agent_background: {exc}")
+
+    return ToolResult.success(
+        f"Started sub-agent '{name}' in the background as {job.id}.\n"
+        f"Check it with check_agent_job('{job.id}'); its result is also folded "
+        "in automatically at the start of a later turn.",
+        summary=f"sub-agent '{name}' started in background ({job.id})",
+    )
+
+
+def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
+    """
+    Check a background sub-agent started by ``spawn_agent_background``.
+
+    Safe to call repeatedly, and a pure read - it never confirms, never mutates
+    the job, and never removes it, so polling after the result has already been
+    folded in still works.
+    """
+    from ..background import get_registry
+
+    registry = get_registry()
+    job = registry.get(job_id)
+    if job is None or job.kind != "agent":
+        known = registry.ids(kind="agent")
+        hint = ("; running or recent: " + ", ".join(known)) if known else \
+               "; no background sub-agents have been started this session"
+        return ToolResult.error(f"no background sub-agent '{job_id}'{hint}")
+
+    st = job.status()
+    state = st["state"]
+    if state == "running":
+        return ToolResult.success(
+            f"sub-agent '{st['label']}' ({job_id}) is still running "
+            f"({job.elapsed():.0f}s so far).",
+            summary=f"{job_id}: running")
+
+    result = st.get("result") or {}
+    if st.get("error"):
+        return ToolResult.success(
+            f"sub-agent '{st['label']}' ({job_id}) FAILED: {st['error']}",
+            summary=f"{job_id}: {state}")
+
+    body = result.get("summary") or "(no output)"
+    warn = ("\nwarnings: " + "; ".join(st["warnings"])) if st.get("warnings") else ""
+    return ToolResult.success(
+        f"sub-agent '{st['label']}' ({job_id}) finished in "
+        f"{result.get('turns', 0)} turn(s):\n\n{body}{warn}",
+        summary=f"{job_id}: {state}")

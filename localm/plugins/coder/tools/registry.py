@@ -41,7 +41,11 @@ from .git import (
 )
 from .env import tool_read_env
 from .web import tool_fetch_url, tool_web_search
-from .agents import tool_spawn_agent
+from .agents import (
+    tool_check_agent_job,
+    tool_spawn_agent,
+    tool_spawn_agent_background,
+)
 from .parallel import tool_dispatch_parallel
 from .media import tool_generate_image
 from .tasks import tool_read_todos, tool_set_todos
@@ -378,6 +382,54 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         # concurrent delegation needs real per-child isolation (its own working
         # tree), which an unflagged parallel batch over one shared cwd is not.
         destructive=True,
+    ),
+    "spawn_agent_background": ToolDef(
+        name="spawn_agent_background",
+        fn=tool_spawn_agent_background,
+        description=(
+            "Start a sub-agent in the background and get a job id back immediately, "
+            "so you can keep working while it runs. Check it with check_agent_job. "
+            "Use spawn_agent instead when you need the result before continuing."
+        ),
+        params={
+            "task":      {"type": "string", "description": "What the sub-agent should do",  "required": True},
+            "name":      {"type": "string", "description": "Short name for this sub-agent", "required": False},
+            "files":     {"type": "array",  "description": "Files to pre-load into sub-agent (the call fails if one cannot be read)", "required": False},
+            "model":     {"type": "string", "description": "Override model for sub-agent",  "required": False},
+            "max_turns": {"type": "int",    "description": "Max iterations (default 10)",   "required": False},
+            "role":      {"type": "string", "description": _spawn_role_help(),              "required": False},
+        },
+        # Destructive for the same reason spawn_agent is - it grants a child
+        # unbounded write+shell in this cwd - and deliberately NOT exempted from
+        # the gate just because it returns quickly. Two consequences are worth
+        # stating, because both are correct rather than incidental:
+        #   1. it gets its own serial segment, exactly like spawn_agent. That
+        #      costs nothing here: the segment serialises the DISPATCH, which is
+        #      a fast registry submit, not the child's run. The children still
+        #      overlap - that is the whole feature - because the concurrency
+        #      lives past the tool call, not inside it.
+        #   2. the ONE confirmation taken here covers everything the child does
+        #      for its entire run, since a backgrounded child cannot come back
+        #      and ask. That widening is documented on the tool itself.
+        destructive=True,
+    ),
+    "check_agent_job": ToolDef(
+        name="check_agent_job",
+        fn=tool_check_agent_job,
+        description=(
+            "Check a background sub-agent started by spawn_agent_background: "
+            "whether it is still running, and its result once finished."
+        ),
+        params={
+            "job_id": {"type": "string", "description": "Job id from spawn_agent_background", "required": True},
+        },
+        # NOT destructive, matching check_shell_job (#791): this only reads a
+        # status field. Gating a poll behind confirmation would prompt the user
+        # on every status check and make background work unusable interactively.
+        # Nothing is weakened by it: `destructive` is the CONFIRMATION axis, not
+        # the capability axis - the capability is gated by membership in the
+        # agent-exec disable family (agent/constants.py).
+        destructive=False,
     ),
     "generate_image": ToolDef(
         name="generate_image",

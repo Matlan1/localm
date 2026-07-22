@@ -107,6 +107,14 @@ from typing import Callable, Optional
 # can act on, never a silent queue that looks like it started.
 _KIND_CAPS: dict[str, int] = {
     "shell": 4,
+    # 2, not the default 4: each background sub-agent holds a model context, and
+    # the box's practical ceiling is 2 resident models. This MUST be declared -
+    # an unlisted kind silently falls back to _DEFAULT_CAP=4, which would be
+    # double the intended ceiling with no error at all. The authoritative gate is
+    # child_limit (it also counts C2's synchronous parallel children, which never
+    # reach this registry); this entry is the defensive backstop for the half the
+    # registry can see.
+    "agent": 2,
 }
 _DEFAULT_CAP = 4
 
@@ -564,6 +572,105 @@ class ShellJob(BackgroundJob):
         st = super().status()
         st["pid"] = self.pid
         return st
+
+
+# --------------------------------------------------------------------------- #
+#  Agent job                                                                   #
+# --------------------------------------------------------------------------- #
+
+class AgentJob(BackgroundJob):
+    """A background sub-agent: the second kind, exactly as this module intended.
+
+    The child Agent is built by the CALLER on the parent's thread and handed in
+    already constructed, so a construction error (bad role, unreadable preload)
+    surfaces synchronously in the spawn tool's result instead of turning into a
+    job that immediately fails. This job only owns RUNNING it.
+
+    ``result`` payload: ``{"summary": str, "turns": int}``.
+
+    NOT PREEMPTIBLE, and we say so rather than pretending. ``Agent.run_task`` is
+    a blocking call with no cooperative cancellation anywhere in the agent
+    package (the only interruption path is a KeyboardInterrupt in the INTERACTIVE
+    loop, which a worker thread cannot raise). So ``_terminate`` cannot stop a
+    turn already in flight: it records a warning and marks intent, and the daemon
+    thread dies with the process. That is why this PR ships no ``kill_agent_job``
+    tool - offering one that cannot actually stop the work would be a facade.
+    """
+
+    kind = "agent"
+
+    def __init__(self, child: Any, task: str, *, label: str,
+                 token: Any = None) -> None:
+        super().__init__(label)
+        self._child = child
+        self._task = task
+        # The child_limit slot this job holds. Released on FINISH, not on submit:
+        # the budget is about children that are RUNNING, and a job that has been
+        # submitted but not yet finished is still occupying the box.
+        self._token = token
+        self._outcome: Optional[dict] = None
+        self._runner = threading.Thread(
+            target=self._run, name=f"bgagent-{self.id}", daemon=True)
+        self._runner.start()
+        # LAST, per the base class contract: without this the job never leaves
+        # "running".
+        self.start_watcher()
+
+    @property
+    def child(self) -> Any:
+        """The child Agent, for the parent's turn-boundary absorption."""
+        return self._child
+
+    def _run(self) -> None:
+        """Body of the worker thread. Never touches parent state - the parent
+        absorbs at ITS turn boundary, so there is no cross-thread mutation of
+        the parent's _changed_files / _error_trace from here."""
+        try:
+            text = self._child.run_task(self._task)
+            outcome = {"summary": text, "turns": getattr(self._child, "turns", 0)}
+        except Exception as exc:                      # noqa: BLE001 - recorded
+            # Surfaced as the job's terminal error, never swallowed.
+            outcome = {"error": f"{type(exc).__name__}: {exc}"}
+        with self._lock:
+            self._outcome = outcome
+
+    def _poll(self):
+        return self._outcome
+
+    def _result_for(self, poll_value) -> Optional[dict]:
+        if poll_value.get("error"):
+            return {"summary": "", "turns": 0, "error": poll_value["error"]}
+        # Defang here, at the single choke point where a child's text becomes
+        # readable by the parent: a sub-agent may have quoted untrusted web/MCP
+        # content verbatim, and this string re-enters the PARENT loop as a
+        # trusted tool result. Same reasoning as the synchronous path.
+        from .provenance import neutralise
+        return {
+            "summary": neutralise(poll_value.get("summary") or ""),
+            "turns": poll_value.get("turns", 0),
+        }
+
+    def _terminate(self, *, force: bool) -> None:
+        # Cannot preempt a blocking run_task (see the class docstring). Record it
+        # instead of reporting a stop that did not happen.
+        self.warnings.append(
+            "a background sub-agent cannot be stopped mid-turn; it will finish "
+            "or die with the process")
+
+    def _finish(self, state: str, result: Optional[dict],
+                error: Optional[str] = None) -> None:
+        # Promote a child-raised exception to the job's own error field so a
+        # failed delegation is visible in check_agent_job, not buried in result.
+        if result and result.get("error") and not error:
+            error, state = result["error"], "failed"
+        try:
+            super()._finish(state, result, error)
+        finally:
+            # Release the shared child budget exactly once; release() is
+            # idempotent and tolerates None, so a double _finish is harmless.
+            from .child_limit import release
+            release(self._token)
+            self._token = None
 
 
 # --------------------------------------------------------------------------- #
