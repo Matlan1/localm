@@ -2,7 +2,7 @@
 """Tests for localm.plugins.coder.memory"""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -302,3 +302,75 @@ def test_normal_system_flag_override_is_untouched(tmp_path):
     text = "Always run pytest before finishing."
     assert cap_user_instructions(text) == text
     assert custom_instructions_warning(tmp_path, text) == ""
+
+
+# --------------------------------------------------------------------------- #
+#  End-to-end through a real Agent.
+#
+#  The functions above are only half the fix: the cap is worthless if the agent
+#  does not actually inject the capped text, and the honesty half is worthless if
+#  the warning never reaches a human. These drive a real Agent (real load_memory,
+#  not a patched one) and assert on the prompt it really builds.
+# --------------------------------------------------------------------------- #
+
+def _make_agent(tmp_path):
+    """A real Agent over *tmp_path*; returns (agent, print_warning mock)."""
+    from localm.plugins.coder.agent import Agent
+    backend = MagicMock()
+    backend.model_id = "test-model"
+    with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.print_warning") as warn:
+        MockPM.build.return_value.file_count.return_value = 0
+        agent = Agent(backend=backend, cwd=tmp_path)
+    return agent, warn
+
+
+def _memory_warnings(warn) -> str:
+    """Just the print_warning calls that are about the memory file.
+
+    Agent startup legitimately warns about other things (MCP servers, plugins,
+    skills that failed to register), so asserting on "no warnings at all" would
+    be testing the wrong thing and would break for unrelated reasons.
+    """
+    return " ".join(str(c) for c in warn.call_args_list
+                    if "LOCALCODER.md" in str(c) or "system.md" in str(c))
+
+
+def test_agent_prompt_is_bounded_and_user_is_warned(tmp_path):
+    raw = _oversized()
+    (tmp_path / "LOCALCODER.md").write_text(raw, encoding="utf-8")
+
+    agent, warn = _make_agent(tmp_path)
+
+    # The whole file did NOT reach the prompt...
+    assert len(agent._system_prompt) < len(raw)
+    # ...the model is told the memory it is reading is partial...
+    assert "characters of project memory omitted" in agent._system_prompt
+    # ...and the human is told which file to fix.
+    assert "omitted" in _memory_warnings(warn)
+
+
+def test_agent_injects_normal_memory_whole_and_stays_quiet(tmp_path):
+    """The common case: no truncation, no notice, no warning."""
+    body = "# Project Memory\n\n- Use ruff for linting\n"
+    (tmp_path / "LOCALCODER.md").write_text(body, encoding="utf-8")
+
+    agent, warn = _make_agent(tmp_path)
+
+    assert body.strip() in agent._system_prompt      # verbatim, not merely present
+    assert "characters of project memory omitted" not in agent._system_prompt
+    assert _memory_warnings(warn) == ""
+
+
+def test_agent_warns_once_more_after_remember_pushes_it_over(tmp_path):
+    """/remember is how the file grows, so the warning must fire on that path
+    too - not only at session start."""
+    (tmp_path / "LOCALCODER.md").write_text("- small\n", encoding="utf-8")
+    agent, warn = _make_agent(tmp_path)
+    assert _memory_warnings(warn) == ""       # quiet while it is small
+
+    with patch("localm.plugins.coder.agent.print_warning") as warn2:
+        agent.remember("x" * (_MAX_MEMORY_CHARS + 500))
+
+    assert "omitted" in _memory_warnings(warn2)
