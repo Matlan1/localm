@@ -76,6 +76,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
   they carry exactly the same confirmation and privacy handling as `run_shell`:
   they prompt before running, they are unavailable to shareable (restricted)
   coder sessions, and turning `run_shell` off turns them off too.
+- **The coder's past lessons no longer expire by age alone, and nothing it
+  forgets is gone for good.** Episodic memory used to be a plain queue: at 200
+  stored lessons the oldest was discarded, however useful it was, with no
+  notice and no way back. Now a new lesson that merely restates one you already
+  have is merged into it (keeping both file lists and the better wording)
+  instead of being stored twice, and when the store is full the LEAST USEFUL
+  lesson goes rather than the oldest, so a hard-won "this is what went wrong
+  and why" survives a run of throwaway one-liners. Everything dropped is
+  archived first: `localcoder --episodes-archive` lists it and
+  `localcoder --restore-episode ID` puts it back. `localcoder --episodes` now
+  shows each lesson's id, and `--forget-episode ID` removes just that one
+  instead of wiping the project's whole history (`--forget-episodes` still
+  erases everything, archive included).
+- **You can see which past lessons the coder is acting on.** When a session
+  recalls lessons from earlier work, the GUI now says which ones it pulled in
+  and shows the id for each, and the same list is written to the session audit
+  log. A lesson that sends a run down the wrong path used to be invisible after
+  the fact; now you can see it and remove it by id.
+- **Optional: let the model merge related lessons into one**
+  (`localcoder --consolidate-episodes`). Strictly opt-in and manual - it never
+  runs on a timer or at session close - and it reports exactly what it merged.
+  The originals are archived, so any merge you dislike is reversible with
+  `--restore-episode`, and a group the model cannot summarize usefully is left
+  untouched rather than lost.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at

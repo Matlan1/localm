@@ -157,7 +157,23 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--episodes", "show_episodes", is_flag=True, default=False,
               help="List the episodic-memory lessons stored for this project and exit.")
 @click.option("--forget-episodes", "forget_episodes", is_flag=True, default=False,
-              help="Delete all stored episodic-memory lessons for this project and exit.")
+              help="Erase ALL episodic memory for this project, archive included, "
+                   "and exit.")
+@click.option("--forget-episode", "forget_episode_id", default=None, metavar="ID",
+              help="Drop ONE lesson by id (see --episodes) from recall and exit. It "
+                   "is archived, so --restore-episode can bring it back; use "
+                   "--forget-episodes to erase everything for good.")
+@click.option("--episodes-archive", "show_archive", is_flag=True, default=False,
+              help="List the lessons this project has dropped (merged, evicted at "
+                   "the cap, or forgotten) and exit. These are recoverable.")
+@click.option("--restore-episode", "restore_episode_id", default=None, metavar="ID",
+              help="Put an archived lesson (see --episodes-archive) back into "
+                   "recall and exit.")
+@click.option("--consolidate-episodes", "consolidate_episodes", is_flag=True,
+              default=False,
+              help="Ask the model to merge related stored lessons into one. "
+                   "OPT-IN and manual only, never automatic: the originals are "
+                   "archived, so a bad merge is reversible with --restore-episode.")
 @click.option("--until", "until_cmd", default=None, metavar="COMMAND",
               help="Goal mode: iterate on the TASK until this command exits 0 "
                    "(e.g. --until 'pytest -x'). Success is judged by the command, "
@@ -171,7 +187,8 @@ def main(
     no_server, force_new, max_turns, temperature, max_tokens,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope, system_instructions,
-    show_episodes, forget_episodes,
+    show_episodes, forget_episodes, forget_episode_id, show_archive,
+    restore_episode_id, consolidate_episodes,
     until_cmd, goal_max_iters,
 ):
     """
@@ -208,7 +225,8 @@ def main(
     # Episodic-memory management: list or clear the lessons stored for this
     # project, then exit (no model/server needed). Transparency: the user can
     # always see and wipe what the coder remembers about a project.
-    if _handle_episode_flags(work_dir, show_episodes, forget_episodes):
+    if _handle_episode_flags(work_dir, show_episodes, forget_episodes,
+                             forget_episode_id, show_archive, restore_episode_id):
         return
 
     # Goal mode needs a task to work on; fail fast before any server/model setup.
@@ -228,6 +246,13 @@ def main(
     backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci)
+
+    # Opt-in episodic consolidation needs a model, so unlike the other episode
+    # flags it runs after the backend is up. Still a one-shot: consolidate, report,
+    # exit - it never piggybacks on a normal session.
+    if consolidate_episodes:
+        _run_episode_consolidation(work_dir, backend)
+        return
 
     # R19a: an unattended one-shot (`localcoder "task"`) auto-approves file writes
     # so it can run without a TTY - but shell (arbitrary code execution) and the
@@ -338,26 +363,88 @@ def main(
 
 
 def _handle_episode_flags(work_dir: Path, show_episodes: bool,
-                          forget_episodes: bool) -> bool:
-    """List or clear the episodic-memory lessons for *work_dir*, returning True if
-    the flags were handled (so main can exit). No model/server needed - the user
-    can always see and wipe what the coder remembers. Split out of main."""
-    if show_episodes or forget_episodes:
-        from localm.plugins.coder.episodes import EpisodeStore
-        store = EpisodeStore(work_dir)
-        if forget_episodes:
-            store.clear()
-            click.echo(f"Cleared episodic memory for {work_dir}.")
-            return True
-        eps = store.all()
-        if not eps:
-            click.echo("No episodic-memory lessons stored for this project yet.")
-            return True
-        click.echo(f"{len(eps)} episode(s) for {work_dir}:")
-        for e in eps:
-            click.echo(f"  - [{e.outcome}] {e.lesson or e.summary}")
+                          forget_episodes: bool, forget_episode_id=None,
+                          show_archive: bool = False,
+                          restore_episode_id=None) -> bool:
+    """Inspect or edit the episodic memory for *work_dir*, returning True if a flag
+    was handled (so main can exit). No model/server needed - the user can always
+    see, prune, and recover what the coder remembers. Split out of main."""
+    if not (show_episodes or forget_episodes or forget_episode_id
+            or show_archive or restore_episode_id):
+        return False
+    from localm.plugins.coder.episodes import EpisodeStore
+    store = EpisodeStore(work_dir)
+
+    if forget_episodes:
+        store.clear()
+        click.echo(f"Cleared episodic memory for {work_dir} (archive included).")
         return True
-    return False
+
+    if forget_episode_id:
+        if store.forget(forget_episode_id):
+            click.echo(f"Forgot episode {forget_episode_id} (archived; restore it "
+                       f"with --restore-episode {forget_episode_id}).")
+        else:
+            click.echo(f"No episode with id {forget_episode_id} for {work_dir}.",
+                       err=True)
+        return True
+
+    if restore_episode_id:
+        ep = store.restore(restore_episode_id)
+        if ep is not None:
+            click.echo(f"Restored episode {ep.id}: {ep.lesson or ep.summary}")
+        else:
+            click.echo(f"No archived episode with id {restore_episode_id}.", err=True)
+        return True
+
+    if show_archive:
+        rows = store.forgotten()
+        if not rows:
+            click.echo("No dropped episodes archived for this project.")
+            return True
+        click.echo(f"{len(rows)} archived episode(s) for {work_dir}:")
+        for r in rows:
+            click.echo("  - %s [%s] %s" % (r.get("id", "?"), r.get("reason", "?"),
+                                           r.get("lesson") or r.get("summary") or ""))
+        return True
+
+    eps = store.all()
+    if not eps:
+        click.echo("No episodic-memory lessons stored for this project yet.")
+        return True
+    click.echo(f"{len(eps)} episode(s) for {work_dir}:")
+    for e in eps:
+        # The id is what --forget-episode / --restore-episode address.
+        click.echo(f"  - {e.id} [{e.outcome}] {e.lesson or e.summary}")
+    return True
+
+
+def _run_episode_consolidation(work_dir: Path, backend) -> None:
+    """Run the OPT-IN model merge of related lessons and REPORT what it did.
+
+    Reporting is the point: memory that rewrites itself without saying so is how a
+    bad merge becomes invisible. Groups whose merge came back unusable are left
+    untouched and counted."""
+    from localm.inference.textnorm import strip_think
+    from localm.plugins.coder.episodes import EpisodeStore, consolidate
+
+    def _complete(prompt: str) -> str:
+        return strip_think(backend.chat([{"role": "user", "content": prompt}],
+                                        max_tokens=1024) or "")
+
+    store = EpisodeStore(work_dir)
+    rep = consolidate(store, complete=_complete)
+    if not rep.get("groups"):
+        click.echo("Nothing to consolidate: no related lessons found.")
+        return
+    click.echo("Consolidated %d group(s): %d lesson(s) merged into %d, %d archived "
+               "(restore any with --restore-episode)."
+               % (rep["groups"], rep["replaced"], rep["merged"], rep["archived"]))
+    if rep.get("skipped"):
+        click.echo("%d group(s) left untouched (the model returned no usable merge)."
+                   % rep["skipped"])
+    if rep.get("warning"):
+        print_warning(rep["warning"])
 
 
 def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,

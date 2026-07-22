@@ -369,6 +369,18 @@ export function handleCoderEvent(s, ev) {
       feedAppend(s, el("div", "feed-info", ev.text));
       break;
     }
+    case "episodes_recalled": {
+      // Which past lessons this run pulled in, with the id `localcoder
+      // --forget-episode <id>` takes. Recall used to be invisible, so a lesson
+      // that steered a run badly could not be traced back or removed.
+      const eps = ev.episodes || [];
+      if (!eps.length) break;
+      flushAssistantBlock(s);
+      const label = `Recalled ${eps.length} past lesson${eps.length > 1 ? "s" : ""}: ` +
+        eps.map((e) => `${e.lesson || ""} (${e.id})`).join(" · ");
+      feedAppend(s, el("div", "feed-info", label));
+      break;
+    }
     case "history": {
       // A recap row replayed when a past session is resumed (CODER-2): plain,
       // role-styled text, no streaming.
