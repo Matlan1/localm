@@ -28,6 +28,15 @@ test("todoHint: tolerates the marker variants the parser accepts", () => {
   assert.equal(window.todoHint([{ text: "[~] dict form" }]), "0/1 done · dict form");
 });
 
+test("todoHint: a task whose own text is bracketed keeps it", () => {
+  const { window } = loadApp();
+  // Only the leading status marker is stripped, matching tasks.py: an
+  // unrecognised bracket is part of the task the model wrote.
+  assert.equal(window.todoHint(["[>] [api] fix the handler", "[ ] test it"]),
+               "0/2 done · [api] fix the handler");
+  assert.equal(window.todoHint(["[api] fix the handler"]), "0/1 done");
+});
+
 test("todoHint: returns nothing for a non-todo tool's args", () => {
   const { window } = loadApp();
   for (const v of [undefined, null, [], "not an array", 42, {}]) {

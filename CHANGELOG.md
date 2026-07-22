@@ -148,6 +148,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   make room for another. Both are off by default, so nothing changes unless you
   set them, and clearing either (`localm config max_resident_models ""`) goes
   back to the automatic behavior.
+- **The coder can now keep a task list that outlives its own memory.** Two new
+  tools, `set_todos` and `read_todos`, let the model write down the plan for a
+  multi-step job ("[x] done", "[>] working on it", "[ ] not started"). The list
+  is kept outside the conversation, so it is not lost when a long session
+  compacts its history, and it is saved with the session so a paused job
+  resumes with its plan intact instead of starting over. In the GUI the tool
+  card shows progress and the current step at a glance. Privacy mode keeps the
+  list in memory only, like everything else about the session.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at

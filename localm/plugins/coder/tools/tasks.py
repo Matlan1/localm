@@ -95,9 +95,13 @@ def _parse_line(raw: str) -> dict | None:
         if close != -1:
             marker = line[1:close].strip().lower()
             # A multi-character marker is a word ("[done]"), a single one is a
-            # glyph ("[x]"); an unknown marker leaves the item pending.
-            status = _STATUS_WORDS.get(marker, _MARKERS.get(marker, PENDING))
-            line = line[close + 1:].lstrip()
+            # glyph ("[x]"). Only a RECOGNISED marker is consumed: an unknown
+            # bracket is part of the task the model wrote ("[api] fix the
+            # handler") and stays in the text rather than being silently eaten.
+            known = _STATUS_WORDS.get(marker, _MARKERS.get(marker))
+            if known is not None:
+                status = known
+                line = line[close + 1:].lstrip()
 
     text = _clean_text(line)
     if not text:

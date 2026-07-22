@@ -71,7 +71,12 @@ def test_todos_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypatch):
     first._messages = [{"role": "user", "content": "do the thing"}]
     first.save_checkpoint()
 
-    # 2. The plan is IN the checkpoint file (pins the save half of the wiring).
+    # 2. The plan is IN the checkpoint file (pins the save half of the wiring),
+    #    under HOME and NOT in the project tree - todos must not regress CODER-4
+    #    by dropping a .localcoder/ folder back into the user's repo.
+    assert (tmp_path / "home") in first._checkpoint_path.parents
+    assert not (proj / ".localcoder").exists()
+    assert list(proj.iterdir()) == []
     saved = json.loads(first._checkpoint_path.read_text(encoding="utf-8"))
     assert saved["todos"] == [
         {"text": "read the failing test", "status": DONE},
@@ -433,7 +438,10 @@ def test_the_store_cannot_be_mutated_through_a_returned_list(tmp_path):
     ("3. [ ] numbered",      {"text": "numbered", "status": PENDING}),
     ("[done] word marker",   {"text": "word marker", "status": DONE}),
     ("[wip] word marker",    {"text": "word marker", "status": IN_PROGRESS}),
-    ("[?] unknown marker",   {"text": "unknown marker", "status": PENDING}),
+    # An unrecognised bracket is the model's own text, not a status marker, so
+    # it is kept verbatim instead of being silently eaten.
+    ("[?] unknown marker",   {"text": "[?] unknown marker", "status": PENDING}),
+    ("[api] fix the handler", {"text": "[api] fix the handler", "status": PENDING}),
     ("[ ]   spaced   out ",  {"text": "spaced out", "status": PENDING}),
     ("[x] multi\nline",      {"text": "multi line", "status": DONE}),
     ({"text": "dict form", "status": "in-progress"},
@@ -478,5 +486,9 @@ def test_render_and_summary_are_stable():
     assert todos_summary(todos) == "1/3 done - now: fix the parser"
     assert todos_summary(normalize_todos(["[x] a", "[x] b"])) == "2/2 done"
     assert todos_summary([]) == "no tasks"
-    # Round-trips: the rendered form parses back to the same list.
+    # Round-trips: the rendered form parses back to the same list, including a
+    # task whose own text starts with a bracket.
     assert normalize_todos(render_todos(todos).splitlines()) == todos
+    tagged = normalize_todos(["[>] [api] fix the handler"])
+    assert tagged == [{"text": "[api] fix the handler", "status": IN_PROGRESS}]
+    assert normalize_todos(render_todos(tagged).splitlines()) == tagged
