@@ -138,7 +138,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   measured, or where the reading is inconclusive, it stays single-resident
   exactly as before rather than stacking models until the graphics driver runs
   out. The HTTP server and the MCP server now share one implementation of this
-  decision, so they cannot drift apart.
+  decision, so they cannot drift apart. Shutting the server down frees every
+  model it still has loaded, and says so if one fails to free.
 - **Two optional knobs to decide model residency yourself**, for when you would
   rather say "keep these loaded" than rely on free-VRAM arithmetic:
   `localm config max_resident_models 2` caps how many models stay loaded at
@@ -221,10 +222,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   absolute root, undoing that in the same prompt. The map header is now
   home-anchored too, so a model that echoes its context back cannot disclose the
   path.
-- **The MCP server left VRAM held after exit when more than one model had been
-  used.** Its shutdown freed only the most recently used model; any other model
-  still loaded kept its VRAM until the process died. It now frees every one,
-  and reports a failed unload instead of silently ignoring it.
 - **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
   long conversation grows the context window mid-generation, the model worker
   decides whether the grown KV cache still fits in VRAM or must move to system

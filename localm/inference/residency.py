@@ -181,7 +181,10 @@ def pinned_model_names(config: Optional[Mapping] = None) -> frozenset:
         _warn("pinned_models=%r is not a list; ignoring it", raw)
         return frozenset()
     names = {n for n in raw if isinstance(n, str) and n}
-    dropped = len(raw) - len(names)
+    # Count what was actually REJECTED, not raw-minus-set: a duplicate pin
+    # ("a,a") collapses in the set but was not rejected, and reporting it as
+    # one would be a warning about something that never happened.
+    dropped = sum(1 for n in raw if not (isinstance(n, str) and n))
     if dropped > 0:
         _warn("pinned_models: ignored %d entr%s that were not names",
               dropped, "y" if dropped == 1 else "ies")

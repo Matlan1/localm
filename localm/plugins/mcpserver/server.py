@@ -198,7 +198,22 @@ class EngineCache:
         name = self.resolve_model(requested)
         engine = self._engines.get(name)
         if engine is not None:
-            self._touch(name)          # already resident: never evict to reuse
+            if (getattr(engine, "loaded", True)
+                    and getattr(engine, "unloading", False) is not True):
+                self._touch(name)      # already resident: never evict to reuse
+                return engine
+            # Resident but NOT loaded, so it holds no VRAM yet. Returning it
+            # here would skip the gate entirely and let the caller's
+            # chat_stream() call load() on top of whatever else is resident -
+            # a permit-direction hole, which is why http_server's own fast path
+            # carries the same `.loaded` check (http_server.py:372). It is
+            # reachable: pull_model calls get() and nothing else, leaving a
+            # constructed-but-unloaded engine parked in the cache, and the
+            # free-VRAM probe cannot see a model that has not loaded.
+            # Gate it, then hand back the SAME object so the pulled engine is
+            # reused rather than silently replaced.
+            self._make_room_for(name)
+            self._touch(name)
             return engine
         self._make_room_for(name)
         _log(f"loading model {name}")
@@ -281,11 +296,13 @@ class EngineCache:
             info = get_model_info(name)
             return bool(info) and _is_gguf(info[0])
         except Exception:
-            # Only decides whether to run the per-device split check, and the
-            # split check is a REFUSE-direction guard: skipping it can only make
-            # this load more permissive on a box with no split configured (where
-            # it is a no-op anyway). Not worth failing a load over.
-            return False
+            # Fail CLOSED. This only decides whether to run the per-device split
+            # check, which is a REFUSE-direction guard - so "unknown" must mean
+            # RUN it, not skip it. Skipping is precisely how a per-device
+            # shortfall gets admitted on a box that does have a split
+            # configured, and running it costs nothing on a box that does not
+            # (gpu_split_shortfall returns [] when no split resolves).
+            return True
 
     def _make_room_for(self, name: str) -> None:
         """
@@ -327,7 +344,11 @@ class EngineCache:
                 if over_cap:
                     reasons.append("the resident cap")
                 if vram_ok is False:
-                    reasons.append("the free-VRAM check")
+                    # _fits_alongside short-circuits to False WITHOUT probing
+                    # when the model cannot be sized, so naming the free-VRAM
+                    # check there would report a measurement never taken.
+                    reasons.append("the free-VRAM check" if required is not None
+                                   else "an unsizeable model")
                 _log(f"warning: {' and '.join(reasons)} wanted room for {name} "
                      f"but no resident model could be evicted "
                      f"(resident={self._lru}, pinned={sorted(pinned)}) - "

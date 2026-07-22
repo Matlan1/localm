@@ -546,6 +546,45 @@ class TestEngineCacheMultiResidency:
             cache.get("b")
         a.unload.assert_called_once()
 
+    def test_resident_but_unloaded_engine_still_goes_through_the_vram_gate(self):
+        """A constructed-but-unloaded engine holds NO VRAM, so the free-VRAM
+        probe cannot see it. Handing it straight back would let the caller's
+        chat_stream() load it on top of whatever else is resident with no gate
+        at all - a permit-direction hole. pull_model reaches exactly this state:
+        it calls get() and nothing else. http_server's fast path carries the
+        same `.loaded` check for the same reason."""
+        def unloaded_factory(name):
+            e = _stub_engine_factory(name)
+            e.loaded = False
+            return e
+
+        cache = EngineCache("m", engine_factory=unloaded_factory)
+        with _fits(), _sized(), _cfg():
+            first = cache.get("a")          # pull_model-style: never loaded
+        probed = []
+        real = EngineCache._fits_alongside
+        with _fits(), _sized(), _cfg(), \
+             patch.object(EngineCache, "_fits_alongside",
+                          lambda self, n, r: (probed.append(n), real(self, n, r))[1]):
+            again = cache.get("a")
+        assert again is first, "the pulled engine must be reused, not replaced"
+        assert probed == ["a"], (
+            f"an unloaded resident engine skipped the VRAM gate: probed={probed}")
+
+    def test_loaded_resident_engine_skips_the_gate(self):
+        """Guard on the test above: a genuinely loaded model must still be the
+        cheap fast path, with no probe at all."""
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            cache.get("a")
+        probed = []
+        real = EngineCache._fits_alongside
+        with _cfg(), patch.object(EngineCache, "_fits_alongside",
+                                  lambda self, n, r: (probed.append(n),
+                                                      real(self, n, r))[1]):
+            cache.get("a")
+        assert probed == [], f"a loaded resident model was re-probed: {probed}"
+
     def test_a_failed_probe_is_not_read_as_headroom(self):
         cache = _resident_cache()
         with _fits(), _sized(), _cfg():

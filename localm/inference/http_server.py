@@ -707,7 +707,26 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     # peer is asked at most once per load attempt, so this loop always
                     # progresses, and a yank that provably could not free enough is
                     # not worth destroying a sibling's models for.
-                    cooperated = await loop.run_in_executor(
+                    # A PIN is a local preference, exactly like the cap above, so
+                    # it must not cost a SIBLING instance its models either. If an
+                    # unpinned peer WOULD have been evictable, the pin is the only
+                    # reason local eviction came up empty - so do not escalate.
+                    # Fall through to the backend's own split-aware sizing
+                    # (partial offload) instead, which honors the pin locally at
+                    # this instance's own expense rather than another's. Unlike
+                    # the cap case, VRAM here is genuinely short, so this is a
+                    # slower load rather than a free one - still the right trade
+                    # against destroying another instance's work.
+                    pin_blocked = bool(pinned) and residency.pick_eviction_victim(
+                        _engines_lru, _engines, requested=name) is not None
+                    if pin_blocked:
+                        from localm.debuglog import logger as _dbg
+                        _dbg.warning(
+                            "pinned_models=%s is the only reason no local model "
+                            "could be evicted for %s; NOT asking a peer instance "
+                            "to unload - deferring to the backend's own sizing",
+                            sorted(pinned), name)
+                    cooperated = False if pin_blocked else await loop.run_in_executor(
                         None,
                         lambda: _attempt_cooperative_unload(
                             needed_bytes=vram_required + headroom,
