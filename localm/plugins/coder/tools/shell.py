@@ -7,7 +7,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
+from .base import (
+    ToolResult,
+    _partial_on_timeout,
+    _truncate,
+    platform_shell,
+    run_subprocess,
+)
 
 def _needs_shell(command: str) -> bool:
     """Return True when the command uses shell operators that require a real shell."""
@@ -25,41 +31,78 @@ def _needs_shell(command: str) -> bool:
     return False
 
 
-def _platform_shell(command: str) -> list[str]:
-    """Wrap *command* for the platform shell."""
+def _split_command(command: str) -> list[str]:
+    """Split *command* into an argument list, with the quote characters REMOVED.
+
+    Removing them is the point. A quoted path is the normal way to pass a path
+    containing spaces, and what must reach the process is the path, not the
+    quotes around it. This used to split with ``shlex.split(posix=False)`` on
+    Windows, which does not do quote removal BY DESIGN, so the token stayed
+    ``"a dir with spaces\\f.txt"``, quotes and all, and the process could not
+    open it.
+
+    So: posix mode, which does the removal - plus one Windows adjustment.
+
+    Post-stripping the quotes off posix=False's tokens is not the same fix and
+    does not work, because posix=False also gets the token BOUNDARIES wrong: it
+    honours a quote only where one OPENS a token, so ``--message="a b"`` splits
+    into ``['--message="a', 'b"']``. A wrong boundary cannot be repaired after
+    the fact. Posix mode groups a mid-token quote the way Windows does.
+
+    ``lex.escape = ""`` is the load-bearing Windows line, and the reason plain
+    ``posix=True`` is not the fix either: posix rules read a backslash as an
+    escape, which turns ``dir sub\\dir\\f.txt`` into ``dir subdirf.txt`` and
+    drops a separator from a UNC ``"\\\\host\\share"``. On Windows a backslash is
+    a path separator and nothing else, so the escape character is cleared.
+
+    ``lex.commenters`` is cleared for the same reason :func:`shlex.split` clears
+    it: otherwise ``#`` opens a comment and truncates the rest, silently losing
+    the message in ``git commit -m "fix #42"``.
+
+    Malformed quoting still raises ``ValueError``, which the caller turns into
+    the shell fallback.
+    """
+    import shlex
+
+    lex = shlex.shlex(command, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
     if sys.platform == "win32":
-        return ["cmd", "/C", command]
-    return ["/bin/sh", "-c", command]
+        lex.escape = ""
+    return list(lex)
 
 
-def _shell_argv(command: str) -> list[str]:
+def _shell_argv(command: str) -> "list[str] | str":
     """Route *command* to an argument list, or to the platform shell.
 
     When the command contains no shell operators (pipes, redirects, globs,
-    variable expansion, etc.) it is parsed with ``shlex.split`` and returned as
-    a plain argument list - no shell injection possible. Otherwise it falls back
-    to the system shell (cmd /C on Windows, /bin/sh -c elsewhere).
+    variable expansion, etc.) it is parsed with :func:`_split_command` and
+    returned as a plain argument list - no shell injection possible. Otherwise
+    it falls back to the system shell (cmd /C on Windows, /bin/sh -c elsewhere),
+    whose launch form is a raw command-line STRING on Windows and a list on
+    POSIX (see :func:`base.platform_shell`).
 
     This is the ONE place that decision is made, so the blocking ``run_shell``
     and the background ``run_shell_background`` cannot drift into different
     security postures.
     """
-    import shlex
-
     if _needs_shell(command):
         # Complex command - must go through a shell
-        return _platform_shell(command)
+        return platform_shell(command)
     try:
-        argv = shlex.split(command, posix=(sys.platform != "win32"))
+        argv = _split_command(command)
     except ValueError:
         # Malformed quoting - fall back to shell
-        return _platform_shell(command)
+        return platform_shell(command)
     # Shell builtins (echo, dir, type, …) have no executable on disk -
     # argument-list mode would fail with "file not found". Detect via
-    # PATH lookup and route those through the shell instead.
+    # PATH lookup and route those through the shell instead. This lookup is why
+    # _split_command must remove quotes: which() of a still-quoted token is
+    # None, so a quoted absolute executable used to fall through to the shell
+    # route and be mangled there rather than run directly.
     import shutil as _shutil
     if not argv or _shutil.which(argv[0]) is None:
-        return _platform_shell(command)
+        return platform_shell(command)
     return argv
 
 
