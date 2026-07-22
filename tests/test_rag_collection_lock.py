@@ -17,10 +17,15 @@ run: the identical harness, with the cross-process lock neutralised IN THE CHILD
 (test-side, never a product switch - a product "skip the lock" flag would be the
 unserialised write path this exists to forbid), must show the interleave the
 locked version prevents. A test that cannot be made to fail proves nothing.
+
+The heartbeat is the lock file's MTIME (the module docstring explains why a
+rewritten timestamp field could clobber a successor's record), so a "stale"
+holder is staged here with ``os.utime``, not by editing a field.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -28,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -57,20 +63,23 @@ def _record(**over) -> dict:
     """A well-formed lock record for a plausible FOREIGN holder."""
     rec = {"token": "feedface" * 4, "pid": 999_999, "pid_create_time": None,
            "machine": "another-machine-hash", "collection": "kb",
-           "op": "a re-sync", "started": time.time() - 120,
-           "heartbeat": time.time()}
+           "op": "a re-sync", "started": time.time() - 120}
     rec.update(over)
     return rec
 
 
-def _write_lock_file(path, rec) -> None:
+def _hold(path, rec, *, silent_for: float = 0.0) -> None:
+    """Stage a foreign lock file whose holder last reported *silent_for* ago."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec), encoding="utf-8")
+    if silent_for:
+        when = time.time() - silent_for
+        os.utime(path, (when, when))
 
 
 def _flat(text: str) -> str:
     """Collapse whitespace so an assertion survives console line wrapping."""
-    return re.sub(r"\s+", " ", text)
+    return re.sub(r"\s+", " ", text or "")
 
 
 # --------------------------------------------------------------------------- #
@@ -177,13 +186,13 @@ def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys):
     """A lock left behind by a crashed holder must not wedge the collection
     forever: once its heartbeat goes stale it is reclaimed, and said out loud."""
     lp = lock_path_for(base / "kb")
-    _write_lock_file(lp, _record(heartbeat=time.time() - 3600))
+    _hold(lp, _record(), silent_for=3600)
 
     with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
         held = json.loads(lp.read_text(encoding="utf-8"))
     assert held["pid"] == os.getpid(), "the stale lock was not taken over"
     assert not lp.exists(), "the lock must be released afterwards"
-    assert "reclaiming the write lock" in capsys.readouterr().err
+    assert "reclaimed the write lock" in capsys.readouterr().err
 
 
 def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
@@ -192,8 +201,7 @@ def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
     reporting must be left alone. config._cross_process_lock's fixed 30 s rule
     would have reaped this one - it is a normal indexing run."""
     lp = lock_path_for(base / "kb")
-    _write_lock_file(lp, _record(started=time.time() - 7200,
-                                 heartbeat=time.time()))
+    _hold(lp, _record(started=time.time() - 7200))     # held 2h, reporting now
 
     with pytest.raises(CollectionLockedError) as e:
         with collection_write_lock(lp, collection="kb", op="a test",
@@ -215,18 +223,17 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(base, monk
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
         time.sleep(stale_after * 4)          # four whole staleness windows
-        first = json.loads(lp.read_text(encoding="utf-8"))
+        mine = json.loads(lp.read_text(encoding="utf-8"))["token"]
         with pytest.raises(CollectionLockedError):
             with collection_write_lock(lp, collection="kb", op="a waiter",
                                        timeout=0.2, stale_after=stale_after):
                 pass
-        assert json.loads(lp.read_text(encoding="utf-8"))["token"] == first["token"]
+        assert json.loads(lp.read_text(encoding="utf-8"))["token"] == mine
 
-    # FIRES-CONTROL, same run, same stale_after: an identical record whose
-    # heartbeat is NOT being refreshed must be reclaimed. Without this the
-    # assertion above could be passing because the waiter never reclaims
-    # anything at all.
-    _write_lock_file(lp, _record(heartbeat=time.time() - 60))
+    # FIRES-CONTROL, same run, same stale_after: an identical record that is NOT
+    # being refreshed must be reclaimed. Without this the assertion above could
+    # be passing because the waiter never reclaims anything at all.
+    _hold(lp, _record(), silent_for=60)
     with collection_write_lock(lp, collection="kb", op="a waiter",
                                timeout=5.0, stale_after=stale_after):
         assert json.loads(lp.read_text(encoding="utf-8"))["pid"] == os.getpid()
@@ -238,10 +245,9 @@ def test_a_recycled_pid_is_not_read_as_a_live_holder(base):
     says - so it is reclaimable early rather than holding the collection for the
     full staleness window."""
     lp = lock_path_for(base / "kb")
-    _write_lock_file(lp, _record(
-        pid=os.getpid(), pid_create_time=1.0,   # 1970: not this process
-        machine=cl._machine_id(),
-        heartbeat=time.time() - (cl.DEAD_HOLDER_GRACE + 5)))
+    _hold(lp, _record(pid=os.getpid(), pid_create_time=1.0,   # 1970: not us
+                      machine=cl._machine_id()),
+          silent_for=cl.DEAD_HOLDER_GRACE + 5)
 
     with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0,
                                stale_after=3600):
@@ -252,17 +258,46 @@ def test_the_real_pid_of_a_live_process_is_read_as_alive(base):
     """The control for the test above: the SAME pid with its REAL start time is
     a living holder, so the identical record is not reclaimed early."""
     lp = lock_path_for(base / "kb")
-    _write_lock_file(lp, _record(
-        pid=os.getpid(), pid_create_time=cl._create_time(os.getpid()),
-        machine=cl._machine_id(),
-        heartbeat=time.time() - (cl.DEAD_HOLDER_GRACE + 5)))
-    if json.loads(lp.read_text(encoding="utf-8"))["pid_create_time"] is None:
+    if cl._create_time(os.getpid()) is None:
         pytest.skip("no psutil: the (pid, create_time) pin is inert by design")
+    _hold(lp, _record(pid=os.getpid(), pid_create_time=cl._create_time(os.getpid()),
+                      machine=cl._machine_id()),
+          silent_for=cl.DEAD_HOLDER_GRACE + 5)
 
     with pytest.raises(CollectionLockedError):
         with collection_write_lock(lp, collection="kb", op="a test",
                                    timeout=0.3, stale_after=3600):
             pass
+
+
+def test_a_pid_from_another_pid_space_is_never_judged_dead(base):
+    """A pid only means something inside one pid table. A LOCALM_HOME shared
+    across a boundary that has its own pids (a network share, or the Windows
+    side of a WSL mount, where the Linux hostname defaults to the Windows
+    machine name) would otherwise let each side look the other's pids up in its
+    own process table, find nothing, and reclaim a perfectly live holder early."""
+    foreign = _record(pid=os.getpid(), pid_create_time=1.0,
+                      machine="a-different-pid-space")
+    assert cl._holder_liveness(foreign) == "unknown"
+
+    lp = lock_path_for(base / "kb")
+    _hold(lp, foreign, silent_for=cl.DEAD_HOLDER_GRACE + 5)
+    with pytest.raises(CollectionLockedError):
+        with collection_write_lock(lp, collection="kb", op="a test",
+                                   timeout=0.3, stale_after=3600):
+            pass
+
+
+def test_the_machine_id_separates_two_pid_spaces_on_one_host(monkeypatch):
+    """The id must not be the hostname alone, or WSL and Windows on one box
+    (same hostname, unrelated pid tables) would trust each other's pids."""
+    monkeypatch.setattr(cl, "_machine_id_cache", None)
+    monkeypatch.setattr(cl.sys, "platform", "win32")
+    win = cl._machine_id()
+    monkeypatch.setattr(cl, "_machine_id_cache", None)
+    monkeypatch.setattr(cl.sys, "platform", "linux")
+    lin = cl._machine_id()
+    assert win != lin, "one hostname on two platforms produced one machine id"
 
 
 # --------------------------------------------------------------------------- #
@@ -278,13 +313,16 @@ def test_a_corrupt_lock_record_is_held_not_free(base):
     lp.parent.mkdir(parents=True, exist_ok=True)
     lp.write_text("{ this is not json", encoding="utf-8")
 
-    with pytest.raises(CollectionLockedError):
+    with pytest.raises(CollectionLockedError) as e:
         with collection_write_lock(lp, collection="kb", op="a test",
                                    timeout=0.3, stale_after=3600):
             pass
+    assert str(lp) in str(e.value), (
+        "a holder that cannot identify itself must at least name the lock file, "
+        "or the user has no way to act on the refusal")
 
-    old = time.time() - 3600
-    os.utime(lp, (old, old))
+    when = time.time() - 3600
+    os.utime(lp, (when, when))
     with collection_write_lock(lp, collection="kb", op="a test", timeout=5.0):
         pass          # stale by its own mtime, so recoverable rather than wedged
 
@@ -299,7 +337,7 @@ def test_a_refused_write_changes_nothing_on_disk(base, docs, monkeypatch):
     before = (base / "kb" / "meta.json").read_text(encoding="utf-8")
     chunks_before = (base / "kb" / "chunks.jsonl").read_text(encoding="utf-8")
 
-    _write_lock_file(lock_path_for(base / "kb"), _record())
+    _hold(lock_path_for(base / "kb"), _record())
     with pytest.raises(CollectionLockedError):
         coll.add_paths([docs / "beta.txt"])
 
@@ -308,10 +346,11 @@ def test_a_refused_write_changes_nothing_on_disk(base, docs, monkeypatch):
     assert "beta.txt" not in before
 
 
-def test_a_refused_resync_and_removal_change_nothing_either(base, docs, monkeypatch):
-    """Every write entry point takes the lock, not just add_paths - so the CLI,
-    the API and the scheduler are covered by construction rather than by each
-    call site remembering to."""
+def test_every_write_entry_point_is_covered(base, docs, monkeypatch):
+    """Not just add_paths: resync, remove_doc, add_uploads, create and delete all
+    take the lock, so the CLI, the API and the scheduler are covered by
+    construction rather than by each call site remembering to."""
+    from localm.rag import delete_collection
     monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
     coll = Collection("kb", base=base)
     coll.create()
@@ -319,31 +358,31 @@ def test_a_refused_resync_and_removal_change_nothing_either(base, docs, monkeypa
     before = (base / "kb" / "meta.json").read_text(encoding="utf-8")
     source = next(iter(json.loads(before)["docs"]))
 
-    _write_lock_file(lock_path_for(base / "kb"), _record())
+    _hold(lock_path_for(base / "kb"), _record())
     with pytest.raises(CollectionLockedError):
         coll.resync(policy=None)
     with pytest.raises(CollectionLockedError):
         coll.remove_doc(source)
     with pytest.raises(CollectionLockedError):
         coll.add_uploads([{"filename": "note.txt", "data": b"hello"}])
-
-    assert (base / "kb" / "meta.json").read_text(encoding="utf-8") == before
-
-
-def test_a_refused_delete_leaves_the_collection_intact(base, docs, monkeypatch):
-    """Deleting is a write too: it must not land in the middle of another
-    process's indexing run and leave that run's final save to rebuild a
-    collection the user believes they deleted."""
-    from localm.rag import delete_collection
-    monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
-    coll = Collection("kb", base=base)
-    coll.create()
-    coll.add_paths([docs])
-
-    _write_lock_file(lock_path_for(base / "kb"), _record(op="an index"))
     with pytest.raises(CollectionLockedError):
         delete_collection("kb", base=base)
-    assert (base / "kb" / "meta.json").is_file()
+
+    assert (base / "kb" / "meta.json").read_text(encoding="utf-8") == before
+    assert (base / "kb" / "meta.json").is_file(), "a refused delete removed it"
+
+
+def test_creating_a_collection_takes_the_lock_too(base, monkeypatch):
+    """Creating is a write. Without the lock a `rag add` that finds no
+    collection can drop a fresh meta.json into a directory another process is
+    part-way through deleting - resurrecting a deleted collection and breaking
+    that delete's final rmdir."""
+    monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
+    _hold(lock_path_for(base / "kb"), _record(op="a delete"))
+
+    with pytest.raises(CollectionLockedError):
+        Collection("kb", base=base).create()
+    assert not (base / "kb" / "meta.json").exists()
 
 
 def test_release_does_not_delete_a_lock_that_was_taken_over(base, capsys):
@@ -354,7 +393,7 @@ def test_release_does_not_delete_a_lock_that_was_taken_over(base, capsys):
     lp = lock_path_for(base / "kb")
     cm = collection_write_lock(lp, collection="kb", op="a test", timeout=5.0)
     cm.__enter__()
-    successor = _record(token="succ" * 8, heartbeat=time.time())
+    successor = _record(token="succ" * 8)
     lp.write_text(json.dumps(successor), encoding="utf-8")
 
     cm.__exit__(None, None, None)
@@ -362,6 +401,26 @@ def test_release_does_not_delete_a_lock_that_was_taken_over(base, capsys):
     assert lp.exists(), "our release deleted the successor's live lock"
     assert json.loads(lp.read_text(encoding="utf-8"))["token"] == successor["token"]
     assert "taken over" in capsys.readouterr().err
+    lp.unlink()
+
+
+def test_release_does_not_delete_a_lock_it_cannot_read(base, capsys):
+    """The same fence, for the case that has no token to compare: a successor
+    that has created its lock file but not yet written its record into it (two
+    syscalls), or a transient read failure. "I cannot read it" must never be
+    taken as "it must be mine" - a lock wrongly left behind costs one staleness
+    window, a live lock wrongly deleted costs a lost update."""
+    lp = lock_path_for(base / "kb")
+    cm = collection_write_lock(lp, collection="kb", op="a test", timeout=5.0)
+    cm.__enter__()
+    lp.write_text("", encoding="utf-8")          # a successor mid-create
+
+    cm.__exit__(None, None, None)
+
+    assert lp.exists(), (
+        "release deleted a lock whose record it could not read - that can be a "
+        "live successor's, and deleting it lets a third writer in")
+    assert "no longer readable" in capsys.readouterr().err
     lp.unlink()
 
 
@@ -406,7 +465,7 @@ def test_concurrent_threads_in_one_process_still_serialise(base, docs):
 
 
 # --------------------------------------------------------------------------- #
-#  4. CLI behaviour on contention                                             #
+#  4. How each surface reports a refusal                                      #
 # --------------------------------------------------------------------------- #
 
 def _run_cli(args, home, *, wait: str = "0.5"):
@@ -466,13 +525,13 @@ def test_cli_succeeds_once_the_holder_releases(tmp_path, docs):
 
     released = threading.Event()
 
-    def _hold():
+    def _hold_briefly():
         with collection_write_lock(lock_path_for(rag / "kb"),
                                    collection="kb", op="a re-sync"):
             time.sleep(4.0)         # comfortably longer than the child's start-up
         released.set()
 
-    t = threading.Thread(target=_hold)
+    t = threading.Thread(target=_hold_briefly)
     t.start()
     time.sleep(0.2)                 # make sure the holder got there first
     try:
@@ -486,6 +545,53 @@ def test_cli_succeeds_once_the_holder_releases(tmp_path, docs):
     meta = json.loads((rag / "kb" / "meta.json").read_text(encoding="utf-8"))
     assert any(k.endswith("gamma.txt") for k in meta["docs"]), (
         "the CLI acquired the lock but did not do the re-sync")
+
+
+def test_a_scheduled_job_reports_the_refusal_instead_of_writing(tmp_path, docs,
+                                                                monkeypatch):
+    """The unattended surface. A scheduled re-sync that meets a hand-run write
+    must record WHY it did nothing - a job history that showed a clean run here
+    would be the "reported success after failing" rule 5 forbids."""
+    from localm.plugins.builtin.jobs import runner
+    rag = tmp_path / "rag"
+    monkeypatch.setattr("localm.rag.store.rag_dir", lambda: rag)
+    monkeypatch.setattr(runner, "_rag_embed_fn", lambda: None)
+    monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
+    coll = Collection("kb", base=rag)
+    coll.create()
+    coll.add_paths([docs])
+    before = (rag / "kb" / "meta.json").read_text(encoding="utf-8")
+
+    _hold(lock_path_for(rag / "kb"), _record(op="an index"))
+    job = types.SimpleNamespace(id="j1", task_kind="rag", collection="kb",
+                                model=None, prompt="")
+    result = runner.run_job(job)
+
+    assert result["status"] == "error", result
+    assert "is being written by" in _flat(result["error"]), result["error"]
+    assert "next scheduled run" in _flat(result["error"]), (
+        "an unattended reader needs to know the folder is not abandoned")
+    assert (rag / "kb" / "meta.json").read_text(encoding="utf-8") == before
+
+
+def test_the_api_answers_409_rather_than_500(base):
+    """A locked collection is a conflict, not a server fault: the HTTP surface
+    must say so, with the message that names the holder."""
+    from fastapi import HTTPException
+
+    from localm.plugins.builtin.rag import plug
+
+    def _locked():
+        raise CollectionLockedError("kb", _record(), 30.0)
+
+    async def _go():
+        with pytest.raises(HTTPException) as e:
+            await plug._write_off_loop(_locked)
+        return e.value
+
+    exc = asyncio.run(_go())
+    assert exc.status_code == 409
+    assert "is being written by" in _flat(str(exc.detail))
 
 
 def test_env_override_reports_a_malformed_value(monkeypatch):

@@ -90,9 +90,9 @@ def rag_add(collection, paths, force, embed, url):
     from .errors import _report_add_paths_result, run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
-    coll.create()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     with _refuse_if_locked(console):
+        coll.create()             # a write too: takes the same lock
         result = coll.add_paths(
             list(paths), force=force, embed_fn=embed_fn,
             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
@@ -396,7 +396,11 @@ def rag_rm(collection, yes):
                       "kept; only the index is removed.", abort=True)
     with _refuse_if_locked(console):
         try:
-            if delete_collection(collection):
+            # on_wait so a delete that queues behind a running index says why it
+            # is sitting there, rather than looking hung for up to 30 seconds.
+            if delete_collection(
+                    collection,
+                    on_wait=lambda t: console.print(f"  [dim]{t}[/dim]")):
                 console.print(f"[green]Deleted '{collection}'.[/green]")
             else:
                 console.print(f"[red]No such collection:[/red] {collection}")

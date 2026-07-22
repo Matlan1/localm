@@ -42,7 +42,8 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
-from .collection_lock import collection_write_lock, lock_path_for
+from .collection_lock import (CollectionLockedError, collection_write_lock,
+                              lock_path_for, wait_budget)
 from .chunk import chunk_text
 from .extract import (BLACKLISTED_SUFFIXES, SECRET_SUFFIXES,
                       UNINDEXABLE_SUFFIXES, ExtractError, classify_format,
@@ -452,7 +453,8 @@ def collection_names(base: Optional[Path] = None) -> list[str]:
                   if p.is_dir() and (p / "meta.json").is_file())
 
 
-def delete_collection(name: str, base: Optional[Path] = None) -> bool:
+def delete_collection(name: str, base: Optional[Path] = None,
+                      on_wait: Optional[Callable[[str], None]] = None) -> bool:
     """Delete a collection, waiting for any in-flight write to finish first.
 
     Deleting IS a write, so it takes the same locks as one. Without them a
@@ -466,11 +468,24 @@ def delete_collection(name: str, base: Optional[Path] = None) -> bool:
     path = base / _check_name(name)
     if not (path / "meta.json").is_file():
         return False
-    with _collection_lock(name), collection_write_lock(
-            lock_path_for(path), collection=name, op="a delete"):
-        if not (path / "meta.json").is_file():
-            return False          # someone else deleted it while we waited
-        shutil.rmtree(path)
+    # The ONE caller that bounds the in-process half too (Collection._write_lock
+    # explains why writers normally queue there). A delete is a foreground action
+    # someone is waiting on, and it can land in an HTTP request thread, so
+    # queueing behind a re-sync that legitimately runs for hours would be a hang
+    # with no way to report itself. Refusing after the same budget is honest and
+    # actionable; nothing is lost, the collection is still there to delete.
+    budget = wait_budget()
+    local = _collection_lock(name)
+    if not local.acquire(timeout=budget):
+        raise CollectionLockedError(name, None, budget, same_process=True)
+    try:
+        with collection_write_lock(lock_path_for(path), collection=name,
+                                   op="a delete", on_wait=on_wait):
+            if not (path / "meta.json").is_file():
+                return False      # someone else deleted it while we waited
+            shutil.rmtree(path)
+    finally:
+        local.release()
     return True
 
 
@@ -497,7 +512,15 @@ _COLLECTION_LOCKS = NamespaceLockRegistry()
 
 
 def _collection_lock(name: str):
-    return _COLLECTION_LOCKS.get(name)
+    # Keyed case-INSENSITIVELY. Collection names are not normalised, so
+    # Collection("Docs") and Collection("docs") are two different keys - but on
+    # Windows and macOS they are the SAME directory and the same lock file. Two
+    # threads spelling the name differently would then sail past each other here
+    # and meet at the lock file, which cannot tell one thread from another and
+    # would report a thread of this very process as "another localm process".
+    # Folding costs only some needless mutual exclusion on a case-sensitive
+    # filesystem, where the two really are separate collections.
+    return _COLLECTION_LOCKS.get(name.casefold())
 
 
 # Where a vectors.json that _load() REFUSED is set aside when the chunks it was
@@ -551,6 +574,16 @@ class Collection:
         config's, can only read as a nested call - a bug - since a file lock
         cannot tell one thread from another).
 
+        The two halves have DIFFERENT waiting rules, on purpose. Writers inside
+        one process QUEUE for as long as it takes: the holder is a thread of
+        this process that is demonstrably making progress, so waiting always
+        ends and always does the work - refusing there would break something
+        that works today (a second GUI index of a collection whose first index
+        runs for ten minutes). A writer in ANOTHER process cannot be trusted
+        that way, since it may be hung or gone, so that half is bounded and
+        ends in a refusal. ``delete_collection`` is the one caller that bounds
+        both (see its docstring).
+
         The wait is reported through the caller's existing progress channel, so
         a CLI or a job stream says why it is waiting instead of looking hung.
         """
@@ -559,11 +592,23 @@ class Collection:
             on_wait=on_progress)
 
     def create(self) -> "Collection":
+        """Create the collection if it does not exist yet.
+
+        Under the write lock, and re-checking existence inside it: creating is a
+        write too. Without it, a `rag add` that finds no collection can drop a
+        fresh meta.json into a directory another process is part-way through
+        deleting - which both resurrects a collection the user deleted and
+        fails that delete's final rmdir on a directory that grew entries after
+        it was listed. The fast path (already exists) takes no lock at all, so
+        the usual add pays nothing."""
         if self.exists():
             return self
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self._meta = {"name": self.name, "created": time.time(), "docs": {}}
-        self._save()
+        with _collection_lock(self.name), self._write_lock("a create"):
+            if self.exists():
+                return self       # somebody else created it while we waited
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self._meta = {"name": self.name, "created": time.time(), "docs": {}}
+            self._save()
         return self
 
     def _load(self) -> None:

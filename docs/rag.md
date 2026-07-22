@@ -162,14 +162,19 @@ policy as an interactive add. Full details in
   serialised both inside a localm process and BETWEEN processes, so the server's
   API adds, its scheduled re-syncs and a hand-run `localm rag add|resync|repair|rm`
   cannot lose each other's changes. Every file is rewritten atomically too, so a
-  concurrent query always sees a consistent snapshot. A second writer WAITS for
-  the collection (up to 30 seconds, saying so while it does) and then REFUSES with
-  a message naming the process that holds it, rather than interleaving: an add
-  that is refused has changed nothing, and the API answers 409. There is no
-  wall-clock limit on how long a collection may be held, so an hours-long index of
-  a big folder is safe; the holder refreshes a heartbeat, and only a holder that
-  stops reporting (a crash, a killed process) has its lock reclaimed. Collections
-  are independent, so work on a different one never waits.
+  concurrent query always sees a consistent snapshot, and queries never wait for a
+  writer at all. The two cases wait differently, on purpose. Two writers *inside
+  one localm process* (say two indexing jobs started from the Knowledge page)
+  simply queue: the one holding the collection is getting on with it, so waiting
+  always ends and the work still happens. A writer in *another process* cannot be
+  trusted that way, since it may be hung or already gone, so it waits a bounded 30
+  seconds, says so while it waits, and then REFUSES with a message naming the
+  process that holds the collection rather than interleaving with it. A refused
+  command has changed nothing, and the API answers 409. There is no wall-clock
+  limit on how long a collection may be HELD, so an hours-long index of a big
+  folder is safe: the holder keeps reporting in, and only a holder that stops
+  reporting (a crash, a killed process) has its lock reclaimed. Collections are
+  independent, so work on a different one never waits.
 - `POST .../add` accepts up to 50 paths per request (a path may itself be a
   folder); `POST .../upload` accepts up to 50 files per request, 30 MB each
   and 100 MB total. Split a larger batch across multiple calls.
@@ -192,13 +197,16 @@ policy as an interactive add. Full details in
   down without changing anything. The message names the process holding it and
   how long it has been running. Let that run finish and repeat the command; a
   scheduled job that hits this says so in its output and picks the folder up on
-  its next run. If you know the holder is gone (the machine lost power mid-index,
-  say), the lock is reclaimed by itself about a minute after that process stopped
-  reporting - it can never wedge a collection permanently. Two environment
-  variables tune this for unusual setups: `LOCALM_RAG_LOCK_WAIT` (seconds to wait
-  before refusing, default 30) and `LOCALM_RAG_LOCK_STALE` (seconds without a
-  heartbeat before a holder counts as crashed, default 60; raise it on a very slow
-  or heavily contended disk).
+  its next run. If the holder is gone (the machine lost power mid-index, say), the
+  lock is reclaimed by itself about a minute after that process stopped reporting,
+  so a crash cannot wedge a collection. The one case that needs you is a lock file
+  localm cannot even read the timestamp of, which means something is wrong with
+  the file itself (permissions, a damaged filesystem): the message then names the
+  file, and deleting it releases the collection once you are sure no localm
+  process is using it. Two environment variables tune this for unusual setups:
+  `LOCALM_RAG_LOCK_WAIT` (seconds to wait before refusing, default 30) and
+  `LOCALM_RAG_LOCK_STALE` (seconds without a heartbeat before a holder counts as
+  crashed, default 60; raise it on a very slow or heavily contended disk).
 - **"Semantic search is degraded".** localm checked the stored vector index
   against the chunks and refused to use it (unreadable, malformed, or no longer
   lining up), and answered lexically instead. Nothing is deleted to make that go

@@ -399,7 +399,9 @@ async def rag_create(req: RagCreateRequest):
         raise HTTPException(400, str(e))
     if coll.exists():
         raise HTTPException(409, f"Collection already exists: {coll.name}")
-    coll.create()
+    # Off the loop like every other write: create() takes the collection write
+    # lock (it can race a delete of the same name), so it can block.
+    await _write_off_loop(coll.create)
     return coll.stats()
 
 
