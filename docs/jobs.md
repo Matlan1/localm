@@ -142,7 +142,23 @@ removing the document from the Knowledge page.
 **An unreachable folder is skipped whole.** If an indexed folder is not
 available at run time (deleted, unmounted, or replaced by a file), the run
 reports it and touches nothing underneath it - no indexing, no flagging, no
-pruning.
+pruning. That includes the case the filesystem hides: unmounting a drive on
+Linux or macOS leaves the mount point behind as an ordinary empty folder, so a
+mount point that is empty *while documents are still indexed under it* is
+treated as unavailable rather than as a folder whose files were all deleted.
+
+**A degraded vector index is reported, never quietly repaired away.** If the
+stored embeddings no longer match the chunks (an interrupted embed, or a
+truncated or hand-edited file), the run says so in its output and leaves the
+vector file on disk, moved aside as `vectors.json.rejected` if the chunks had to
+be rewritten. Search keeps working lexically meanwhile. Rebuild the index with
+`localm rag repair NAME --embed`.
+
+**Do not run manual `rag` writes on a collection the server is re-syncing.**
+`localm rag add` and `localm rag resync` run in their own process, and write
+serialisation is per process, so a hand-run command overlapping a scheduled run
+on the *same* collection can lose one of the two updates. Wait for the scheduled
+run, or trigger it from the Jobs tab, rather than racing it by hand.
 
 **Confinement still applies.** A scheduled re-sync runs under the same allowed
 or denied folder policy as an interactive add (Settings > Knowledge), including

@@ -471,11 +471,31 @@ def delete_collection(name: str, base: Optional[Path] = None) -> bool:
 # Shared registry implementation (storekit.NamespaceLockRegistry) - see CF-9/CF-10:
 # memory/store.py independently re-implements the identical lazy-RLock-per-key
 # pattern, keyed by namespace hash instead of collection name.
+#
+# SCOPE, stated rather than implied: this lock is PER PROCESS. It serialises the
+# server's own concurrent writers (API adds, a scheduled re-sync job), which is
+# what CHK-RAG-LOCK was about. It does NOT serialise a `localm rag add|resync`
+# CLI invocation against a running server: the CLI opens the collection directly
+# in its own process, with its own registry, so the two can interleave their
+# read-modify-write cycles and lose one another's changes. Documented for users
+# in docs/rag.md and docs/jobs.md ("do not run manual rag writes while the server
+# re-syncs the same collection"). Deliberately NOT closed with
+# config._cross_process_lock: that lock reclaims any holder older than 30 s as
+# abandoned, which is right for a config read-modify-write and wrong for indexing
+# runs that routinely take minutes - a waiter would reclaim a LIVE holder's lock
+# and we would be back to interleaving while claiming to be safe. Doing it
+# properly needs a parameterised stale age plus a holder heartbeat.
 _COLLECTION_LOCKS = NamespaceLockRegistry()
 
 
 def _collection_lock(name: str):
     return _COLLECTION_LOCKS.get(name)
+
+
+# Where a vectors.json that _load() REFUSED is set aside when the chunks it was
+# (mis)aligned with get rewritten. Preserved, never deleted - see
+# Collection._quarantine_rejected_vectors.
+_REJECTED_VECTORS = "vectors.json.rejected"
 
 
 class Collection:
@@ -494,6 +514,13 @@ class Collection:
         # DETECTED and we fell back to BM25 lexical - surfaced, not silently
         # swallowed (AGENTS rule 5). Exposed via stats() and logged once.
         self.vector_degrade_reason: Optional[str] = None
+        # True when _load() found a vectors.json on disk and REFUSED to use it.
+        # That file is then both the only remaining copy of those vectors and the
+        # only evidence of the fault, so _save() must not delete it (see _save).
+        # Distinct from vector_degrade_reason, which is ALSO set by query-time
+        # degrades (a failed query embedding, partial coverage) that say nothing
+        # about the file on disk.
+        self._vectors_file_rejected: bool = False
         if self.exists():
             self._load()
 
@@ -565,6 +592,7 @@ class Collection:
         self._vectors = None
         self._vec_dim = None
         self.vector_degrade_reason = None
+        self._vectors_file_rejected = False
         vec_file = self.dir / "vectors.json"
         if vec_file.is_file():
             # vectors.json PRESENT but unusable is the unexpected case: do NOT
@@ -615,6 +643,21 @@ class Collection:
                         f"vectors.json has {len(vectors)} vectors for "
                         f"{len(self._chunks)} chunks ({kind}); "
                         f"using BM25 lexical retrieval only", warn=True)
+            # Any reason recorded in this block means the file IS there and we
+            # refused it (the reason was reset to None immediately above, so
+            # nothing else can have set it). Remember that for _save().
+            self._vectors_file_rejected = self.vector_degrade_reason is not None
+        elif (self.dir / _REJECTED_VECTORS).is_file():
+            # An earlier write set an unusable sidecar aside rather than deleting
+            # it (_quarantine_rejected_vectors). Nothing was lost, but semantic
+            # search IS still degraded and stays that way until the index is
+            # rebuilt - so keep saying so. Tidying a fault out of the way must not
+            # also tidy away the fact that it happened (AGENTS rule 5).
+            self._note_vector_degrade(
+                f"the stored vector index was unusable and was set aside as "
+                f"{_REJECTED_VECTORS} (nothing was deleted); using BM25 lexical "
+                f"retrieval only - rebuild it with 'localm rag repair'",
+                warn=True)
         self._bm25 = None
         # If meta.json was corrupt but chunks survived, rebuild a minimal docs
         # map from the chunk sources. This makes stats()/documents() reflect the
@@ -646,21 +689,92 @@ class Collection:
             self._vec_dim = _first_dim(self._vectors)
             self._atomic_write("vectors.json", json.dumps(
                 {"dim": self._vec_dim, "vectors": self._vectors}))
+            # A real index replaced whatever _load() rejected: what we just wrote
+            # is well-formed, finite and aligned with the chunks written above, so
+            # the load-time degrade no longer describes the disk. Clearing it here
+            # keeps stats() and the re-sync result honest without a reload (a
+            # coverage shortfall is re-noted by _vector_scores at query time).
+            self._vectors_file_rejected = False
+            self.vector_degrade_reason = None
+        elif self._vectors_file_rejected and self._chunks:
+            # We have no vectors to write AND the vectors.json on disk is one
+            # _load() refused to use. Deleting it here would destroy the only copy
+            # of that data AND the only evidence of the fault: the next _load()
+            # would find no file, record no vector_degrade_reason, and the
+            # collection would read as legitimately lexical-only. An unattended
+            # re-sync tick would then quietly erase a fault nobody ever saw
+            # (AGENTS rule 5 - never turn a diagnosable problem into a silent
+            # one). Keep the file; _load() keeps reporting why, stats() keeps
+            # showing it, and `localm rag repair <name> --embed` rebuilds it.
+            #
+            # Once no chunks are left (every document removed or pruned) the
+            # exception ends: stored vectors are positional against chunks, so
+            # with nothing to realign them to they are unrecoverable rather than
+            # recoverable, and keeping them would pin a permanent degrade on an
+            # empty collection.
+            #
+            # We are rewriting chunks.jsonl just above, so the file is set ASIDE
+            # rather than left in place: see _quarantine_rejected_vectors.
+            self._quarantine_rejected_vectors()
+            self._vec_dim = None
         else:
             (self.dir / "vectors.json").unlink(missing_ok=True)
+            self._vectors_file_rejected = False
             self._vec_dim = None
         self._bm25 = None
+
+    def _quarantine_rejected_vectors(self) -> None:
+        """Set a rejected vectors.json aside as ``vectors.json.rejected``.
+
+        Preserving the file in place would be enough to keep the data and the
+        evidence, but not enough to keep it SAFE: the caller has just rewritten
+        chunks.jsonl, and ``_load`` decides a vectors sidecar is usable partly by
+        comparing its length to the chunk count. A rejected file left in place can
+        therefore be silently RE-ADOPTED once an unrelated change happens to make
+        the counts agree again (index 2 documents, truncate vectors.json to the
+        second document's vector, remove the first document: one vector, one
+        chunk, structurally valid, and every semantic score from then on is
+        computed against the wrong chunk). Trading one silent fault for another is
+        not a fix (AGENTS rule 5).
+
+        Renaming solves both at once: the bytes are still on disk for recovery and
+        for anyone diagnosing what happened, and no loader will ever pair them with
+        chunks again. ``_load`` reports the set-aside file as a degrade for as long
+        as it exists, so the fault stays visible rather than becoming folklore."""
+        src = self.dir / "vectors.json"
+        if not src.is_file():
+            return
+        try:
+            os.replace(src, self.dir / _REJECTED_VECTORS)
+        except OSError as e:
+            # Best-effort, and the failure is NOT silent. Leaving the file where
+            # it is still preserves the data and the evidence (the property that
+            # actually matters); only the re-adoption guard is lost.
+            _log.warning("RAG collection %r: could not set the unusable "
+                         "vectors.json aside as %s (%s); it is left in place",
+                         self.name, _REJECTED_VECTORS, e)
+            return
+        _log.warning("RAG collection %r: the unusable vectors.json was set aside "
+                     "as %s (%s). Nothing was deleted; rebuild the index with "
+                     "'localm rag repair %s --embed'.",
+                     self.name, _REJECTED_VECTORS,
+                     self.vector_degrade_reason or "unusable", self.name)
 
     def _save_meta(self) -> None:
         """Persist meta.json ONLY, leaving chunks.jsonl / vectors.json alone.
 
         For a change that touches nothing but metadata (a newly recorded root, a
         missing/restored flag), this is both sufficient and strictly safer than a
-        full ``_save()``: ``_save`` DELETES vectors.json whenever
-        ``self._vectors`` is None, and ``_load`` sets it to None on purpose when
-        it finds a corrupt or stale vector sidecar (``vector_degrade_reason``).
-        A metadata-only write must not turn that recoverable state into real data
-        loss. Chunks are untouched, so the cached BM25 index stays valid too."""
+        full ``_save()``: ``_save`` rewrites chunks.jsonl and decides the fate of
+        vectors.json from ``self._vectors``, which ``_load`` sets to None on
+        purpose when it finds a corrupt or stale vector sidecar
+        (``vector_degrade_reason``). A metadata-only write must not turn that
+        recoverable state into real data loss. ``_save`` now refuses that
+        particular deletion itself (see its ``_vectors_file_rejected`` branch),
+        but the two guards are deliberately independent: this one keeps a
+        metadata write from touching chunks or vectors AT ALL, which is the
+        property callers here actually want. Chunks are untouched, so the cached
+        BM25 index stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
 
@@ -938,7 +1052,21 @@ class Collection:
             }
             say(f"indexed {f.name} ({len(new_chunks)} chunks)")
 
-        self._save()
+        if added or updated:
+            self._save()
+        elif roots_changed or self.corrupt:
+            # Nothing was indexed (every file skipped as unchanged, or every one
+            # failed), so chunks and vectors are exactly as _load() read them. A
+            # full _save() here would rewrite chunks.jsonl for no reason and
+            # rewrite or DELETE vectors.json off in-memory state that no longer
+            # reflects a real change - which is how a scheduled re-sync tick, whose
+            # normal outcome is "nothing changed", used to erase a vectors.json
+            # that _load() had deliberately kept as evidence of a degraded index.
+            # Persist metadata only, and only when there is something to persist:
+            # a newly recorded root, or a meta.json that _load() flagged corrupt
+            # and rebuilt a docs map for (that self-heal happens on the next
+            # metadata write). Mirrors the no-indexable-files early return above.
+            self._save_meta()
         return {"added": added, "updated": updated, "skipped": skipped,
                 "failed": failed, "chunks": len(self._chunks)}
 
@@ -986,8 +1114,10 @@ class Collection:
 
         Returns the ``add_paths`` counters plus ``missing`` (newly flagged),
         ``missing_total``, ``restored``, ``pruned``, ``roots``,
-        ``unavailable_roots`` and ``blocked_roots`` (each ``{root, reason}``), so
-        the caller can report honestly what the run did and did NOT do.
+        ``unavailable_roots`` and ``blocked_roots`` (each ``{root, reason}``), and
+        ``vector_degrade_reason`` (why semantic search is degraded after this run,
+        None when it is fine), so the caller can report honestly what the run did
+        and did NOT do, and over what state.
         """
         with _collection_lock(self.name):
             self._load()
@@ -1048,6 +1178,12 @@ class Collection:
             "missing_total": sum(
                 1 for e in docs.values()
                 if isinstance(e, dict) and e.get("missing")),
+            # Why semantic search is degraded, AFTER this run (None when it is
+            # fine). _load() only logs it, and a scheduled job's result is the
+            # single place anyone looks at an unattended run - so a corrupt or
+            # stale vectors.json has to be reported here too, or the job reads as
+            # a clean success over a knowingly broken index (AGENTS rule 5).
+            "vector_degrade_reason": self.vector_degrade_reason,
         })
         return result
 
@@ -1056,7 +1192,9 @@ class Collection:
 
         Availability is checked FIRST and reported, never assumed: an
         unreachable root is the single most likely reason a re-sync would
-        otherwise conclude that every file under it was deleted."""
+        otherwise conclude that every file under it was deleted. ``is_dir()``
+        answers most of that, but not all of it - see ``_unmounted_reason`` for
+        the case it cannot see."""
         available: list = []
         unavailable: list = []
         blocked: list = []
@@ -1073,6 +1211,11 @@ class Collection:
                 unavailable.append({"root": raw, "reason": reason})
                 say(f"skipping {raw}: {reason} - nothing under it was changed")
                 continue
+            reason = self._unmounted_reason(root)
+            if reason:
+                unavailable.append({"root": raw, "reason": reason})
+                say(f"skipping {raw}: {reason} - nothing under it was changed")
+                continue
             if policy is not None:
                 try:
                     confine_index_path(root, policy)
@@ -1082,6 +1225,53 @@ class Collection:
                     continue
             available.append(root)
         return available, unavailable, blocked
+
+    def _unmounted_reason(self, root: Path) -> Optional[str]:
+        """Why *root* looks like an UNMOUNTED mount point, or None if it is fine.
+
+        ``is_dir()`` cannot see this on POSIX: unmounting leaves the mount point
+        behind as an ordinary, existing, EMPTY directory. The root then passes the
+        availability check above, every document under it fails ``p.exists()`` in
+        the missing pass, and an explicit ``resync --prune-missing`` run during
+        the unmount window deletes the entire index for that folder - the exact
+        outcome the "an unplugged drive cannot destroy the index" promise rules
+        out. (The scheduled path never prunes, so only a hand-run prune could
+        reach it.)
+
+        All three conditions are required and none is sufficient alone.
+        ``os.path.ismount`` by itself would skip a volume that is mounted and was
+        legitimately indexed (a NAS share, a second drive); "empty" by itself
+        would break the user who really did empty an indexed folder and wants
+        --prune-missing to act on it. A mount point that is empty WHILE we hold
+        documents indexed under it is the specific shape of a drive that went
+        away, and skipping it is recoverable (remove the entries with
+        ``localm rag rm`` if the folder really is empty for good), where pruning
+        a mounted-away drive is not.
+        """
+        try:
+            if not os.path.ismount(root):
+                return None
+            if next(root.iterdir(), None) is not None:
+                return None
+        except OSError:
+            # We could not even look inside. Same reasoning as is_dir() being
+            # False: an unanswerable question is never resolved destructively.
+            return ("the indexed folder could not be read (disconnected, or "
+                    "permission denied)")
+        if not self._has_docs_under(root):
+            return None
+        return ("the indexed folder is an empty mount point, so its drive or "
+                "share appears to be unmounted")
+
+    def _has_docs_under(self, root: Path) -> bool:
+        """True when at least one indexed document's source lives under *root*.
+
+        Uploads are excluded: an ``upload:`` key is not a filesystem path, so it
+        can neither be under a root nor be evidence that one lost its contents."""
+        return any(
+            not str(key).startswith("upload:") and _path_within(Path(key), root)
+            for key in self._meta.get("docs", {})
+        )
 
     def _resyncable_files(self, skipped_roots: list, policy: Optional[dict],
                           say: ProgressFn) -> list:

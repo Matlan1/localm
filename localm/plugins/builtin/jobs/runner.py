@@ -411,8 +411,10 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     """Render a re-sync result as the job's output.
 
     Every degrade is stated, not implied (AGENTS.md rule 5): a skipped root, a
-    flagged-missing document, a per-file failure, and - the easy one to hide -
-    new documents indexed WITHOUT embeddings into a collection that had semantic
+    flagged-missing document, a per-file failure, a vectors.json the store found
+    corrupt or stale (this result is the ONLY place an unattended run is seen, so
+    a _log.warning nobody reads is not enough), and - the easy one to hide - new
+    documents indexed WITHOUT embeddings into a collection that had semantic
     search, which silently pushes vector coverage down and can drop the whole
     collection to BM25."""
     out = [f"re-synced '{name}': {result['added']} added, "
@@ -433,6 +435,12 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     if result["failed"]:
         out.append(f"{len(result['failed'])} file(s) failed:")
         out.extend(f"  {f['path']}: {f['error']}" for f in result["failed"][:10])
+    if result.get("vector_degrade_reason"):
+        out.append(
+            f"NOTE: semantic search is degraded on this collection: "
+            f"{result['vector_degrade_reason']}. The stored vector index was "
+            f"left in place, not deleted - rebuild it with "
+            f"'localm rag repair {name} --embed'.")
     if not embedded and had_vectors and (result["added"] or result["updated"]):
         out.append(
             "NOTE: no embedding model was available, so the newly indexed "
