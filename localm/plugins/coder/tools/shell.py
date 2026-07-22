@@ -341,6 +341,104 @@ def resolve_runner(name: str) -> "str | None":
     return os.path.abspath(found) if found else None
 
 
+# Test runners that actually HAVE a --passWithNoTests flag. An allowlist on
+# purpose, and a measured one rather than a remembered one: both entries were
+# read off the runner's own --help (jest: "Will not fail if no tests are found";
+# vitest: "Pass when no tests are found"). Sending the flag to a runner that
+# does not know it is at best inert and at worst fatal - `node --test
+# --passWithNoTests` exits 9 with "bad option" (measured, node 24.16.0) - so a
+# runner we cannot vouch for gets no flag rather than a guess.
+_NO_TESTS_OK_RUNNERS = frozenset({"jest", "vitest"})
+
+# How a package script may spell a runner's binary; stripped before matching, so
+# `node_modules/.bin/jest.cmd` still reads as jest while a script that merely
+# mentions one (`node tools/jest-codemod.js`) does not.
+_SCRIPT_BIN_SUFFIXES = (".js", ".cjs", ".mjs", ".cmd", ".bat", ".exe")
+
+
+def _last_command_of(script: str) -> str:
+    """The FINAL command in a package script line.
+
+    A package manager appends forwarded arguments to the END of the script, so
+    the last command is the only one that can receive them. Measured on npm with
+    the script ``node a.js && node b.js``: the forwarded argument arrived at
+    ``b.js`` and ``a.js`` saw nothing. So in ``jest && eslint .`` an appended
+    ``--passWithNoTests`` would land on eslint, not on jest.
+    """
+    import re
+    return re.split(r"&&|\|\||[;|&]", script)[-1]
+
+
+def _script_runner_takes_no_tests_flag(cwd: Path) -> bool:
+    """True when this package's ``test`` script ends in a runner that has a
+    ``--passWithNoTests`` flag (see :data:`_NO_TESTS_OK_RUNNERS`)."""
+    import json
+    try:
+        data = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
+    except Exception:                                          # noqa: BLE001
+        return False        # unreadable or malformed: no evidence, so no flag
+    scripts = data.get("scripts")
+    script = scripts.get("test") if isinstance(scripts, dict) else None
+    if not isinstance(script, str):
+        return False
+    for token in _last_command_of(script).split():
+        name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        for suffix in _SCRIPT_BIN_SUFFIXES:
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        if name in _NO_TESTS_OK_RUNNERS:
+            return True
+    return False
+
+
+def _js_test_command(cwd: Path, package_manager: str) -> list[str]:
+    """The ``npm``/``yarn`` test command for *cwd*.
+
+    ONE definition, used by both :func:`_detect_test_runner` and ``run_tests``'s
+    explicit npm/yarn branch, so the command the verify oracle runs and the
+    command the model's own tool runs cannot drift apart.
+
+    ``--passWithNoTests`` keeps a project whose suite is still empty from being
+    billed a failed verification. HOW it has to be passed differs per package
+    manager, and the difference is measured (npm 11.13.0, yarn 1.22.22, node
+    24.16.0), not assumed:
+
+    * npm SWALLOWS the bare flag. It reads an unrecognised option as one of its
+      own configs - the script sees only ``npm_config_passwithnotests`` in the
+      environment, and npm warns "Unknown cli config" - and forwards just nopt's
+      POSITIONAL remainder to the script (``npm/lib/npm.js``:
+      ``this.argv = [...parsedArgv.remain]``). Hence npm's own usage for the
+      lifecycle commands, ``[-- <args>]``. Measured against real jest in a
+      package with no test files: the bare form exits 1, identical to passing
+      nothing at all, so the flag was decorative and the empty suite was billed
+      as a failure anyway. Through ``--`` the same project exits 0.
+    * yarn is the OPPOSITE and must NOT be given the separator. yarn classic
+      forwards the bare flag correctly today, and warns that a future yarn "will
+      forward any explicit -- as-is to the scripts" - which would hand the runner
+      a literal ``--`` and demote the flag to a positional argument. So yarn
+      keeps the bare form it already had.
+
+    Positional arguments need no separator on either (measured: ``npm test
+    somepath`` reaches the script), which is why ``run_tests`` can still append
+    its ``path`` after this command.
+
+    The flag also goes only to a runner that HAS it (see
+    :data:`_NO_TESTS_OK_RUNNERS`); anything else gets a plain ``<pm> test``.
+    That is the honest outcome rather than a silent downgrade - the flag never
+    reached those runners before either - and it avoids trading a working check
+    for a permanently red one.
+    """
+    cmd = [resolve_runner(package_manager) or package_manager, "test"]
+    if _script_runner_takes_no_tests_flag(cwd):
+        # npm forwards nothing flag-shaped without the separator; yarn forwards
+        # it fine and warns that a future version will pass an explicit `--`
+        # straight through to the runner.
+        separator = ["--"] if package_manager == "npm" else []
+        cmd += separator + ["--passWithNoTests"]
+    return cmd
+
+
 def _detect_test_runner(cwd: Path) -> list[str]:
     """Return the command list for the most appropriate test runner in *cwd*.
 
@@ -355,7 +453,7 @@ def _detect_test_runner(cwd: Path) -> list[str]:
         return [resolve_runner("go") or "go", "test", "./..."]
     if (cwd / "package.json").exists():
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
-        return [resolve_runner(lock) or lock, "test", "--passWithNoTests"]
+        return _js_test_command(cwd, lock)
     # Python - prefer pytest; fall back to unittest. Use the SAME interpreter that
     # runs localm (sys.executable), not a bare "python" off PATH - on many machines
     # PATH `python` is a different env (uv/conda/system) without pytest or the
@@ -392,9 +490,10 @@ def tool_run_tests(
     elif runner == "go":
         cmd = [resolve_runner("go") or "go", "test", "./..."]
     elif runner in ("npm", "yarn"):
-        # Resolved for the same reason as the auto branch: an explicitly asked
-        # for `npm` is no more launchable as a bare argv[0] on Windows.
-        cmd = [resolve_runner(runner) or runner, "test", "--passWithNoTests"]
+        # Same builder as the auto branch, so an explicitly asked for `npm` gets
+        # the same resolved path (a bare name is not launchable as argv[0] on
+        # Windows) and the same --passWithNoTests handling.
+        cmd = _js_test_command(cwd, runner)
     else:
         return ToolResult.error(
             f"Unknown runner '{runner}'. Use: auto, pytest, cargo, go, npm, yarn"

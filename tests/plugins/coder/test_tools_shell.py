@@ -4,8 +4,12 @@ Tests for shell and test-runner tools in localm.plugins.coder.tools:
   tool_run_shell, tool_run_tests, _detect_test_runner
 """
 
+import json
+import shutil
 import subprocess
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 from localm.plugins.coder.tools import (
     tool_run_shell,
@@ -13,6 +17,7 @@ from localm.plugins.coder.tools import (
     _detect_test_runner,
     _needs_shell,
 )
+from localm.plugins.coder.tools.shell import _js_test_command
 
 
 def _launcher(launched) -> str:
@@ -230,6 +235,122 @@ class TestDetectTestRunner:
         (tmp_path / "yarn.lock").write_text("")
         cmd = _detect_test_runner(tmp_path)
         assert "yarn" in cmd[0]
+
+
+class TestPassWithNoTestsActuallyReachesTheRunner:
+    """The flag used to be appended bare: ``npm test --passWithNoTests``.
+
+    npm parses an unknown ``--flag`` as a CLI config and forwards only nopt's
+    POSITIONAL remainder to the package script, so the flag never reached the
+    runner. It was decorative, and a JS project with no tests was billed a
+    verification failure anyway - the exact outcome it was added to prevent. It
+    now goes through npm's own documented ``--`` separator, and only to a runner
+    that actually has the flag, because with the separator it really does arrive
+    and most runners reject an unknown option outright.
+    """
+
+    @staticmethod
+    def _pkg(tmp_path, test_script):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "p", "private": True,
+                        "scripts": {"test": test_script}}), encoding="utf-8")
+
+    @pytest.mark.parametrize("script", [
+        "jest",
+        "jest --ci",
+        "vitest run",
+        "cross-env NODE_ENV=test jest",
+        "node_modules/.bin/jest.cmd",
+    ])
+    def test_a_runner_that_has_the_flag_gets_it_past_the_separator(
+            self, tmp_path, script):
+        self._pkg(tmp_path, script)
+        assert _detect_test_runner(tmp_path)[1:] == [
+            "test", "--", "--passWithNoTests"]
+
+    @pytest.mark.parametrize("script", [
+        # This repository's OWN test script. `node --test` rejects an unknown
+        # option, so an unconditional separator would break its own oracle.
+        "node --test --test-force-exit tests-js/*.test.mjs",
+        "mocha",
+        "node tools/jest-codemod.js",   # merely MENTIONS jest, is not jest
+        "jest && eslint .",             # appended args land on eslint, not jest
+    ])
+    def test_a_runner_without_the_flag_gets_a_plain_test_command(
+            self, tmp_path, script):
+        self._pkg(tmp_path, script)
+        assert _detect_test_runner(tmp_path)[1:] == ["test"]
+
+    @pytest.mark.parametrize("body", ['{"name": "x"}', "{not json"])
+    def test_no_readable_test_script_means_no_flag(self, tmp_path, body):
+        (tmp_path / "package.json").write_text(body, encoding="utf-8")
+        assert _detect_test_runner(tmp_path)[1:] == ["test"]
+
+    def test_yarn_gets_the_flag_bare_because_a_separator_would_break_it(
+            self, tmp_path):
+        """npm and yarn are OPPOSITES here, and both directions were measured.
+        yarn classic already forwards a bare flag to the script, and warns that
+        a future yarn "will forward any explicit -- as-is to the scripts" -
+        which would hand the runner a literal `--` and demote the flag to a
+        positional argument. Giving yarn npm's separator would therefore break
+        a case that works today."""
+        self._pkg(tmp_path, "jest")
+        (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
+        cmd = _detect_test_runner(tmp_path)
+        assert "yarn" in cmd[0]
+        assert cmd[1:] == ["test", "--passWithNoTests"]
+
+    def test_the_explicit_yarn_runner_also_omits_the_separator(self, tmp_path):
+        self._pkg(tmp_path, "jest")
+        assert _js_test_command(tmp_path, "yarn")[1:] == [
+            "test", "--passWithNoTests"]
+
+    def test_the_explicit_npm_runner_builds_the_same_command_as_auto(
+            self, tmp_path):
+        """run_tests(runner="npm") and the verify oracle's auto-detection were
+        two copies of the same literal and could drift; they share one builder
+        now, so this pins that they agree."""
+        self._pkg(tmp_path, "jest")
+        assert _js_test_command(tmp_path, "npm") == _detect_test_runner(tmp_path)
+
+    def test_the_flag_really_arrives_at_the_runner(self, tmp_path):
+        """The end-to-end that the argv assertions above cannot make: run the
+        detected command through the REAL npm and read back what the package
+        script actually received.
+
+        The second half is the fires-control. The argv this repository shipped
+        before (bare, no separator) is run against the SAME project with the
+        SAME npm in the SAME test, and the flag does NOT arrive. Without it a
+        green first half would only prove that npm exists, not that the
+        separator is what delivers the flag - and that is precisely the gap the
+        original bug slipped through, since a pure argv-shape assertion cannot
+        see whether npm forwards what it is given.
+        """
+        if shutil.which("npm") is None:
+            pytest.skip("npm is not installed on this box")
+        # Named jest.js so detection recognises a supported runner; the file
+        # itself only reports its argv, which is the thing under test.
+        (tmp_path / "jest.js").write_text(
+            'console.log("ARGV=" + JSON.stringify(process.argv.slice(2)));\n',
+            encoding="utf-8")
+        self._pkg(tmp_path, "node jest.js")
+
+        cmd = _detect_test_runner(tmp_path)
+        assert cmd[1:] == ["test", "--", "--passWithNoTests"]
+        fixed = subprocess.run(cmd, cwd=tmp_path, capture_output=True,
+                               text=True, timeout=180)
+        assert "--passWithNoTests" in fixed.stdout, (
+            "the separator form did not deliver the flag to the script: "
+            f"stdout={fixed.stdout!r} stderr={fixed.stderr!r}")
+
+        bare = subprocess.run([cmd[0], "test", "--passWithNoTests"],
+                              cwd=tmp_path, capture_output=True, text=True,
+                              timeout=180)
+        assert "ARGV=[]" in bare.stdout, (
+            "npm forwarded a BARE --passWithNoTests after all. If that is real, "
+            "the separator is unnecessary and this fix needs re-measuring - do "
+            "not just relax the assertion. "
+            f"stdout={bare.stdout!r} stderr={bare.stderr!r}")
 
 
 # ---------------------------------------------------------------------------
