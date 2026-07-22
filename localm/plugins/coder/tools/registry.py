@@ -242,6 +242,21 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "model":     {"type": "string", "description": "Override model for sub-agent",      "required": False},
             "max_turns": {"type": "int",    "description": "Max iterations (default 10)",       "required": False},
         },
+        # A child agent runs write_file/run_shell/git_* of its own in the PARENT's
+        # cwd, so spawn_agent is at least as destructive as the tools it grants.
+        # Marking it so has three effects, all of them required:
+        #   1. _execute_tools gives it its own segment, so two spawn_agent calls in
+        #      one model turn can never run children CONCURRENTLY in the same cwd -
+        #      the invariant that function's own docstring already claims.
+        #   2. it leaves the 120s parallel-batch deadline, whose pool is abandoned
+        #      with shutdown(wait=False): a timed-out child kept writing while
+        #      _absorb_child_state mutated the parent.
+        #   3. an unbounded write+shell grant now passes the same confirmation gate
+        #      every single destructive tool passes, instead of skipping it.
+        # The serialisation is deliberate and permanent, not a stopgap: safe
+        # concurrent delegation needs real per-child isolation (its own working
+        # tree), which an unflagged parallel batch over one shared cwd is not.
+        destructive=True,
     ),
     "generate_image": ToolDef(
         name="generate_image",

@@ -69,7 +69,7 @@ localm job remove <job_id>      # delete the job and its stored results
 | `--every SECONDS` | Interval schedule in seconds. Defaults to hourly if neither schedule flag is given. |
 | `--coder` | Run a coder agent task instead of a chat prompt. |
 | `--cwd DIR` | Working directory for a coder job. |
-| `--scope GLOB` | File-access glob for a coder job. |
+| `--scope GLOB` | File-access glob for a coder job. Confines the file tools only: `run_shell`/`run_tests` execute a process and cannot be bounded by a path check, so leave `--allow-shell` off (the default) if you need the scope to be a hard boundary. |
 | `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell, no network, no sub-agents) unless you pass this. |
 | `--model M` | Model to run the job with (otherwise the server's active model). |
 | `--disabled` | Create the job disabled; it will not run until you enable it. |

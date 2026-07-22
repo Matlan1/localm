@@ -57,7 +57,11 @@ class ReviewResult:
     blocking: list = field(default_factory=list)
     notes: str = ""
     raw: str = ""
-    ok: bool = True          # False when the reviewer call/parse failed (fail-open)
+    # False when the reviewer call/parse FAILED. The run still proceeds (fail-open),
+    # but ok=False is NOT an approval and must never be presented as one: the caller
+    # is required to surface it (see Agent._run_pre_done_review). ``notes`` always
+    # carries the reason when this is False, so the warning can say why.
+    ok: bool = True
 
 
 def _truncate_diff(diff: str, max_chars: int = _MAX_DIFF_CHARS) -> str:
@@ -111,7 +115,9 @@ def parse_review(raw: str) -> ReviewResult:
     so a flaky reviewer never blocks the agent - the review is a safety net, not a gate."""
     data = _extract_json(raw)
     if not data:
-        return ReviewResult(approved=True, blocking=[], notes="", raw=raw, ok=False)
+        return ReviewResult(
+            approved=True, blocking=[], raw=raw, ok=False,
+            notes="the reviewer reply contained no parseable JSON object")
     blocking = data.get("blocking") or []
     if not isinstance(blocking, list):
         blocking = [str(blocking)]
@@ -144,10 +150,29 @@ class Reviewer:
                                 raw="", ok=False)
         return parse_review(raw)
 
-    def review_feedback(self, diff: str, task: str = "") -> str:
-        """A ``[review feedback]`` message if the reviewer flagged blocking issues,
-        else ``""`` (the agent's answer stands)."""
-        result = self.review(diff, task)
+    def failure_warning(self, result: ReviewResult) -> str:
+        """The user-facing warning for a review that FAILED, else ``""``.
+
+        A crashed or unparseable review returns approved=True so it never blocks
+        the answer (fail-open), which made it indistinguishable from a genuine
+        approval at every call site. It is not one: nothing was actually checked.
+        Callers surface this before accepting the final answer (AGENTS.md rule 5 -
+        a verification step that failed must never report success)."""
+        if result.ok:
+            return ""
+        who = "the separate reviewer model" if self.heterogeneous else "the review pass"
+        why = result.notes or "no detail available"
+        return (
+            f"self-review did NOT run: {who} failed ({why}). "
+            "Proceeding UNREVIEWED - this is not an approval, the changes were "
+            "never checked."
+        )
+
+    def feedback_for(self, result: ReviewResult) -> str:
+        """The ``[review feedback]`` message for an already-obtained *result*, or
+        ``""`` when the answer stands. Split from ``review_feedback`` so a caller
+        can inspect ``result.ok`` (a failed review is not an approval) instead of
+        being handed the same empty string for both outcomes."""
         if result.approved or not result.blocking:
             return ""
         lines = "\n".join("- " + b for b in result.blocking)
@@ -158,6 +183,16 @@ class Reviewer:
             "\nFix these, then give your final answer. If you are confident a flag "
             "is wrong, briefly explain why instead of changing the code."
         )
+
+    def review_feedback(self, diff: str, task: str = "") -> str:
+        """A ``[review feedback]`` message if the reviewer flagged blocking issues,
+        else ``""`` (the agent's answer stands).
+
+        Convenience wrapper that DISCARDS the ReviewResult, so it cannot tell an
+        approval from a failed review. A caller that must not treat a crashed
+        reviewer as a pass uses ``review()`` + ``failure_warning()`` +
+        ``feedback_for()`` instead."""
+        return self.feedback_for(self.review(diff, task))
 
 
 # --------------------------------------------------------------------------- #

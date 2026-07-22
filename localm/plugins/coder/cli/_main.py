@@ -142,7 +142,10 @@ def _complete_model(ctx, param, incomplete):
               help=(
                   "Restrict all file-access tools to paths matching this glob, "
                   "e.g. 'src/**/*.py'.  Requests touching files outside the "
-                  "scope are rejected."
+                  "scope are rejected.  Does NOT confine run_shell/run_tests: "
+                  "they start a process, which a path check cannot bound, so a "
+                  "command can still reach outside the scope (the session warns "
+                  "about this).  Disable those tools for a hard boundary."
               ))
 @click.option("--system", "system_instructions", default=None, metavar="TEXT",
               help=(

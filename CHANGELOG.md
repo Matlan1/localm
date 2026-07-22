@@ -88,6 +88,33 @@ permanent public record of what shipped and are never rewritten; the in-progress
   without a `prompt` field. The prompt requirement now lives in one place (the
   job definition), which accepts a promptless `memory` or `rag` job and still
   refuses a promptless chat or coder one.
+- **A coder sub-agent now inherits the scope you set, and two of them can no
+  longer run at once.** `spawn_agent` had two independent gaps. It was not
+  marked destructive, so when the model asked for several sub-agents in one
+  reply they ran in parallel in the same working directory (each free to write
+  over the other's files), skipped the confirmation prompt every other
+  write/shell tool goes through, and were subject to a batch timeout that
+  abandoned a slow child while it was still writing. And a session started with
+  `--scope` passed everything to its children except the scope, so a sub-agent
+  could read and write files the parent itself was blocked from touching.
+  Sub-agents now run one at a time, are confirmed like any other destructive
+  action, and are confined to the same scope as the session that spawned them.
+- **A self-review that crashed no longer looks like a clean approval.** With
+  the optional pre-done review enabled (`coder_review`), a reviewer that failed
+  to run - the model unreachable, or its reply unusable - was silently treated
+  the same as a review that ran and found nothing: the agent finished and said
+  nothing. The run still proceeds (a flaky reviewer must never cost you your
+  answer), but it now says plainly that the review did not run, why, and that
+  the changes went out unchecked, in the console, the GUI event stream, and the
+  session log.
+- **`--scope` now tells you that it does not confine shell commands.** The
+  scope glob restricts every file tool, but `run_shell` and `run_tests` start a
+  real process, which no path check can confine - so a command could always
+  read and write outside the scope. That was true before and is still true; it
+  was just invisible. A scoped session with shell tools enabled now says so
+  once at startup, and a shell command that names a path outside the scope
+  prints a best-effort warning before it runs. Nothing is blocked: disable the
+  shell tools if you need the scope to be a hard boundary.
 - **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
   long conversation grows the context window mid-generation, the model worker
   decides whether the grown KV cache still fits in VRAM or must move to system
