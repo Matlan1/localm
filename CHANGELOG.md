@@ -22,6 +22,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   written off as absent. Restoring a lesson while the archive is unreadable also
   no longer rewrites that archive from the failed read, which would have thrown
   away every remaining recovery copy.
+- **Restoring a coder lesson into a full store no longer destroys it.** When
+  episodic memory was at its cap, `localm coder --restore-episode ID` could bring
+  a lesson back, immediately drop it again because it still ranked lowest, and
+  then delete the fresh recovery copy along with the old one - leaving the lesson
+  in neither the stored list nor the recoverable archive, gone for good, while the
+  command reported "Restored episode ID". The recovery copy is now kept, so the
+  lesson stays restorable, and the command says plainly when the store is full and
+  the lesson was dropped again rather than claiming an unqualified success.
 - **Two coder sessions finishing at once can no longer lose a lesson outright.**
   Recording, forgetting, restoring and consolidating episodic memory each read the
   whole per-project log, changed it, and wrote it back with nothing serialising
