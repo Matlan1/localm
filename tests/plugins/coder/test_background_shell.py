@@ -600,12 +600,111 @@ def test_background_tools_are_not_available_to_restricted_sessions():
         assert name not in SAFE_RESTRICTED_TOOLS
 
 
-def test_background_tools_are_destructive_and_unscoped():
+def test_concurrent_polls_are_safe(tmp_path, _py):
+    """check_shell_job is non-destructive, so the agent may batch several polls
+    into ONE parallel tool batch. Prove concurrent polls neither raise nor
+    disturb the job.
+
+    Every read is under a lock and none mutate job state: registry.get() takes
+    the registry lock, status() the job lock, and output() each ring's own lock.
+    (Note it is NOT _poll that protects this - check_shell_job never polls the
+    process; only the watcher thread and kill() do, both under the job lock.)
+    """
+    res = tool_run_shell_background(
+        tmp_path, _py("import time\nfor i in range(40):\n"
+                      "    print('line', i)\n    time.sleep(0.05)"))
+    job_id = _job_id(res)
+
+    results, errors = [], []
+
+    def _poll_many():
+        try:
+            for _ in range(15):
+                results.append(tool_check_shell_job(tmp_path, job_id).output)
+        except Exception as e:                      # noqa: BLE001 - recorded, asserted below
+            errors.append(f"{type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=_poll_many) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == [], f"concurrent polls raised: {errors}"
+    assert len(results) == 8 * 15
+    assert all("<job>" in r and job_id in r for r in results), "a poll returned a malformed body"
+
+    # The job is unharmed by being polled 120 times concurrently: it still
+    # finishes normally with its real exit code and its output intact.
+    assert _wait_for(
+        lambda: "<state>done</state>" in tool_check_shell_job(tmp_path, job_id).output,
+        timeout=60)
+    final = tool_check_shell_job(tmp_path, job_id)
+    assert "<exit_code>0</exit_code>" in final.output
+    assert "line 39" in final.output
+
+
+def test_all_background_tools_are_unscoped():
+    """A path-arg check cannot confine arbitrary code, so none of these are
+    scope-confined - that is deliberate and must stay explicit, not accidental."""
     from localm.plugins.coder.agent.constants import _INTENTIONALLY_UNSCOPED
-    from localm.plugins.coder.tools import TOOL_REGISTRY
     for name in ("run_shell_background", "check_shell_job", "kill_shell_job"):
-        assert TOOL_REGISTRY[name].destructive, f"{name} must hit the confirm gate"
         assert name in _INTENTIONALLY_UNSCOPED
+
+
+def test_starting_and_killing_are_gated_but_polling_is_not(tmp_path):
+    """The confirmation gate belongs on the capability, not on observing it.
+
+    Starting a job is arbitrary code execution and killing one tears down a
+    process tree, so both must be confirmed. check_shell_job only reads a status
+    field and an output buffer: gating it would put a card in front of every poll
+    of a running build, and an unattended run (where the gate fails closed) could
+    start a job it could then never observe.
+
+    Drives the REAL dispatch gate rather than reading ToolDef.destructive back:
+    a flag assertion only restates the declaration and would still pass if
+    _execute_tool stopped consulting it. Every call is REJECTED, so the gate is
+    observed without starting or killing anything.
+    """
+    from localm.plugins.coder.agent import Agent
+    from localm.plugins.coder.parser import ToolCall
+
+    class _StubBackend:
+        model_id = "stub-model"
+        native_tools = False
+
+        def set_tools(self, defs):
+            pass
+
+    asked: list = []
+
+    def _recording_confirm(call):
+        asked.append(call.name)
+        return False                      # reject: nothing may actually run
+
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=False,
+                  confirm_handler=_recording_confirm)
+
+    def _dispatch(name, **args):
+        return agent._execute_tool(
+            ToolCall(name=name, args=args, raw="", start=0, end=0),
+            interactive=False)
+
+    # Reading a job's status must reach the tool WITHOUT a confirmation.
+    res = _dispatch("check_shell_job", job_id="job_nonexistent")
+    assert asked == [], "polling a job asked for confirmation"
+    assert "Rejected by user" not in res.output
+    assert "job_nonexistent" in res.output   # it really ran and reported
+
+    # Starting and killing must BOTH be stopped at the gate.
+    started = _dispatch("run_shell_background", command="echo should-not-run")
+    assert asked == ["run_shell_background"]
+    assert "Rejected by user" in started.output
+    assert not get_registry().running(), "a rejected start still spawned a job"
+
+    killed = _dispatch("kill_shell_job", job_id="job_nonexistent")
+    assert asked == ["run_shell_background", "kill_shell_job"]
+    assert "Rejected by user" in killed.output
 
 
 def test_unattended_one_shot_gate_covers_the_background_variant():
