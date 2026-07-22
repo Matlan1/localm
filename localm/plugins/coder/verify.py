@@ -171,7 +171,10 @@ def _has_project_check(cwd: Path) -> bool:
     if (cwd / "go.mod").is_file():
         return _runner_available("go")     # likewise `go test ./...`
     if (cwd / "package.json").is_file():
-        lock = "yarn" if (cwd / "yarn.lock").is_file() else "npm"
+        # .exists(), not .is_file(), to match _detect_test_runner's own yarn.lock
+        # test exactly: the runner checked here has to be the runner that will be
+        # picked there, or the gate vouches for a command nobody runs.
+        lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
         return _npm_has_test_script(cwd) and _runner_available(lock)
     return _has_python_tests(cwd) and _pytest_importable()
 
