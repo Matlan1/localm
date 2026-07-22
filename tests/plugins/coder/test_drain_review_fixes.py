@@ -62,9 +62,18 @@ class _Stub:
         yield "Done."
 
 
+# The REAL Agent class, captured at import time. The child-faking fixtures below
+# patch localm.plugins.coder.agent.Agent, which is the same name _run_one_child
+# resolves lazily - so a helper that looked the class up at call time would build
+# the PARENT out of the child fake too, and every such test died with
+# "_SlowChild.__init__() takes 1 positional argument but 2 were given". The parent
+# must stay real; only the children are substituted.
+from localm.plugins.coder.agent import Agent as _RealAgent
+
+
 def _agent(cwd, **kw):
     """A real Agent, so tests go through the REAL dispatcher."""
-    from localm.plugins.coder.agent import Agent
+    Agent = _RealAgent
     with patch("localm.plugins.coder.agent.ProjectMap") as PM, \
          patch("localm.plugins.coder.agent.make_audit_log"), \
          patch("localm.plugins.coder.agent.load_memory", return_value=""):
