@@ -75,6 +75,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
+        # The multi-GPU split distribution the last load actually applied
+        # ({"source": "auto"|"pinned"|"equal", "devices": [{"index", "share"},
+        # ...]}), or None when no split applied - recorded in _load_native for
+        # the GUI's loaded-model status (GET /api/models -> active_gpu_split).
+        self.applied_gpu_split: Optional[dict] = None
         # The isolated worker process holding the real model - see
         # llamacpp/_runner.py. None until load() succeeds.
         self._runner = None
@@ -209,7 +214,37 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # torch DLL conflict (#754/#771), and only the parent has the
         # #697/#700 corrected readings. By-symbol function-scoped import so
         # tests can patch localm.discover.resolve_auto_split_ratios.
-        from localm.discover import resolve_auto_split_ratios
+        # wait_for_inflight: this runs off the event loop (executor/CLI
+        # thread), and a collision with the GUI's stats-heartbeat probe
+        # must JOIN rather than decline auto into the equal fallback.
+        from localm.config import load_config
+        from localm.discover import resolve_auto_split_ratios, resolve_gpu_split
+        auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
+
+        # Record what this load will actually apply, for the GUI's
+        # loaded-model status (GET /api/models -> active_gpu_split): the
+        # parent-side mirror of the worker's own apply_gpu_split resolution
+        # (auto override when computed, else the config ratios, else equal -
+        # through the same resolve_gpu_split validation), normalized to
+        # shares. Display data only, never fed back into the load. An INVALID
+        # pinned config (length mismatch) shows its actual fallback (equal)
+        # shares under the "pinned" label - the shares never lie, and
+        # resolve_gpu_split's WARNING names the misconfig.
+        cfg = load_config()
+        _display_ratios = auto_ratios if auto_ratios else cfg.get("gpu_split_ratios")
+        _pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), _display_ratios)
+        if len(_pairs) >= 2:
+            _total = sum(r for _, r in _pairs) or 1.0
+            self.applied_gpu_split = {
+                "source": ("auto" if auto_ratios
+                           else "pinned" if cfg.get("gpu_split_ratios")
+                           else "equal"),
+                "devices": [{"index": i, "share": r / _total}
+                            for i, r in _pairs],
+            }
+        else:
+            self.applied_gpu_split = None
+
         params = dict(
             model_path=self.model_path,
             mmproj_path=self.mmproj_path,       # C1: vision via mtmd, in the child
@@ -223,10 +258,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # initial load, not the class-level default: an instance-level
             # override here would otherwise silently not reach the child process.
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
-            # wait_for_inflight: this runs off the event loop (executor/CLI
-            # thread), and a collision with the GUI's stats-heartbeat probe
-            # must JOIN rather than decline auto into the equal fallback.
-            gpu_split_ratios=resolve_auto_split_ratios(wait_for_inflight=True),
+            gpu_split_ratios=auto_ratios,
         )
         timeout = self._load_timeout_seconds()
 

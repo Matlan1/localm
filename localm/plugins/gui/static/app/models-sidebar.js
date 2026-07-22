@@ -459,9 +459,31 @@ export async function refreshModels() {
       }
     }
     setStatus("ok", data.active || "no model");
+    renderModelSplitLine(data.active_gpu_split);
   } catch (e) {
     setStatus("err", "server unreachable");
   }
+}
+
+/** Show the GPU split the ACTIVE model's load actually applied (auto
+ *  free-VRAM-proportional, pinned ratios, or the equal fallback) under the
+ *  model status - e.g. "Split: GPU 0 33% · GPU 1 67% (by free VRAM)". Hidden
+ *  whenever /api/models carries no active_gpu_split (no split, no model, or
+ *  a backend that does not record one), and re-hidden when a model switch
+ *  drops it - a stale line would claim a distribution the current model does
+ *  not have. */
+export function renderModelSplitLine(split) {
+  const line = document.getElementById("model-split-line");
+  if (!line) return;
+  const devices = split && Array.isArray(split.devices) ? split.devices : [];
+  if (devices.length < 2) { line.hidden = true; line.textContent = ""; return; }
+  const parts = devices.map(
+    (d) => `GPU ${d.index} ${Math.round((d.share || 0) * 100)}%`);
+  const why = split.source === "auto" ? " (by free VRAM)"
+    : split.source === "pinned" ? " (pinned)"
+    : split.source === "equal" ? " (equal)" : "";
+  line.textContent = `Split: ${parts.join(" · ")}${why}`;
+  line.hidden = false;
 }
 
 // Switch the active model. Returns the server status object
