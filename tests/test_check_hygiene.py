@@ -779,17 +779,17 @@ def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
     assert ch.main([]) == 0
 
 
-# ---- [Unreleased] draft drop WARNING (rebase-eats-a-sibling-bullet backstop) --
+# ---- [Unreleased] draft corruption WARNINGS (sibling-bullet-loss backstop) ----
 # The append-only gate above deliberately EXEMPTS the [Unreleased] draft: it is
 # freely rewritable until cut (test_changelog_rewriting_unreleased_is_allowed).
-# But that exemption has a blind spot: when parallel branches all add draft
-# bullets, a textually clean rebase can mis-anchor a replayed insertion inside
-# the bullet list and silently DELETE a sibling branch's bullet - seen twice in
-# one 12-PR fan-out day (2026-07-22): the rebase reported clean, the hygiene
-# gate passed, and a landed PR's entry vanished from the release notes with no
-# mechanical backstop. These tests pin the warn-only detector for that: a
-# baseline [Unreleased] content line missing from the working copy WARNS (exit
-# stays 0), and fails only under --strict or LOCALM_HYGIENE_STRICT=1.
+# That exemption has a blind spot: when parallel branches all add draft bullets,
+# a sibling branch's bullet can disappear around a rebase with every mechanical
+# check still reporting clean - it happened twice in one 12-PR fan-out day
+# (2026-07-22). Two warn-only detectors, for the two shapes seen that day: a
+# DROP (a baseline draft line gone from the working copy) and a new DUPLICATE
+# (the artifact of hand-restoring a bullet that was never actually lost, after
+# a tip-relative drop check false-positived on a sibling's merged bullet).
+# Both warn with exit 0, and fail only under --strict / LOCALM_HYGIENE_STRICT=1.
 
 _DRAFT_BASE = (
     "# Changelog\n\n"
@@ -820,6 +820,37 @@ def test_unreleased_lines_collects_draft_content_only():
         "- a wrapped draft bullet whose second line",
         "  carries the rest of the sentence",
     ], got
+
+
+def test_unreleased_lines_keys_on_whole_lines_not_a_bold_title_regex():
+    """A first cut of the manual version of this check keyed bullets on a
+    single-line bold title (``^- \\*\\*[^*]*\\*\\*``) and was BLIND to bullets
+    whose bold title wraps across lines - measured at 7 of 20 real bullets - so
+    it reported CLEAN on a real drop. Pin that the extractor takes whole lines:
+    a wrapped-title bullet's first line is collected like any other."""
+    ch = _load_check_hygiene()
+    text = ("## [Unreleased]\n\n### Added\n"
+            "- **A title that does not close its bold marker on the first\n"
+            "  line at all** and then keeps going.\n")
+    assert ch._changelog_unreleased_lines(text) == [
+        "- **A title that does not close its bold marker on the first",
+        "  line at all** and then keeps going.",
+    ]
+
+
+def test_unreleased_drop_of_a_wrapped_title_bullet_is_reported():
+    """The same blind spot, at the detector level: dropping a bullet whose bold
+    title spans two lines must be reported (both of its lines), not silently
+    passed."""
+    ch = _load_check_hygiene()
+    old = ("## [Unreleased]\n\n### Added\n"
+           "- **A wrapped title that closes\n  on the second line** with a body.\n"
+           "- plain bullet\n")
+    new = "## [Unreleased]\n\n### Added\n- plain bullet\n"
+    assert ch._changelog_dropped_unreleased_lines(old, new) == [
+        "- **A wrapped title that closes",
+        "  on the second line** with a body.",
+    ]
 
 
 def test_unreleased_drop_of_sibling_bullet_is_reported():
@@ -933,6 +964,105 @@ def test_unreleased_drop_guard_warns_end_to_end(tmp_path, monkeypatch):
     assert ch._changelog_append_only() == []               # the hard gate cannot see it
 
 
+def test_unreleased_new_duplicate_bullet_is_reported():
+    """NEGATIVE (the remedy going wrong): a bullet hand-restored when it was
+    never actually lost now appears twice. Reported with its working-copy count
+    so the fix is unambiguous (delete the extra copy, not both)."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace(
+        "- my own draft bullet\n",
+        "- my own draft bullet\n- sibling bullet a rebase must not eat\n")
+    dupes = ch._changelog_new_duplicate_unreleased_bullets(_DRAFT_BASE, new)
+    assert dupes == [("- sibling bullet a rebase must not eat", 2)], dupes
+
+
+def test_unreleased_duplicate_already_in_the_baseline_is_not_reported():
+    """A duplicate that already exists at the baseline is master's defect, not
+    this branch's: warning about it on every run of every session is how a
+    warning gets trained into background noise."""
+    ch = _load_check_hygiene()
+    old = _DRAFT_BASE.replace("- my own draft bullet\n",
+                              "- my own draft bullet\n- my own draft bullet\n")
+    assert ch._changelog_new_duplicate_unreleased_bullets(old, old) == []
+
+
+def test_unreleased_duplicate_growing_past_the_baseline_is_reported():
+    """...but a duplicate that gets WORSE on this branch (two copies at the
+    baseline, three now) is this branch's doing and is reported."""
+    ch = _load_check_hygiene()
+    old = _DRAFT_BASE.replace("- my own draft bullet\n",
+                              "- my own draft bullet\n- my own draft bullet\n")
+    new = old.replace("- my own draft bullet\n- my own draft bullet\n",
+                      "- my own draft bullet\n- my own draft bullet\n"
+                      "- my own draft bullet\n")
+    assert ch._changelog_new_duplicate_unreleased_bullets(old, new) == [
+        ("- my own draft bullet", 3)]
+
+
+def test_unreleased_duplicate_ignores_continuation_lines():
+    """Only top-level bullets are counted: two DIFFERENT bullets can legitimately
+    wrap to the same trailing words, so an identical continuation line is not a
+    duplicate. Two byte-identical bullet lines are a mistake every time."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace(
+        "  carries the rest of the sentence\n",
+        "  carries the rest of the sentence\n"
+        "- another bullet whose wrap repeats\n"
+        "  carries the rest of the sentence\n")
+    assert ch._changelog_new_duplicate_unreleased_bullets(_DRAFT_BASE, new) == []
+
+
+def test_unreleased_duplicate_outside_the_draft_is_ignored():
+    """A published section is the append-only gate's business, not this one's:
+    the duplicate check looks only inside [Unreleased]."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("- inference and CLI\n",
+                              "- inference and CLI\n- inference and CLI\n")
+    assert ch._changelog_new_duplicate_unreleased_bullets(_DRAFT_BASE, new) == []
+
+
+def test_unreleased_duplicate_guard_warns_end_to_end(tmp_path, monkeypatch):
+    """The git-wired duplicate entrypoint on a real throwaway repo: quiet on the
+    committed baseline, one warning naming the doubled bullet after the bad
+    restore, and the DROP check stays quiet (nothing was lost) so the two
+    conditions are reported independently."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _DRAFT_BASE)
+    assert ch._changelog_unreleased_duplicates() == []
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace(
+            "- my own draft bullet\n",
+            "- my own draft bullet\n- sibling bullet a rebase must not eat\n"),
+        encoding="utf-8")
+    msgs = ch._changelog_unreleased_duplicates()
+    assert len(msgs) == 1, msgs
+    assert "sibling bullet a rebase must not eat" in msgs[0]
+    assert "x2" in msgs[0], msgs[0]
+    assert ch._changelog_unreleased_drops() == []
+
+
+def test_hygiene_main_warns_on_a_new_duplicate(tmp_path, monkeypatch, capsys):
+    """main() surfaces the duplicate condition too (warn by default, escalated by
+    --strict) - a second detector wired into the same warning channel."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    _init_changelog_repo(tmp_path, _DRAFT_BASE)
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace(
+            "- my own draft bullet\n",
+            "- my own draft bullet\n- sibling bullet a rebase must not eat\n"),
+        encoding="utf-8")
+
+    assert ch.main([]) == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "more than once" in err, err
+    assert ch.main(["--strict"]) == 1
+
+
 def test_unreleased_drop_guard_passes_without_a_git_baseline(tmp_path, monkeypatch):
     """A never-committed CHANGELOG has no baseline: no warning, no crash."""
     ch = _load_check_hygiene()
@@ -975,10 +1105,49 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     assert ch.main([]) == 0                    # explicit off stays warn-only
 
 
-def test_real_changelog_unreleased_drops_runs_on_the_real_tree():
-    """Smoke: the drop detector runs against the REAL repo without crashing.
+def test_real_changelog_unreleased_checks_run_on_the_real_tree():
+    """Smoke: both detectors run against the REAL repo without crashing.
     Deliberately NOT asserting emptiness: a branch that legitimately rewords an
     [Unreleased] line would then fail the SUITE, turning the designed warn-only
     behavior back into a hard failure through the back door."""
     ch = _load_check_hygiene()
     assert isinstance(ch._changelog_unreleased_drops(), list)
+    assert isinstance(ch._changelog_unreleased_duplicates(), list)
+
+
+def test_real_changelog_has_no_duplicate_unreleased_bullets():
+    """The real [Unreleased] section must have no duplicate bullets AT ALL (not
+    just none newly introduced). This one CAN assert emptiness: unlike a reword,
+    a byte-identical duplicate bullet is never legitimate, and the fan-out that
+    motivated this check produced two of them for real."""
+    ch = _load_check_hygiene()
+    from collections import Counter
+    text = (ch.REPO / ch._CHANGELOG).read_text(encoding="utf-8")
+    bullets = Counter(x for x in ch._changelog_unreleased_lines(text)
+                      if x.startswith("- "))
+    assert [b for b, n in bullets.items() if n > 1] == []
+
+
+def test_baseline_ref_is_the_merge_base_not_the_moving_tip(monkeypatch):
+    """The baseline MUST be the merge-base with origin/master, never the
+    origin/master ref itself. Worktrees share one ref store, so a sibling
+    session's fetch advances the tip under you; a tip-relative comparison then
+    reports every bullet merged after your branch point as a line YOU dropped -
+    the false positive whose "restore what you did not author" remedy created
+    the duplicates the check above now watches for. Asserted at the git-command
+    level so the choice cannot be silently swapped."""
+    ch = _load_check_hygiene()
+    calls = []
+
+    class _Result:
+        returncode = 0
+        stdout = "cafebabecafebabecafebabecafebabecafebabe\n"
+
+    def _fake_git(*args):
+        calls.append(args)
+        return _Result()
+
+    monkeypatch.setattr(ch, "_git", _fake_git)
+    ref = ch._changelog_baseline_ref()
+    assert calls and calls[0] == ("merge-base", "HEAD", "origin/master"), calls
+    assert ref == "cafebabecafebabecafebabecafebabecafebabe"

@@ -352,18 +352,33 @@ def _changelog_append_only() -> list[str]:
             f"Removed: {shown}{more}"]
 
 
-# ---- check 4b: [Unreleased] draft lines silently DROPPED (warn-only) --------
+# ---- check 4b: [Unreleased] draft corruption (warn-only) --------------------
 # The append-only gate above deliberately exempts the [Unreleased] draft: it is
 # freely rewritable until cut. That exemption has a blind spot: when parallel
-# branches all add draft bullets, a textually clean rebase can mis-anchor a
-# replayed insertion inside the bullet list and silently DELETE a sibling
-# branch's bullet. Seen twice in one 12-PR fan-out day (2026-07-22): the rebase
-# reported clean, this gate passed, and a landed PR's entry vanished from the
-# release notes with no mechanical backstop. So: any baseline [Unreleased]
-# content line missing from the working copy is reported as a WARNING - not a
-# failure, because rewording or deleting YOUR OWN draft lines is legitimate and
-# must stay frictionless - escalatable with --strict / LOCALM_HYGIENE_STRICT=1
-# where a hard gate is wanted (e.g. a CI job or a release ritual).
+# branches all add draft bullets, a sibling branch's bullet can disappear around
+# a rebase while every mechanical check still reports clean. It happened twice in
+# one 12-PR fan-out day (2026-07-22): a landed PR's entry simply vanished from
+# the release notes. So two warnings, not one, matching the two failure shapes
+# actually observed that day:
+#   DROP      - a baseline [Unreleased] content line missing from the working copy.
+#   DUPLICATE - a draft bullet that now appears more than once. This is the
+#               artifact of the REMEDY going wrong: the naive drop check (diff
+#               against the moving origin/master ref) false-positives on every
+#               sibling bullet merged after your branch point, and "restore
+#               anything you did not author" then re-imports a bullet that was
+#               never lost. Two sessions did exactly that.
+# Both are WARNINGS, never failures by default: rewording or deleting YOUR OWN
+# draft lines is legitimate and must stay frictionless. --strict /
+# LOCALM_HYGIENE_STRICT=1 escalates them where a hard gate is wanted.
+#
+# On the CAUSE, stated carefully because a wrong story sends people hunting the
+# wrong thing: "it happens on every rebase that replays an [Unreleased]
+# insertion" was FALSIFIED by direct comparison (a matching branch showed zero
+# drops). What is actually evidenced is a CONFLICTED rebase resolved
+# bulk-take-mine (reproduced end to end while building this check: the sibling
+# bullet is gone, the tree is clean, and the hard gate above returns nothing);
+# a squash or amend across the section is suspected but unproven. So the warning
+# text below points at the resolution step, not at rebases in general.
 #
 # Design decisions, recorded so they are not re-litigated:
 #   - Matching is EXACT (rstrip'd) line equality, so a REWORDED draft line warns
@@ -393,6 +408,16 @@ def _changelog_append_only() -> list[str]:
 #     [Unreleased], while a cut section is edited by exactly one release
 #     ritual, so the rebase-collision hazard this backstops does not arise
 #     there.
+#   - The baseline is the MERGE-BASE with origin/master (_changelog_baseline_ref),
+#     never the origin/master ref itself. This is load-bearing, not incidental:
+#     worktrees share one ref store, so any sibling session's fetch advances
+#     origin/master under you, and a tip-relative comparison then reports every
+#     bullet merged after your branch point as a line YOU dropped. That false
+#     positive is what produced the duplicate-import artifact above.
+#   - DUPLICATES are reported only when NEW relative to the baseline. A duplicate
+#     already present at the baseline is master's defect, not this branch's, and
+#     nagging every session about it on every run is how a warning gets trained
+#     into background noise.
 _CHANGELOG_UNRELEASED_HEADER = re.compile(r"^##\s+\[unreleased\]", re.I)
 
 
@@ -435,31 +460,98 @@ def _changelog_dropped_unreleased_lines(old_text: str, new_text: str) -> list[st
     return dropped
 
 
-def _changelog_unreleased_drops() -> list[str]:
-    """Warn-only companion to _changelog_append_only: [Unreleased] draft lines
-    present at the baseline but gone from the working copy. Same baseline and
-    the same no-record short-circuits as the hard gate."""
+def _changelog_new_duplicate_unreleased_bullets(
+        old_text: str, new_text: str) -> list[tuple[str, int]]:
+    """Top-level [Unreleased] bullets that occur MORE often in *new_text* than in
+    *old_text* and now occur at least twice: (line, count-in-working-copy) pairs,
+    in working-copy order.
+
+    Only top-level bullets (a raw line starting with "- ") are counted, not their
+    wrapped continuations: two different bullets can legitimately wrap to the same
+    trailing words, whereas two byte-identical bullet lines are a mistake every
+    time. Baseline-relative so a duplicate that already exists on master does not
+    nag every branch (see the block comment above)."""
+    from collections import Counter
+    old = Counter(line for line in _changelog_unreleased_lines(old_text)
+                  if line.startswith("- "))
+    new = Counter(line for line in _changelog_unreleased_lines(new_text)
+                  if line.startswith("- "))
+    seen = set()
+    out = []
+    for line in _changelog_unreleased_lines(new_text):
+        if not line.startswith("- ") or line in seen:
+            continue
+        seen.add(line)
+        count = new[line]
+        if count >= 2 and count > old.get(line, 0):
+            out.append((line, count))
+    return out
+
+
+def _changelog_baseline_pair() -> tuple[str, str, str] | None:
+    """(ref, baseline CHANGELOG text, working CHANGELOG text), or None when there
+    is nothing to compare against (no git, or no CHANGELOG in the baseline yet).
+    Shared by the two warn-only checks so they cannot drift apart on which
+    baseline they read - the merge-base choice is the whole correctness story
+    here (see the block comment above)."""
     ref = _changelog_baseline_ref()
     if ref is None:
-        return []                       # no git available: nothing to diff against
+        return None                     # no git available: nothing to diff against
     base = _git("show", f"{ref}:{_CHANGELOG}")
     if base is None or base.returncode != 0:
-        return []                       # CHANGELOG not in the baseline yet: no record
+        return None                     # CHANGELOG not in the baseline yet: no record
     try:
         working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
     except OSError:
         working = ""                    # deleted from the tree: every draft line is gone
-    dropped = _changelog_dropped_unreleased_lines(base.stdout, working)
+    return ref, base.stdout, working
+
+
+def _changelog_unreleased_drops() -> list[str]:
+    """Warn-only companion to _changelog_append_only: [Unreleased] draft lines
+    present at the baseline but gone from the working copy."""
+    pair = _changelog_baseline_pair()
+    if pair is None:
+        return []
+    ref, base_text, working = pair
+    dropped = _changelog_dropped_unreleased_lines(base_text, working)
     if not dropped:
         return []
     listing = "\n".join(f"    lost: {x!r}" for x in dropped)
     return [
         f"{_CHANGELOG}: {len(dropped)} [Unreleased] draft line(s) present at the "
         f"baseline ({ref[:8]}) are missing from the working copy:\n{listing}\n"
-        "    Rewording or removing your OWN draft entries is fine, but a textually "
-        "clean rebase has silently eaten a SIBLING branch's bullet before (git can "
-        "mis-anchor a replayed insertion in a bullet list), so confirm every line "
-        "above was removed or reworded on purpose and restore any that were not."
+        "    Rewording or removing your OWN draft entries is fine. What this "
+        "catches is the other case: a SIBLING branch's bullet lost around a "
+        "rebase (observed after a conflicted rebase resolved bulk-take-mine; "
+        "resolve those additively, keeping BOTH sides' bullets).\n"
+        "    Attribute a line before acting on it - `git log -S \"<line>\" -- "
+        f"{_CHANGELOG}` - then restore only what you actually dropped. Do NOT "
+        "reset the section to master and do NOT hand-copy a bullet back in "
+        "blind: re-importing a bullet that was never lost is how duplicates get "
+        "created."
+    ]
+
+
+def _changelog_unreleased_duplicates() -> list[str]:
+    """Warn-only: an [Unreleased] bullet that is newly duplicated in the working
+    copy - the artifact left behind when a bullet is hand-restored after a
+    false-positive drop report."""
+    pair = _changelog_baseline_pair()
+    if pair is None:
+        return []
+    _ref, base_text, working = pair
+    dupes = _changelog_new_duplicate_unreleased_bullets(base_text, working)
+    if not dupes:
+        return []
+    listing = "\n".join(f"    x{count}: {line!r}" for line, count in dupes)
+    return [
+        f"{_CHANGELOG}: {len(dupes)} [Unreleased] bullet(s) now appear more than "
+        f"once and did not at the baseline:\n{listing}\n"
+        "    A duplicate is usually a bullet that was restored but never actually "
+        "lost (a stale-ref drop report false-positives on every sibling bullet "
+        "merged after your branch point). Delete the EXTRA copy only - deleting "
+        "both is how the entry disappears for real."
     ]
 
 
@@ -973,7 +1065,7 @@ def main(argv: list[str]) -> int:
     # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
     # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
     # failures for CI-style use.
-    warnings = _changelog_unreleased_drops()
+    warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
     if strict and warnings:
         problems.extend(warnings)
         warnings = []
