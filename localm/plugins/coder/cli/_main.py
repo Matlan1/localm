@@ -525,13 +525,63 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 env = os.environ.copy()
                 env["LOCALM_OWN_CONSOLE"] = "1"
                 kwargs["env"] = env
-                if sys.platform == "win32":
+                # A HEADLESS caller (MCP's run_coder_task, CI, a script - stdin
+                # is not a TTY) has no desktop for a new console window, so the
+                # child's real startup error (e.g. gui's "Model not found: X",
+                # reproduced live 2026-07-21) died in a window nobody could see
+                # while this process could only report "exit code 1". Capture
+                # the child's output to a LOG FILE instead - a PIPE would
+                # deadlock a healthy long-lived server once the OS buffer fills
+                # with its normal request logging, a file cannot - read its
+                # tail back on early exit, and point at the file otherwise. A
+                # TTY run keeps today's visible console window.
+                headless = not sys.stdin.isatty()
+                child_log_path = None
+                child_log = None
+                if headless:
+                    import tempfile
+                    fd, child_log_path = tempfile.mkstemp(
+                        prefix="localm-coder-autostart-", suffix=".log")
+                    child_log = os.fdopen(fd, "w", encoding="utf-8",
+                                          errors="replace")
+                    kwargs["stdout"] = child_log
+                    kwargs["stderr"] = subprocess.STDOUT
+                    if sys.platform == "win32":
+                        # No console at all (nothing would be visible anyway);
+                        # a fresh process group so the server outlives this
+                        # CLI, mirroring start_new_session on POSIX.
+                        kwargs["creationflags"] = (
+                            subprocess.DETACHED_PROCESS
+                            | subprocess.CREATE_NEW_PROCESS_GROUP)
+                    else:
+                        kwargs["start_new_session"] = True
+                elif sys.platform == "win32":
                     kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
                 else:
                     kwargs["start_new_session"] = True
 
+                def _child_log_tail(limit: int = 2000) -> str:
+                    """Best-effort tail of the captured child output; '' when
+                    nothing was captured (TTY mode, or the child wrote nothing
+                    before dying). Read failures are non-fatal by design: the
+                    log is diagnostic garnish on an error path that already
+                    reports the exit code either way."""
+                    if not child_log_path:
+                        return ""
+                    try:
+                        with open(child_log_path, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            return f.read()[-limit:].strip()
+                    except OSError:
+                        return ""
+
                 try:
                     proc = subprocess.Popen(cmd, **kwargs)
+                    if child_log is not None:
+                        # The child holds its own handle from here; closing
+                        # ours flushes anything buffered so the early-exit
+                        # read below sees everything written so far.
+                        child_log.close()
                     _tgt = None
                     for _ in range(40):
                         time.sleep(0.5)
@@ -547,14 +597,24 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                                               localm_server=True)
                         console.print(f"[dim]connected to newly started server at {_tgt['base_url']}[/dim]")
                     elif proc.poll() is not None:
+                        tail = _child_log_tail()
+                        if tail:
+                            detail = f" Its output:\n{tail}"
+                        elif headless:
+                            detail = ""
+                        else:
+                            detail = (" Check the new console window it opened "
+                                      "for the specific error.")
                         print_error(
                             f"The auto-started server exited immediately (exit code "
-                            f"{proc.returncode}) instead of starting. Check the new "
-                            "console window it opened for the specific error."
+                            f"{proc.returncode}) instead of starting.{detail}"
                         )
                         sys.exit(2 if ci else 1)
                     else:
-                        print_error("Failed to attach to the auto-started server.")
+                        hint = (f" Its output log: {child_log_path}"
+                                if child_log_path else "")
+                        print_error(
+                            f"Failed to attach to the auto-started server.{hint}")
                         sys.exit(2 if ci else 1)
                 except Exception as e:
                     print_error(f"Failed to start server: {e}")

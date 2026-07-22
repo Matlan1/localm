@@ -7,6 +7,8 @@ child's own refusal message prints to its own console/process, which this
 process never reads)."""
 
 import socket
+import subprocess
+import sys
 
 from click.testing import CliRunner
 
@@ -77,3 +79,45 @@ class TestAutoStartedServerDiesFast:
         assert result.exit_code == 1
         assert "exited immediately (exit code 1)" in result.output
         assert "Failed to attach to the auto-started server" not in result.output
+
+
+class TestHeadlessAutoStartSurfacesChildError:
+    """Driven headlessly (MCP's run_coder_task, CI, a script - stdin is not a
+    TTY, exactly how CliRunner invokes main), the auto-start must not route
+    the child's output into a NEW CONSOLE WINDOW nobody can see: the child's
+    real refusal (e.g. gui's "Model not found: X" - the exact failure
+    reproduced live 2026-07-21, where the MCP caller could only be told
+    "exit code 1, check the console window") must reach THIS process's error
+    output, and no console window may be requested."""
+
+    def test_child_error_reaches_the_error_message(self, monkeypatch):
+        _bypass_plugin_gate(monkeypatch)
+        _no_existing_instance(monkeypatch)
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen.update(kw)
+            # The child's output must have somewhere to land that THIS process
+            # can read back - write the real-world refusal there, as the real
+            # gui child does before exiting 1.
+            target = kw.get("stdout")
+            assert target is not None, (
+                "headless spawn must capture the child's output (a new console "
+                "window is invisible to an MCP/CI caller)")
+            target.write("Model not found: m\n")
+            return _DeadProc(1)
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+        result = CliRunner().invoke(ccli.main, ["--model", "m", "hi"])
+
+        assert result.exit_code == 1
+        assert "exited immediately (exit code 1)" in result.output
+        # The child's REAL reason, not a pointer at an invisible window.
+        assert "Model not found: m" in result.output
+        assert "console window" not in result.output
+        if sys.platform == "win32":
+            assert not (seen.get("creationflags", 0)
+                        & subprocess.CREATE_NEW_CONSOLE), (
+                "a headless caller has no desktop for a new console window")
