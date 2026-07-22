@@ -6,7 +6,6 @@ _confine() is the security boundary for all file tools - it must reliably
 reject any path that resolves outside cwd.
 """
 
-import sys
 import pytest
 
 from localm.plugins.coder.tools import _confine, _verify_syntax
@@ -50,8 +49,11 @@ class TestConfineRejected:
             _confine(tmp_path, "../sibling.txt")
 
     def test_parent_traversal_many_dots(self, tmp_path):
+        # The traversal SYNTAX is the payload; the leaf is deliberately a neutral
+        # name. _confine resolve()s what it is handed, so naming a real OS file
+        # here would make the suite itself reach for one.
         with pytest.raises(PermissionError):
-            _confine(tmp_path, "../../etc/passwd")
+            _confine(tmp_path, "../../up/two/levels.txt")
 
     def test_absolute_path_outside_cwd(self, tmp_path):
         outside = tmp_path.parent / "other_project" / "secret.py"
@@ -61,15 +63,22 @@ class TestConfineRejected:
     def test_traversal_through_subdir(self, tmp_path):
         # Starts in cwd, climbs out via traversal
         with pytest.raises(PermissionError):
-            _confine(tmp_path, "subdir/../../etc/shadow")
+            _confine(tmp_path, "subdir/../../up/out.txt")
 
-    def test_cwd_root_traversal(self, tmp_path):
-        if sys.platform == "win32":
-            outside = "C:\\Windows\\System32\\cmd.exe"
-        else:
-            outside = "/etc/passwd"
+    def test_absolute_path_to_an_existing_file_outside_cwd(self, tmp_path,
+                                                           tmp_path_factory):
+        """The refusal must not rest on the target merely being absent: a file
+        that really exists outside cwd is rejected just the same.
+
+        A disposable file the test owns, never a real OS path. _confine()
+        resolve()s whatever it is handed - it has to, or a symlink would slip
+        past - so a system target here would make the test suite itself open a
+        real system file, and at that access point a legitimate test, a command
+        gone wrong, and a live injection are indistinguishable."""
+        outside = tmp_path_factory.mktemp("outside_cwd") / "real.txt"
+        outside.write_text("disposable\n", encoding="utf-8")
         with pytest.raises(PermissionError):
-            _confine(tmp_path, outside)
+            _confine(tmp_path, str(outside))
 
     def test_error_message_contains_path(self, tmp_path):
         try:

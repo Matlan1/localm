@@ -2735,18 +2735,25 @@ class TestImageManagement:
         "..%5Cconfig.json",       # ..\config.json
         "..%2Fconfig.json",       # ../config.json (decodes to /, off-route)
         "C:evil.png",             # Windows drive-relative (blocklist bypass)
-        "%2e%2e%5c%2e%2e%5cwin.ini",  # ..\..\win.ini
+        "%2e%2e%5c%2e%2e%5cconfig.json",  # ..\..\config.json, fully encoded
         "sub%2Ffile.png",         # nested subpath
     ])
     def test_delete_rejects_traversal_vectors(self, img_app, tmp_path, name):
         app, _ = img_app
-        # plant a file the traversal would target; it must survive
-        target = tmp_path / ".localm" / "config.json"
-        target.write_text("{}")
+        # Plant the files the traversals would target; both must survive. The
+        # traversal SYNTAX is the payload, so it is kept verbatim, but every leaf
+        # names a disposable file this test owns under tmp_path - never a real OS
+        # file. The route resolves what it is handed, so a system leaf would make
+        # the suite itself reach for one, and a "did it survive" assertion cannot
+        # tell a refused traversal from one that simply failed to delete.
+        one_up = tmp_path / ".localm" / "config.json"     # images/ is one below
+        two_up = tmp_path / "config.json"                 # ..\..\ lands here
+        one_up.write_text("{}")
+        two_up.write_text("{}")
         with TestClient(app) as client:
             r = client.delete(f"/api/imagine/file/{name}")
         assert not (200 <= r.status_code < 300)   # never a successful delete
-        assert target.exists()
+        assert one_up.exists() and two_up.exists()
 
     def test_confine_blocks_drive_relative_serve(self, img_app, tmp_path):
         """A drive-relative name must never resolve outside the images dir."""

@@ -1,8 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """C2 confinement: the RAG indexing API must not be trickable into reading and
-serving back system files (C:/Windows/win.ini, /etc/passwd) or THIRD-PARTY
-credential folders (.ssh, .aws, ...) that a caller other than the owner should
-never be able to reach through the API.
+serving back files outside the allowed roots (an OS file elsewhere on the disk)
+or THIRD-PARTY credential folders (.ssh, .aws, ...) that a caller other than the
+owner should never be able to reach through the API.
+
+Note on targets: every "outside the allowed roots" path in this file is a real
+but DISPOSABLE file the test creates under its own tmp_path, never an actual
+system path. confine_index_path() resolve()s what it is handed BEFORE it decides
+anything - it has to, or a symlink into a credential folder would slip past - so
+handing it a real OS file would make the test suite itself reach out and touch
+one. There is no benign version of that: at the access point a legitimate test,
+a command gone wrong, and a live injection attempt look identical. An
+outside-the-roots temp file exercises the identical code path.
 
 The confinement is MODE-based (whitelist / blacklist) with an always-on HARD
 FLOOR of well-known third-party credential folders, refused in every mode. The
@@ -17,7 +26,6 @@ does and the CLI never does. A whitelist MISS is offered back to the owner as
 'add and continue' (409), not a dead-end error.
 """
 
-import os
 from pathlib import Path
 
 import pytest
@@ -82,10 +90,23 @@ class TestWhitelist:
         assert ei.value.reason == "outside_allowed"
         assert "outside" in str(ei.value).lower()
 
-    def test_system_file_rejected(self, home_env):
-        target = "C:/Windows/win.ini" if os.name == "nt" else "/etc/passwd"
-        with pytest.raises(ConfinementError):
-            confine_index_path(target, _wl())
+    def test_absolute_string_outside_allowed_rejected(self, home_env,
+                                                      tmp_path_factory):
+        """The out-of-roots refusal that protects an OS file elsewhere on the
+        disk, exercised against a disposable stand-in for one.
+
+        Distinct from test_outside_rejected_with_reason above in the two ways
+        that matter: the target is passed as a plain str (not a Path, which is
+        what an API caller sends), and it sits in a temp tree of its own rather
+        than under the same tmp_path as the home folder. The refusal is by root
+        containment, so what the file happens to be is irrelevant - which is
+        exactly why it never has to be a real system file."""
+        outside = tmp_path_factory.mktemp("outside_roots") / "notes.txt"
+        outside.write_text("stand-in for a file outside every allowed root\n",
+                           encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(str(outside), _wl())
+        assert ei.value.reason == "outside_allowed"
 
     def test_ordinary_dotdir_under_home_indexable(self, home_env):
         # Regression: a non-credential dotted folder (.github) must not be blocked.
