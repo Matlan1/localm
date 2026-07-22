@@ -234,6 +234,18 @@ DEFAULT_CONFIG: dict = {
     # back to the equal split (warned). Set explicit ratios (e.g. [1, 1])
     # to pin exact shares and opt out of the automatic distribution.
     "gpu_split_ratios": None,
+    # How many chat models may stay loaded at once. None (default) = no cap:
+    # free-VRAM arithmetic alone decides, so a second model loads alongside the
+    # first only when it provably fits (see inference/residency.py). Set an
+    # integer to bound it regardless of headroom - 1 restores strict
+    # single-resident. Applies to the HTTP server and the MCP server alike.
+    "max_resident_models": None,
+    # Model display names that are never chosen as an eviction victim, so a
+    # user can say "keep these resident" instead of relying on LRU order.
+    # Pinning only protects an already-loaded model; it never loads one. If
+    # pins leave nothing evictable, the load proceeds and the miss is logged
+    # rather than silently exceeding or silently enforcing the cap.
+    "pinned_models": None,
     # Default system prompt for chat. The GUI's per-chat System prompt field
     # OVERRIDES this when set; a blank field inherits this. Empty by default.
     "chat_system_prompt": "",

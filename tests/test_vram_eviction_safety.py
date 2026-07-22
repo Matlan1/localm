@@ -181,6 +181,130 @@ def test_measurable_vram_allows_coexistence(monkeypatch):
         f"ample VRAM must keep multi-model coexistence; loaded={loaded}")
 
 
+def _knobs(monkeypatch, **over):
+    """Override just the residency knobs, keeping the rest of the real config."""
+    from localm.config import load_config as _real
+    base = _real()
+
+    def fake():
+        cfg = dict(base)
+        cfg.update(over)
+        return cfg
+
+    monkeypatch.setattr("localm.config.load_config", fake)
+
+
+def test_resident_cap_bounds_coexistence(monkeypatch):
+    """max_resident_models caps how many models stay loaded even when there is
+    ample VRAM for all of them (test_measurable_vram_allows_coexistence is the
+    same scenario with no cap, and keeps all three)."""
+    _install_fakes(monkeypatch, free=10 * 1024 ** 3)
+    _knobs(monkeypatch, max_resident_models=2)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    for m in ("model-a", "model-b", "model-c"):
+        assert _chat(client, m).status_code == 200
+
+    loaded = sorted(n for n, e in hs._engines.items() if e.loaded)
+    assert loaded == ["model-b", "model-c"], (
+        f"cap of 2 must keep only the 2 most recent; loaded={loaded}")
+
+
+def test_pinned_model_survives_an_over_cap_load(monkeypatch):
+    _install_fakes(monkeypatch, free=10 * 1024 ** 3)
+    _knobs(monkeypatch, max_resident_models=1, pinned_models=["model-a"])
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    assert _chat(client, "model-a").status_code == 200
+    assert _chat(client, "model-b").status_code == 200
+
+    loaded = sorted(n for n, e in hs._engines.items() if e.loaded)
+    assert loaded == ["model-a", "model-b"], (
+        f"a pinned model must never be the victim; loaded={loaded}")
+
+
+def test_unmet_cap_never_yanks_a_sibling_instance(monkeypatch):
+    """A cap is a user PREFERENCE; free VRAM is the safety constraint.
+
+    With the cap exceeded but every peer pinned, there is nothing local to
+    evict. That must NOT fall through to the VRAM-exhaustion handling, which
+    asks a SIBLING localm instance to dump ITS models - destroying another
+    instance's work to satisfy a local preference, over VRAM that was never
+    short - and then logs the miss as a whole-model VRAM shortfall, a reason
+    the readings do not support (AGENTS.md rule 5).
+    """
+    _install_fakes(monkeypatch, free=10 * 1024 ** 3)
+    _knobs(monkeypatch, max_resident_models=1, pinned_models=["model-a"])
+    asked = []
+    monkeypatch.setattr(hs, "_attempt_cooperative_unload",
+                        lambda **kw: asked.append(kw) or False)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    assert _chat(client, "model-a").status_code == 200
+    assert _chat(client, "model-b").status_code == 200
+    assert asked == [], (
+        "an unmeetable resident cap asked a sibling instance to unload, even "
+        f"though free VRAM was sufficient: {asked}")
+
+
+def test_a_pin_never_costs_a_sibling_instance_its_models(monkeypatch):
+    """A pin is a local preference, like the cap - and must not be paid for out
+    of ANOTHER localm instance's VRAM.
+
+    Here free VRAM is genuinely short (unlike the cap case), so local eviction
+    really is needed; the only idle peer is simply pinned. Escalating to
+    _attempt_cooperative_unload would ask a sibling instance to dump its models
+    to satisfy this instance's pin. Deferring to the backend's own sizing
+    (partial offload) honors the pin at OUR expense instead of theirs.
+    """
+    _install_fakes(monkeypatch, free=2 * 1024 ** 3)
+    _knobs(monkeypatch, pinned_models=["model-a"])
+    asked = []
+    monkeypatch.setattr(hs, "_attempt_cooperative_unload",
+                        lambda **kw: asked.append(kw) or False)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    assert _chat(client, "model-a").status_code == 200
+    # The FIRST load legitimately asks a peer: VRAM is short and nothing is
+    # resident yet, so local eviction is empty for reasons that have nothing to
+    # do with pinning. That is pre-existing behavior and not what this guards -
+    # so measure only the asks made during the SECOND load, where the pinned
+    # model-a is the sole reason nothing local can be freed.
+    asked_before = len(asked)
+    assert _chat(client, "model-b").status_code == 200
+
+    assert len(asked) == asked_before, (
+        "a pin made this instance yank a sibling's models: "
+        f"{asked[asked_before:]}")
+    assert hs._engines["model-a"].loaded, "the pinned model must survive"
+
+
+def test_an_unpinned_shortfall_still_asks_a_peer(monkeypatch):
+    """Guard on the test above: with nothing pinned and the only peer BUSY,
+    local eviction is exhausted for a real reason, and the cooperative path
+    must still run - the pin guard must not disable it wholesale."""
+    _install_fakes(monkeypatch, free=2 * 1024 ** 3)
+    _knobs(monkeypatch)
+    asked = []
+    monkeypatch.setattr(hs, "_attempt_cooperative_unload",
+                        lambda **kw: asked.append(kw) or False)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    assert _chat(client, "model-a").status_code == 200
+    hs._engines["model-a"].active_requests = 1        # busy, not evictable
+    asked_before = len(asked)                         # ignore the first load's ask
+    assert _chat(client, "model-b").status_code == 200
+
+    assert len(asked) > asked_before, (
+        "an unpinned, genuinely exhausted shortfall must still ask a peer - "
+        "the pin guard must not disable the cooperative path wholesale")
+
+
 def test_busy_chat_peer_not_evicted_but_new_load_still_succeeds(monkeypatch):
     """Mirrors test_busy_embedder_not_evicted_for_chat_load's proof, for a
     busy CHAT peer instead of the shared embedder: with a resident engine
