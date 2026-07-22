@@ -172,3 +172,77 @@ class TestRealRenamedLauncherEndToEnd:
         # The two known failure modes must not appear even in stderr noise.
         assert "WinError 2" not in result.stderr
         assert "WinError 6" not in result.stderr
+
+
+class TestInterpreterForLocalmChildren:
+    """interpreter_for_localm_children() - the exe for PLAIN subprocess
+    children that must import localm and its venv packages (the VRAM-probe
+    daemon). Found live 2026-07-22: inside an mp-spawn worker sys.executable
+    is the BASE interpreter (the deliberate ensure_spawn_uses_venv_python
+    redirect above), so the daemon it Popen'd had no venv context, could not
+    resolve the localm-llama-runtime wheel, and answered ERR to every query -
+    the GGUF worker never had a raw VRAM reading at all."""
+
+    def test_in_venv_process_keeps_sys_executable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        assert _mp_spawn.interpreter_for_localm_children() == sys.executable
+
+    def test_worker_state_finds_venv_python_from_sys_path_windows(
+            self, monkeypatch, tmp_path):
+        """The mp-spawn worker shape: base-interpreter exe (prefix ==
+        base_prefix) with the venv's site-packages injected into sys.path."""
+        venv = tmp_path / "venv"
+        sp = venv / "Lib" / "site-packages"
+        sp.mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = elsewhere\n", encoding="utf-8")
+        scripts = venv / "Scripts"
+        scripts.mkdir()
+        venv_py = scripts / "python.exe"
+        venv_py.write_bytes(b"")
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "path", [str(sp)])
+
+        assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
+
+    def test_worker_state_finds_venv_python_from_sys_path_posix(
+            self, monkeypatch, tmp_path):
+        venv = tmp_path / "venv"
+        sp = venv / "lib" / "python3.12" / "site-packages"
+        sp.mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = elsewhere\n", encoding="utf-8")
+        bindir = venv / "bin"
+        bindir.mkdir()
+        venv_py = bindir / "python"
+        venv_py.write_bytes(b"")
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "path", [str(sp)])
+
+        assert _mp_spawn.interpreter_for_localm_children() == str(venv_py)
+
+    def test_no_venv_on_sys_path_falls_back_to_sys_executable(
+            self, monkeypatch, tmp_path):
+        """A genuinely venv-less setup (system python + PYTHONPATH): keep
+        today's behavior. sys.path is replaced for the call window so the REAL
+        test venv's site-packages cannot leak in and satisfy the walk."""
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "path", [str(tmp_path / "plain-dir")])
+        assert _mp_spawn.interpreter_for_localm_children() == sys.executable
+
+    def test_site_packages_without_pyvenv_cfg_is_not_a_venv(
+            self, monkeypatch, tmp_path):
+        """A bare site-packages (a system python's own, or a stray dir named
+        that) must not be mistaken for a venv."""
+        sp = tmp_path / "somewhere" / "site-packages"
+        sp.mkdir(parents=True)
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "path", [str(sp)])
+        assert _mp_spawn.interpreter_for_localm_children() == sys.executable
