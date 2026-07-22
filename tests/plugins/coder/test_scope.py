@@ -307,6 +307,90 @@ class TestShellArgvScopeCheck:
         assert result.ok                # still ran; the check only warns
 
 
+class TestShellArgvScopeHeuristicPrecision:
+    """A warning nobody believes is worse than no warning. Two token shapes were
+    reported as out-of-scope paths when they are not paths at all: anything with
+    a colon in position 1 (``5:30``, ``s:old:new:``) and a command verb that
+    happens to match a directory name (``npm test`` in a repo with ``test/``).
+    Both must go quiet without the real findings going quiet with them."""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        """An utterly ordinary layout: these directory names are exactly the ones
+        common command verbs collide with."""
+        for name in ("src", "test", "tests", "docs", "build"):
+            (tmp_path / name).mkdir()
+        (tmp_path / "secrets.txt").write_text("token\n")
+        return tmp_path
+
+    def _flagged(self, cwd, tool="run_shell", **args):
+        with patch("localm.plugins.coder.agent.print_warning"):
+            agent = _make_agent_with(cwd, scope="src/**")
+        return agent._shell_paths_outside_scope(_make_tool_call(tool, **args))
+
+    @pytest.mark.parametrize("command", [
+        "ffmpeg -ss 5:30 -i in.mp4 out.mp4",       # a timestamp offset
+        "ffmpeg -aspect 4:3 -i in.mp4 out.mp4",    # an aspect ratio
+        "sed s:old:new: notes.txt",                # a sed delimiter
+        "prog a:b",                                # a generic key:value argument
+    ])
+    def test_a_colon_token_is_not_read_as_a_drive_path(self, repo, command):
+        assert self._flagged(repo, command=command) == []
+
+    def test_a_real_drive_path_is_still_flagged(self, repo):
+        """Fires-control for the case above: the same colon check, still loud on a
+        genuinely drive-qualified path."""
+        assert self._flagged(repo, command=r"cat C:\Windows\win.ini") == [
+            r"C:\Windows\win.ini"]
+        assert self._flagged(repo, command="cat D:/other/file.txt") == [
+            "D:/other/file.txt"]
+        assert self._flagged(repo, command="cat E:") == ["E:"]
+
+    @pytest.mark.parametrize("command", [
+        "npm test",                  # test/ exists
+        "make docs",                 # docs/ exists
+        "cargo build",               # build/ exists
+        "npm run build",             # a dispatch subcommand, then a script name
+        "uv run pytest",
+        "npm --silent test",         # a flag does not take the subcommand slot
+        "echo start && make docs",   # && starts a new command, so make is a program
+    ])
+    def test_a_command_verb_is_not_read_as_a_path(self, repo, command):
+        assert self._flagged(repo, command=command) == []
+
+    def test_the_same_word_is_still_flagged_in_argument_position(self, repo):
+        """Fires-control for the case above: ``docs`` is quiet as a make target and
+        loud as a real argument, so the check became precise rather than mute."""
+        assert self._flagged(repo, command="make docs") == []
+        assert self._flagged(repo, command="cp -r docs backup") == ["docs"]
+        assert self._flagged(repo, command="git add docs") == ["docs"]
+
+    def test_an_explicit_path_in_command_position_is_still_flagged(self, repo):
+        """Only the exists-under-cwd guess is skipped for a command word. Running a
+        script written out as an out-of-scope path is what the warning is for."""
+        assert self._flagged(repo, command="./build/run.sh --fast") == [
+            "./build/run.sh"]
+        assert self._flagged(repo, command="/usr/local/bin/deploy") == [
+            "/usr/local/bin/deploy"]
+        assert self._flagged(repo, command="make ../other/target") == [
+            "../other/target"]
+
+    def test_a_real_out_of_scope_reference_still_warns(self, repo):
+        """The #781 behaviour restated against this layout: an existing relative
+        path and an absolute path, both outside the scope, both still reported."""
+        assert self._flagged(repo, command="cat secrets.txt") == ["secrets.txt"]
+        assert self._flagged(repo, command="cat /etc/passwd") == ["/etc/passwd"]
+        assert self._flagged(repo, command="cat ../../elsewhere.txt") == [
+            "../../elsewhere.txt"]
+
+    def test_run_tests_args_are_not_treated_as_a_command_line(self, repo):
+        """run_tests passes a target PATH plus extra args, not a command line, so
+        the program-word suppression must not reach either of them."""
+        assert self._flagged(repo, tool="run_tests", path="tests") == ["tests"]
+        assert self._flagged(repo, tool="run_tests",
+                             path="tests", extra_args="docs") == ["tests", "docs"]
+
+
 class TestScopedToolsSet:
     @pytest.mark.parametrize(
         "tool,expected",

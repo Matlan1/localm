@@ -25,10 +25,28 @@ from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_EXEC_TOOLS,
+    _SHELL_NESTED_RUNNER_WORDS, _SHELL_SEPARATORS, _SHELL_SUBCOMMAND_RUNNERS,
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
+
+
+def _looks_like_drive_path(tok: str) -> bool:
+    """True for a Windows drive-qualified token: ``C:``, ``C:\\x``, ``d:/x``.
+
+    The drive letter must be a single ASCII letter followed by a separator or the
+    end of the token. Testing only for a colon in position 1 made every ``a:b``
+    token a path, so ``5:30`` and ``4:3`` (an ffmpeg offset, an aspect ratio) and
+    ``s:old:new:`` (a sed delimiter) were all reported as out-of-scope paths.
+    ``C:foo``, drive-relative with no separator, is given up deliberately: it is
+    rare and cannot be told apart from an ordinary key:value argument.
+    """
+    if len(tok) < 2 or tok[1] != ":":
+        return False
+    if not (tok[0].isascii() and tok[0].isalpha()):
+        return False
+    return len(tok) == 2 or tok[2] in "/\\"
 
 
 class _ExecutionMixin:
@@ -113,6 +131,15 @@ class _ExecutionMixin:
         under cwd. That deliberately misses things like ``sed s/a/b/`` (which is
         not a path) at the cost of missing a path that does not exist yet - the
         right trade for a warning the user must be able to trust.
+
+        For the same reason the exists-under-cwd guess is skipped in the two
+        positions of a command line that hold a verb rather than a path: the
+        program word, and the word after a known runner. Otherwise ``npm test``
+        in a repo with a ``test/`` directory, ``make docs``, and ``cargo build``
+        all warned, which are ordinary layouts and ordinary commands. A path
+        written out explicitly (``./build/run.sh``) is still flagged there, and
+        ``run_tests`` is unaffected because its ``path`` arg is a path, not a
+        command line.
         """
         flagged: list[str] = []
         for arg in _SHELL_COMMAND_ARGS.get(call.name, ()):
@@ -128,15 +155,39 @@ class _ExecutionMixin:
                 # Unbalanced quotes: fall back to whitespace splitting rather than
                 # skipping the check entirely.
                 tokens = text.split()
+            # Only a real command line has a program word to skip. run_tests
+            # passes a target path in `path`, which must stay fully checked.
+            cmdline = call.name in _SHELL_EXEC_TOOLS and arg == "command"
+            at_program = True
+            after_runner = False
             for tok in tokens:
                 tok = tok.strip("'\"")
-                if not tok or tok.startswith("-") or tok in flagged:
+                if not tok:
+                    continue
+                if cmdline and tok in _SHELL_SEPARATORS:
+                    at_program, after_runner = True, False
+                    continue
+                if tok.startswith("-"):
+                    continue    # a flag never takes the program/subcommand slot
+                command_word = cmdline and (at_program or after_runner)
+                if at_program:
+                    prog = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                    after_runner = prog in _SHELL_SUBCOMMAND_RUNNERS
+                    at_program = False
+                else:
+                    # "npm run build": a dispatch subcommand hands off to one more
+                    # name, which is a script, not a path.
+                    after_runner = (after_runner
+                                    and tok.lower() in _SHELL_NESTED_RUNNER_WORDS)
+                if tok in flagged:
                     continue
                 norm = tok.replace("\\", "/")
                 explicit = (norm.startswith(("./", "../", "~/", "/"))
                             or "/../" in norm
-                            or (len(tok) > 1 and tok[1] == ":"))   # C:\... etc
+                            or _looks_like_drive_path(tok))
                 if not explicit:
+                    if command_word:
+                        continue   # a verb ("npm test"), not a path
                     try:
                         if not (self.cwd / tok).exists():
                             continue
