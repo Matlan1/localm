@@ -68,11 +68,19 @@ def invoke_confirm(handler: Any, call: Any, agent: Optional[str] = None) -> bool
     substitute a default for either. A handler that raises propagates - callers
     treat an exception as a failed tool, not as an approval.
 
-    *agent* is the asking sub-agent's label, or None for the top-level agent.
+    *agent* is the asking sub-agent's label, or None for the top-level agent. A
+    handler that opts in is passed the keyword ALWAYS, including when the value is
+    None: the call shape then depends only on the handler's signature, never on the
+    value, so ``def handler(call, agent)`` (no default) works on every confirmation
+    instead of raising on exactly the unlabelled ones - an intermittent break that
+    would surface late, on the top-level agent's own prompt. It also lets a handler
+    say "nobody is delegating" explicitly rather than infer it from an absent
+    argument.
+
     Inspection runs per call rather than being cached: a confirmation is gated on a
     human answering, so microseconds are irrelevant, and a cache keyed on a bound
     method (a fresh object on every attribute access) would miss anyway.
     """
-    if agent and handler_accepts_agent(handler):
+    if handler_accepts_agent(handler):
         return handler(call, **{_AGENT_KW: agent})
     return handler(call)

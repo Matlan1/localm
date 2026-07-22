@@ -108,8 +108,38 @@ def test_the_answer_is_relayed_verbatim_and_never_invented():
 
 
 def test_a_callable_without_an_introspectable_signature_falls_back_safely():
-    """No signature to read -> treat it as the original protocol, never guess."""
+    """No signature to read -> treat it as the original protocol, never guess.
+
+    ``type`` and ``dict`` genuinely raise ValueError from inspect.signature on
+    CPython; ``len`` does NOT (it reports ``(obj, /)``), so it exercises the
+    ordinary no-such-parameter path instead. Both are pinned, because a test that
+    only used ``len`` would claim to cover the except branch without entering it.
+    """
+    import inspect
+    for uninspectable in (type, dict):
+        with pytest.raises((TypeError, ValueError)):
+            inspect.signature(uninspectable)
+        assert handler_accepts_agent(uninspectable) is False
     assert handler_accepts_agent(len) is False
+
+
+def test_a_handler_whose_agent_argument_is_required_works_unlabelled_too():
+    """The keyword is passed whenever the handler accepts it, value or not.
+
+    Passing it only when a label EXISTS would make the call shape depend on the
+    value, so a handler written ``def handler(call, agent)`` would work for a
+    sub-agent's prompt and raise TypeError on the top-level agent's own - an
+    intermittent break landing on the commonest case.
+    """
+    seen = []
+
+    def strict(call, agent):            # no default: legal, must not break
+        seen.append(agent)
+        return True
+
+    assert invoke_confirm(strict, _Call(), agent="child1") is True
+    assert invoke_confirm(strict, _Call()) is True
+    assert seen == ["child1", None]
 
 
 # --------------------------------------------------------------------------
@@ -121,6 +151,44 @@ def test_a_sub_agent_labels_its_prompts_and_the_top_level_agent_does_not(tmp_pat
     child = Agent(_StubBackend(), cwd=tmp_path, name="reviewer", parent=parent)
     assert child._confirm_agent_label() == "reviewer"
     assert parent._confirm_agent_label() is None
+
+
+@pytest.mark.parametrize("empty", ["", None])
+def test_a_child_with_no_usable_name_is_still_marked_as_a_sub_agent(tmp_path, empty):
+    """``spawn_agent``'s name comes from the MODEL, so it can arrive empty.
+
+    A falsy label would collapse to "no label" and make a delegated request look
+    exactly like the user's own - the precise confusion this path exists to stop.
+    Not knowing which child is asking is tolerable; a child's prompt passing for
+    the human's own is not.
+    """
+    parent = Agent(_StubBackend(), cwd=tmp_path)
+    child = Agent(_StubBackend(), cwd=tmp_path, name=empty, parent=parent)
+    assert child._confirm_agent_label() == "sub-agent"
+    # FIRES-CONTROL: the top-level agent is still unlabelled, not "sub-agent".
+    assert parent._confirm_agent_label() is None
+
+
+def test_a_child_named_by_the_model_reaches_the_gui_even_when_the_name_is_empty(tmp_path):
+    """The same gap end to end: an empty-named child must not look like the user."""
+    session = _gui_session(tmp_path)
+    try:
+        _auto_answer(session)
+        captured = {}
+
+        def _fake_run_task(self, task):
+            captured["child"] = self
+            return "done"
+
+        from unittest.mock import patch
+        with patch.object(Agent, "run_task", _fake_run_task):
+            res = tool_spawn_agent(tmp_path, "do work", name="",
+                                   _parent_agent=session.agent)
+        assert res.ok, res.output
+        assert captured["child"]._execute_tool(_write_call(), interactive=False).ok
+        assert [r["agent"] for r in _requests(session)] == ["sub-agent"]
+    finally:
+        session.close()
 
 
 def test_a_real_child_reaches_the_parents_handler_with_its_own_name(tmp_path):

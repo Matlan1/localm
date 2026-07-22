@@ -493,8 +493,17 @@ class _ExecutionMixin:
         This is the ONE place a child's identity enters the confirm chain, so every
         delegation path (worktree-isolated parallel dispatch, spawn_agent, background
         sub-agents) is attributed by construction rather than each re-implementing it.
+
+        A child with a falsy name still gets a label. ``spawn_agent``'s ``name`` comes
+        straight from the model's tool-call arguments, and an empty one would collapse
+        to "no label" - making a delegated request look exactly like the human's own,
+        which is the confusion this whole path exists to prevent. Being unable to say
+        WHICH child is asking is tolerable; letting a child's prompt pass for the
+        user's own is not.
         """
-        return self.name if self.parent is not None else None
+        if self.parent is None:
+            return None
+        return self.name or "sub-agent"
 
     def _confirm_tool(self, call: ToolCall) -> bool:
         """
