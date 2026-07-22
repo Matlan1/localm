@@ -266,6 +266,24 @@ class TestChildPromptHygiene:
             from localm.plugins.coder.prompts import _display_cwd
             assert _display_cwd(tmp_path) in prompt, role
 
+    def test_codebase_map_header_is_home_anchored_too(self, tmp_path):
+        """The map is only emitted for a NON-EMPTY project, so an empty tmp_path
+        would not exercise it. Its header printed the raw absolute root into the
+        same prompt, undoing the anchoring three lines above it."""
+        (tmp_path / "app.py").write_text("def main():\n    return 1\n")
+        _, child = _spawn_child(tmp_path, role="reviewer")
+        prompt = child._system_prompt
+        assert "Codebase map" in prompt, "map not in prompt - test proves nothing"
+        assert str(tmp_path) not in prompt
+        assert str(tmp_path.resolve()) not in prompt
+
+    def test_main_agent_prompt_is_also_free_of_the_raw_root(self, tmp_path):
+        """The map leak was never role-specific: it hit every coder session."""
+        (tmp_path / "app.py").write_text("def main():\n    return 1\n")
+        agent = Agent(_StubBackend(), cwd=tmp_path)
+        assert "Codebase map" in agent._system_prompt
+        assert str(tmp_path) not in agent._system_prompt
+
     def test_role_brief_itself_is_home_anchored(self, tmp_path):
         brief = build_subagent_system_prompt(tmp_path, "reviewer")
         assert str(tmp_path) not in brief
