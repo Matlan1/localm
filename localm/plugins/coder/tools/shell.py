@@ -25,6 +25,52 @@ def _needs_shell(command: str) -> bool:
     return False
 
 
+def _platform_shell(command: str) -> list[str]:
+    """Wrap *command* for the platform shell."""
+    if sys.platform == "win32":
+        return ["cmd", "/C", command]
+    return ["/bin/sh", "-c", command]
+
+
+def _shell_argv(command: str) -> list[str]:
+    """Route *command* to an argument list, or to the platform shell.
+
+    When the command contains no shell operators (pipes, redirects, globs,
+    variable expansion, etc.) it is parsed with ``shlex.split`` and returned as
+    a plain argument list - no shell injection possible. Otherwise it falls back
+    to the system shell (cmd /C on Windows, /bin/sh -c elsewhere).
+
+    This is the ONE place that decision is made, so the blocking ``run_shell``
+    and the background ``run_shell_background`` cannot drift into different
+    security postures.
+    """
+    import shlex
+
+    if _needs_shell(command):
+        # Complex command - must go through a shell
+        return _platform_shell(command)
+    try:
+        argv = shlex.split(command, posix=(sys.platform != "win32"))
+    except ValueError:
+        # Malformed quoting - fall back to shell
+        return _platform_shell(command)
+    # Shell builtins (echo, dir, type, …) have no executable on disk -
+    # argument-list mode would fail with "file not found". Detect via
+    # PATH lookup and route those through the shell instead.
+    import shutil as _shutil
+    if not argv or _shutil.which(argv[0]) is None:
+        return _platform_shell(command)
+    return argv
+
+
+def _privacy_env(_privacy: bool) -> dict | None:
+    """Subprocess environment with shell-history variables zeroed, or None."""
+    if not _privacy:
+        return None
+    from ..privacy import subprocess_privacy_env
+    return subprocess_privacy_env()
+
+
 def tool_run_shell(
     cwd: Path,
     command: str,
@@ -32,49 +78,15 @@ def tool_run_shell(
     _privacy: bool = False,
 ) -> ToolResult:
     """
-    Execute a shell command.
+    Execute a shell command and wait for it to finish.
 
-    When the command contains no shell operators (pipes, redirects, globs,
-    variable expansion, etc.) it is parsed with ``shlex.split`` and run as
-    a plain argument list - no shell injection possible.  Otherwise it falls
-    back to the system shell (cmd /C on Windows, /bin/sh -c elsewhere).
+    Argument-list vs shell routing is decided by :func:`_shell_argv`.
 
     In privacy mode (``_privacy=True``) the subprocess environment has
     shell-history variables zeroed.
     """
-    import shlex
-
-    shell_cmd: list[str]
-    if _needs_shell(command):
-        # Complex command - must go through a shell
-        if sys.platform == "win32":
-            shell_cmd = ["cmd", "/C", command]
-        else:
-            shell_cmd = ["/bin/sh", "-c", command]
-    else:
-        try:
-            shell_cmd = shlex.split(command, posix=(sys.platform != "win32"))
-        except ValueError:
-            # Malformed quoting - fall back to shell
-            if sys.platform == "win32":
-                shell_cmd = ["cmd", "/C", command]
-            else:
-                shell_cmd = ["/bin/sh", "-c", command]
-        else:
-            # Shell builtins (echo, dir, type, …) have no executable on disk -
-            # argument-list mode would fail with "file not found". Detect via
-            # PATH lookup and route those through the shell instead.
-            import shutil as _shutil
-            if not shell_cmd or _shutil.which(shell_cmd[0]) is None:
-                if sys.platform == "win32":
-                    shell_cmd = ["cmd", "/C", command]
-                else:
-                    shell_cmd = ["/bin/sh", "-c", command]
-
-    env: dict | None = None
-    if _privacy:
-        from ..privacy import subprocess_privacy_env
-        env = subprocess_privacy_env()
+    shell_cmd = _shell_argv(command)
+    env = _privacy_env(_privacy)
 
     result = run_subprocess(shell_cmd, cwd, timeout=timeout, env=env)
 
@@ -101,6 +113,157 @@ def tool_run_shell(
         summary=f"$ {command[:60]}  [{status}]",
         truncated=trunc,
     )
+
+
+# --------------------------------------------------------------------------- #
+#  Background execution                                                        #
+# --------------------------------------------------------------------------- #
+#  run_shell blocks, so the coder could not start a dev server and then talk to
+#  it, or run a long build while doing anything else. These three tools are the
+#  async half. They deliberately reuse _shell_argv above, so the background path
+#  makes the SAME shell-vs-argv security decision as the blocking one; the job
+#  bookkeeping lives in the kind-agnostic registry in ../background.py.
+
+def _job_not_found(registry, job_id: str) -> ToolResult:
+    """Error naming the ids that DO exist, so a wrong id is self-correcting."""
+    known = registry.ids()
+    listing = ", ".join(known) if known else "none"
+    return ToolResult.error(
+        f"No background job with id '{job_id}'. Known job ids: {listing}.")
+
+
+def _render_job(job) -> tuple[str, str, bool]:
+    """Render a job as ``(output, summary, truncated)`` for a ToolResult."""
+    st = job.status()
+    out, err, dropped = job.output()
+
+    body = out.strip()
+    if err.strip():
+        body += ("\n" if body else "") + "STDERR:\n" + err.strip()
+    if not body:
+        body = "(no output yet)" if st["state"] == "running" else "(no output)"
+    body, trunc = _truncate(body)
+
+    exit_code = (st["result"] or {}).get("exit_code")
+    lines = [
+        f"<job>{st['id']}</job>",
+        f"<state>{st['state']}</state>",
+        f"<pid>{st.get('pid')}</pid>",
+        f"<elapsed>{st['elapsed']:.1f}s</elapsed>",
+    ]
+    if st["state"] != "running":
+        lines.append(f"<exit_code>{exit_code}</exit_code>")
+    if st["error"]:
+        lines.append(f"<error>{st['error']}</error>")
+    if dropped:
+        # Never present a trimmed tail as if it were the whole output.
+        lines.append(
+            f"<dropped_chars>{dropped}</dropped_chars>  "
+            "(oldest output was discarded to bound memory)")
+    for warning in st["warnings"]:
+        lines.append(f"<warning>{warning}</warning>")
+    lines.append(f"<output>\n{body}\n</output>")
+
+    if st["state"] == "running":
+        status = f"running {st['elapsed']:.0f}s"
+    elif st["state"] == "done":
+        status = "ok" if exit_code == 0 else f"exit {exit_code}"
+    else:
+        status = st["state"]
+    summary = f"{st['id']} $ {st['label'][:40]}  [{status}]"
+    return "\n".join(lines), summary, trunc
+
+
+def tool_run_shell_background(
+    cwd: Path,
+    command: str,
+    _privacy: bool = False,
+) -> ToolResult:
+    """
+    Start a shell command in the background and return a job id immediately.
+
+    Use for anything long-running you need to keep talking to or working
+    alongside: a dev server you then curl, a long build, a watcher. Poll it with
+    ``check_shell_job`` and stop it with ``kill_shell_job``. For a command you
+    just need the result of, use ``run_shell`` instead.
+
+    Argument-list vs shell routing and privacy-mode env handling are identical
+    to :func:`tool_run_shell`; only the waiting differs.
+    """
+    from ..background import JobCapacityError, ShellJob, get_registry
+
+    argv = _shell_argv(command)
+    env = _privacy_env(_privacy)
+    registry = get_registry()
+
+    try:
+        job = registry.submit(
+            lambda: ShellJob(argv, cwd, label=command, env=env), kind="shell")
+    except JobCapacityError as e:
+        return ToolResult.error(str(e))
+    except FileNotFoundError as e:
+        return ToolResult.error(
+            f"Could not start '{command}': {e}. Check the executable is on PATH.")
+    except OSError as e:
+        return ToolResult.error(f"Could not start '{command}': {e}")
+
+    return ToolResult(
+        ok=True,
+        output=(
+            f"<job>{job.id}</job>\n"
+            f"<state>running</state>\n"
+            f"<pid>{job.pid}</pid>\n"
+            f"<note>Started in the background. Poll it with "
+            f"check_shell_job(job_id=\"{job.id}\") and stop it with "
+            f"kill_shell_job(job_id=\"{job.id}\").</note>"
+        ),
+        summary=f"{job.id} started $ {command[:50]}",
+    )
+
+
+def tool_check_shell_job(cwd: Path, job_id: str) -> ToolResult:
+    """
+    Check a background job: its state, exit code once finished, and the output
+    buffered so far. Safe to call repeatedly; output accumulates until the job
+    is pruned.
+    """
+    from ..background import get_registry
+
+    registry = get_registry()
+    job = registry.get(job_id)
+    if job is None:
+        return _job_not_found(registry, job_id)
+
+    output, summary, trunc = _render_job(job)
+    st = job.status()
+    # Mirror run_shell: a finished job that FAILED reports ok=False, so the model
+    # sees the failure rather than a green "check succeeded". A job the model
+    # killed on purpose is not a failure though - reporting one would feed the
+    # consecutive-failure circuit breaker for doing exactly the right thing.
+    ok = (st["state"] in ("running", "killed")
+          or (st["result"] or {}).get("exit_code") == 0)
+    return ToolResult(ok=ok, output=output, summary=summary, truncated=trunc)
+
+
+def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
+    """
+    Stop a background job and its whole process tree, then report the final
+    state and buffered output.
+    """
+    from ..background import get_registry
+
+    registry = get_registry()
+    job = registry.get(job_id)
+    if job is None:
+        return _job_not_found(registry, job_id)
+
+    outcome = job.kill()
+    output, summary, trunc = _render_job(job)
+    output = f"<kill_result>{outcome}</kill_result>\n" + output
+    # A kill that could not stop the process must never report success.
+    ok = not outcome.startswith("kill FAILED")
+    return ToolResult(ok=ok, output=output,
+                      summary=f"{job_id} {outcome}", truncated=trunc)
 
 
 def _detect_test_runner(cwd: Path) -> list[str]:

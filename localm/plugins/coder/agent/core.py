@@ -26,6 +26,7 @@ from ..backends.base import BaseLLMBackend
 from ..indexer import ProjectMap
 from ..tools import SAFE_RESTRICTED_TOOLS
 from ..audit import AuditLogT, SessionMode
+from .constants import expand_shell_disable
 from .loop import _LoopMixin
 from .execution import _ExecutionMixin
 from .context import _ContextMixin
@@ -123,7 +124,7 @@ class Agent(
         self.restricted = restricted
         # Tools removed from THIS session: hidden from the model and hard-refused
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
-        self.disabled_tools = frozenset(disabled_tools or ())
+        self.disabled_tools = expand_shell_disable(frozenset(disabled_tools or ()))
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
         # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)

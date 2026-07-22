@@ -21,7 +21,8 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
-    _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_UNSCOPED_TOOLS,
+    _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_EXEC_TOOLS,
+    _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS,
 )
 from .scope import _scope_pattern
@@ -322,7 +323,7 @@ class _ExecutionMixin:
         # THIS session at close - the write-tool tracker never sees them (audit
         # cluster 11). Captured before the shell runs so the shell's own changes
         # are the delta, not part of the baseline; only for episodic sessions.
-        if (call.name == "run_shell" and self._episodic
+        if (call.name in _SHELL_EXEC_TOOLS and self._episodic
                 and not self._shell_baseline_captured):
             self._shell_baseline_captured = True
             self._git_baseline = self._git_status_paths()
@@ -331,7 +332,7 @@ class _ExecutionMixin:
         args = dict(call.args)
         if call.name == "spawn_agent":
             args["_parent_agent"] = self
-        if call.name in ("run_shell", "fetch_url", "web_search", "generate_image") \
+        if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
 
