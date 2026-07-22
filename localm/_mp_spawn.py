@@ -99,6 +99,56 @@ def ensure_spawn_uses_venv_python() -> None:
         multiprocessing.set_executable(str(base_python))
 
 
+def interpreter_for_localm_children() -> str:
+    """Interpreter path for a PLAIN ``subprocess`` child that must import localm
+    and its venv-installed packages (e.g. the VRAM-probe daemon,
+    ``Popen([exe, "-m", "localm...."])``).
+
+    ``sys.executable`` is correct for a process launched via the venv (or the
+    branded launcher living inside it): the exe sits next to ``pyvenv.cfg``, so
+    a child running the same exe re-discovers the venv on its own. It is WRONG
+    inside a Windows multiprocessing-spawn worker: ``ensure_spawn_uses_venv_python``
+    above deliberately spawns workers via the BASE interpreter (see the module
+    docstring for why neither the renamed launcher nor the venv trampoline can
+    be used THERE), and multiprocessing hands the worker the venv's ``sys.path``
+    as spawn-prep data rather than via the exe - so inside the worker,
+    ``sys.executable`` is a bare base python whose own children get no venv
+    paths at all. Found live (2026-07-22): the GGUF worker's VRAM-probe daemon
+    could not resolve the ``localm-llama-runtime`` wheel (nor ``localm`` itself
+    on a non-dev install) and answered ERR on every query, silently costing the
+    worker its only raw VRAM reading - which made every mid-generation
+    context-grow KV-placement check unmeasurable.
+
+    Resolution: a process already running inside the venv (``sys.prefix !=
+    sys.base_prefix``) keeps ``sys.executable``, today's working behavior.
+    Otherwise the venv is found via the site-packages entries multiprocessing
+    injected into ``sys.path`` (the ancestor holding ``pyvenv.cfg``) and its
+    ``Scripts/python.exe`` (``bin/python`` elsewhere) is returned. The venv
+    trampoline is safe for THESE children: the WinError 6 failure that rules it
+    out for multiprocessing workers is specific to mp's cross-process SEMAPHORE
+    handle injection (``DuplicateHandle`` into the trampoline, not the real
+    child - see module docstring); plain stdio pipes are standard handles,
+    which the trampoline forwards to its child (verified live with a pipe
+    round-trip). Falls back to ``sys.executable`` when no venv is found (a
+    system-python setup with localm on ``PYTHONPATH`` keeps today's behavior)."""
+    if sys.prefix != sys.base_prefix:
+        return sys.executable
+    for entry in sys.path:
+        p = Path(entry)
+        if p.name.lower() != "site-packages":
+            continue
+        # Windows: <venv>/Lib/site-packages (2 levels up); POSIX:
+        # <venv>/lib/pythonX.Y/site-packages (3 levels up). pyvenv.cfg marks
+        # the venv root either way.
+        for root in list(p.parents)[:3]:
+            if (root / "pyvenv.cfg").is_file():
+                cand = (root / "Scripts" / "python.exe"
+                        if sys.platform == "win32" else root / "bin" / "python")
+                if cand.is_file():
+                    return str(cand)
+    return sys.executable
+
+
 def install_parent_death_watchdog() -> bool:
     """Make THIS spawned worker process die when its parent dies - HOWEVER the
     parent died, including an uncatchable hard kill (Windows TerminateProcess /
