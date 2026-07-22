@@ -94,6 +94,51 @@ def test_todos_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypatch):
     assert "1/3 done" in result.summary and "fix the parser" in result.summary
 
 
+def test_a_real_agent_turn_writes_and_resumes_the_plan(tmp_path, monkeypatch):
+    """The same round trip driven through the REAL loop: a model response is
+    parsed into a tool call, dispatched, checkpointed, and resumed - so the
+    parser, the loop, the hidden-arg injection, and the checkpoint are all
+    exercised together rather than one dispatcher call at a time."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+
+    class _Scripted(_Stub):
+        """Emits a genuine <tool_call> block, then a plain final answer."""
+        def __init__(self):
+            self.replies = [
+                '<tool_call>\n{"name": "set_todos", "args": {"items": '
+                '["[x] read the failing test", "[>] fix the parser", '
+                '"[ ] run the suite"]}}\n</tool_call>',
+                "Plan written.",
+            ]
+
+        def chat(self, messages, **kw):
+            return self.replies.pop(0) if self.replies else "Done."
+
+        def chat_stream(self, messages, **kw):
+            yield self.chat(messages, **kw)
+
+    from localm.plugins.coder.agent import Agent
+    with patch("localm.plugins.coder.agent.ProjectMap") as PM, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        PM.build.return_value.file_count.return_value = 0
+        PM.build.return_value.truncated = False
+        a = Agent(_Scripted(), cwd=proj, auto_approve=True, self_verify=False,
+                  mode=SessionMode.LOG)
+        answer = a.run_task("Plan the parser fix.")
+
+    assert answer.strip() == "Plan written."
+    assert [t["text"] for t in a.get_todos()] == [
+        "read the failing test", "fix the parser", "run the suite"]
+
+    a.save_checkpoint()
+    resumed = _agent(proj)
+    resumed.resume_checkpoint(resumed.load_checkpoint())
+    assert resumed.get_todos() == a.get_todos()
+
+
 def test_privacy_mode_writes_no_todos_to_disk(tmp_path, monkeypatch):
     """Privacy mode's no-disk promise covers the task list too: the checkpoint
     is a no-op there, so a fresh session finds nothing to resume."""
