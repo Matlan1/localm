@@ -32,6 +32,7 @@ from ..backends.http import (
     CoderAuthError,
 )
 from ..agent import Agent
+from ..agent.constants import _SHELL_EXEC_TOOLS
 from ..audit import SessionMode, parse_mode
 from ..privacy import (
     clear_shell_history_traces,
@@ -235,12 +236,16 @@ def main(
     # no way to confirm, so the gate in execution.py fails CLOSED (denied). This
     # makes confirm-on-shell the effective default for the one-shot CLI.
     if task and not yes:
-        always_confirm = set(always_confirm) | {"run_shell"}
+        # run_shell_background is the same capability as run_shell (arbitrary code
+        # execution, just without the wait), so it MUST carry the same gate - a
+        # background variant left out here would be an unconfirmed-RCE bypass of it.
+        always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
         print_warning(
             "Unattended one-shot: run_shell is code execution and the web tools "
-            "egress data. run_shell now requires --yes (else it is denied this "
-            "run); network tools still obey net_mode (off/ask/allow). Pass --yes "
-            "to auto-approve, or run interactively to confirm each call.")
+            "egress data. run_shell and run_shell_background now require --yes "
+            "(else they are denied this run); network tools still obey net_mode "
+            "(off/ask/allow). Pass --yes to auto-approve, or run interactively to "
+            "confirm each call.")
 
     # ------------------------------------------------------------------ #
     #  Create agent
@@ -392,10 +397,10 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     if not yes and proj_cfg.get("auto_approve"):
         yes = True
     # always_confirm: tools that prompt even under --yes
-    # --interactive-confirm sets {"run_shell"}; config can extend the list
+    # --interactive-confirm sets the shell-execution tools; config can extend the list
     always_confirm: set[str] = set()
     if interactive_confirm:
-        always_confirm.add("run_shell")
+        always_confirm.update(_SHELL_EXEC_TOOLS)
     cfg_confirm = proj_cfg.get("always_confirm", [])
     if isinstance(cfg_confirm, list):
         always_confirm.update(cfg_confirm)

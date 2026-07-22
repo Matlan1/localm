@@ -82,6 +82,9 @@ _TOOL_EXAMPLES: dict = {
     "patch_file":    {"path": "src/main.py",
                       "diff": "--- a/src/main.py\n+++ b/src/main.py\n@@ -10,4 +10,5 @@\n context line\n-old line\n+new line\n+added line\n"},
     "run_shell":     {"command": "python -m pytest tests/ -x"},
+    "run_shell_background": {"command": "npm run dev"},
+    "check_shell_job": {"job_id": "job_1a2b3c4d"},
+    "kill_shell_job":  {"job_id": "job_1a2b3c4d"},
     "list_dir":      {"path": "src/"},
     "tree":          {"path": ".", "max_depth": 2},
     "edit_notebook_cell": {"path": "analysis.ipynb", "cell_index": 3, "source": "import pandas as pd"},
@@ -122,8 +125,14 @@ def _example_args(name: str, tool) -> dict:
 def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
     """One block per registered tool: description (the 'when to use this'
     signal), a concrete example call, and the optional params. Tools in
-    *disabled* are omitted (e.g. run_shell for a restricted, shareable key)."""
+    *disabled* are omitted (e.g. run_shell for a restricted, shareable key).
+
+    Disabling a shell-execution tool expands to the whole family here, not just
+    in the callers: this is the boundary that decides what the model is TOLD
+    exists, and it is called directly (not only via build_system_prompt)."""
+    from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
+    disabled = expand_shell_disable(disabled)
     blocks = []
     for name, tool in TOOL_REGISTRY.items():
         if name in disabled:
@@ -142,7 +151,9 @@ def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
 def _brief_tool_docs(disabled: frozenset = frozenset()) -> str:
     """Condensed list for small models - one line per tool, no JSON examples.
     Tools in *disabled* are omitted."""
+    from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
+    disabled = expand_shell_disable(disabled)
     lines = []
     for name, tool in TOOL_REGISTRY.items():
         if name in disabled:
@@ -354,6 +365,9 @@ def build_system_prompt(
         hand-written directives the user wants followed, rather than the running
         list of project facts they keep with /remember.
     """
+    # Lazy import: agent/ imports this module, so a top-level import would cycle.
+    from .agent.constants import expand_shell_disable
+    disabled_tools = expand_shell_disable(disabled_tools)
     family = detect_model_family(model_name) if model_name else "default"
 
     map_section = ""
@@ -420,6 +434,9 @@ def build_subagent_system_prompt(
     disabled_tools: frozenset = frozenset(),
 ) -> str:
     """Leaner prompt for sub-agents - focused on their specific role."""
+    # Lazy import: agent/ imports this module, so a top-level import would cycle.
+    from .agent.constants import expand_shell_disable
+    disabled_tools = expand_shell_disable(disabled_tools)
     family = detect_model_family(model_name) if model_name else "default"
     think_hint = _thinking_hint(family)
     # Only advertise tools that are actually enabled for this session so a

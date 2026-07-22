@@ -35,7 +35,16 @@ from .files import (
     tool_tree,
     tool_write_file,
 )
-from .shell import _detect_test_runner, _needs_shell, tool_run_shell, tool_run_tests
+from .shell import (
+    _detect_test_runner,
+    _needs_shell,
+    _shell_argv,
+    tool_check_shell_job,
+    tool_kill_shell_job,
+    tool_run_shell,
+    tool_run_shell_background,
+    tool_run_tests,
+)
 from .git import (
     _git,
     tool_git_commit,
@@ -54,11 +63,12 @@ from .registry import SAFE_RESTRICTED_TOOLS, TOOL_REGISTRY, ToolDef
 __all__ = [
     "ToolResult", "ToolDef", "TOOL_REGISTRY", "SAFE_RESTRICTED_TOOLS",
     "_confine", "_truncate", "_MAX_OUTPUT", "_render_notebook", "_line_count",
-    "_closest_snippet", "_verify_syntax", "_needs_shell", "_detect_test_runner",
-    "_git", "_redact_env_value",
+    "_closest_snippet", "_verify_syntax", "_needs_shell", "_shell_argv",
+    "_detect_test_runner", "_git", "_redact_env_value",
     "tool_read_file", "tool_write_file", "tool_edit_file", "tool_patch_file",
     "tool_list_dir", "tool_tree", "tool_edit_notebook_cell", "tool_search_files",
     "tool_grep", "tool_search_replace", "tool_run_shell", "tool_run_tests",
+    "tool_run_shell_background", "tool_check_shell_job", "tool_kill_shell_job",
     "tool_git_status", "tool_git_diff", "tool_git_log", "tool_git_commit",
     "tool_git_push", "tool_git_create_branch", "tool_read_env",
     "tool_fetch_url", "tool_web_search", "tool_spawn_agent", "tool_generate_image",

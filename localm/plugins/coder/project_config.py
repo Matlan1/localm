@@ -10,7 +10,7 @@ Supported keys
 model           = "gemma4-4b"
 max_turns       = 20
 auto_approve    = false
-always_confirm  = ["run_shell"]           # prompt for these even under auto_approve
+always_confirm  = ["run_shell", "run_shell_background"]  # prompt even under auto_approve
 memory_file     = ".localcoder/memory.md" # overrides default search order
 max_tokens      = 2048
 temperature     = 0.7
