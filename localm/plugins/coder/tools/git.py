@@ -11,15 +11,22 @@ to the one caller that needs them."""
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Optional
 
 from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
 
-def _git(cwd: Path, *args: str, timeout: int = 10) -> tuple[str, bool]:
-    """Run a git command and return (output, ok)."""
-    result = run_subprocess(["git", *args], cwd, timeout=timeout)
+def _git(cwd: Path, *args: str, timeout: int = 10,
+         env: Optional[dict] = None) -> tuple[str, bool]:
+    """Run a git command and return (output, ok).
+
+    *env* REPLACES the child's whole environment (that is subprocess semantics),
+    so a caller that only wants to add a variable must merge it onto os.environ -
+    a git invoked without PATH does not run at all.
+    """
+    result = run_subprocess(["git", *args], cwd, timeout=timeout, env=env)
     if result.not_found:
         return "git not found in PATH", False
     if result.timed_out:
@@ -254,8 +261,73 @@ def git_worktree_remove(repo: Path, path: Path) -> tuple[str, bool]:
     return f"could not remove worktree {path}: {reason}: {out}", False
 
 
-def git_worktree_prune(repo: Path) -> tuple[str, bool]:
-    """Drop administrative records for worktrees whose directories are gone."""
+# `git worktree prune -n -v` reports each record it WOULD drop as
+# "Removing worktrees/<name>: <reason>", where <name> is the administrative
+# record under .git/worktrees/ and derives from the worktree directory's own
+# basename. Verified against git 2.54.0.
+_PRUNE_RECORD_RE = re.compile(r"^Removing\s+worktrees/(?P<name>.+?):")
+
+
+def git_prune_child_worktrees(repo: Path) -> tuple[str, bool]:
+    """Prune stale worktree records, but ONLY when every one of them is ours.
+
+    `git worktree prune` takes no pathspec (`usage: git worktree prune [-n] [-v]
+    [--expire <expire>]`), so a bare call drops the administrative record of
+    EVERY registered worktree whose directory is currently missing - in the
+    USER's repo, not just ours. Git's own documentation names the victim: a
+    worktree "stored on a portable device or network share which is not always
+    mounted" is indistinguishable from an abandoned one, and recovering it needs
+    `git worktree repair`. Tidying up after our own children is not worth
+    silently discarding a user's worktree; that is the same class of bug #795
+    fixed for RAG, where an unplugged drive must not be able to destroy the index.
+
+    So: ask git what it WOULD prune, and prune only when every record listed is
+    one of ours (the ``coder-child-`` prefix). Anything else, INCLUDING a line we
+    cannot parse, fails CLOSED - we skip the prune and say why. A leftover record
+    of our own is harmless and already surfaced in the dispatch report; a dropped
+    foreign record cannot be recovered from here.
+
+    Returns (message, ok). ok=False means nothing was pruned and the message says
+    what stopped it, for the caller to surface rather than swallow.
+    """
+    # Force git's own messages to English FOR THIS PROBE. The line we parse is
+    # gettext-translated (git's source emits `Removing %s/%s: %s` through _()),
+    # so on a build that ships message catalogs a localized line would fail the
+    # regex below - and the fail-closed branch would then report OUR OWN records
+    # as foreign, print a message that is simply untrue, and disable the cleanup
+    # permanently on that machine. Merged onto os.environ, never passed bare:
+    # env REPLACES the environment, and a git without PATH does not run at all.
+    probe_env = {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
+    out, ok = _git(repo, "worktree", "prune", "-n", "-v", timeout=30,
+                   env=probe_env)
+    if not ok:
+        return f"could not check what `git worktree prune` would remove: {out}", False
+
+    ours: list[str] = []
+    foreign: list[str] = []
+    for line in out.splitlines():
+        text = line.strip()
+        if not text or text == "(no output)":
+            continue
+        match = _PRUNE_RECORD_RE.match(text)
+        if match is None:
+            # An unrecognised line (a git output-format change, or a translated
+            # build) means we cannot tell whose record it is. Fail closed.
+            foreign.append(text)
+        elif match.group("name").startswith(WORKTREE_PREFIX):
+            ours.append(match.group("name"))
+        else:
+            foreign.append(match.group("name"))
+
+    if foreign:
+        return (
+            "skipped `git worktree prune`: it would also drop worktree records "
+            "this plugin does not own (" + "; ".join(foreign) + "). A worktree on "
+            "an unmounted drive or network share looks missing to git, so pruning "
+            "would discard it; restore one with `git worktree repair`."
+        ), False
+    if not ours:
+        return "(nothing to prune)", True
     return _git(repo, "worktree", "prune", timeout=30)
 
 

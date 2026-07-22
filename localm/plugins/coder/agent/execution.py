@@ -25,7 +25,8 @@ from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
-    _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
+    _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
+    _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
@@ -456,9 +457,12 @@ class _ExecutionMixin:
             self._shell_baseline_captured = True
             self._git_baseline = self._git_status_paths()
 
-        # Inject hidden runtime args into specific tools
+        # Inject hidden runtime args into specific tools. Injected AFTER the copy
+        # so a model-supplied "_parent_agent" cannot win: without that, a model
+        # emitting the key itself would slip past the tool's own is-None guard and
+        # fail much deeper, inside a worker thread.
         args = dict(call.args)
-        if call.name in ("spawn_agent", "spawn_agent_background"):
+        if call.name in _PARENT_AGENT_TOOLS:
             args["_parent_agent"] = self
         # The task-list tools operate on THIS session's state (tools/tasks.py).
         # Injected after the copy, so a model-supplied "_session" cannot win.

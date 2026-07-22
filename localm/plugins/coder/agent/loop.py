@@ -4,6 +4,7 @@ parallel tool dispatch. Mixed into Agent (see core.py)."""
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
 
@@ -706,11 +707,54 @@ class _LoopMixin:
             else:
                 segments.append((destructive, [call]))
 
+        # Non-destructive peers abandoned at a batch deadline, as (future, tool
+        # name). A destructive tool is marked destructive precisely so it runs
+        # ALONE; the timeout path cancels (a no-op on a running future) and shuts
+        # the pool down without joining, so before this the next segment started
+        # while the abandoned thread was still executing. run_tests is
+        # non-destructive and a real suite comfortably outlives the 120s deadline,
+        # so [run_tests, check_shell_job, dispatch_parallel] could put a whole test
+        # run and two freshly dispatched child agents on the box at once - the exact
+        # stacked concurrency the flag exists to prevent.
+        #
+        # Kept on the AGENT, not in this frame: _execute_tools runs once per turn,
+        # and a tool that outlived a 120s deadline is very likely still running on
+        # the next one. A per-call list would be empty by then, so "call it again
+        # next turn" - which is what the refusal below tells the model - would walk
+        # straight through an ungated path into the peer this exists to avoid.
+        # Drop the ones that have since finished so the list cannot grow.
+        self._abandoned_peers = [(f, n) for f, n in self._abandoned_peers
+                                 if not f.done()]
+        abandoned = self._abandoned_peers
+
         for destructive, group in segments:
+            still_live: list[tuple] = []
+            if destructive and abandoned:
+                abandoned = self._await_abandoned_peers(abandoned)
+                self._abandoned_peers = abandoned
+                still_live = abandoned
             if destructive or len(group) == 1:
                 # Serial execution
                 for call in group:
-                    result = self._execute_tool(call, interactive=interactive)
+                    if still_live:
+                        # REFUSE rather than run alongside it. The model can call it
+                        # again next turn, by which time the peer has usually ended;
+                        # quietly running it anyway would break the guarantee the
+                        # destructive flag is supposed to give.
+                        peers = ", ".join(sorted({n for _f, n in still_live}))
+                        result = ToolResult.error(
+                            f"{call.name} was not run: it is a destructive tool, so "
+                            f"it runs alone, and {peers} is still running after an "
+                            f"extra {self._ABANDONED_PEER_GRACE_S}s. Running them "
+                            "together would stack more concurrency than this "
+                            f"machine can serve. WAIT for {peers} to finish - "
+                            "retrying immediately, this turn or the next, is "
+                            "refused again for the same reason."
+                        )
+                        if interactive:
+                            print_tool_error(call.name, result.output)
+                    else:
+                        result = self._execute_tool(call, interactive=interactive)
                     result_blocks.append(self._result_block(call, result))
             else:
                 # Parallel execution for non-destructive batch. The pool is
@@ -740,6 +784,12 @@ class _LoopMixin:
                     for fut, (i, call) in futures.items():
                         if i not in ordered:
                             fut.cancel()
+                            if not fut.done():
+                                # cancel() cannot stop a RUNNING future, so this one
+                                # is still executing. Remember it: a destructive
+                                # segment later in this batch must not start
+                                # alongside it.
+                                abandoned.append((fut, call.name))
                             result = ToolResult.error(
                                 f"{call.name} did not finish within "
                                 f"{self._PARALLEL_BATCH_TIMEOUT_S}s (parallel "
@@ -755,5 +805,30 @@ class _LoopMixin:
 
         return result_blocks
 
+    def _await_abandoned_peers(self, abandoned: list) -> list:
+        """Wait a bounded grace for abandoned non-destructive peers to end.
+
+        Returns the ones STILL running, so the caller can refuse to start a
+        destructive tool beside them. Bounded, because an unbounded join here would
+        reintroduce the very hang the batch deadline exists to avoid.
+        """
+        deadline = time.monotonic() + self._ABANDONED_PEER_GRACE_S
+        for fut, _name in abandoned:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                fut.result(timeout=remaining)
+            except Exception:
+                # We only care THAT it ended, not how. Its outcome was already
+                # turned into a result block for the model in the segment that
+                # abandoned it, so re-reporting it here would duplicate it.
+                pass
+        return [(f, n) for f, n in abandoned if not f.done()]
+
     # Wall-clock deadline for one parallel batch of non-destructive tools
     _PARALLEL_BATCH_TIMEOUT_S = 120
+
+    # Extra grace a destructive tool gives an abandoned non-destructive peer from
+    # the same batch to finish before it refuses to run beside it.
+    _ABANDONED_PEER_GRACE_S = 30

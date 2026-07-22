@@ -57,9 +57,9 @@ from .git import (
     _git,
     git_commit_all_in,
     git_list_child_worktrees,
+    git_prune_child_worktrees,
     git_repo_root,
     git_worktree_add,
-    git_worktree_prune,
     git_worktree_remove,
 )
 
@@ -185,14 +185,48 @@ def _normalise_tasks(tasks: Any) -> tuple[list[dict], Optional[str]]:
             if not text:
                 return [], f"task {i + 1} has no 'task' text"
             raw_name = str(entry.get("name") or f"child{i + 1}")
+            model = entry.get("model")
+            if model is not None and not isinstance(model, str):
+                # Rejected HERE, at the edge, rather than left to blow up deeper:
+                # an unhashable value (a dict or list, both shapes a local model
+                # plausibly emits) used to raise a TypeError out of the set
+                # comprehension that builds the requested-model set, past every
+                # cleanup path, which is how two malformed calls could zero the
+                # process-wide child budget for the life of the session.
+                return [], (f"task {i + 1}'s 'model' must be a model name (a "
+                            f"string), got {type(model).__name__}")
             out.append({
                 "name": _safe_label(raw_name) or f"child{i + 1}",
                 "task": str(text),
-                "model": entry.get("model"),
+                "model": model,
             })
         else:
             return [], f"task {i + 1} must be a string or an object, got {type(entry).__name__}"
     return out, None
+
+
+def _absorb_child_errors(parent: Any, errors: list) -> None:
+    """Fold a finished child's error trace into the parent, and nothing else.
+
+    ERRORS ONLY, deliberately. A child ran in its own worktree, so its
+    ``_changed_files`` keys are relative to a tree this parent does not have:
+    merging them would make ``session_diff()`` resolve them against the PARENT's
+    cwd and either fabricate a diff for a file the parent never touched or lose
+    the child's work silently. Errors carry no path, so that half stays valid -
+    the same split the background absorption path makes.
+
+    Called on the parent's OWN thread once every worker has been waited on, never
+    from a worker.
+    """
+    if not errors:
+        return
+    from ..agent.constants import _MAX_ERROR_TRACE
+    trace = getattr(parent, "_error_trace", None)
+    if trace is None:
+        return
+    trace.extend(errors)
+    if len(trace) > _MAX_ERROR_TRACE:
+        parent._error_trace = trace[-_MAX_ERROR_TRACE:]
 
 
 def _safe_label(raw: str) -> str:
@@ -209,8 +243,13 @@ class _ChildOutcome:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.status = "pending"      # ok | error | timeout | rejected
+        # ok | error | timeout | not_started | rejected. "timeout" means the child
+        # was RUNNING when the batch deadline expired and was abandoned;
+        # "not_started" means it never ran at all (see the wait loop).
+        self.status = "pending"
         self.detail = ""
+        self.errors: list = []   # the child's own _error_trace, folded into the
+                                 # parent on the parent's thread after the wait
         self.branch = ""
         self.worktree = ""       # the worktree root (what we create and remove)
         self.child_cwd = None    # where the child actually runs inside it
@@ -278,7 +317,20 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
 
     result_text = child.run_task(spec["task"])
     outcome.turns = getattr(child, "turns", 0)
-    outcome.status = "ok"
+    # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
+    # rather than raising (a child that hit max_turns or tripped the circuit
+    # breaker comes back normally), so "we got here without an exception" is not
+    # success. Reporting an unconditional "ok" made a failed child read as ok to
+    # every machine consumer: the report, the ToolResult, the /diff delegated
+    # footer, the parent's own last_run_ok, the --ci exit code and the episodic
+    # outcome, so no failure lesson was ever stored.
+    outcome.status = "ok" if getattr(child, "last_run_ok", True) else "error"
+    # The child's error trace is worth keeping even though its CHANGED FILES are
+    # not: errors carry no path, so they stay valid in the parent, while file keys
+    # would resolve against the parent's cwd and fabricate or lose a diff. Same
+    # split the background path makes. Stashed here, folded in on the parent's own
+    # thread once the wait is over, so a worker never mutates parent state.
+    outcome.errors = list(getattr(child, "_error_trace", None) or [])
     if result_text:
         from ..provenance import neutralise
         summary = neutralise(str(result_text))
@@ -308,8 +360,11 @@ def tool_dispatch_parallel(
     max_turns:
         Per-child iteration cap (default 10).
     timeout_s:
-        Per-child wall-clock budget (default 600). A child that exceeds it is
-        abandoned and reported, never left to hang the dispatch.
+        Wall-clock budget for the WHOLE batch (default 600), not per child: one
+        shared deadline, because waiting the full budget on each child in turn
+        would let two hung children block the parent for twice what the caller
+        asked for. A child still running when it expires is abandoned and
+        reported; a child that never got a slot is reported as never started.
 
     Notes
     -----
@@ -348,55 +403,21 @@ def tool_dispatch_parallel(
     # children and report them to the user as if they were the blockers.
     prior_holders = child_limit.describe_holders()
 
-    # Take the concurrency budget BEFORE creating anything on disk.
+    # EVERYTHING that can hold a slot happens inside the try below, so the finally
+    # is the single place the budget is returned. The acquire used to sit out here,
+    # ahead of the guarded block: any exception raised between it and the `try`
+    # (a malformed `model` value reaching the set comprehension was the live one)
+    # skipped the release entirely, and child_limit's gate is a process-wide
+    # singleton with no timeout and no reaper. Two such calls zeroed the budget for
+    # the life of the session, refusing every later child with only a generic
+    # "Tool error" to show for it.
     tokens: list[Any] = []
-    for spec in specs:
-        tok = child_limit.try_acquire("parallel", spec["name"])
-        if tok is None:
-            break
-        tokens.append(tok)
-
-    if not tokens:
-        return ToolResult.error(
-            "no child-agent slots are free: " + prior_holders +
-            f". The limit is {child_limit.MAX_CONCURRENT_CHILDREN} concurrent "
-            "children in total across all dispatch mechanisms."
-        )
-
+    # Every future we submitted, readable from the finally: the budget release
+    # needs to know which children are still alive, and an early return must not
+    # leave the name undefined.
+    futures_started: list[Any] = []
     degraded = ""
-    if len(tokens) < len(specs):
-        degraded = (
-            f"NOTE: only {len(tokens)} of {len(specs)} child slots were free "
-            f"({prior_holders}), so the tasks ran with reduced "
-            "parallelism rather than being rejected. Results are unaffected.\n\n"
-        )
-
-    # Two DISTINCT models only run genuinely side by side when the server can hold
-    # both resident: it loads alongside with no eviction when free VRAM is measured
-    # and fits, and otherwise evicts the idle LRU peer (http_server.py). Requesting
-    # two models that do not both fit therefore means the two children take turns
-    # evicting each other rather than running in parallel.
-    #
-    # We do NOT predict that here. Deciding it needs the per-model VRAM sizing the
-    # server already does, and re-deriving it in a coder tool would be duplicated,
-    # brittle, and a second place to get wrong; probing GPUs from a hot path is also
-    # what once hung the server. Nor do we silently rewrite the caller's explicit
-    # model choice. So the server stays the authority, the SAFE case is the default
-    # (omit `model` and both children share the parent's already-resident engine),
-    # and when two distinct models ARE asked for we say what the condition is and
-    # report which model each child actually ran on.
-    requested = {s.get("model") for s in specs if s.get("model")}
     residency_note = ""
-    if len(requested) > 1:
-        residency_note = (
-            "NOTE: two different models were requested. They run truly "
-            "concurrently only if the server can hold both resident; if VRAM does "
-            "not allow it, it will evict one to load the other and the children "
-            "take turns instead of running in parallel. Each child's actual model "
-            "is reported below. Omit 'model' to run both on the already-resident "
-            "one.\n\n"
-        )
-
     outcomes = [_ChildOutcome(s["name"]) for s in specs]
     created: list[tuple[Path, str, _ChildOutcome]] = []
     run_id = uuid.uuid4().hex[:8]
@@ -409,6 +430,53 @@ def tool_dispatch_parallel(
         rel_cwd = None
 
     try:
+        # Take the concurrency budget before creating anything on disk, but INSIDE
+        # the guarded block so every exit path returns it.
+        for spec in specs:
+            tok = child_limit.try_acquire("parallel", spec["name"])
+            if tok is None:
+                break
+            tokens.append(tok)
+
+        if not tokens:
+            return ToolResult.error(
+                "no child-agent slots are free: " + prior_holders +
+                f". The limit is {child_limit.MAX_CONCURRENT_CHILDREN} concurrent "
+                "children in total across all dispatch mechanisms."
+            )
+
+        if len(tokens) < len(specs):
+            degraded = (
+                f"NOTE: only {len(tokens)} of {len(specs)} child slots were free "
+                f"({prior_holders}), so the tasks ran with reduced "
+                "parallelism rather than being rejected. Results are unaffected.\n\n"
+            )
+
+        # Two DISTINCT models only run genuinely side by side when the server can
+        # hold both resident: it loads alongside with no eviction when free VRAM is
+        # measured and fits, and otherwise evicts the idle LRU peer (http_server.py).
+        # Requesting two models that do not both fit therefore means the two children
+        # take turns evicting each other rather than running in parallel.
+        #
+        # We do NOT predict that here. Deciding it needs the per-model VRAM sizing the
+        # server already does, and re-deriving it in a coder tool would be duplicated,
+        # brittle, and a second place to get wrong; probing GPUs from a hot path is
+        # also what once hung the server. Nor do we silently rewrite the caller's
+        # explicit model choice. So the server stays the authority, the SAFE case is
+        # the default (omit `model` and both children share the parent's
+        # already-resident engine), and when two distinct models ARE asked for we say
+        # what the condition is and report which model each child actually ran on.
+        requested = {s.get("model") for s in specs if s.get("model")}
+        if len(requested) > 1:
+            residency_note = (
+                "NOTE: two different models were requested. They run truly "
+                "concurrently only if the server can hold both resident; if VRAM "
+                "does not allow it, it will evict one to load the other and the "
+                "children take turns instead of running in parallel. Each child's "
+                "actual model is reported below. Omit 'model' to run both on the "
+                "already-resident one.\n\n"
+            )
+
         base_sha, ok = _git(repo, "rev-parse", "HEAD")
         if not ok:
             # An empty repo has no commit to branch a worktree from. Say that
@@ -456,6 +524,7 @@ def tool_dispatch_parallel(
                 fut = pool.submit(_run_one_child, _parent_agent, spec, wt,
                                   outcome.branch, max_turns, outcome)
                 futures[fut] = outcome
+                futures_started.append(fut)
             # ONE shared deadline for the whole batch, not a fresh timeout per
             # future: waiting `timeout_s` on each in turn would let two hung
             # children block the parent for twice the budget the caller asked for.
@@ -464,25 +533,54 @@ def tool_dispatch_parallel(
                 try:
                     fut.result(timeout=max(0.0, deadline - time.monotonic()))
                 except _FuturesTimeout:
-                    # The thread cannot be killed, only abandoned. It is writing
-                    # into its OWN worktree, so an abandoned child corrupts only its
-                    # own checkout - which is exactly what the isolation buys us.
-                    outcome.status = "timeout"
-                    outcome.detail = (
-                        f"exceeded its {timeout_s}s budget and was abandoned. Its "
-                        "worktree is still held by the running thread, so it was "
-                        "left in place rather than force-removed."
-                    )
-                    fut.cancel()
+                    # cancel() SUCCEEDS only on a future that never started. With
+                    # fewer slots than tasks the pool runs them in turn, so an
+                    # earlier child can burn the whole batch deadline while a later
+                    # one is still QUEUED - and that one is not a timeout: it never
+                    # ran, it holds no worktree and it burned no turns. Reporting it
+                    # as "exceeded its budget, its worktree is held by the running
+                    # thread" was false in every clause, and it made the teardown
+                    # skip a worktree that nothing was holding, leaking it and its
+                    # branch to disk with no reaper.
+                    if fut.cancel():
+                        outcome.status = "not_started"
+                        outcome.detail = (
+                            f"never started: the batch's {timeout_s}s budget was "
+                            "already spent by the other child(ren) before a slot "
+                            "freed up. It ran no turns and changed nothing. Re-run "
+                            "it on its own, or raise timeout_s."
+                        )
+                    else:
+                        # Running, and a thread cannot be killed, only abandoned. It
+                        # writes into its OWN worktree, so an abandoned child
+                        # corrupts only its own checkout - what the isolation buys.
+                        outcome.status = "timeout"
+                        outcome.detail = (
+                            f"exceeded the {timeout_s}s batch budget and was "
+                            "abandoned. Its worktree is still held by the running "
+                            "thread, so it was left in place rather than "
+                            "force-removed."
+                        )
                 except Exception as exc:
                     outcome.status = "error"
                     outcome.detail = f"{type(exc).__name__}: {exc}"
         finally:
             pool.shutdown(wait=False)
 
-        # 3. Commit each child's work and capture its diff BEFORE teardown.
+        # Fold each child's error trace into the parent, on the PARENT's thread now
+        # that every worker has been waited on or abandoned. Errors only, never the
+        # child's changed-file keys: those are relative to a tree this parent does
+        # not have. Without this a failed child left the parent with no record of
+        # what went wrong beyond the human-readable report text.
+        for outcome in outcomes:
+            if outcome.errors:
+                _absorb_child_errors(_parent_agent, outcome.errors)
+
+        # 3. Commit each child's work and capture its diff BEFORE teardown. A child
+        #    that never started has nothing to commit and no diff to read; running
+        #    the commit anyway would only manufacture a "could not commit" warning.
         for worktree, branch, outcome in created:
-            if outcome.status == "timeout":
+            if outcome.status in ("timeout", "not_started"):
                 continue
             msg = f"coder child '{outcome.name}' ({run_id})"
             out, ok = git_commit_all_in(worktree, msg)
@@ -507,7 +605,9 @@ def tool_dispatch_parallel(
         # session_diff() feeds the self-reviewer and episodic memory, so foreign
         # content there would corrupt two model-facing loops, not just a view.
         for _wt, branch, outcome in created:
-            if not branch:
+            if not branch or outcome.status == "not_started":
+                # Nothing ran, so there is no change set to point at: the branch is
+                # still exactly base_sha and its worktree has been removed.
                 continue
             _delegated.record(_parent_agent, _delegated.DelegatedChangeSet(
                 label=outcome.name,
@@ -535,12 +635,74 @@ def tool_dispatch_parallel(
                 # A failed removal is REAL (dirty tree, or a process still holding
                 # it). Report it so the operator can reap it; never --force past it.
                 outcome.cleanup_warning = out
-        try:
-            git_worktree_prune(repo)
-        except Exception:
-            pass
-        for tok in tokens:
+                continue
+            if outcome.status == "not_started" and branch:
+                # Nothing ever ran on it, so the branch is still exactly base_sha
+                # and there is no work to preserve. Leaving it would litter the
+                # user's branch list with an empty branch per never-started child.
+                # -d (never -D): if it somehow does carry a commit, git refuses and
+                # we keep it rather than destroy work.
+                _git(repo, "branch", "-d", branch)
+
+        # SCOPED prune, with its outcome REPORTED. A bare `git worktree prune` is
+        # repo-wide and takes no pathspec, so it would also drop the record of a
+        # USER's worktree that merely lives on a drive that is not mounted right
+        # now; and wrapping it in `except: pass` made a failed prune invisible.
+        # Only when we actually created something: a dispatch rejected for lack of
+        # a free slot has nothing of ours to reap, and should not pay for a git
+        # subprocess to discover that.
+        if created:
+            pruned, pok = git_prune_child_worktrees(repo)
+            if not pok and outcomes:
+                # APPEND to whatever is there. Picking "the first outcome with no
+                # warning yet" finds nothing when every child already has one, and
+                # the prune failure then disappears - the exact swallow this change
+                # exists to remove.
+                target = outcomes[0]
+                target.cleanup_warning = (
+                    f"{target.cleanup_warning}; {pruned}"
+                    if target.cleanup_warning else pruned)
+
+        # Return the budget only for children that have actually TERMINATED. An
+        # abandoned child is still running and still occupying the box, so its slot
+        # goes back when its thread really ends, not when this call returns.
+        # Releasing unconditionally here let two abandoned-but-live children plus
+        # two newly admitted ones run at once - exactly the "two mechanisms each
+        # capping at 2 jointly admit 4" failure child_limit exists to prevent, and
+        # the rule the background path already states: released on FINISH, not on
+        # submit. add_done_callback fires immediately if the future finished in the
+        # meantime, so there is no lost-release race.
+        #
+        # Pair each token with the child it was TAKEN FOR wherever the two line up,
+        # because child_limit's holder list is what a later rejection NAMES: keeping
+        # child1's token alive to cover child2's thread reports a child that
+        # finished long ago as the one still running. Where they cannot line up -
+        # fewer slots than tasks, so child2 is occupying the slot child1 finished
+        # with - a spare token is held back instead. The budget counts RUNNING
+        # children, so the COUNT is what must never be wrong; the label is the
+        # diagnostic.
+        keep: list = []
+        spare: list = []
+        unpaired: list = []
+        for i in range(max(len(tokens), len(futures_started))):
+            tok = tokens[i] if i < len(tokens) else None
+            fut = futures_started[i] if i < len(futures_started) else None
+            live = fut is not None and not fut.done()
+            if tok is not None and live:
+                keep.append((fut, tok))
+            elif tok is not None:
+                spare.append(tok)
+            elif live:
+                unpaired.append(fut)
+        for fut in unpaired:
+            if not spare:
+                break
+            keep.append((fut, spare.pop(0)))
+        for tok in spare:
             child_limit.release(tok)
+        for fut, tok in keep:
+            fut.add_done_callback(
+                lambda _f, _tok=tok: child_limit.release(_tok))
 
     return ToolResult(
         ok=any(o.status == "ok" for o in outcomes),

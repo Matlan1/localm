@@ -200,6 +200,13 @@ class Agent(
         # lesson worth a close-time reflection - and a user who just asked to stop
         # is the last person who should wait on a model call (REG-594).
         self._user_stopped: bool = False
+        # Non-destructive tool threads abandoned at a parallel-batch deadline, as
+        # (future, tool name). SESSION state, not per-batch: a tool that outran the
+        # 120s batch deadline usually outlives the whole TURN too (a real test
+        # suite does), so a per-call list is empty again on the very next turn and
+        # a destructive tool would launch straight into the still-running peer -
+        # the stacked concurrency destructive=True exists to prevent.
+        self._abandoned_peers: list = []
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
         # Changed-files tracker: rel path -> {original: bytes|None, writes: int,

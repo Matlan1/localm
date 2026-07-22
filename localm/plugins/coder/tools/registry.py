@@ -561,7 +561,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         params={
             "tasks":     {"type": "array",  "description": "1 or 2 sub-tasks: strings, or objects with task/name/model", "required": True},
             "max_turns": {"type": "int",    "description": "Per-child iteration cap (default 10)", "required": False},
-            "timeout_s": {"type": "int",    "description": "Per-child wall-clock budget in seconds (default 600)", "required": False},
+            "timeout_s": {"type": "int",    "description": "Wall-clock budget in seconds for the whole batch, shared by every child (default 600)", "required": False},
         },
         # Destructive so _execute_tools runs it ALONE. The tool manages its own
         # internal 2-way concurrency; letting the batch executor also run it
