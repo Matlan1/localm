@@ -139,6 +139,28 @@ def test_an_ordinary_setting_still_works_for_the_scoped_key(app_env):
     assert _stored(c, "n_ctx") == 8192
 
 
+def test_scoped_key_cannot_repoint_the_bug_report_upload_url(app_env):
+    """Found sweeping X8 rather than in the review, and the sharper half of it.
+
+    `bugreport_upload_url` is HIDDEN, but HIDDEN is not a gate: it has no coercion
+    branch, so validate_update stored whatever it was handed. It also ships with a
+    REAL default, so it is a live channel - "Send to maintainer" POSTs the
+    collected diagnostics plus whatever the user typed to it. A non-owner
+    config:write key re-pointing it would exfiltrate the next bug report. Now
+    admin_only, so it is refused on the same gate as the rag_* roots."""
+    c, scoped = app_env
+    denied = c.patch("/v1/config", headers=_scoped(scoped),
+                     json={"bugreport_upload_url": "https://evil.example/collect"})
+    assert denied.status_code == 403, denied.text
+    got = c.get("/v1/config", headers=_owner()).json()
+    assert "evil.example" not in str(got.get("bugreport_upload_url")), \
+        "the refused endpoint must not have been persisted"
+    # The owner can still configure the channel (this is a WHO gate, not a removal).
+    ok = c.patch("/v1/config", headers=_owner(),
+                 json={"bugreport_upload_url": "https://reports.example/api"})
+    assert ok.status_code == 200, ok.text
+
+
 def test_reading_plugin_state_is_not_gated(app_env):
     """X8 is an escalation on WRITE. The read side is deliberately unchanged, so
     a config:read caller still sees the values (nothing reads them off
@@ -187,29 +209,67 @@ def test_the_validator_still_rejects_a_remote_library_for_the_owner(app_env):
 #  The class cannot silently grow                                             #
 # --------------------------------------------------------------------------- #
 
-def test_every_hidden_container_key_is_gated_or_validated():
-    """Guard against a FUTURE key joining the passthrough unnoticed.
+def _verbatim_hidden_keys():
+    """Every HIDDEN core key that hands a hostile value straight back.
 
-    A HIDDEN field whose default is a list/dict falls through _validate_one to the
-    container tail, which stores it verbatim (dict) or with only a per-element
-    str() (list). Every such key must therefore be either engine_managed (gated
-    here) or intercepted by its own validator above the tail. If this fails, a new
-    key reached the passthrough without anyone classifying it - decide which it is
-    rather than deleting the assertion."""
+    PROBED, not inferred. The obvious guard - "HIDDEN with a list/dict default" -
+    is WRONG, and quietly so: the tail of the HIDDEN branch in _validate_one is a
+    bare `return val`, reached by ANY hidden field that has no dedicated coercion
+    branch above it, whatever its default's type. bugreport_upload_url and
+    update_url have str/None defaults and still return a dict unchanged. Asking
+    the validator what it actually does is the only guard that cannot drift."""
     from localm import settings_schema as ss
-    from localm.config import DEFAULT_CONFIG
+    hostile = {"evil": "payload"}
+    out = set()
+    for f in ss.CORE_FIELDS:
+        if f.widget != ss.Widget.HIDDEN:
+            continue
+        try:
+            got = ss.validate_update({f.key: hostile})
+        except ValueError:
+            continue                      # rejected outright - not a passthrough
+        if got.get(f.key) is hostile:     # identity: stored exactly as supplied
+            out.add(f.key)
+    return out
 
-    hidden_containers = {
-        f.key for f in ss.CORE_FIELDS
-        if f.widget == ss.Widget.HIDDEN
-        and isinstance(DEFAULT_CONFIG.get(f.key), (list, dict))}
-    # key_presets looks like the class but is intercepted by _validate_key_presets
-    # (it checks each {name, scopes} bundle and rejects unknown scopes), so it is
-    # never stored unvalidated and does not need the owner gate.
-    validated_elsewhere = {"key_presets"}
-    assert hidden_containers == ss.engine_managed_keys() | validated_elsewhere, (
-        "a HIDDEN container key is neither engine_managed nor validated: "
-        f"{hidden_containers - ss.engine_managed_keys() - validated_elsewhere}")
+
+def test_no_key_is_stored_verbatim_without_an_owner_gate():
+    """The invariant that actually matters, and the guard against a FUTURE key
+    joining the passthrough unnoticed.
+
+    If PATCH /v1/config will store a value it never inspected, a non-owner
+    config:write key decides that value - so every such key must be owner-gated,
+    by either flag. If this fails, a new key reached the passthrough: gate it, or
+    give it a real validator. Do not delete the assertion."""
+    from localm import settings_schema as ss
+    gated = ss.engine_managed_keys() | ss.admin_only_keys()
+    ungated = _verbatim_hidden_keys() - gated
+    assert not ungated, (
+        "these keys are stored VERBATIM from a PATCH body but need no owner: "
+        f"{sorted(ungated)}")
+
+
+def test_the_verbatim_set_is_exactly_what_we_think_it_is():
+    """Pin the membership too, so a key LEAVING the set (someone gives it a real
+    validator) is also visible, not just one joining it."""
+    assert _verbatim_hidden_keys() == {
+        "plugins",                  # engine_managed: per-plugin state
+        "bugreport_upload_url",     # admin_only: where bug reports are POSTed
+        "bugreport_upload_token",
+        "update_url",               # admin_only: the update channel base
+        "update_token",
+    }
+
+
+def test_key_presets_is_not_a_passthrough():
+    """It LOOKS like the class (HIDDEN, list-of-dicts default) but is intercepted
+    by _validate_key_presets, which rejects unknown scopes - so it needs no owner
+    gate. Pinned because 'looks like the class' is what made the first version of
+    this guard wrong."""
+    from localm import settings_schema as ss
+    assert "key_presets" not in _verbatim_hidden_keys()
+    with pytest.raises(ValueError, match="unknown scope"):
+        ss.validate_update({"key_presets": [{"name": "x", "scopes": ["not-a-scope"]}]})
 
 
 def test_engine_managed_keys_are_exactly_the_plugin_state_keys():

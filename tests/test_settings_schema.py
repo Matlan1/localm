@@ -174,11 +174,32 @@ def test_rag_indexing_fields_are_owner_only():
         assert by_key[key].admin_only is True, f"{key} must be owner-only"
 
 
+# Outbound-target deployment keys: each names WHERE data goes or comes from, so
+# each widens network reach the same way net_allow_private does. They are also
+# stored VERBATIM by validate_update (no coercion branch above the HIDDEN tail),
+# so HIDDEN was doing no gating at all and a non-owner config:write key could
+# re-point the live "Send to maintainer" channel (found sweeping finding X8).
+OUTBOUND_OWNER_KEYS = {"bugreport_upload_url", "bugreport_upload_token",
+                       "update_url", "update_token"}
+
+
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
     # disables the SSRF guard (a network trust boundary). Both are owner-only, so
     # a non-owner config:write key cannot flip either (pentest finding LM-PT-001).
-    assert ss.admin_only_keys() == RAG_OWNER_KEYS | {"net_allow_private"}
+    # The bug-report / update endpoints are the same class of boundary.
+    assert ss.admin_only_keys() == (
+        RAG_OWNER_KEYS | {"net_allow_private"} | OUTBOUND_OWNER_KEYS)
+
+
+def test_outbound_endpoint_keys_are_owner_only():
+    """Re-pointing bugreport_upload_url redirects a LIVE channel (it ships with a
+    real default) that POSTs collected diagnostics plus whatever the user typed,
+    and update_url falls back to it. HIDDEN never gated the write - PATCH
+    /v1/config stored these verbatim - so this flag is what makes them owner-only."""
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    for key in OUTBOUND_OWNER_KEYS:
+        assert by_key[key].admin_only is True, f"{key} must be owner-only"
 
 
 def test_net_allow_private_is_admin_only():

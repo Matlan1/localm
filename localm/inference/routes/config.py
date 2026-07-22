@@ -81,9 +81,11 @@ def register(app: FastAPI, ctx) -> None:
         body = {k: v for k, v in body.items() if k not in readonly}
         # REC-OWNER-SETTINGS: an admin_only key widens a trust boundary, so a
         # non-owner config:write key must not set it. Today that is the rag_*
-        # indexing settings (which host folders the indexer may read) and
+        # indexing settings (which host folders the indexer may read),
         # net_allow_private (which DISABLES the SSRF guard, widening network reach)
-        # - a filesystem boundary and a network one. Mirrors the media
+        # and the bugreport_upload_* / update_* endpoints (WHERE collected
+        # diagnostics are sent and where updates are fetched from) - a filesystem
+        # boundary and three network ones. Mirrors the media
         # launch_cmd/api_url guard: require an ADMIN principal; open mode (the
         # trusted local owner) has caller_scopes None and passes. Checked on the
         # RAW body before validation, so an unauthorized caller is refused up front

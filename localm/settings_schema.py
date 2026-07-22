@@ -395,22 +395,31 @@ CORE_FIELDS: list = [
     # HIDDEN: the maintainer sets these in config.json when preparing a tester
     # build (see tools/bugreport-proxy/). Not rendered in the form, so a tester on
     # a shared build does not see or change the proxy URL / shared secret.
+    #
+    # admin_only, all four: these name an OUTBOUND network target, so they widen
+    # trust reach exactly like net_allow_private does. bugreport_upload_url is
+    # where "Send to maintainer" POSTs the report (diagnostics plus whatever the
+    # user typed) and it ships with a real default, so re-pointing it redirects a
+    # live channel, not a dormant one; update_url is the updater's base and falls
+    # back to it. HIDDEN is not itself a gate - PATCH /v1/config stores these
+    # verbatim (no coercion branch, so _validate_one's tail returns them as given),
+    # which without this flag let a non-owner config:write key set them.
     SettingField("bugreport_upload_url", Widget.HIDDEN, "Bug-report upload URL",
                  "Endpoint the in-app 'Send to maintainer' button POSTs the report "
                  "to (the bug-report proxy). Blank = no upload channel.",
-                 group="Bug reports"),
+                 group="Bug reports", admin_only=True),
     SettingField("bugreport_upload_token", Widget.HIDDEN, "Bug-report upload token",
                  "Optional shared secret the proxy may require, sent as a header. "
                  "Set in config.json, not here.",
-                 group="Bug reports"),
+                 group="Bug reports", admin_only=True),
     SettingField("update_url", Widget.HIDDEN, "Update endpoint URL",
                  "Override for the updater's Worker base (defaults to the bug-report "
                  "URL when blank). Set in config.json, not here.",
-                 group="Bug reports"),
+                 group="Bug reports", admin_only=True),
     SettingField("update_token", Widget.HIDDEN, "Update endpoint token",
                  "Override shared secret for the updater (defaults to the bug-report "
                  "token when blank). Set in config.json, not here.",
-                 group="Bug reports"),
+                 group="Bug reports", admin_only=True),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
