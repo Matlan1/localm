@@ -197,13 +197,28 @@ export function slimArgs(args) {
   return slim;
 }
 
+/** Head-line hint for a set_todos call: progress plus the item being worked on,
+ *  so the user sees the model's plan move without opening the card. Mirrors
+ *  todos_summary() in coder/tools/tasks.py; "" for anything that is not a todo
+ *  list. Markers: [x] done, [>] in progress, anything else pending. */
+export function todoHint(items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  const lines = items.map((t) =>
+    String(t && typeof t === "object" ? (t.text ?? "") : (t ?? "")).trim());
+  const done = lines.filter((l) => /^\[[xXvV✓✔]\]/.test(l)).length;
+  const active = lines.find((l) => /^\[[>*~@]\]/.test(l)) || "";
+  const label = `${done}/${lines.length} done`;
+  return active ? `${label} · ${active.replace(/^\[.\]\s*/, "")}` : label;
+}
+
 export function buildToolCard(ev) {
   const card = el("div", "tool-card");
   card.dataset.t0 = String(Date.now());
   const inner = el("div", "inner");
   const head = el("div", "head");
   head.appendChild(el("span", "name", ev.tool));
-  const hintVal = ev.args?.path || ev.args?.command || ev.args?.pattern || ev.args?.url || "";
+  const hintVal = ev.args?.path || ev.args?.command || ev.args?.pattern
+    || ev.args?.url || todoHint(ev.args?.items) || "";
   head.appendChild(el("span", "hint", String(hintVal).slice(0, 120)));
   head.appendChild(el("span", "state", "…"));
   const body = el("div", "body");

@@ -258,7 +258,9 @@ class _PersistenceMixin:
         """Persist current conversation state so it can be resumed later.
 
         No-op in privacy mode - the checkpoint contains the full
-        conversation, which privacy mode promises never to write to disk."""
+        conversation, which privacy mode promises never to write to disk.
+        The task list rides along in the same file and is therefore covered by
+        the same promise: in privacy mode it stays in memory only."""
         if self.mode == SessionMode.PRIVACY:
             return
         data = {
@@ -267,6 +269,9 @@ class _PersistenceMixin:
             "turns": self._turns,
             "total_tokens": self._total_tokens,
             "messages": self._messages,
+            # The model's own task list (tools/tasks.py). An older build simply
+            # ignores the extra key, and an older checkpoint restores as no todos.
+            "todos": self.get_todos(),
         }
         p = self._checkpoint_path
         try:
@@ -299,10 +304,18 @@ class _PersistenceMixin:
         return None
 
     def resume_checkpoint(self, data: dict) -> None:
-        """Restore agent state from a checkpoint dict."""
+        """Restore agent state from a checkpoint dict.
+
+        This is the single restore path for every caller (the REPL /resume, the
+        CLI resume flag, and the GUI session), so restoring the task list here
+        is what makes it survive a pause/resume everywhere. The file is plain
+        user-writable JSON, so the todos go back through normalize_todos rather
+        than being trusted as-is."""
+        from ..tools.tasks import normalize_todos
         self._messages     = data["messages"]
         self._turns        = data.get("turns", len(self._messages))
         self._total_tokens = data.get("total_tokens", 0)
+        self.set_todos(normalize_todos(data.get("todos")))
 
     def _undo_one(self, entry: dict) -> tuple[str, bool]:
         """Revert a single undo-stack entry. Returns (description, ok)."""
