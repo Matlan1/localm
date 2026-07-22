@@ -542,21 +542,26 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(f"coder task timed out after {timeout}s", is_error=True)
 
         # --output-format json pretty-prints with indent=2 (multi-line), and
-        # console messages (e.g. "attached to running server") print to stdout
-        # BEFORE it - so the JSON is neither the whole stdout nor its last
-        # line (that's just the closing brace). Find the last line that is a
-        # lone "{" (the JSON dict is always non-empty, so indent=2 always
-        # opens it on its own line) and parse from there to the end.
+        # console messages print to stdout BOTH BEFORE it ("attached to
+        # running server", the auto-start banner) AND AFTER it (`--mode
+        # full`'s "Session transcript saved -> <path>", found live 2026-07-22
+        # reporting a fully successful task as an error) - so the JSON is
+        # neither the whole stdout nor anchored to either end. Find each line
+        # that is a lone "{" (the JSON dict is always non-empty, so indent=2
+        # always opens it on its own line), newest first, and raw_decode from
+        # there: unlike json.loads, raw_decode stops at the object's closing
+        # brace and tolerates whatever trailing console text follows it.
         stdout = proc.stdout.strip()
         payload = None
         if stdout:
             lines = stdout.splitlines()
-            starts = [i for i, ln in enumerate(lines) if ln == "{"]
-            if starts:
+            decoder = json.JSONDecoder()
+            for i in reversed([n for n, ln in enumerate(lines) if ln == "{"]):
                 try:
-                    payload = json.loads("\n".join(lines[starts[-1]:]))
+                    payload, _ = decoder.raw_decode("\n".join(lines[i:]))
+                    break
                 except json.JSONDecodeError:
-                    payload = None
+                    continue
 
         if payload is None:
             detail = proc.stderr.strip() or stdout or f"exit code {proc.returncode}"
