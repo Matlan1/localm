@@ -162,7 +162,18 @@ class Agent(
         self._last_response_fp: str = ""       # last LLM response (repeated-scaffold breaker)
         self._repeat_response_count: int = 0   # consecutive identical responses
         self._compact_warned: bool = False
-        self._last_run_ok: bool = True    # False when the last _loop hit max_turns
+        # Per-run: False when the LAST _loop failed (max_turns, a circuit breaker,
+        # a stop). _loop re-arms it to True at the start of every run, so one bad
+        # turn in a multi-turn session (REPL / GUI) does not mislabel every later
+        # turn as a failure - the GUI reports this per turn ("ok" on the final
+        # event) and the CLI turns it into an exit code.
+        self._last_run_ok: bool = True
+        # Session-level: True once ANY run this session failed. _last_run_ok alone
+        # used to carry both meanings because nothing ever re-armed it; the
+        # close-time episodic reflection (session.py) needs the session-wide answer
+        # and keeps reading this one, so making _last_run_ok per-run does not
+        # silently narrow "did this session fail" to "did the last run fail".
+        self._had_any_failure: bool = False
         # True when the last _loop ended because the USER stopped it (Ctrl-C, or
         # declining "keep going?"), as opposed to a genuine failure (max_turns, a
         # circuit breaker). Both clear _last_run_ok, but only the latter carries a
@@ -471,7 +482,12 @@ class Agent(
 
     @property
     def last_run_ok(self) -> bool:
-        """False if the last run ended by hitting max_turns rather than completing normally."""
+        """False if the LAST run failed (max_turns, a circuit breaker, a stop)
+        rather than completing normally.
+
+        Per-run, not per-session: a fresh run re-arms it, so a later healthy turn
+        in the same session reports ok. ``_had_any_failure`` is the session-wide
+        answer."""
         return self._last_run_ok
 
     @property

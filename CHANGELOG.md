@@ -300,6 +300,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   fall back to the old single-device behavior whenever the combined reading is
   unmeasurable; the refusal message on a split box now names the split's
   combined capacity instead of "this GPU".
+- **One failed coder turn no longer marks every later turn as failed.** In a
+  coder session with more than one turn (the GUI, or the REPL), a turn that
+  ended badly - the turn cap, a circuit breaker, or your own stop - left the
+  session flagged as failed for good. Every turn after it was reported failed
+  too, however cleanly it finished, so the GUI kept labelling healthy work as a
+  failure and `localm coder --ci` could exit non-zero on a task that had
+  actually succeeded. Each turn is now judged on its own. Sessions still
+  remember that something went wrong earlier, so the close-time lesson the coder
+  writes to its episodic memory is unchanged: a session that stumbled and then
+  recovered still records what went wrong, and is no longer described as
+  unfinished when it did finish.
 
 ### Changed
 - **Coder: `grep` is much faster on real repositories, and its limits are now

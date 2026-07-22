@@ -135,6 +135,14 @@ class _LoopMixin:
         self._stop_requested = False       # a stale stop must not kill a new task
         self._user_stopped = False         # per-run: a stop in an EARLIER run must
                                            # not mute this run's failure lesson
+        self._last_run_ok = True           # per-run: an EARLIER run's failure must
+                                           # not label THIS run failed. Without this
+                                           # the flag only ever went False, so after
+                                           # one bad turn every later turn of a REPL
+                                           # or GUI session was reported as failed
+                                           # too. The session-wide "did anything
+                                           # fail" answer lives in _had_any_failure,
+                                           # recorded in the finally below.
         start_turns = self._turns          # turns used by *this* task only
         budget_escalated = False           # uncertainty escalation fires at most once per task
         # Per-task one-shot flags for the no-tool-calls handler (split out below):
@@ -313,6 +321,15 @@ class _LoopMixin:
         else:
             # Clean finish - discard any stale checkpoint
             self.clear_checkpoint()
+
+        finally:
+            # Fold this run's outcome into the session-level flag before the
+            # per-run one is re-armed by the next run. One place, so every
+            # failure path (max_turns, either circuit breaker, a stop) is
+            # captured and a future one cannot forget to - the close-time
+            # episodic reflection depends on this not being lost.
+            if not self._last_run_ok:
+                self._had_any_failure = True
 
         return final_response
 
