@@ -835,6 +835,36 @@ class TestRunCoderTask:
         # server under the WRONG project root, so attach-back never finds it.
         assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
 
+    def test_subprocess_env_pins_the_servers_home_and_code(self, coder_active, tmp_path):
+        """The coder chain re-resolves BOTH the localm data home and (via
+        `-m`'s cwd-first sys.path) the localm PACKAGE from ambient state at
+        every process boundary - and this handler deliberately runs the child
+        in the TASK's directory (the cwd assertion above). A server whose own
+        home came from ITS cwd (the contained-default fallback - exactly the
+        documented `localm mcp` source-checkout offload setup) therefore
+        handed the chain a DIFFERENT, empty home: a model registered via
+        pull_model did not exist there, and the coder's auto-started server
+        died with 'Model not found' (exit 1) into an invisible console
+        (reproduced live 2026-07-21). The handler must pin ITS OWN resolved
+        identity into the child env: LOCALM_HOME (same data home), and
+        PYTHONSAFEPATH + a PYTHONPATH entry for its own package root (same
+        code, regardless of what a task directory happens to contain)."""
+        import os
+        from pathlib import Path
+        import localm as _pkg
+        from localm.config import home_dir
+        server, _ = _server()
+        payload = {"success": True, "response": "ok", "turns": 1, "total_tokens": 1}
+        fake = MagicMock(stdout=json.dumps(payload, indent=2) + "\n", stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake) as mock_run:
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is False
+        env = mock_run.call_args.kwargs["env"]
+        assert env["LOCALM_HOME"] == str(home_dir())
+        assert env["PYTHONSAFEPATH"] == "1"
+        pkg_root = str(Path(_pkg.__file__).resolve().parent.parent)
+        assert pkg_root in env.get("PYTHONPATH", "").split(os.pathsep)
+
     def test_agent_reported_failure_is_surfaced_as_error(self, coder_active, tmp_path):
         server, _ = _server()
         payload = {"success": False, "response": "hit max turns", "turns": 40,
@@ -960,6 +990,25 @@ class TestNewToolCalls:
         assert resp["result"]["isError"] is False
         assert "doctor-ok" in resp["result"]["content"][0]["text"]
         mock_run.assert_called_once()
+
+    def test_run_doctor_env_pins_the_servers_home_and_code(self):
+        """Same identity pinning as run_coder_task's own env test: a doctor
+        child that re-resolves home/code from ambient state reports on the
+        WRONG install whenever this server's home came from its cwd (the
+        source-checkout `localm mcp` setup)."""
+        import os
+        from pathlib import Path
+        import localm as _pkg
+        from localm.config import home_dir
+        server, _ = _server()
+        fake_proc = MagicMock(stdout="doctor-ok", stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake_proc) as mock_run:
+            _req(server, "tools/call", {"name": "run_doctor", "arguments": {}})
+        env = mock_run.call_args.kwargs["env"]
+        assert env["LOCALM_HOME"] == str(home_dir())
+        assert env["PYTHONSAFEPATH"] == "1"
+        pkg_root = str(Path(_pkg.__file__).resolve().parent.parent)
+        assert pkg_root in env.get("PYTHONPATH", "").split(os.pathsep)
 
     def test_list_plugins(self):
         server, _ = _server()

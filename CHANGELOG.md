@@ -46,6 +46,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is logged either way.
 
 ### Fixed
+- **The MCP server's `run_coder_task` and `run_doctor` now always act on the
+  server's own install and data.** Their helper processes re-resolved the
+  localm data directory (and even which localm code to run) from the working
+  directory at every step, and a coder task deliberately runs in YOUR
+  project's directory - so when the MCP server itself ran from a source
+  checkout (its data home coming from its own folder), the coder chain
+  looked in a different, empty data home: a model you had just pulled came
+  back "Model not found", and the real error was printed into a console
+  window an MCP client never sees. The server now pins its own data home and
+  code onto every helper it starts. Relatedly, when the coder auto-starts a
+  background server for a caller without a terminal (an MCP client, CI, a
+  script), the server's output is now captured and its actual error shown on
+  failure, instead of opening a console window nobody can look at.
 - **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
   long conversation grows the context window mid-generation, the model worker
   decides whether the grown KV cache still fits in VRAM or must move to system
