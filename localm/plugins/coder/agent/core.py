@@ -198,6 +198,12 @@ class Agent(
         # last_tool: str}. The first-seen original is kept so session_diff()
         # can show the cumulative change, not just the last edit.
         self._changed_files: dict[str, dict] = {}
+        # Work done by ISOLATED children (their own git worktree), which is
+        # deliberately NOT in _changed_files: it never touched this tree, and
+        # merging its keys would fabricate diffs (keys are relative to the writing
+        # agent's cwd, and session_diff re-resolves them against ours). Surfaced
+        # as a separate labelled section in the human-facing views only.
+        self._delegated: list = []
         # Bounded trace of tool/command failures this session, fed into the
         # close-time episode reflection so it can capture what_failed (audit
         # cluster 13). Newest kept, capped at _MAX_ERROR_TRACE.
