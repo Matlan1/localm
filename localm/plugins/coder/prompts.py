@@ -341,7 +341,8 @@ def build_system_prompt(
     project_map:
         Codebase index injected as context; omitted when empty.
     memory:
-        Content of LOCALCODER.md; injected under "## Project Memory".
+        Content of LOCALCODER.md; injected under "## Project Memory". Already
+        capped by memory.load_memory, which leaves a visible notice when it cut.
     model_name:
         Used to select per-family prompt tuning (Gemma / thinking / small / default).
     extra_tool_docs:
@@ -350,7 +351,8 @@ def build_system_prompt(
     custom_instructions:
         User-authored guidance (the ``--system`` flag or ``.localcoder/system.md``);
         injected under "## User Instructions". Distinct from ``memory``: these are
-        hand-written directives the user wants followed, not auto-managed facts.
+        hand-written directives the user wants followed, rather than the running
+        list of project facts they keep with /remember.
     """
     family = detect_model_family(model_name) if model_name else "default"
 
@@ -362,8 +364,8 @@ def build_system_prompt(
     if memory:
         memory_section = f"\n## Project Memory\n\n{memory}\n"
 
-    # User-authored directives carry more weight than auto-managed memory, so they
-    # get their own clearly-labelled section right after it.
+    # User-authored directives carry more weight than the project-memory facts, so
+    # they get their own clearly-labelled section right after it.
     custom_section = ""
     if custom_instructions:
         custom_section = f"\n## User Instructions\n\n{custom_instructions}\n"

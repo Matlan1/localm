@@ -95,6 +95,7 @@ class Agent(
         # into this submodule when agent.py became a package).
         load_memory = _agent.load_memory
         load_custom_instructions = _agent.load_custom_instructions
+        cap_user_instructions = _agent.cap_user_instructions
         make_audit_log = _agent.make_audit_log
         self.backend        = backend
         self.cwd            = cwd
@@ -208,8 +209,11 @@ class Agent(
         # from the new cwd). Distinct from project memory above.
         self._system_override: Optional[str] = custom_instructions
         self._custom_instructions: str = (
-            custom_instructions if custom_instructions is not None
+            cap_user_instructions(custom_instructions) if custom_instructions is not None
             else load_custom_instructions(cwd))
+        # Say so at startup when either file was too big to inject whole (or could
+        # not be read), so a capped prompt is never a silent surprise.
+        self._warn_injected_file_limits()
 
         self._init_episodic_memory(cwd)
         self._init_provenance()

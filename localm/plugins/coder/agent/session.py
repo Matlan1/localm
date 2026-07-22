@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
-from ..memory import forget, remember
+from ..memory import cap_user_instructions, forget, remember
 from ..prompts import build_system_prompt
 from ..audit import SessionMode
 
@@ -66,9 +66,11 @@ class _SessionMixin:
         # An explicit --system override persists across a cwd change; otherwise
         # re-read the new cwd's .localcoder/system.md.
         self._custom_instructions = (
-            self._system_override if self._system_override is not None
+            cap_user_instructions(self._system_override)
+            if self._system_override is not None
             else load_custom_instructions(cwd))
         self._rebuild_system_prompt()
+        self._warn_injected_file_limits()
 
     def reindex(self) -> int:
         """Rebuild the full project map and regenerate the system prompt."""
@@ -76,11 +78,34 @@ class _SessionMixin:
         self._rebuild_system_prompt()
         return self._project_map.file_count()
 
+    def _warn_injected_file_limits(self) -> None:
+        """Tell the user when project memory or user instructions did NOT go into
+        the system prompt whole (over the injection budget, or unreadable).
+
+        Both surfaces, because they have different channels: ``print_warning``
+        reaches the CLI (which registers no event sink, so ``_emit`` is a no-op
+        there), and an ``info`` event reaches the GUI (which renders ``info`` and
+        would drop an unknown ``warning`` type). Capping without this would be a
+        silent truncation, which AGENTS.md rule 5 forbids.
+
+        Called from every site that (re)loads those files, so the user hears about
+        it right when they cause it - at session start, on /remember and /forget,
+        and on a cwd change - rather than never.
+        """
+        print_warning = _agent.print_warning  # live: honour a patched print_warning
+        for text in (_agent.memory_warning(self.cwd),
+                     _agent.custom_instructions_warning(self.cwd,
+                                                        self._system_override)):
+            if text:
+                print_warning(text)
+                self._emit("info", text=text)
+
     def reload_memory(self) -> str:
         """Re-read the memory file from disk and rebuild the system prompt."""
         load_memory = _agent.load_memory  # live: honour a patched agent.load_memory
         self._memory = load_memory(self.cwd)
         self._rebuild_system_prompt()
+        self._warn_injected_file_limits()
         return self._memory
 
     def remember(self, text: str) -> Path:
