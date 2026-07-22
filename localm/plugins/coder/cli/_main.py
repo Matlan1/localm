@@ -468,12 +468,30 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
         ep = store.restore(restore_episode_id)
         if ep is not None:
             click.echo(f"Restored episode {ep.id}: {ep.lesson or ep.summary}")
+        elif not store.last_forgotten_ok:
+            # The archive EXISTS but could not be read, so "no such id" would be a
+            # claim we cannot make: the episode may well be sitting in there,
+            # recoverable, and a retry once the file is readable would find it.
+            # Rule 5 - do not report a clean negative for a step that failed.
+            click.echo(
+                f"Could not read the episode archive for {work_dir}, so episode "
+                f"{restore_episode_id} could not be looked up. The archive file "
+                f"exists ({store.archive_path.name}); it may be locked by another "
+                f"process. Nothing was changed - try again.", err=True)
         else:
             click.echo(f"No archived episode with id {restore_episode_id}.", err=True)
         return True
 
     if show_archive:
         rows = store.forgotten()
+        if not rows and not store.last_forgotten_ok:
+            # Same distinction as above: an unreadable archive is not an empty one.
+            click.echo(
+                f"Could not read the episode archive for {work_dir}. The archive "
+                f"file exists ({store.archive_path.name}) but could not be read, "
+                f"so this list would be INCOMPLETE - it may be locked by another "
+                f"process. Try again.", err=True)
+            return True
         if not rows:
             click.echo("No dropped episodes archived for this project.")
             return True

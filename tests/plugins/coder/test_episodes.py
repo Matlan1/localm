@@ -485,6 +485,304 @@ def test_all_raises_once_the_retry_budget_is_exhausted(home, tmp_path, monkeypat
 
 
 # --------------------------------------------------------------------------- #
+#  An UNREADABLE archive is not an EMPTY one (AGENTS.md rule 5)                #
+# --------------------------------------------------------------------------- #
+#
+# forgotten() branched OSError from absent and logged it, but still returned []
+# with no way for a caller to tell the two apart - so the CLI printed "No dropped
+# episodes archived for this project" / "No archived episode with id X" while the
+# user's recovery copies existed and merely could not be read. Only a debug log
+# distinguished them, which no user reads. These pin the distinction at BOTH the
+# store and the CLI, so a revert to the silent form goes red.
+
+
+def _lock_reads_of(monkeypatch, target):
+    """Make Path.read_text raise for *target* only, leaving every other path
+    readable: an existing file that cannot be read (the transient Windows AV /
+    indexer lock storekit.py documents). Fault injected at the DISK BOUNDARY, so
+    the real store code under test runs unmocked."""
+    from pathlib import Path
+    real_read_text = Path.read_text
+
+    def locked(self, *a, **kw):
+        if self == target:
+            raise PermissionError(13, f"simulated transient lock on {self}")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+
+    def restore():
+        monkeypatch.setattr(Path, "read_text", real_read_text)
+    return restore
+
+
+def _seed_one_archived(store_cls, tmp_path, monkeypatch):
+    """A store whose archive holds exactly one dropped episode."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
+    store = store_cls(tmp_path)
+    dropped = store.add(ep_mod.Episode(task="rename the config loader",
+                                       lesson="config lives in one place"))
+    store.add(ep_mod.Episode(task="bump the pillow dependency",
+                             lesson="pin the minor version"))
+    assert [r["id"] for r in store.forgotten()] == [dropped.id]
+    return store, dropped
+
+
+def test_unreadable_archive_is_flagged_not_reported_as_empty(home, tmp_path,
+                                                             monkeypatch, caplog):
+    """The pin for finding 1: forgotten() must tell a caller that the empty list
+    it just returned is a READ FAILURE, not an empty archive."""
+    import logging
+
+    store, _dropped = _seed_one_archived(EpisodeStore, tmp_path, monkeypatch)
+    assert store.last_forgotten_ok is True             # the readable baseline
+
+    restore = _lock_reads_of(monkeypatch, store.archive_path)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        rows = store.forgotten()
+    restore()
+
+    assert rows == []                                  # non-destructive empty
+    assert store.last_forgotten_ok is False, (
+        "an unreadable archive must be distinguishable from an empty one")
+    assert any("could not be read" in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+
+def test_absent_archive_reports_ok_not_a_read_failure(home, tmp_path):
+    """The fires-control for the above: a genuinely ABSENT archive is normal and
+    must NOT set the failure flag, or the CLI would cry wolf on every fresh
+    project. Without this, a store that hardcoded last_forgotten_ok = False would
+    pass the test above."""
+    store = EpisodeStore(tmp_path)
+    assert not store.archive_path.is_file()
+    assert store.forgotten() == []
+    assert store.last_forgotten_ok is True
+
+
+def test_forgotten_ok_flag_resets_between_calls(home, tmp_path, monkeypatch):
+    """The flag describes the LAST call, not a sticky one-way latch: once the file
+    is readable again the caller must stop being told the list is incomplete."""
+    store, _dropped = _seed_one_archived(EpisodeStore, tmp_path, monkeypatch)
+    restore = _lock_reads_of(monkeypatch, store.archive_path)
+    store.forgotten()
+    assert store.last_forgotten_ok is False
+    restore()
+
+    rows = store.forgotten()                            # readable again
+    assert len(rows) == 1 and store.last_forgotten_ok is True
+
+
+def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
+                                                                 monkeypatch, caplog):
+    """restore() re-reads the archive after add() and rewrites it minus the
+    restored id. If that re-read FAILS, the empty stand-in must NOT be written
+    over the file - that turns a transient read error into permanent loss of every
+    remaining recovery copy (the trap memory/store.py's propose_corrections
+    guards)."""
+    import logging
+    from pathlib import Path
+
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
+    store = ep_mod.EpisodeStore(tmp_path)
+    a = store.add(ep_mod.Episode(task="rename the config loader",
+                                 lesson="config lives in one place"))
+    store.add(ep_mod.Episode(task="bump the pillow dependency",
+                             lesson="pin the minor version"))
+    b = store.add(ep_mod.Episode(task="delete the unused sprite sheet",
+                                 lesson="check references first"))
+    archived_before = {r["id"] for r in store.forgotten()}
+    assert len(archived_before) == 2                    # two recovery copies exist
+
+    # Fail ONLY the post-add re-read: let the first read (which finds the record to
+    # restore) and add()'s own reads through, then lock the archive.
+    real_read_text = Path.read_text
+    seen = {"n": 0}
+
+    def flaky(self, *a, **kw):
+        if self == store.archive_path:
+            seen["n"] += 1
+            if seen["n"] >= 2:                          # the post-add re-read onward
+                raise PermissionError(13, "simulated transient lock")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        back = store.restore(a.id)
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+
+    assert back is not None and back.id == a.id         # the restore itself worked
+    assert a.id in {e.id for e in store.all()}          # it is live
+    survived = {r["id"] for r in store.forgotten()}
+    assert archived_before <= survived, (
+        "the unreadable re-read wiped recovery copies it could not even see")
+    assert b.id in {e.id for e in store.all()} or b.id in survived
+    assert any("unreadable" in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+
+def test_cli_says_the_archive_is_unreadable_not_empty(home, tmp_path, monkeypatch):
+    """The user-facing half of finding 1: --episodes-archive and --restore-episode
+    must not print a clean "nothing here" while the archive exists and could not be
+    read. That is the exact absent-vs-unreadable collapse rule 5 forbids."""
+    from click.testing import CliRunner
+
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setattr(PluginManager, "is_active", lambda self, name: True)
+    store, dropped = _seed_one_archived(EpisodeStore, tmp_path, monkeypatch)
+
+    from localm.plugins.coder.cli import main
+    runner = CliRunner()
+    restore = _lock_reads_of(monkeypatch, store.archive_path)
+    listing = runner.invoke(main, ["--cwd", str(tmp_path), "--episodes-archive"])
+    single = runner.invoke(main, ["--cwd", str(tmp_path), "--restore-episode",
+                                  dropped.id])
+    restore()
+
+    for r in (listing, single):
+        out = r.output.lower()
+        assert "could not" in out and "archive" in out, r.output
+        assert "no dropped episodes archived" not in out, r.output
+        assert f"no archived episode with id {dropped.id}".lower() not in out, r.output
+
+
+def test_cli_still_says_empty_when_the_archive_really_is_empty(home, tmp_path,
+                                                              monkeypatch):
+    """Fires-control for the CLI half: with a readable (absent) archive the plain
+    empty message must still appear, so the test above is pinning the DISTINCTION
+    rather than just the presence of a scary string."""
+    from click.testing import CliRunner
+
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setattr(PluginManager, "is_active", lambda self, name: True)
+
+    from localm.plugins.coder.cli import main
+    r = CliRunner().invoke(main, ["--cwd", str(tmp_path), "--episodes-archive"])
+    assert "No dropped episodes archived for this project." in r.output
+    assert "could not" not in r.output.lower()
+
+
+# --------------------------------------------------------------------------- #
+#  Concurrent WRITERS: a lost update CLOBBERS an episode with no archive copy  #
+# --------------------------------------------------------------------------- #
+#
+# add/forget/restore/consolidate each did all() -> mutate -> _write_all() with no
+# lock. Two writers on the same project (two sessions closing at once, or a
+# --forget-episode CLI run racing a session-close reflection) are last-writer-
+# wins, and an episode lost that way never reaches the archive - so it is
+# CLOBBERED, not dropped-recoverably, defeating the whole loss-averse design.
+# The pre-existing concurrency test covers reader-vs-replace only.
+
+
+def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
+        home, tmp_path):
+    """Two threads add() DISTINCT episodes to the same project concurrently. Every
+    episode either survives in the live log or has a recovery copy in the archive -
+    silently vanishing from both is the clobber this lock exists to prevent.
+
+    Each writer uses its OWN EpisodeStore instance, which is the real shape: the
+    race is across instances (a per-instance lock could not help), so the lock has
+    to be keyed by the store file."""
+    import threading
+
+    n_each = 25
+    ids: dict = {}
+    errors: list = []
+    start = threading.Barrier(2)
+
+    def writer(tag):
+        store = EpisodeStore(tmp_path)          # separate instance, same project
+        mine = []
+        try:
+            start.wait(5)
+            for i in range(n_each):
+                # Distinct subjects so nothing is a near-duplicate: a MERGE is a
+                # legitimate, archived drop, and this test is about the silent
+                # loss, so keeping them unmergeable keeps the assertion sharp.
+                ep = store.add(Episode(task=f"{tag} unrelated subject number {i}",
+                                       lesson=f"{tag} lesson {i}"))
+                mine.append(ep.id)
+        except Exception as e:                  # pragma: no cover - failure path
+            errors.append((tag, e))
+        ids[tag] = mine
+
+    threads = [threading.Thread(target=writer, args=(t,))
+               for t in ("alpha", "bravo")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == [], errors
+    written = {i for got in ids.values() for i in got}
+    assert len(written) == 2 * n_each, "both writers should have added their own"
+
+    live = {e.id for e in EpisodeStore(tmp_path).all()}
+    archived = {r.get("id") for r in EpisodeStore(tmp_path).forgotten()}
+    vanished = written - live - archived
+    assert not vanished, (
+        f"{len(vanished)} episode(s) were clobbered by a concurrent writer and "
+        f"never reached the archive, so they are unrecoverable: {sorted(vanished)}")
+
+
+def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path):
+    """The other writer-vs-writer shape from the finding: a --forget-episode CLI
+    run racing a session-close reflection add(). The forgotten episode must stay
+    forgotten (not resurrected by a stale snapshot write) and the concurrently
+    added ones must not be clobbered."""
+    import threading
+
+    seed_store = EpisodeStore(tmp_path)
+    victims = [seed_store.add(Episode(task=f"seeded distinct subject {i}",
+                                      lesson=f"seed lesson {i}")).id
+               for i in range(20)]
+
+    errors: list = []
+    added: list = []
+    start = threading.Barrier(2)
+
+    def forgetter():
+        store = EpisodeStore(tmp_path)
+        try:
+            start.wait(5)
+            for vid in victims:
+                store.forget(vid)
+        except Exception as e:                  # pragma: no cover - failure path
+            errors.append(("forget", e))
+
+    def adder():
+        store = EpisodeStore(tmp_path)
+        try:
+            start.wait(5)
+            for i in range(20):
+                added.append(store.add(
+                    Episode(task=f"fresh unrelated topic {i}",
+                            lesson=f"fresh lesson {i}")).id)
+        except Exception as e:                  # pragma: no cover - failure path
+            errors.append(("add", e))
+
+    threads = [threading.Thread(target=forgetter), threading.Thread(target=adder)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == [], errors
+    final = EpisodeStore(tmp_path)
+    live = {e.id for e in final.all()}
+    archived = {r.get("id") for r in final.forgotten()}
+
+    # Every forgotten victim is archived (recoverable) and none was resurrected.
+    assert not (set(victims) & live), "a stale write resurrected a forgotten episode"
+    assert set(victims) <= archived, "a forgotten episode never reached the archive"
+    # And the concurrent additions were not clobbered by the forgetter's writes.
+    lost = set(added) - live - archived
+    assert not lost, f"{len(lost)} concurrently added episode(s) were clobbered: {sorted(lost)}"
+
+
+# --------------------------------------------------------------------------- #
 #  Retrieval (BM25)                                                           #
 # --------------------------------------------------------------------------- #
 
