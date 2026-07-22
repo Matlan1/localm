@@ -294,7 +294,6 @@ class _Heartbeat(threading.Thread):
         # NOT `_stop`: threading.Thread already uses that name internally, and
         # shadowing it breaks join() at interpreter level.
         self._stopping = threading.Event()
-        self.lost = False          # our lock was taken over while we held it
 
     def run(self) -> None:
         while not self._stopping.wait(self._interval):
@@ -312,12 +311,12 @@ class _Heartbeat(threading.Thread):
             # record that waiter may have just written - if it got there first we
             # lose the create and find out below that the lock is now theirs.
             if self._create_exclusive():
-                _log.warning("rag lock %s was removed while this process still "
-                             "held it; re-established it", self._lockpath.name)
+                _note(f"the write lock file for "
+                      f"'{self._record.get('collection')}' was removed while "
+                      f"this process still held it; put it back.")
                 return True
             rec, _ = _read_record(self._lockpath)
         if isinstance(rec, dict) and rec.get("token") != token:
-            self.lost = True
             _note(f"another localm process took over the write lock on "
                   f"'{self._record.get('collection')}' while this process was "
                   f"still writing to it. Both may now be writing; check the "
@@ -415,9 +414,13 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
             rec, mtime = _read_record(lockpath)
             unreadable = rec is None and mtime is None
             if not unreadable:
-                if _is_stale(rec, mtime, stale_after):
-                    _reclaim(lockpath, rec, mtime)
-                    continue
+                if _is_stale(rec, mtime, stale_after) and _reclaim(lockpath, rec, mtime):
+                    continue      # removed: retry the create straight away
+                # A stale lock we could NOT remove (a permissions fault, a handle
+                # another process still has open, or a fresher lock that appeared
+                # under us) falls through to the bounded wait below. Retrying the
+                # reclaim from here instead would spin without ever consulting the
+                # deadline - a hang, dressed as a busy loop.
             # `unreadable` means the file existed for the create and was gone (or
             # unopenable) a syscall later. Usually the holder releasing, so retry -
             # but through the SAME deadline, never in a tight spin: a lock file we
@@ -472,8 +475,8 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
         rec, _ = _read_record(lockpath)
         if rec is not None and rec.get("token") != token:
             _note(f"the write lock on '{collection}' was taken over by another "
-                  f"localm process before this {op} finished; leaving their lock "
-                  f"in place.")
+                  f"localm process before this write finished; leaving their "
+                  f"lock in place.")
         elif rec is not None or lockpath.exists():
             try:
                 lockpath.unlink()
@@ -485,8 +488,9 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
                       f"{stale_after:.0f}s.")
 
 
-def _reclaim(lockpath: Path, rec: Optional[dict], mtime: Optional[float]) -> None:
-    """Remove a lock whose holder stopped proving it was alive.
+def _reclaim(lockpath: Path, rec: Optional[dict], mtime: Optional[float]) -> bool:
+    """Remove a lock whose holder stopped proving it was alive. True when the
+    file is gone afterwards and the caller may retry its create.
 
     Re-reads and compares the token first, so a lock that was released and
     freshly re-taken between our staleness judgement and this call is left
@@ -503,12 +507,19 @@ def _reclaim(lockpath: Path, rec: Optional[dict], mtime: Optional[float]) -> Non
         isinstance(current, dict) and isinstance(rec, dict)
         and current.get("token") == rec.get("token"))
     if not same:
-        return                    # somebody else's fresh lock now: not ours to remove
+        return False              # somebody else's fresh lock now: not ours to remove
     _note(f"reclaiming the write lock on "
           f"'{(rec or {}).get('collection', lockpath.stem)}': its holder "
           f"({describe_holder(rec)}) has not reported for {_duration(age)}, so it "
           f"appears to have crashed without releasing it.")
     try:
         lockpath.unlink()
-    except OSError:
-        pass                      # already gone: the acquire loop re-tries anyway
+    except FileNotFoundError:
+        pass                      # already gone; the acquire loop re-tries anyway
+    except OSError as e:
+        # We judged it abandoned but cannot remove it (no permission, or another
+        # process holds a handle to it). Say so and let the caller wait out its
+        # budget and refuse: silently looping on an unremovable file would hang.
+        _note(f"could not remove that lock file ({e}); waiting instead.")
+        return False
+    return True
