@@ -2912,7 +2912,13 @@ class TestGpuUsageSourceRobustness:
         This machine's real torch build IS ROCm/HIP (verified: torch.version.hip
         is set), so if the function fell back to a real `import torch` anyway,
         this would wrongly return True - the test only passes if the import was
-        genuinely skipped."""
+        genuinely skipped.
+
+        The resident-HIP fallback signal is pinned False so this test keeps its
+        one subject (the inflight race guard): with no HIP runtime resident the
+        no-torch answer must stay the conservative False. The signal's own
+        truth (and the True case) is covered by TestScopeGateAnswersWithoutTorch
+        and TestNativeHipRuntimeResident."""
         import localm.gpu_usage as gu
         import localm.discover as _discover
         import sys as _sys
@@ -2920,6 +2926,8 @@ class TestGpuUsageSourceRobustness:
         monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
         monkeypatch.delitem(_sys.modules, "torch", raising=False)
         monkeypatch.setattr(_discover, "_gpu_probe_inflight", True)
+        monkeypatch.setattr(_discover, "native_hip_runtime_resident",
+                            lambda: False)
 
         # Record every import attempt rather than raising from inside the patched
         # __import__: raw_reading_is_process_scoped() has its own broad
@@ -2954,10 +2962,12 @@ class TestGpuUsageSourceRobustness:
         with the same noisy STATUS_ENTRYPOINT_NOT_FOUND stderr trace and land
         in this function's own except anyway (reproduced 2026-07-21: 5 of the
         6 mixed-run traces came through here). It must consult
-        discover._torch_gpu_probe_known_doomed() and answer the conservative
-        False without ever starting the import. The detector is pinned True
-        (its truth table has its own tests in TestTorchProbeKnownDoomedSkip);
-        attempts are recorded, not raised on, per the sibling tests'
+        discover._torch_gpu_probe_known_doomed() and never start the import.
+        The detector is pinned True (its truth table has its own tests in
+        TestTorchProbeKnownDoomedSkip) and the resident-HIP fallback signal
+        pinned False, so the answer here must stay the conservative False;
+        the True side of the fallback is TestScopeGateAnswersWithoutTorch's
+        subject. Attempts are recorded, not raised on, per the sibling tests'
         rationale."""
         import builtins
         import sys as _sys
@@ -2970,6 +2980,8 @@ class TestGpuUsageSourceRobustness:
         monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
         monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
                             lambda: True)
+        monkeypatch.setattr(_discover, "native_hip_runtime_resident",
+                            lambda: False)
 
         _real_import = builtins.__import__
         attempted = []
@@ -2987,6 +2999,166 @@ class TestGpuUsageSourceRobustness:
             "attempt faults with a 'Windows fatal exception' trace on every "
             "call")
         assert result is False
+
+
+class TestScopeGateAnswersWithoutTorch:
+    """raw_reading_is_process_scoped() must answer from the resident-HIP-runtime
+    signal - never a blanket False - whenever torch cannot be consulted (a
+    mid-flight probe, the known-doomed DLL conflict, or torch simply not
+    installed). The torch-less case is the GGUF WORKER, the process that makes
+    the mid-generation context-grow sizing decision: the blanket False kept the
+    #706 device-global correction permanently dead there on exactly the
+    measured-blind platform (found live 2026-07-22 - the blindness belongs to
+    the HIP runtime, which torch and the bundled ggml query merely both read;
+    see gpu_usage's module docstring). A fresh `import torch` must still never
+    be started on the guarded paths."""
+
+    def _arm(self, monkeypatch, *, inflight, known_doomed, hip_resident):
+        import builtins
+        import sys as _sys
+
+        import localm.discover as _discover
+        import localm.gpu_usage as gu
+
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.delitem(_sys.modules, "torch", raising=False)
+        monkeypatch.setattr(_discover, "_gpu_probe_inflight", inflight)
+        monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
+                            lambda: known_doomed)
+        monkeypatch.setattr(_discover, "native_hip_runtime_resident",
+                            lambda: hip_resident)
+
+        real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *a, **k):
+            if name == "torch":
+                attempted.append(name)
+                raise ImportError("torch is not installed in this scenario")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+        return gu, attempted
+
+    def test_known_doomed_with_resident_hip_answers_true_without_import(
+            self, monkeypatch, caplog):
+        """The GGUF-worker case: the doomed import is skipped AND the answer is
+        the truthful True, surfaced at debug (rule 5), not the old blanket
+        False that silently disabled the correction."""
+        gu, attempted = self._arm(monkeypatch, inflight=False,
+                                  known_doomed=True, hip_resident=True)
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            result = gu.raw_reading_is_process_scoped()
+        assert result is True
+        assert "torch" not in attempted
+        assert "torch is not consultable" in caplog.text
+
+    def test_inflight_probe_with_resident_hip_answers_true_without_import(
+            self, monkeypatch):
+        gu, attempted = self._arm(monkeypatch, inflight=True,
+                                  known_doomed=False, hip_resident=True)
+        assert gu.raw_reading_is_process_scoped() is True
+        assert "torch" not in attempted
+
+    def test_torch_import_failure_with_resident_hip_answers_true(
+            self, monkeypatch):
+        """A GGUF-only install (no torch at all) on the HIP build: the import
+        legitimately fails, and the resident runtime still answers True."""
+        gu, attempted = self._arm(monkeypatch, inflight=False,
+                                  known_doomed=False, hip_resident=True)
+        assert gu.raw_reading_is_process_scoped() is True
+        assert attempted == ["torch"], "the permitted import must be attempted"
+
+    def test_torch_import_failure_without_resident_hip_stays_false(
+            self, monkeypatch):
+        """No torch AND no resident HIP runtime (a vulkan/cpu build's worker, a
+        torch-less NVIDIA box): no measured blindness to assert - False."""
+        gu, attempted = self._arm(monkeypatch, inflight=False,
+                                  known_doomed=False, hip_resident=False)
+        assert gu.raw_reading_is_process_scoped() is False
+
+    def test_torch_pci_bus_never_starts_a_doomed_import(self, monkeypatch):
+        """Opening the gate in the worker makes _torch_pci_bus the NEXT
+        potential doomed-import site (device_global_used_bytes calls it for the
+        ADL mapping): it must decline, not fault with the 0xc0000139 trace the
+        #771 skip had just eliminated."""
+        import builtins
+        import sys as _sys
+
+        import localm.discover as _discover
+        import localm.gpu_usage as gu
+
+        monkeypatch.delitem(_sys.modules, "torch", raising=False)
+        monkeypatch.setattr(_discover, "_gpu_probe_inflight", False)
+        monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed",
+                            lambda: True)
+
+        real_import = builtins.__import__
+        attempted = []
+
+        def _tracking_import(name, *a, **k):
+            if name == "torch":
+                attempted.append(name)
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _tracking_import)
+
+        assert gu._torch_pci_bus(0) is None
+        assert "torch" not in attempted, (
+            "_torch_pci_bus started a fresh `import torch` despite the "
+            "known-doomed DLL conflict")
+
+
+class TestDeviceGlobalUsedTorchlessAdlMapping:
+    """device_global_used_bytes() must still map ADL's device-global figure when
+    torch cannot supply a PCI bus id (the GGUF worker), via the unambiguous
+    single-AMD-adapter + single-requested-GPU rule - and must NOT apply that
+    rule where the raw reading is not known-blind (an NVIDIA dGPU next to an
+    idle AMD iGPU would otherwise get the WRONG adapter's usage subtracted from
+    an already device-global reading). Found live 2026-07-22: with torch
+    unmappable, the PDH fallback also declined on the real box (its LUID list
+    shows TWO adapter instances there), leaving the opened gate with no source
+    at all - this rule is what makes the worker correction actually operate."""
+
+    def _arm(self, monkeypatch, *, by_bus, blind, gpus_n=1):
+        import localm.gpu_usage as gu
+
+        monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
+        monkeypatch.setattr(gu, "_adl_used_by_bus", lambda: dict(by_bus))
+        monkeypatch.setattr(gu, "_torch_pci_bus", lambda index: None)
+        monkeypatch.setattr(gu, "raw_reading_is_process_scoped", lambda: blind)
+        monkeypatch.setattr(gu, "_pdh_adapter_used", lambda: [])
+        gpus = [{"index": i, "total": 16_000_000_000} for i in range(gpus_n)]
+        return gu, gpus
+
+    def test_single_amd_adapter_maps_without_torch_on_blind_platform(
+            self, monkeypatch):
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True)
+        assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
+
+    def test_rule_does_not_fire_where_reading_is_not_known_blind(
+            self, monkeypatch):
+        """The NVIDIA+iGPU safety case: same shape, but the platform is not the
+        measured-blind one - report nothing rather than pair the wrong adapter."""
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False)
+        assert gu.device_global_used_bytes(gpus) == {}
+
+    def test_rule_does_not_fire_with_two_amd_adapters(self, monkeypatch):
+        gu, gpus = self._arm(
+            monkeypatch, by_bus={45: 2_900_000_000, 3: 100}, blind=True)
+        assert gu.device_global_used_bytes(gpus) == {}
+
+    def test_rule_does_not_fire_for_two_requested_gpus(self, monkeypatch):
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True,
+                             gpus_n=2)
+        assert gu.device_global_used_bytes(gpus) == {}
+
+    def test_exact_torch_bus_mapping_still_wins(self, monkeypatch):
+        """With a usable pci_bus_id the exact pairing is used, exactly as
+        before - the torch-less rule is a fallback, not a replacement."""
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True)
+        monkeypatch.setattr(gu, "_torch_pci_bus", lambda index: 45)
+        assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
 
 
 @pytest.mark.usefixtures("_non_vulkan_host")
@@ -3089,6 +3261,57 @@ class TestAdlLatchRobustness:
 # ------------------------------------------------------------------ #
 #  The known-doomed torch import skip (native HIP runtime resident)   #
 # ------------------------------------------------------------------ #
+
+class TestNativeHipRuntimeResident:
+    """discover.native_hip_runtime_resident() - the shared platform signal for
+    both the known-doomed torch-import skip and the torch-less blindness answer
+    (gpu_usage.raw_reading_is_process_scoped). True exactly on: Windows + the
+    native lib loaded in this process + the resolved runtime shipping a HIP
+    ggml backend. The glob runs REAL detection over a real directory - only
+    the DLL name is faked (same posture as TestTorchProbeKnownDoomedSkip)."""
+
+    def _arm(self, monkeypatch, tmp_path, *, platform="win32",
+             native_loaded=True, hip_dll=True):
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.native_lib_loaded",
+            lambda: native_loaded)
+        rt = tmp_path / "native-runtime"
+        rt.mkdir()
+        (rt / ("ggml-hip.dll" if hip_dll else "ggml-vulkan.dll")).write_bytes(b"")
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            lambda: rt)
+
+    def test_true_on_resident_hip_build(self, monkeypatch, tmp_path):
+        self._arm(monkeypatch, tmp_path)
+        assert discover.native_hip_runtime_resident() is True
+
+    @pytest.mark.parametrize("absent", ["platform", "native", "hip"])
+    def test_false_when_any_condition_is_absent(
+            self, monkeypatch, tmp_path, absent):
+        kwargs = {}
+        if absent == "platform":
+            kwargs["platform"] = "linux"
+        elif absent == "native":
+            kwargs["native_loaded"] = False
+        else:
+            kwargs["hip_dll"] = False
+        self._arm(monkeypatch, tmp_path, **kwargs)
+        assert discover.native_hip_runtime_resident() is False
+
+    def test_check_failure_answers_false(self, monkeypatch, tmp_path):
+        """Fail closed: both consumers treat False as 'no special handling'."""
+        self._arm(monkeypatch, tmp_path)
+
+        def _boom():
+            raise RuntimeError("resolver broke")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+            _boom)
+        assert discover.native_hip_runtime_resident() is False
+
 
 class TestTorchProbeKnownDoomedSkip:
     """_list_gpus_probe() must skip its `import torch` attempt AT THE ROOT

@@ -813,6 +813,49 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
         return served, GPU_PROBE_TIMEOUT
 
 
+def native_hip_runtime_resident() -> bool:
+    """True when llama.cpp's bundled HIP-linked runtime is resident IN THIS
+    process on Windows: the native lib has been loaded (``_loader.load_lib``)
+    and the resolved runtime ships a HIP ggml backend (same shipped-DLL-set
+    authority as :func:`_native_backend_has_vulkan`).
+
+    This is the platform signal for TWO distinct conclusions, each taken by its
+    own caller with its own extra narrowing:
+
+    - :func:`_torch_gpu_probe_known_doomed` below: a FRESH ``import torch``
+      here collides with the resident HIP DLLs (it adds the torch-absence and
+      ``rocm_sdk`` conditions on top).
+    - ``gpu_usage.raw_reading_is_process_scoped``: the raw free-VRAM readings
+      this process can take are HIP-sourced - and the HIP runtime's reading on
+      Windows is the MEASURED-blind one (``ggml_backend_dev_memory`` and
+      torch's ``mem_get_info`` were measured byte-identical and equally blind;
+      see gpu_usage's module docstring and
+      dev-notes/vram-cross-process-blindness.md) - so blindness can be
+      answered truthfully even where torch itself cannot be consulted at all
+      (the GGUF worker).
+
+    Fails closed (False) when the check itself errors: both callers treat
+    False as "no special handling", today's behavior. The glob re-resolves
+    ``runtime_binary_dir()`` at check time, which could in principle drift
+    from the dir the resident lib actually loaded from; no current caller
+    both holds a resident lib and repoints the runtime dir mid-process, so
+    that drift window is theoretical today (same note as the vulkan check)."""
+    import sys
+    if sys.platform != "win32":
+        return False
+    try:
+        from localm.inference.backends.llamacpp import _loader
+        if not _loader.native_lib_loaded():
+            return False
+        d = _loader.runtime_binary_dir()
+        return d is not None and any(
+            "hip" in p.name.lower() for p in d.glob(_loader._ggml_glob()))
+    except Exception as e:
+        logger.debug("native-HIP-resident check failed (%s); answering False",
+                     type(e).__name__)
+        return False
+
+
 def _torch_gpu_probe_known_doomed() -> bool:
     """True when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
     KNOWN, ahead of time, to fail in this exact process state - so the probe
@@ -852,19 +895,14 @@ def _torch_gpu_probe_known_doomed() -> bool:
       imported successfully (before the runtime loaded, or on a setup where
       the two coexist) and importing it again is a free cache hit - no
       preload runs, nothing can fault, and its working enumeration is kept.
-    - Windows only: the conflict is Windows OS-loader same-name resolution;
-      it has only ever been observed there.
-    - ``native_lib_loaded()``: nothing resident yet means no conflict - a
-      fresh process (the common probe context) keeps its torch enumeration.
-    - The resolved runtime ships a HIP ggml backend (same shipped-DLL-set
-      authority as :func:`_native_backend_has_vulkan`): a vulkan/cpu/cuda
-      build leaves no HIP DLLs resident for torch's preload to collide with.
-      If that ever proves wrong for some exotic build, the cost is today's
-      pre-guard noise, never a lost probe. (The glob re-resolves
-      ``runtime_binary_dir()`` at check time, which could in principle drift
-      from the dir the resident lib actually loaded from; no current caller
-      both holds a resident lib and probes here outside a mixed test
-      process, so that drift window is theoretical today.)
+    - :func:`native_hip_runtime_resident` (Windows + the native lib loaded +
+      the resolved runtime ships a HIP ggml backend): the conflict is Windows
+      OS-loader same-name resolution against resident HIP DLLs. Nothing
+      resident yet means no conflict - a fresh process (the common probe
+      context) keeps its torch enumeration - and a vulkan/cpu/cuda build
+      leaves no HIP DLLs resident for torch's preload to collide with. If
+      the shipped-DLL-set authority ever proves wrong for some exotic build,
+      the cost is today's pre-guard noise, never a lost probe.
     - ``rocm_sdk`` is importable: the failing preload belongs to the
       ROCm-for-Windows torch; a CPU/CUDA torch (or no torch at all) never
       runs it. Importability is necessary, not sufficient (the rocm-sdk
@@ -886,15 +924,8 @@ def _torch_gpu_probe_known_doomed() -> bool:
         # resident - the faulted module is evicted on every attempt - so this
         # never defuses the real guard.
         return False
-    if sys.platform != "win32":
-        return False
     try:
-        from localm.inference.backends.llamacpp import _loader
-        if not _loader.native_lib_loaded():
-            return False
-        d = _loader.runtime_binary_dir()
-        if d is None or not any(
-                "hip" in p.name.lower() for p in d.glob(_loader._ggml_glob())):
+        if not native_hip_runtime_resident():
             return False
         import importlib.util
         if importlib.util.find_spec("rocm_sdk") is None:

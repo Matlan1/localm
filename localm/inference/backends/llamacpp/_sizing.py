@@ -241,15 +241,26 @@ class VramSizingMixin:
         kept unchanged. This is the DECISION half of the same fix #697 applied to the
         reporting surfaces - _auto_gpu_layers / _auto_ctx_max / _check_vram all read
         through here."""
+        # One debug line per read, stating raw/source/corrected (rule 5): every
+        # value here feeds a sizing decision, and the silent form of this chain
+        # is what let the worker-side reading stay broken, invisibly, from the
+        # worker split until 2026-07-22.
+        from localm.debuglog import logger as _dbg
         free_raw, total = cls._free_total_vram_bytes()
+        src = "torch"
         if free_raw is None:
             from localm.inference.backends.llamacpp import _loader
             mem = _loader.gpu_memory_isolated()
+            src = "isolated-probe"
             if mem is not None:
                 free_raw, total = int(mem[0]), int(mem[1])
         if free_raw is None:
+            _dbg.debug("free-vram read: unmeasurable (neither torch nor the "
+                       "isolated probe answered)")
             return None
         corrected = cls._device_global_free_bytes(total)
+        _dbg.debug("free-vram read: raw=%d total=%s source=%s "
+                   "device-global-corrected=%s", free_raw, total, src, corrected)
         return corrected if corrected is not None else free_raw
 
     @staticmethod
@@ -261,9 +272,13 @@ class VramSizingMixin:
         Never raises: a correction that cannot be made must degrade to "use the
         uncorrected reading", never crash a model load (rule 5, the same fail-safe
         posture as the isolated probe). Only acts where
-        gpu_usage.raw_reading_is_process_scoped() is True (Windows + a ROCm/HIP torch
-        build), so NVIDIA / Linux / Vulkan reads - device-global by documentation, or
-        unmeasured - are left exactly as before."""
+        gpu_usage.raw_reading_is_process_scoped() is True - Windows + a ROCm/HIP
+        torch build, and equally the torch-less processes whose readings come from
+        the resident bundled HIP runtime (the GGUF worker deciding a context
+        grow: same measured blindness, answered via
+        discover.native_hip_runtime_resident()) - so NVIDIA / Linux / Vulkan
+        reads - device-global by documentation, or unmeasured - are left exactly
+        as before."""
         if total is None:
             return None
         try:
@@ -654,6 +669,12 @@ class VramSizingMixin:
         current = max(int(current_ctx), self.n_ctx)
         charge = (n_ctx * per_token if kv_in_ram
                   else (n_ctx - current) * per_token)   # NET when the old VRAM KV is reclaimed
+        # The decision, stated (rule 5): this runs in the worker where nothing
+        # else surfaces what the grow was judged against.
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("ctx-grow fit: target=%d free=%d per_token=%d charge=%d "
+                   "kv_in_ram=%s -> KV in %s", n_ctx, free, per_token, charge,
+                   kv_in_ram, "VRAM" if charge <= free else "system RAM")
         if charge <= free:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window, put the KV cache in system RAM and

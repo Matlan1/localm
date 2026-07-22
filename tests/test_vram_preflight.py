@@ -133,8 +133,15 @@ class TestVramPreflight:
     def test_load_failure_mentions_vram_when_low(self, tmp_path):
         # No subprocess fallback: a native load failure raises, and the message
         # includes the low-VRAM hint and points at setup-llama.
+        # _total_vram_bytes is stubbed like the sibling tests above: without it,
+        # load()'s preflight ran the REAL probe (a real `import torch`), which
+        # is not this test's subject and, in a mixed multi-file run on the
+        # ROCm box, faulted with a 0xc0000139 stderr trace per test (caught by
+        # the product's own broken-import latch, so the tests still passed -
+        # pure noise, reproduced identically on a pristine checkout).
         b = _backend(tmp_path, size_bytes=80_000_000)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=20_000_000), \
+             patch.object(GgufBackend, "_total_vram_bytes", return_value=16_000_000_000), \
              patch.object(b, "_load_native", side_effect=RuntimeError("alloc failed")):
             with pytest.raises(RuntimeError) as exc:
                 b.load()
@@ -146,6 +153,7 @@ class TestVramPreflight:
     def test_load_failure_no_vram_hint_when_plenty_free(self, tmp_path):
         b = _backend(tmp_path, size_bytes=20_000_000)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=120_000_000), \
+             patch.object(GgufBackend, "_total_vram_bytes", return_value=16_000_000_000), \
              patch.object(b, "_load_native", side_effect=RuntimeError("bad dll")):
             with pytest.raises(RuntimeError) as exc:
                 b.load()
@@ -605,6 +613,32 @@ class TestGpuMemoryIsolated:
         assert not fake._killed
         assert loader.gpu_memory_isolated() == (50, 100)
 
+    def test_err_reply_with_cause_is_unmeasurable_not_desync(
+            self, monkeypatch, caplog):
+        """An "ERR <cause>" reply (the daemon naming its startup load_lib
+        failure - see _vram_probe's protocol) is the ERR branch, not a protocol
+        desync: the daemon stays alive and the cause reaches the caller's debug
+        log. The strict `line == "ERR"` match would have parsed the
+        cause-carrying reply as garbage and killed a healthy daemon - and the
+        bare "ERR" it replaced is what hid the wrong-interpreter daemon spawn
+        (the GGUF worker's dead raw reading) for months."""
+        import logging
+
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        fake = _FakeDaemonProc(
+            ["ERR load_lib failed: RuntimeError('Cannot find llama.dll')\n",
+             "50 100\n"])
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", lambda: fake)
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            assert loader.gpu_memory_isolated() is None
+        assert not fake._killed, (
+            "a cause-carrying ERR reply was treated as desync and killed a "
+            "healthy daemon")
+        assert "load_lib failed" in caplog.text, (
+            "the daemon's named cause must reach the caller's debug log")
+        assert loader.gpu_memory_isolated() == (50, 100)
+
     def test_dead_daemon_triggers_respawn(self, monkeypatch):
         loader = self._loader()
         self._patch_readline_passthrough(monkeypatch, loader)
@@ -644,6 +678,57 @@ class TestGpuMemoryIsolated:
         monkeypatch.setattr(loader, "_spawn_probe_daemon", _raise)
         assert loader.gpu_memory_isolated() is None
         assert loader._PROBE_PROC is None
+
+
+def test_spawn_probe_daemon_uses_localm_capable_interpreter(monkeypatch):
+    """_spawn_probe_daemon must resolve the interpreter via
+    _mp_spawn.interpreter_for_localm_children(), never bare sys.executable:
+    inside an mp-spawn worker sys.executable is the BASE interpreter, whose
+    children cannot import localm or resolve the runtime wheel - the daemon
+    then fails on every query and the worker never has a raw VRAM reading
+    (found live 2026-07-22; the resolver has its own tests in
+    test_mp_spawn_fix.py)."""
+    import subprocess
+
+    import localm._mp_spawn as mp_spawn
+    from localm.inference.backends.llamacpp import _loader
+
+    sentinel = r"C:\resolved\venv\python.exe"
+    monkeypatch.setattr(mp_spawn, "interpreter_for_localm_children",
+                        lambda: sentinel)
+    captured = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakeDaemonProc([])
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    proc = _loader._spawn_probe_daemon()
+    assert isinstance(proc, _FakeDaemonProc)
+    assert captured["argv"][0] == sentinel
+    assert captured["argv"][-1].endswith("_vram_probe")
+
+
+def test_vram_probe_daemon_names_its_load_failure(monkeypatch, capsys):
+    """The daemon's startup load_lib failure must ride along in its ERR replies
+    ("ERR <cause>"): its stderr is discarded by the caller, so the protocol
+    line is the only channel that can carry WHY into the caller's debug log
+    (rule 5 - a bare ERR is indistinguishable from 'no GPU')."""
+    import io
+
+    from localm.inference.backends.llamacpp import _loader, _vram_probe
+
+    def _boom():
+        raise RuntimeError("Cannot find llama.dll - not provisioned")
+
+    monkeypatch.setattr(_loader, "load_lib", _boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("q\ndevices\n"))
+    assert _vram_probe.main() == 0
+    out_lines = capsys.readouterr().out.strip().splitlines()
+    assert len(out_lines) == 2
+    for line in out_lines:
+        assert line.startswith("ERR "), line
+        assert "Cannot find llama.dll" in line
 
 
 class TestReadlineWithTimeout:

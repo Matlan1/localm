@@ -295,21 +295,61 @@ def source_is_warm() -> bool:
     return bool(_adl_state) or bool(_pdh_state)
 
 
+def _known_blind_without_torch(reason: str) -> bool:
+    """The no-torch answer for :func:`raw_reading_is_process_scoped`: True when
+    the bundled HIP llama.cpp runtime is resident in this process
+    (``discover.native_hip_runtime_resident()``), because then every raw
+    free-VRAM reading this process can take is HIP-sourced - the source whose
+    Windows blindness is the MEASURED one this module exists to correct (the
+    in-process ggml query and torch's mem_get_info were measured
+    byte-identical; the isolated probe daemon loads the same runtime). Where
+    no HIP runtime is resident, False: no measured blindness to assert.
+
+    *reason* says why torch could not be consulted; surfaced at debug (rule 5)
+    so the decision that used to be an invisible blanket False is diagnosable."""
+    from localm import discover as _discover
+    resident = _discover.native_hip_runtime_resident()
+    if resident:
+        logger.debug(
+            "gpu_usage: raw VRAM readings in this process are process-scoped: "
+            "torch is not consultable (%s) but the bundled HIP llama.cpp "
+            "runtime is resident, which is itself the measured-blind source "
+            "(dev-notes/vram-cross-process-blindness.md)", reason)
+    return resident
+
+
 def raw_reading_is_process_scoped() -> bool:
     """True when this platform's RAW driver free-VRAM query (torch.cuda.mem_get_info)
     is KNOWN to count only the calling process's own allocations - blind to every
     other process - so an uncorrected reading here must be tagged FREE_SCOPE_PROCESS
     rather than trusted or silently passed off as device-global.
 
-    Measured only on Windows + an AMD ROCm/HIP torch build (see
-    dev-notes/vram-cross-process-blindness.md). On Windows + a CUDA (NVIDIA) build,
-    and on every non-Windows platform, cudaMemGetInfo is device-global BY
-    DOCUMENTATION, so an uncorrected reading there is NOT known-blind: tagging it
-    process-scoped would assert a blindness never measured and raise a spurious
-    uncertainty flag on a number that is actually fine. Detected via
-    ``torch.version.hip`` (set on ROCm builds, None on CUDA builds). torch absence
-    (a GGUF-only install) reaches here only via nvidia-smi, which is device-global
-    and already tagged as such upstream, so False is the safe answer there too.
+    Measured only on Windows + an AMD ROCm/HIP runtime (see
+    dev-notes/vram-cross-process-blindness.md - torch's ``mem_get_info`` and the
+    bundled HIP llama.cpp runtime's ``ggml_backend_dev_memory`` were measured
+    byte-identical and equally blind, so the blindness belongs to the HIP
+    runtime on this platform, not to torch specifically). On Windows + a CUDA
+    (NVIDIA) build, and on every non-Windows platform, cudaMemGetInfo is
+    device-global BY DOCUMENTATION, so an uncorrected reading there is NOT
+    known-blind: tagging it process-scoped would assert a blindness never
+    measured and raise a spurious uncertainty flag on a number that is actually
+    fine.
+
+    Detected via ``torch.version.hip`` (set on ROCm builds, None on CUDA
+    builds) whenever torch can be consulted. When it CANNOT - torch is not
+    resident and a fresh import is unsafe or impossible (the three guarded
+    cases below) - the answer comes from
+    ``discover.native_hip_runtime_resident()`` instead: a resident bundled HIP
+    runtime means every raw reading this process can take (the in-process ggml
+    query, or the isolated probe daemon loading the same runtime) is
+    HIP-sourced, i.e. exactly the measured-blind source. That torch-less case
+    is not an edge: it is the GGUF WORKER, the process that makes the
+    mid-generation context-grow sizing decision - a blanket False there kept
+    the #706 device-global correction permanently off on exactly the platform
+    it was built for (found live 2026-07-22). Where no HIP runtime is resident
+    either (a vulkan/cpu build's worker, a torch-less NVIDIA box), False stays
+    the answer: those readings' blindness was never measured, and nvidia-smi
+    readings are device-global and already tagged as such upstream.
 
     Guards against a live-crashing race: this can run on whatever thread called
     :func:`discover._apply_device_global_free`, which can collide with
@@ -333,8 +373,10 @@ def raw_reading_is_process_scoped() -> bool:
     the known-doomed native-runtime DLL conflict
     (``discover._torch_gpu_probe_known_doomed`` - e.g. inside the GGUF
     worker, where the bundled HIP runtime is always resident and torch never
-    is): in those two cases it falls back to the conservative default (False,
-    "cannot confirm a blindness"), same as the exception path below. Reuses
+    is): in those two cases, and when a permitted fresh import itself fails (a
+    GGUF-only install), the answer comes from the resident-HIP-runtime signal
+    via :func:`_known_blind_without_torch` rather than a blanket False - see
+    the docstring above for why that is the truthful answer there. Reuses
     discover's existing probe-tracking lock rather than inventing new
     cross-module coordination."""
     import sys
@@ -347,20 +389,21 @@ def raw_reading_is_process_scoped() -> bool:
             with _discover._gpu_probe_lock:
                 probe_may_be_mid_import = _discover._gpu_probe_inflight
             if probe_may_be_mid_import:
-                return False
+                return _known_blind_without_torch("a GPU probe may be mid-import")
             if _discover._torch_gpu_probe_known_doomed():
                 # The same known-doomed fresh import _list_gpus_probe skips
-                # (see that predicate's docstring: the bundled HIP runtime is
-                # resident and torch's rocm_sdk preload would collide with
-                # it): attempting it here can only fault - printing the same
-                # stderr trace - and land in the except below anyway. Reached
-                # with the native lib loaded and torch not resident, e.g. the
-                # GGUF worker's sizing gate (_sizing._device_global_free_bytes)
-                # or a direct _apply_device_global_free caller. Same
-                # conservative "cannot confirm a blindness" answer as the two
-                # guards above.
-                return False
-            import torch
+                # (see that predicate's docstring): attempting it here can
+                # only fault - printing the same stderr trace - so the
+                # resident-runtime signal answers instead. Reached with the
+                # native lib loaded and torch not resident, e.g. the GGUF
+                # worker's sizing gate (_sizing._device_global_free_bytes).
+                return _known_blind_without_torch(
+                    "a fresh torch import here is the known-doomed DLL conflict")
+            try:
+                import torch
+            except Exception as e:
+                return _known_blind_without_torch(
+                    "torch import failed (%s)" % type(e).__name__)
         return bool(getattr(torch.version, "hip", None))
     except Exception:
         return False
@@ -378,11 +421,22 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
     Mapping rules, in order:
     - ADL: match each adapter's PCI bus number to torch's own ``pci_bus_id``. Exact,
       so it is safe on a multi-GPU box.
+    - ADL, torch-less: when torch cannot supply a bus id (the GGUF worker) but
+      ADL reports EXACTLY one AMD adapter and exactly one GPU was asked about,
+      the pairing is unambiguous without one - the same only-one-candidate rule
+      the PDH path below already applies. Gated on
+      :func:`raw_reading_is_process_scoped` so it can never fire on a box whose
+      single detected GPU is NOT the blind-HIP one (e.g. an NVIDIA dGPU next to
+      an idle AMD iGPU, where this pairing would "correct" an already
+      device-global reading with the WRONG adapter's usage).
     - PDH: used ONLY when there is exactly one GPU and exactly one adapter instance
       reporting. Its LUID instance name carries no PCI bus, so on a multi-GPU box the
       mapping would be a GUESS - and a confidently-wrong per-device number is worse
       than the blind one, so this reports nothing rather than guess (the caller then
-      surfaces the reading as process-scoped instead of silently trusting it)."""
+      surfaces the reading as process-scoped instead of silently trusting it).
+      (An iGPU+dGPU box reports TWO adapter instances here - observed live - which
+      is exactly why the ADL torch-less rule above exists: ADL lists only AMD
+      adapters, so the dGPU stays unambiguous where the LUID list is not.)"""
     if sys.platform != "win32" or not gpus:
         return {}
     with _lock:
@@ -395,6 +449,15 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
                     mapped[g["index"]] = by_bus[bus]
             if mapped:
                 return mapped
+            if (len(by_bus) == 1 and len(gpus) == 1
+                    and raw_reading_is_process_scoped()):
+                only_bus, only_used = next(iter(by_bus.items()))
+                logger.debug(
+                    "gpu_usage: pairing the single AMD adapter (bus %d) with the "
+                    "single requested GPU without a torch pci_bus_id - "
+                    "unambiguous, same only-one-candidate rule as the PDH path",
+                    only_bus)
+                return {gpus[0]["index"]: only_used}
             logger.debug(
                 "gpu_usage: ADL reported buses %s but none matched the detected "
                 "GPUs' PCI bus ids; leaving the reading process-scoped rather than "
@@ -415,10 +478,25 @@ def _torch_pci_bus(index) -> Optional[int]:
     """The PCI bus number torch reports for device *index*, or None.
 
     ``pci_bus_id`` is what pairs a torch device with an ADL adapter; both are the
-    physical bus, so the pairing is exact rather than positional."""
+    physical bus, so the pairing is exact rather than positional.
+
+    Never triggers a fresh ``import torch`` that is unsafe in this process
+    (mid-flight probe, or the known-doomed resident-HIP-runtime conflict -
+    the same two guards :func:`raw_reading_is_process_scoped` documents):
+    before this guard, opening the correction gate in the GGUF worker would
+    have made this the next site to fault with the 0xc0000139 stderr trace
+    the #771 skip had just eliminated."""
     if index is None:
         return None
     try:
+        if "torch" not in sys.modules:
+            from localm import discover as _discover
+            with _discover._gpu_probe_lock:
+                inflight = _discover._gpu_probe_inflight
+            if inflight or _discover._torch_gpu_probe_known_doomed():
+                logger.debug("gpu_usage: no pci_bus_id for device %s: torch is "
+                             "not consultable in this process", index)
+                return None
         import torch
         props = torch.cuda.get_device_properties(int(index))
         bus = getattr(props, "pci_bus_id", None)

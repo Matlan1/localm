@@ -828,11 +828,25 @@ def _spawn_probe_daemon():
     readline() on either side is exactly one protocol message - see
     _vram_probe.py for the request/response contract. stderr is discarded
     (the daemon logs nothing useful to a caller that only wants two numbers;
-    a crash there is diagnosed via the direct gpu_memory() docstring instead)."""
+    a load failure is carried in the protocol itself - the "ERR <cause>"
+    reply - so the reason reaches the caller's debug log, not a discarded
+    stream).
+
+    Spawned via ``_mp_spawn.interpreter_for_localm_children()``, NOT bare
+    ``sys.executable``: inside a Windows multiprocessing-spawn worker,
+    ``sys.executable`` is the BASE interpreter (deliberate - see _mp_spawn's
+    module docstring), whose children get no venv context, so a daemon
+    spawned from it cannot resolve localm or the localm-llama-runtime wheel
+    and answers ERR to every query. Found live 2026-07-22: this had silently
+    cost the GGUF worker its ONLY raw VRAM reading since the worker split -
+    every mid-generation context-grow check ran unmeasurable. The resolver
+    keeps ``sys.executable`` for ordinary venv processes and only redirects
+    where that would fail."""
     import subprocess
-    import sys
+    from localm._mp_spawn import interpreter_for_localm_children
     return subprocess.Popen(
-        [sys.executable, "-u", "-m", "localm.inference.backends.llamacpp._vram_probe"],
+        [interpreter_for_localm_children(), "-u", "-m",
+         "localm.inference.backends.llamacpp._vram_probe"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, bufsize=1)
 
@@ -941,27 +955,43 @@ def _probe_roundtrip(request: str, parse) -> "Optional[object]":
             try:
                 _PROBE_PROC = _spawn_probe_daemon()
                 first_spawn = True
-            except Exception:
+            except Exception as e:
+                # Surfaced, not swallowed (rule 5): a silent None here is
+                # indistinguishable from "no GPU" to every caller, which is
+                # exactly how the worker's dead daemon went unnoticed.
+                logger.debug("vram-probe: daemon spawn failed (%s)", e)
                 _PROBE_PROC = None
                 return None
         proc = _PROBE_PROC
         try:
             proc.stdin.write(request)
             proc.stdin.flush()
-        except Exception:
+        except Exception as e:
+            logger.debug("vram-probe: request write failed (%s); a fresh daemon "
+                         "spawns on the next query", e)
             _kill_and_clear_probe()
             return None
         timeout = _ISOLATED_PROBE_SPAWN_TIMEOUT if first_spawn else _ISOLATED_PROBE_TIMEOUT
         line = _readline_with_timeout(proc.stdout, timeout)
         if line is None:
+            logger.debug("vram-probe: no reply within %.1fs (daemon rc=%s); "
+                         "killed, a fresh daemon spawns on the next query",
+                         timeout, proc.poll())
             _kill_and_clear_probe()
             return None
         line = line.strip()
-        if line == "ERR" or not line:
-            return None                  # daemon is alive and answered - genuinely unmeasurable
+        if line.startswith("ERR") or not line:
+            # The daemon is alive and answered "genuinely unmeasurable". A load
+            # failure on its side rides along as "ERR <cause>" so the reason
+            # lands here rather than dying with its discarded stderr.
+            logger.debug("vram-probe: daemon answered unmeasurable%s",
+                         f" ({line[4:]})" if len(line) > 4 else "")
+            return None
         try:
             return parse(line)
-        except Exception:
+        except Exception as e:
+            logger.debug("vram-probe: reply desync (%.80r: %s); daemon killed, "
+                         "a fresh one spawns on the next query", line, e)
             _kill_and_clear_probe()      # protocol desync - do not trust this daemon again
             return None
 

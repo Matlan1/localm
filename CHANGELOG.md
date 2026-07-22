@@ -12,6 +12,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
+  long conversation grows the context window mid-generation, the model worker
+  decides whether the grown KV cache still fits in VRAM or must move to system
+  RAM. On Windows with the AMD (HIP) runtime that decision was broken twice
+  over: the worker's VRAM probe helper was started with the wrong interpreter
+  and always failed (so the check silently saw "unmeasurable" and always chose
+  VRAM), and even the intended reading counts only the calling process's own
+  VRAM - blind to the model itself and to every other app - on this platform.
+  The probe now starts correctly, and the worker applies the same whole-board
+  correction the rest of localm already uses (introduced for load sizing), so
+  a grow that genuinely does not fit moves the KV cache to system RAM instead
+  of overcommitting VRAM and collapsing generation speed. Failures along this
+  path are now named in the debug log instead of being silently swallowed.
 - **No more repeated "Windows fatal exception" traces when the native runtime
   and a ROCm torch share a process.** On Windows with the AMD ROCm install,
   once the bundled HIP llama.cpp runtime was loaded into a process, every GPU
