@@ -21,7 +21,90 @@ def _stub_engine_factory(model_name):
     engine.chat_stream.side_effect = lambda messages, **kw: iter(
         [f"reply-from-{model_name}"])
     engine.embed.return_value = [[0.1, 0.2]]
+    # Mirror the real Engine's victim-safety attributes (engine.py:181-188). A
+    # bare MagicMock answers every getattr with a truthy Mock, so an idle stub
+    # would read as "serving 1 request, mid-unload" to the eviction policy and
+    # never be evictable - the stub has to model the contract it stands in for.
+    engine.active_requests = 0
+    engine.unloading = False
     return engine
+
+
+GB = 1024 ** 3
+
+
+def _counting_factory():
+    """Engine factory that records every load, so thrash is measurable."""
+    loads = []
+
+    def factory(model_name):
+        loads.append(model_name)
+        return _stub_engine_factory(model_name)
+
+    factory.loads = loads
+    return factory
+
+
+def _resident_cache(default_model="m"):
+    return EngineCache(default_model, engine_factory=_counting_factory())
+
+
+def _fits(free_gb=20):
+    """Probe context: fresh reading, plenty of free VRAM."""
+    from localm.discover import GPU_PROBE_OK
+    return patch("localm.discover.vram_capacity",
+                 return_value=({"free": int(free_gb * GB), "total": 24 * GB},
+                               GPU_PROBE_OK))
+
+
+def _too_tight(free_gb=2):
+    """Probe context: fresh reading, not enough room for another model."""
+    from localm.discover import GPU_PROBE_OK
+    return patch("localm.discover.vram_capacity",
+                 return_value=({"free": int(free_gb * GB), "total": 24 * GB},
+                               GPU_PROBE_OK))
+
+
+def _probe_inconclusive(free_gb=20):
+    """Probe context: the number looks huge but the reading was NOT taken."""
+    from localm.discover import GPU_PROBE_TIMEOUT
+    return patch("localm.discover.vram_capacity",
+                 return_value=({"free": int(free_gb * GB), "total": 24 * GB},
+                               GPU_PROBE_TIMEOUT))
+
+
+def _unmeasurable():
+    """Probe context: the box cannot report free VRAM at all."""
+    from localm.discover import GPU_PROBE_OK
+    return patch("localm.discover.vram_capacity",
+                 return_value=({"total": 24 * GB}, GPU_PROBE_OK))
+
+
+def _sized(gb=4):
+    """Every model reports the same known footprint."""
+    return patch.object(EngineCache, "_model_required_bytes",
+                        lambda self, name: int(gb * GB))
+
+
+def _no_vram_wait():
+    """
+    Neutralize the eviction path's before/after VRAM reading.
+
+    _vram_free_reading() calls discover.vram_capacity() too, so a test that
+    scripts the ADMIT probe (an iterator, or a raising side_effect) would
+    otherwise have that same double consumed/hit by the unload wait as well.
+    before=None makes wait_for_vram_release a documented no-op. The unload
+    wait's own honesty rules have dedicated tests above.
+    """
+    return patch("localm.vram._vram_free_reading",
+                 return_value=(None, False, None))
+
+
+def _cfg(**over):
+    """Patch load_config with just the residency keys the policy reads."""
+    cfg = {"max_resident_models": None, "pinned_models": None}
+    cfg.update(over)
+    return patch("localm.config.load_config", return_value=cfg)
 
 
 def _server(default_model="stub-model", enable_images=True):
@@ -294,6 +377,33 @@ class TestEngineCache:
         assert not any("did not rise" in m for m in logged), (
             f"logged a false 'did not rise' on a blind process-scoped reading: {logged}")
 
+    def test_shutdown_unloads_every_resident_engine(self):
+        """N resident means N to free: unloading only the most recent one would
+        leave the rest holding VRAM past process exit."""
+        cache = _resident_cache()
+        with _fits(), _sized():
+            a, b = cache.get("a"), cache.get("b")
+        assert cache.resident == ["a", "b"]
+        cache.unload_all()
+        a.unload.assert_called_once()
+        b.unload.assert_called_once()
+        assert cache.resident == []
+        assert cache._engine is None
+
+    def test_shutdown_reports_a_failed_unload_instead_of_swallowing_it(self):
+        """A native free that failed is exactly what leaves VRAM pinned after
+        exit; silence there makes it unexplainable (AGENTS.md rule 5)."""
+        cache = _resident_cache()
+        with _fits(), _sized():
+            a = cache.get("a")
+            cache.get("b")
+        a.unload.side_effect = RuntimeError("native free blew up")
+        logged = []
+        with patch("localm.plugins.mcpserver.server._log", logged.append):
+            cache.unload_all()          # must not raise
+        assert any("failed to unload a at shutdown" in m for m in logged), logged
+        assert cache.resident == []
+
     def test_no_default_falls_back_to_first_registered(self):
         cache = EngineCache(None, engine_factory=_stub_engine_factory)
         with patch("localm.config.load_registry",
@@ -305,6 +415,242 @@ class TestEngineCache:
         with patch("localm.config.load_registry", return_value={}):
             with pytest.raises(ValueError, match="localm pull"):
                 cache.resolve_model(None)
+
+
+class TestEngineCacheMultiResidency:
+    """
+    Parity with the HTTP server: a second model that provably fits loads
+    ALONGSIDE the first instead of evicting it (C1 of the 2026-07-22 ledger).
+
+    The MCP cache used to be single-resident by construction, so these are the
+    tests that would have failed before the change - see
+    test_both_models_stay_resident_when_they_fit, which is the whole point.
+    """
+
+    def test_both_models_stay_resident_when_they_fit(self):
+        """THE parity case: measurable, sufficient free VRAM -> zero eviction."""
+        cache = _resident_cache()
+        with _fits(free_gb=20), _sized(gb=4), _cfg():
+            a = cache.get("a")
+            b = cache.get("b")
+        assert a is not b
+        a.unload.assert_not_called()
+        assert cache.resident == ["a", "b"]
+        assert cache._engines["a"] is a and cache._engines["b"] is b
+
+    def test_resident_model_is_returned_without_reloading(self):
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+            cache.get("b")
+            assert cache.get("a") is a
+        assert cache._factory.loads == ["a", "b"]
+
+    def test_alternating_requests_do_not_thrash(self):
+        """A,B,A,B,A,B on a box with room must load each model exactly once."""
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            for _ in range(3):
+                cache.get("a")
+                cache.get("b")
+        assert cache._factory.loads == ["a", "b"], (
+            f"thrashed: {cache._factory.loads}")
+        assert cache.resident == ["a", "b"]
+
+    def test_reusing_a_resident_model_updates_recency(self):
+        """LRU order decides the victim, so a reuse must count as a use."""
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            cache.get("a")
+            cache.get("b")
+            cache.get("a")                     # 'a' is now MRU, 'b' the LRU
+        assert cache.resident == ["b", "a"]
+
+    def test_second_model_that_does_not_fit_evicts_the_lru_peer(self):
+        cache = _resident_cache()
+        with _fits(free_gb=20), _sized(gb=4), _cfg():
+            a = cache.get("a")
+        with _too_tight(free_gb=2), _sized(gb=4), _cfg():
+            b = cache.get("b")
+        a.unload.assert_called_once()
+        assert cache.resident == ["b"]
+        assert cache._engines["b"] is b
+
+    def test_eviction_picks_the_lru_and_leaves_the_rest_resident(self):
+        cache = _resident_cache()
+        with _fits(free_gb=20), _sized(gb=4), _cfg():
+            a, b = cache.get("a"), cache.get("b")
+        # Room for one more only after something goes: free rises as each
+        # victim is freed, so the loop stops after the first eviction.
+        frees = iter([2 * GB, 20 * GB])
+        from localm.discover import GPU_PROBE_OK
+        with patch("localm.discover.vram_capacity",
+                   side_effect=lambda *a_, **k: ({"free": next(frees),
+                                                  "total": 24 * GB},
+                                                 GPU_PROBE_OK)), \
+             _no_vram_wait(), _sized(gb=4), _cfg():
+            cache.get("c")
+        a.unload.assert_called_once()          # 'a' was least recently used
+        b.unload.assert_not_called()           # 'b' survives
+        assert cache.resident == ["b", "c"]
+
+    def test_eviction_never_targets_the_requested_model(self):
+        """Reloading a resident model must never free the model itself."""
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        with _too_tight(), _sized(), _cfg():
+            again = cache.get("a")
+        assert again is a
+        a.unload.assert_not_called()
+        assert cache._factory.loads == ["a"]
+
+    def test_a_busy_engine_is_not_evicted(self):
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a, b = cache.get("a"), cache.get("b")
+        a.active_requests = 1                  # 'a' is mid-generation
+        with _too_tight(), _sized(), _cfg():
+            cache.get("c")
+        a.unload.assert_not_called()
+        b.unload.assert_called_once()
+
+    def test_unmeasurable_vram_falls_back_to_single_resident(self):
+        """A box that cannot report free VRAM must behave exactly as before:
+        never stack on an unknown, best-effort single-resident."""
+        cache = _resident_cache()
+        with _unmeasurable(), _sized(), _cfg():
+            a = cache.get("a")
+            cache.get("b")
+        a.unload.assert_called_once()
+        assert cache.resident == ["b"]
+
+    def test_inconclusive_probe_falls_back_to_single_resident(self):
+        """A stale/timed-out reading that happens to look huge must not admit a
+        stacked load - that is the direction that OOMs the driver."""
+        cache = _resident_cache()
+        with _probe_inconclusive(free_gb=100), _sized(gb=1), _cfg():
+            a = cache.get("a")
+            cache.get("b")
+        a.unload.assert_called_once()
+        assert cache.resident == ["b"]
+
+    def test_unknown_footprint_falls_back_to_single_resident(self):
+        """An unregistered/unreadable model cannot be proven to fit, so it gets
+        the card to itself rather than being assumed free."""
+        cache = _resident_cache()
+        with _fits(free_gb=100), _cfg(), \
+             patch.object(EngineCache, "_model_required_bytes",
+                          lambda self, name: None):
+            a = cache.get("a")
+            cache.get("b")
+        a.unload.assert_called_once()
+
+    def test_a_failed_probe_is_not_read_as_headroom(self):
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            a = cache.get("a")
+        logged = []
+        with patch("localm.discover.vram_capacity",
+                   side_effect=RuntimeError("driver wedged")), \
+             _no_vram_wait(), _sized(), _cfg(), \
+             patch("localm.plugins.mcpserver.server._log", logged.append):
+            cache.get("b")
+        a.unload.assert_called_once()
+        assert any("VRAM probe failed" in m for m in logged), logged
+
+
+class TestResidencyKnobs:
+    def test_cap_forces_eviction_even_when_vram_fits(self):
+        """The point of the knob: 'keep at most N', regardless of headroom."""
+        cache = _resident_cache()
+        with _fits(free_gb=100), _sized(gb=1), _cfg(max_resident_models=1):
+            a = cache.get("a")
+            cache.get("b")
+        a.unload.assert_called_once()
+        assert cache.resident == ["b"]
+
+    def test_cap_of_two_keeps_two_and_evicts_the_third(self):
+        cache = _resident_cache()
+        with _fits(free_gb=100), _sized(gb=1), _cfg(max_resident_models=2):
+            a, b = cache.get("a"), cache.get("b")
+            assert cache.resident == ["a", "b"]
+            cache.get("c")
+        a.unload.assert_called_once()
+        b.unload.assert_not_called()
+        assert cache.resident == ["b", "c"]
+
+    def test_default_config_does_not_cap(self):
+        """Defaults must reproduce the unknobbed policy exactly."""
+        cache = _resident_cache()
+        with _fits(free_gb=100), _sized(gb=1), _cfg():
+            cache.get("a")
+            cache.get("b")
+            cache.get("c")
+        assert cache.resident == ["a", "b", "c"]
+
+    def test_pinned_model_is_never_the_victim(self):
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg(pinned_models=["a"]):
+            a, b = cache.get("a"), cache.get("b")
+        with _too_tight(), _sized(), _cfg(pinned_models=["a"]):
+            cache.get("c")
+        a.unload.assert_not_called()           # pinned, though least recent
+        b.unload.assert_called_once()
+        assert "a" in cache.resident
+
+    def test_pin_plus_cap_keeps_the_pinned_pair_resident(self):
+        """The user-facing ask: 'keep these two', not LRU roulette."""
+        cache = _resident_cache()
+        knobs = dict(max_resident_models=2, pinned_models=["a", "b"])
+        with _fits(free_gb=100), _sized(gb=1), _cfg(**knobs):
+            a, b = cache.get("a"), cache.get("b")
+            cache.get("c")                     # over cap, but both peers pinned
+        a.unload.assert_not_called()
+        b.unload.assert_not_called()
+        assert set(cache.resident) == {"a", "b", "c"}
+
+    def test_unevictable_load_says_the_policy_was_missed(self):
+        """When pins leave nothing evictable the load still proceeds (a stdio
+        tool call has no useful 'try later'), but it must SAY the cap was
+        missed rather than pretend it held."""
+        cache = _resident_cache()
+        knobs = dict(max_resident_models=1, pinned_models=["a"])
+        logged = []
+        with _fits(free_gb=100), _sized(gb=1), _cfg(**knobs), \
+             patch("localm.plugins.mcpserver.server._log", logged.append):
+            cache.get("a")
+            cache.get("b")
+        assert any("resident cap" in m and "loading it anyway" in m
+                   for m in logged), logged
+        assert set(cache.resident) == {"a", "b"}
+
+    def test_invalid_cap_is_ignored_not_coerced(self):
+        cache = _resident_cache()
+        with _fits(free_gb=100), _sized(gb=1), _cfg(max_resident_models=0):
+            cache.get("a")
+            cache.get("b")
+        assert cache.resident == ["a", "b"]     # ignored, not treated as 1
+
+
+class TestEngineCacheBackCompat:
+    """_engine/_loaded_name predate multi-residency and stay as MRU views."""
+
+    def test_engine_and_loaded_name_track_the_most_recent_model(self):
+        cache = _resident_cache()
+        with _fits(), _sized(), _cfg():
+            cache.get("a")
+            b = cache.get("b")
+            assert cache._engine is b
+            assert cache._loaded_name == "b"
+            a = cache.get("a")
+            assert cache._engine is a
+            assert cache._loaded_name == "a"
+
+    def test_empty_cache_reports_no_engine(self):
+        cache = _resident_cache()
+        assert cache._engine is None
+        assert cache._loaded_name is None
 
 
 class TestStdioLoop:

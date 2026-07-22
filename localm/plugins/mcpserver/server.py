@@ -120,15 +120,50 @@ def _redirect_consoles_to_stderr() -> None:
 # ---------------------------------------------------------------------------
 
 class EngineCache:
-    """Lazy, per-model engine cache. Only one model loaded at a time."""
+    """
+    Lazy, per-model engine cache. Multi-resident, on the shared policy.
+
+    Models stay loaded ALONGSIDE each other whenever free VRAM provably allows
+    it, matching the HTTP server rather than the single-model cache this used to
+    be. Both servers ask the same module (``inference.residency``) the same two
+    questions - may this load with zero eviction, and if not who is the safe
+    victim - so the two cannot drift apart again.
+
+    The conservative half is unchanged and load-bearing: stacking needs a fresh,
+    measurable reading that clears the requirement plus headroom with no split
+    shortfall. On a box that cannot measure VRAM, on an inconclusive probe, or
+    for a model whose footprint cannot be read, this falls straight back to the
+    old single-resident behaviour (evict, wait for the free to land, then load).
+    A wrong PERMIT here is a native OOM or a driver hang, not a tidy error.
+    """
 
     def __init__(self, default_model: Optional[str] = None,
                  engine_factory: Optional[Callable] = None) -> None:
         self.default_model = default_model
-        self._engine = None
-        self._loaded_name: Optional[str] = None
+        # Display name -> engine, plus usage order (least-recently-used FIRST,
+        # MRU last) - the same shape http_server keeps in _engines/_engines_lru.
+        self._engines: Dict[str, Any] = {}
+        self._lru: list = []
         # Injection point for tests - real factory builds a localm Engine
         self._factory = engine_factory or self._build_engine
+
+    # ---- back-compat views over the multi-resident state -------------------
+    # _engine/_loaded_name predate multi-residency and still read naturally as
+    # "the model in use", so they are kept as MRU views rather than churning
+    # every call site (_backend_can_embed, the stdio shutdown, tests).
+
+    @property
+    def _engine(self):
+        return self._engines.get(self._lru[-1]) if self._lru else None
+
+    @property
+    def _loaded_name(self) -> Optional[str]:
+        return self._lru[-1] if self._lru else None
+
+    @property
+    def resident(self) -> list:
+        """Resident display names, least-recently-used first."""
+        return list(self._lru)
 
     @staticmethod
     def _build_engine(model_name: str):
@@ -161,65 +196,206 @@ class EngineCache:
 
     def get(self, requested: Optional[str]):
         name = self.resolve_model(requested)
-        if self._engine is not None and self._loaded_name == name:
-            return self._engine
-        if self._engine is not None:
-            _log(f"switching model {self._loaded_name} -> {name}")
-            from localm.vram import _live_free_vram_bytes, _vram_free_reading
-            # SEED the wait with the reading even when the probe was not fresh,
-            # and poll with the live-only reader - exactly as the three
-            # http_server unload paths do, and NOT the other way round. The two
-            # ends need opposite things from a stale probe: for the 'before'
-            # SEED, None means "do not wait at all" (wait_for_vram_release
-            # short-circuits on before_bytes=None), so seeding it from the
-            # live-only reader would silently drop the driver-hang guard below to
-            # a 0-second no-op on any box whose probe merely ran slow. For the
-            # 'after' POLL, None correctly means "cannot verify". Freshness is
-            # carried separately, for the REPORT, not the wait.
-            # scope IS used, for the same reason the /v1/models/unload report needs
-            # it: a process-scoped reading (Windows/AMD, blind to the model in its
-            # isolated worker) genuinely CANNOT observe the free rising after unload,
-            # so "did not rise" would be a false claim, not a backable one. It is
-            # folded into the verdict below, not just the report.
-            before_free, before_fresh, before_scope = _vram_free_reading()
-            try:
-                self._engine.unload()
-            except Exception as e:
-                # Unload is best-effort (we still load the new model), but a
-                # cleanup failure must be visible, not silently swallowed.
-                _log(f"warning: failed to unload {self._loaded_name}: {e}")
-            # The native unload's VRAM free is asynchronous - loading the next
-            # model before it lands can exceed total VRAM and hang the GPU
-            # driver (the same TDR risk the /v1/models/unload endpoint guards
-            # against; see vram.wait_for_vram_release). before_free is None only
-            # when VRAM is not measurable AT ALL (a CPU-only box), in which case
-            # there is nothing to wait for and this is a no-op, as before.
-            from localm.discover import FREE_SCOPE_DEVICE
-            from localm.vram import wait_for_vram_release
-            released, _final = wait_for_vram_release(
-                _live_free_vram_bytes, before_bytes=before_free)
-            backable = before_fresh and before_scope == FREE_SCOPE_DEVICE
-            if released is False and backable:
-                # Fresh AND device-global on both ends: "did not rise" is a claim we
-                # can back. A process-scoped reading is excluded here precisely
-                # because it cannot see the model's VRAM in its isolated worker, so a
-                # no-rise there proves nothing (it falls to the honest branch below).
-                _log(f"warning: VRAM free did not rise after unloading "
-                     f"{self._loaded_name} within the timeout - loading {name} anyway")
-            elif before_free is not None and (released is None or not backable):
-                # Either end came off a timed-out/busy probe, OR the reading is
-                # process-scoped (blind to the worker's VRAM), so whether the free
-                # landed is unknown. Say that rather than the "did not rise" claim
-                # above, which a reading we never took - or one that cannot see the
-                # freed memory - cannot support (rule 5). The wait still ran; only the
-                # verdict is withheld.
-                _log(f"warning: could not confirm the VRAM free after unloading "
-                     f"{self._loaded_name} (no live GPU reading) - loading "
-                     f"{name} anyway")
+        engine = self._engines.get(name)
+        if engine is not None:
+            self._touch(name)          # already resident: never evict to reuse
+            return engine
+        self._make_room_for(name)
         _log(f"loading model {name}")
-        self._engine = self._factory(name)
-        self._loaded_name = name
-        return self._engine
+        engine = self._factory(name)
+        self._engines[name] = engine
+        self._touch(name)
+        return engine
+
+    def _touch(self, name: str) -> None:
+        """Mark ``name`` most-recently-used."""
+        if name in self._lru:
+            self._lru.remove(name)
+        self._lru.append(name)
+
+    def _model_required_bytes(self, name: str) -> Optional[int]:
+        """
+        VRAM ``name`` is expected to occupy once loaded, or None when that
+        cannot be determined (unregistered model, unreadable path).
+
+        None is not "zero": it means the fit cannot be PROVEN, which sends the
+        caller down the single-resident path. Never let an unknown read as room.
+        """
+        from localm.inference.residency import (
+            model_footprint_bytes, required_vram_bytes)
+        try:
+            from localm.model_manager import get_model_info
+            info = get_model_info(name)
+            if info is None:
+                return None
+            path, _hint = info
+            return required_vram_bytes(model_footprint_bytes(path))
+        except Exception as e:
+            # Falls back to single-resident, so this is safe - but it is also
+            # exactly the kind of silent degradation rule 5 is about, so it is
+            # traceable in the debug log rather than invisible.
+            from localm.debuglog import logger
+            logger.debug("mcp: could not size %s, assuming it needs the card "
+                         "to itself: %s", name, e)
+            return None
+
+    def _fits_alongside(self, name: str, required: Optional[int]) -> bool:
+        """True when ``name`` may load with NO eviction, next to the residents."""
+        if required is None:
+            return False
+        from localm import discover
+        from localm.discover import gpu_split_shortfall, vram_capacity
+        from localm.inference.residency import (
+            DEFAULT_HEADROOM_BYTES, fits_alongside_residents)
+        try:
+            # Same deadline the HTTP server's gate uses, for the same reason:
+            # THIS caller's correctness depends on waiting out a cold ROCm/CUDA
+            # init. The first load after an MCP server starts is precisely that
+            # cold case, and a timed-out probe here does not merely slow things
+            # down - it reads as "unmeasurable" and drops us to single-resident.
+            # No executor hop is needed (unlike http_server): this process is
+            # synchronous, so there is no event loop for the probe to stall.
+            v_info, probe_status = vram_capacity(
+                return_status=True, deadline=discover._GPU_PROBE_CLI_DEADLINE,
+                wait_for_inflight=True)
+            probe_ok = probe_status == discover.GPU_PROBE_OK
+            shortfall = []
+            if probe_ok and self._is_gguf(name):
+                # Aggregate free can clear the bar while one device of a
+                # configured split is short - see gpu_split_shortfall.
+                shortfall = gpu_split_shortfall(required + DEFAULT_HEADROOM_BYTES)
+            return fits_alongside_residents(
+                free_vram=v_info.get("free"), vram_required=required,
+                probe_ok=probe_ok, shortfall=shortfall)
+        except Exception as e:
+            # A failed probe must not be read as headroom.
+            _log(f"warning: VRAM probe failed ({e}) - loading {name} "
+                 f"single-resident")
+            return False
+
+    @staticmethod
+    def _is_gguf(name: str) -> bool:
+        try:
+            from localm.inference.engine import _is_gguf
+            from localm.model_manager import get_model_info
+            info = get_model_info(name)
+            return bool(info) and _is_gguf(info[0])
+        except Exception:
+            # Only decides whether to run the per-device split check, and the
+            # split check is a REFUSE-direction guard: skipping it can only make
+            # this load more permissive on a box with no split configured (where
+            # it is a no-op anyway). Not worth failing a load over.
+            return False
+
+    def _make_room_for(self, name: str) -> None:
+        """
+        Evict resident peers until ``name`` fits, or until none can be freed.
+
+        Returns as soon as the model may load alongside what is already there,
+        which on a measurable box with headroom is immediately and with zero
+        eviction - the whole point of the parity fix.
+        """
+        from localm.config import load_config
+        from localm.inference import residency
+        cfg = load_config()
+        cap = residency.resident_cap(cfg)
+        pinned = residency.pinned_model_names(cfg)
+        required = self._model_required_bytes(name)
+        while self._lru:
+            over_cap = residency.exceeds_resident_cap(self._lru, name, cap)
+            if not over_cap and self._fits_alongside(name, required):
+                return
+            victim = residency.pick_eviction_victim(
+                self._lru, self._engines, requested=name, pinned=pinned)
+            if victim is None:
+                # Nothing evictable (all pinned, or all busy). Unlike the HTTP
+                # server, which can answer 503, a stdio tool call has no useful
+                # "try later" - refusing would turn a working setup into a dead
+                # one. So load anyway, best-effort, and SAY that the policy was
+                # missed instead of pretending it held.
+                reason = ("the resident cap" if over_cap
+                          else "the free-VRAM check")
+                _log(f"warning: {reason} wanted room for {name} but no resident "
+                     f"model could be evicted (resident={self._lru}, "
+                     f"pinned={sorted(pinned)}) - loading it anyway")
+                return
+            self._evict(victim, loading=name)
+
+    def _evict(self, victim: str, *, loading: str) -> None:
+        """Unload ``victim`` and wait for its VRAM to actually come back."""
+        engine = self._engines.pop(victim, None)
+        if victim in self._lru:
+            self._lru.remove(victim)
+        if engine is None:
+            return
+        _log(f"evicting {victim} to make room for {loading}")
+        from localm.vram import _live_free_vram_bytes, _vram_free_reading
+        # SEED the wait with the reading even when the probe was not fresh,
+        # and poll with the live-only reader - exactly as the three
+        # http_server unload paths do, and NOT the other way round. The two
+        # ends need opposite things from a stale probe: for the 'before'
+        # SEED, None means "do not wait at all" (wait_for_vram_release
+        # short-circuits on before_bytes=None), so seeding it from the
+        # live-only reader would silently drop the driver-hang guard below to
+        # a 0-second no-op on any box whose probe merely ran slow. For the
+        # 'after' POLL, None correctly means "cannot verify". Freshness is
+        # carried separately, for the REPORT, not the wait.
+        # scope IS used, for the same reason the /v1/models/unload report needs
+        # it: a process-scoped reading (Windows/AMD, blind to the model in its
+        # isolated worker) genuinely CANNOT observe the free rising after unload,
+        # so "did not rise" would be a false claim, not a backable one. It is
+        # folded into the verdict below, not just the report.
+        before_free, before_fresh, before_scope = _vram_free_reading()
+        try:
+            engine.unload()
+        except Exception as e:
+            # Unload is best-effort (we still load the new model), but a
+            # cleanup failure must be visible, not silently swallowed.
+            _log(f"warning: failed to unload {victim}: {e}")
+        # The native unload's VRAM free is asynchronous - loading the next
+        # model before it lands can exceed total VRAM and hang the GPU
+        # driver (the same TDR risk the /v1/models/unload endpoint guards
+        # against; see vram.wait_for_vram_release). before_free is None only
+        # when VRAM is not measurable AT ALL (a CPU-only box), in which case
+        # there is nothing to wait for and this is a no-op, as before.
+        from localm.discover import FREE_SCOPE_DEVICE
+        from localm.vram import wait_for_vram_release
+        released, _final = wait_for_vram_release(
+            _live_free_vram_bytes, before_bytes=before_free)
+        backable = before_fresh and before_scope == FREE_SCOPE_DEVICE
+        if released is False and backable:
+            # Fresh AND device-global on both ends: "did not rise" is a claim we
+            # can back. A process-scoped reading is excluded here precisely
+            # because it cannot see the model's VRAM in its isolated worker, so a
+            # no-rise there proves nothing (it falls to the honest branch below).
+            _log(f"warning: VRAM free did not rise after unloading "
+                 f"{victim} within the timeout - loading {loading} anyway")
+        elif before_free is not None and (released is None or not backable):
+            # Either end came off a timed-out/busy probe, OR the reading is
+            # process-scoped (blind to the worker's VRAM), so whether the free
+            # landed is unknown. Say that rather than the "did not rise" claim
+            # above, which a reading we never took - or one that cannot see the
+            # freed memory - cannot support (rule 5). The wait still ran; only the
+            # verdict is withheld.
+            _log(f"warning: could not confirm the VRAM free after unloading "
+                 f"{victim} (no live GPU reading) - loading "
+                 f"{loading} anyway")
+
+    def unload_all(self) -> None:
+        """Free every resident engine (shutdown). N resident means N to free."""
+        for name in list(self._lru):
+            engine = self._engines.pop(name, None)
+            self._lru.remove(name)
+            if engine is None:
+                continue
+            try:
+                engine.unload()
+            except Exception as e:
+                # Process teardown, so nothing downstream can act on this - but
+                # a native free that failed is exactly what leaves VRAM pinned
+                # after exit, and swallowing it silently is how that becomes
+                # unexplainable. stderr only; stdout belongs to the protocol.
+                _log(f"warning: failed to unload {name} at shutdown: {e}")
 
 
 def _text_result(text: str, is_error: bool = False) -> dict:
@@ -1055,8 +1231,7 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
     try:
         server.run_stdio()
     finally:
-        if engines._engine is not None:
-            try:
-                engines._engine.unload()
-            except Exception:
-                pass
+        # Every resident engine, not just the most recent one: the cache went
+        # multi-resident, and freeing one of N would leave the rest holding
+        # VRAM past exit.
+        engines.unload_all()

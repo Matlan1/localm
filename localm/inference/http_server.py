@@ -39,6 +39,7 @@ from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import ModelLoadCancelled
 from localm.inference.chat_pipeline import ChatPipeline
+from localm.inference import residency
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
     ChatChunk, ChatResponse,
@@ -380,7 +381,6 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             return {"status": "already_active", "model": name}
 
         # Perform VRAM check and eviction
-        from pathlib import Path
         from localm import discover
         # By-symbol AND by-module deliberately: the by-symbol names are re-read from
         # the module on every call (this import is function-scoped), which is what
@@ -397,8 +397,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         file_size = 0
         if info is not None:
             m_path, _ = info
-            p = Path(m_path)
-            file_size = p.stat().st_size if p.is_file() else (sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 4 * 1024 ** 3)
+            file_size = residency.model_footprint_bytes(m_path)
         elif registry:
             # Registered against a real registry but the files are not on disk:
             # the shipped 404 contract. (Previously papered over with a fabricated
@@ -414,8 +413,15 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             from localm.inference.engine import _is_gguf
             from localm.inference import embedder as _embedder_mod
             from localm.vram import wait_for_vram_release
-            vram_required = int(file_size * 1.2)
-            headroom = 1024 ** 3  # 1GB VRAM headroom
+            # The admit margin, the victim-safety rules and the two policy knobs
+            # live in inference/residency.py, shared with the MCP server's
+            # EngineCache so the two serving layers cannot drift apart.
+            vram_required = residency.required_vram_bytes(file_size)
+            headroom = residency.DEFAULT_HEADROOM_BYTES
+            from localm.config import load_config as _load_config
+            _cfg = _load_config()
+            resident_cap = residency.resident_cap(_cfg)
+            pinned = residency.pinned_model_names(_cfg)
             # discover.gpu_split_shortfall's docstring has the full rationale:
             # vram_capacity() alone proves the AGGREGATE combined split free is
             # enough, but the GGUF/llama.cpp backend divides a model by a
@@ -555,8 +561,15 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # and admit a load with ZERO eviction on top of resident peers - the
                 # same stale int that produces a dishonest 503 in the LOW direction
                 # produces a native OOM / driver TDR in the HIGH one.
-                if (probe_ok and measurable
-                        and free_vram >= vram_required + headroom and not shortfall):
+                # `measurable` is folded into the shared predicate (free_vram is
+                # not None); it stays a local because the refuse-vs-defer branch
+                # below still distinguishes cannot-measure from inconclusive.
+                over_cap = residency.exceeds_resident_cap(
+                    _engines_lru, name, resident_cap)
+                if not over_cap and residency.fits_alongside_residents(
+                        free_vram=free_vram, vram_required=vram_required,
+                        probe_ok=probe_ok, headroom=headroom,
+                        shortfall=shortfall):
                     break
 
                 # Make room. Measurable VRAM: evict idle models until the new one
@@ -568,23 +581,14 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # until the driver OOMs (AUDIT-CRIT-2). The two diverge only once
                 # eviction is exhausted, below: cannot-measure loads best-effort,
                 # inconclusive refuses.
-                evict_name = None
-                for candidate in _engines_lru:
-                    if candidate == name:
-                        continue  # never evict the model we are loading
-                    candidate_engine = _engines.get(candidate)
-                    # Skip an engine another unload path is already mid-freeing
-                    # (unloading is True): those paths keep it in _engines_lru until
-                    # AFTER the native free completes, so without this guard the
-                    # eviction could select it and call _backend.unload() a SECOND
-                    # time concurrently (a double free of one native context - the
-                    # per-model semaphore does not serialise it, since eviction takes
-                    # no victim sem). active_requests==0 alone does not catch this.
-                    if (candidate_engine is not None
-                            and getattr(candidate_engine, "active_requests", 0) == 0
-                            and getattr(candidate_engine, "unloading", False) is not True):
-                        evict_name = candidate
-                        break
+                # Victim safety (never the requested model, never one that is
+                # serving, never one another path is already mid-freeing, never a
+                # pinned one) lives in residency.pick_eviction_victim, shared with
+                # the MCP server's cache. Its docstring carries the full rationale
+                # for each skip, in particular why active_requests==0 alone is not
+                # enough to rule out a concurrent double free.
+                evict_name = residency.pick_eviction_victim(
+                    _engines_lru, _engines, requested=name, pinned=pinned)
 
                 if evict_name is None:
                     # Nothing idle among the chat engines. The shared embedder is a
