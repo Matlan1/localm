@@ -600,6 +600,50 @@ def test_background_tools_are_not_available_to_restricted_sessions():
         assert name not in SAFE_RESTRICTED_TOOLS
 
 
+def test_concurrent_polls_are_safe(tmp_path, _py):
+    """check_shell_job is non-destructive, so the agent may batch several polls
+    into ONE parallel tool batch. Prove concurrent polls neither raise nor
+    disturb the job.
+
+    Every read is under a lock and none mutate job state: registry.get() takes
+    the registry lock, status() the job lock, and output() each ring's own lock.
+    (Note it is NOT _poll that protects this - check_shell_job never polls the
+    process; only the watcher thread and kill() do, both under the job lock.)
+    """
+    res = tool_run_shell_background(
+        tmp_path, _py("import time\nfor i in range(40):\n"
+                      "    print('line', i)\n    time.sleep(0.05)"))
+    job_id = _job_id(res)
+
+    results, errors = [], []
+
+    def _poll_many():
+        try:
+            for _ in range(15):
+                results.append(tool_check_shell_job(tmp_path, job_id).output)
+        except Exception as e:                      # noqa: BLE001 - recorded, asserted below
+            errors.append(f"{type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=_poll_many) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == [], f"concurrent polls raised: {errors}"
+    assert len(results) == 8 * 15
+    assert all("<job>" in r and job_id in r for r in results), "a poll returned a malformed body"
+
+    # The job is unharmed by being polled 120 times concurrently: it still
+    # finishes normally with its real exit code and its output intact.
+    assert _wait_for(
+        lambda: "<state>done</state>" in tool_check_shell_job(tmp_path, job_id).output,
+        timeout=60)
+    final = tool_check_shell_job(tmp_path, job_id)
+    assert "<exit_code>0</exit_code>" in final.output
+    assert "line 39" in final.output
+
+
 def test_all_background_tools_are_unscoped():
     """A path-arg check cannot confine arbitrary code, so none of these are
     scope-confined - that is deliberate and must stay explicit, not accidental."""
