@@ -28,6 +28,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   needed the lookup. Nothing that was refused before is allowed now: this has
   always been a warning that never blocked anything, and the scope confinement on
   the file tools is unchanged.
+- **The coder no longer reports finished work as failed because its own check
+  could not start.** When the coder picks a project's test command for you, it
+  now confirms that command can actually run before making it the gate. On
+  Windows it could not: npm and yarn ship as `.CMD` shims, which the way the
+  coder launches a command cannot start, so any project with a `package.json`
+  test script (localm's own repository included) failed verification on every
+  turn that changed a file. The coder was then told to fix a defect that was
+  never in the code, burned its retries on it, and ended with "this task is NOT
+  verified" over work that was fine. The command is now resolved to the runner's
+  real location, so it runs; and when a runner genuinely is not installed, no
+  check is set up at all rather than one that can only fail. The same applies to
+  a Rust project without cargo, a Go project without go, and a Python project
+  whose interpreter has no pytest.
+- **"The check could not run" is no longer reported as either a pass or a
+  failure.** An exit code meaning the command never started is now treated as
+  inconclusive, like a test run that collects nothing: the coder says plainly
+  that nothing was verified instead of blaming the model, and it does not spend
+  fix attempts on it. It is still never called a success. Sessions in the app
+  now also carry that third answer, so a finished task whose check never ran is
+  labelled "not verified" rather than reading as a clean finish.
 - **The coder's forgotten-lessons archive no longer reports "nothing here" when
   it simply could not be read.** `localm coder --episodes-archive` printed "No
   dropped episodes archived for this project", and `--restore-episode ID` printed

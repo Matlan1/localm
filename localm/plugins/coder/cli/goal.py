@@ -11,7 +11,12 @@ from pathlib import Path
 import localm.plugins.coder.cli as _cli
 from ..agent import Agent
 from ..display import print_error, print_info, print_success, print_warning
-from ..verify import run_verify as _run_verify, verify_feedback as _goal_feedback
+from ..verify import (
+    inconclusive_reason as _inconclusive_reason,
+    is_inconclusive as _is_inconclusive,
+    run_verify as _run_verify,
+    verify_feedback as _goal_feedback,
+)
 
 # _run_verify and _goal_feedback moved to ../verify.py when the oracle stopped
 # being CLI-only (the agent loop runs the same check at its pre-done boundary in
@@ -53,6 +58,19 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
             print_success(
                 f"Goal met: `{until_cmd}` exited 0 after {attempt} iteration(s).")
             return True, response
+        if _is_inconclusive(until_cmd, code):
+            # The check never ran (could not start, or collected nothing). No
+            # code change can affect that, so iterating on it would burn the
+            # whole budget asking the model to fix a condition it cannot reach.
+            # Not success either: nothing was verified, and for a caller reading
+            # the exit code that has to stay distinct from a green run.
+            print_error(
+                f"Goal NOT verified: `{until_cmd}` "
+                f"{_inconclusive_reason(until_cmd, code)} (exit {code}) after "
+                f"{attempt} iteration(s). Nothing was actually checked, so this "
+                "is reported as unverified rather than as a pass or as a code "
+                "failure to fix.")
+            return False, response
         if attempt == max_iters:
             print_error(
                 f"Goal NOT met: `{until_cmd}` still failing (exit {code}) after "

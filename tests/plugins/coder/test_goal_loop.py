@@ -74,6 +74,35 @@ def test_goal_loop_gives_up_honestly_at_the_cap(tmp_path, monkeypatch):
     assert len(agent.continue_calls) == 2
 
 
+def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
+                                                             monkeypatch):
+    """X4 in the --until path: 125 means the command never started, so no fix
+    turn can reach it. Iterating burns the whole budget asking the model to fix
+    a condition it cannot touch."""
+    calls = []
+
+    def _verify(cmd, wd):
+        calls.append(cmd)
+        return (125, "failed to run verification command: [WinError 2]")
+
+    monkeypatch.setattr(cli, "_run_verify", _verify)
+    agent = _FakeAgent()
+    success, _ = cli._run_goal_loop(agent, "do it", "npm test", 5, tmp_path)
+    assert success is False              # nothing was verified: never a pass
+    assert len(calls) == 1               # and never retried
+    assert agent.continue_calls == []    # the model is not billed for it
+
+
+def test_goal_loop_still_retries_a_genuine_failure(tmp_path, monkeypatch):
+    """FIRES-CONTROL for the test above: a real failing check must still drive
+    fix turns, or the --until oracle has been disarmed rather than corrected."""
+    monkeypatch.setattr(cli, "_run_verify", lambda cmd, wd: (1, "1 failed"))
+    agent = _FakeAgent()
+    success, _ = cli._run_goal_loop(agent, "do it", "pytest -x", 3, tmp_path)
+    assert success is False
+    assert len(agent.continue_calls) == 2
+
+
 def test_goal_task_wrap_forbids_editing_the_check():
     wrapped = cli._goal_task_wrap("add a feature", "pytest -x")
     assert "add a feature" in wrapped

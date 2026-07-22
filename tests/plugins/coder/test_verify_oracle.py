@@ -92,6 +92,24 @@ def _tool_call(name, **args):
             + "\n</tool_call>")
 
 
+_FAKE_BIN = "/fake/bin/%s"
+
+
+@pytest.fixture
+def runners_installed(monkeypatch):
+    """Pretend every test runner is installed, at a stable fake path.
+
+    Detection gates on the runner actually resolving and carries its resolved
+    path, so without this the branch-order tests would assert one thing on a box
+    with cargo and another on a box without - a suite whose result depends on
+    what happens to be installed. Availability itself is the subject of
+    TestDetectionConfirmsTheRunnerCanRun; these tests are about which branch
+    wins and what shape it returns."""
+    monkeypatch.setattr(
+        "localm.plugins.coder.tools.shell.resolve_runner",
+        lambda name: _FAKE_BIN % name)
+
+
 # --------------------------------------------------------------------------- #
 #  run_verify: the primitive, moved out of cli/goal.py                         #
 # --------------------------------------------------------------------------- #
@@ -141,6 +159,41 @@ class TestInconclusive:
         assert verify.is_inconclusive("pytest -q", 0) is False
 
 
+class TestLaunchFailureIsInconclusive:
+    """A command that never started is not a code defect to bill the model for.
+
+    X4: auto-detection handed back `npm test` on a box where an argv-list npm
+    cannot start; run_verify returned 125; 125 was not inconclusive, so it took
+    the FAILURE branch and correct work ended "NOT verified"."""
+
+    @pytest.mark.parametrize("code", [125, 126, 127])
+    def test_launch_failure_codes_are_inconclusive(self, code):
+        assert verify.is_launch_failure(code) is True
+        assert verify.is_inconclusive(["npm", "test"], code) is True
+        assert verify.is_inconclusive("make check", code) is True
+
+    @pytest.mark.parametrize("code", [1, 2, 3, 4, 6, 124, 128])
+    def test_a_genuine_failure_is_still_a_failure(self, code):
+        """FIRES-CONTROL for the whole class: widening "inconclusive" must not
+        swallow the exit codes a real failing suite returns, or the oracle stops
+        being an oracle. 124 is our own timeout marker - a check that ran."""
+        assert verify.is_launch_failure(code) is False
+        assert verify.is_inconclusive(["npm", "test"], code) is False
+
+    def test_the_reason_distinguishes_the_two_inconclusive_cases(self):
+        assert verify.inconclusive_reason(["npm", "test"], 125) == "could not run"
+        assert verify.inconclusive_reason("pytest -q", 5) == "collected no tests"
+
+    def test_a_command_that_cannot_launch_reports_inconclusive_end_to_end(
+            self, tmp_path):
+        """Through the REAL primitive, not a hand-written 125: an argv naming a
+        binary that does not exist must come back classified as "did not run"."""
+        cmd = ["definitely-not-a-real-binary-xyz"]
+        code, out = verify.run_verify(cmd, tmp_path)
+        assert verify.is_inconclusive(cmd, code) is True
+        assert "failed to run verification command" in out
+
+
 # --------------------------------------------------------------------------- #
 #  Auto-detection: the right command per project type, or none at all          #
 # --------------------------------------------------------------------------- #
@@ -151,35 +204,38 @@ class TestDetectVerifyCommand:
         in a project that simply has no tests."""
         assert verify.detect_verify_command(tmp_path) is None
 
-    def test_cargo_project(self, tmp_path):
+    def test_cargo_project(self, tmp_path, runners_installed):
         (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n")
         assert verify.detect_verify_command(tmp_path) == [
-            "cargo", "test", "--color=never"]
+            _FAKE_BIN % "cargo", "test", "--color=never"]
 
-    def test_go_project(self, tmp_path):
+    def test_go_project(self, tmp_path, runners_installed):
         (tmp_path / "go.mod").write_text("module x\n")
         assert verify.detect_verify_command(tmp_path) == [
-            "go", "test", "./..."]
+            _FAKE_BIN % "go", "test", "./..."]
 
-    def test_npm_project_with_a_test_script(self, tmp_path):
+    def test_npm_project_with_a_test_script(self, tmp_path, runners_installed):
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
         assert verify.detect_verify_command(tmp_path) == [
-            "npm", "test", "--passWithNoTests"]
+            _FAKE_BIN % "npm", "test", "--passWithNoTests"]
 
-    def test_yarn_lock_selects_yarn(self, tmp_path):
+    def test_yarn_lock_selects_yarn(self, tmp_path, runners_installed):
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
         (tmp_path / "yarn.lock").write_text("")
-        assert verify.detect_verify_command(tmp_path)[0] == "yarn"
+        assert verify.detect_verify_command(tmp_path)[0] == _FAKE_BIN % "yarn"
 
-    def test_npm_project_without_a_test_script_is_not_a_check(self, tmp_path):
+    def test_npm_project_without_a_test_script_is_not_a_check(
+            self, tmp_path, runners_installed):
         """`npm test` with no test script fails every run with "missing script",
-        which no code change can fix - so it must not become the oracle."""
+        which no code change can fix - so it must not become the oracle. npm is
+        present here, so this pins the test-script half specifically."""
         (tmp_path / "package.json").write_text(json.dumps({"name": "x"}))
         assert verify.detect_verify_command(tmp_path) is None
 
-    def test_malformed_package_json_is_not_a_check(self, tmp_path):
+    def test_malformed_package_json_is_not_a_check(self, tmp_path,
+                                                   runners_installed):
         (tmp_path / "package.json").write_text("{not json")
         assert verify.detect_verify_command(tmp_path) is None
 
@@ -223,11 +279,122 @@ class TestDetectVerifyCommand:
         assert verify.detect_verify_command(tmp_path) == "make check"
 
 
+class TestDetectionConfirmsTheRunnerCanRun:
+    """X4's first half: a project file proves the project's SHAPE, not that its
+    runner is installed. Detecting a command that cannot start hands the oracle
+    a permanent 125 and bills it to the model as a code defect."""
+
+    @staticmethod
+    def _fake_which(monkeypatch, table):
+        """Patch runner resolution at its single source (tools/shell)."""
+        monkeypatch.setattr(
+            "localm.plugins.coder.tools.shell.resolve_runner",
+            lambda name: table.get(name))
+
+    @pytest.mark.parametrize("marker,body,runner", [
+        ("Cargo.toml", "[package]\nname='x'\n", "cargo"),
+        ("go.mod", "module x\n", "go"),
+    ])
+    def test_absent_runner_means_no_oracle(self, tmp_path, monkeypatch,
+                                           marker, body, runner):
+        (tmp_path / marker).write_text(body)
+        self._fake_which(monkeypatch, {})
+        assert verify.detect_verify_command(tmp_path) is None
+
+    @pytest.mark.parametrize("marker,body,runner,resolved", [
+        ("Cargo.toml", "[package]\nname='x'\n", "cargo", "/opt/bin/cargo"),
+        ("go.mod", "module x\n", "go", "/opt/bin/go"),
+    ])
+    def test_present_runner_is_used_at_its_resolved_path(
+            self, tmp_path, monkeypatch, marker, body, runner, resolved):
+        (tmp_path / marker).write_text(body)
+        self._fake_which(monkeypatch, {runner: resolved})
+        assert verify.detect_verify_command(tmp_path)[0] == resolved
+
+    def test_npm_project_without_npm_installed_is_not_a_check(
+            self, tmp_path, monkeypatch):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}))
+        self._fake_which(monkeypatch, {})
+        assert verify.detect_verify_command(tmp_path) is None
+
+    def test_npm_is_used_at_its_resolved_path_not_its_bare_name(
+            self, tmp_path, monkeypatch):
+        """THE X4 BUG. `shutil.which('npm')` finds `npm.CMD` on Windows, but an
+        argv list naming it "npm" still cannot start: argv execution goes
+        through CreateProcess, which will not launch a .CMD shim. The resolved
+        path
+        does. So detection must carry the path, not the name."""
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}))
+        self._fake_which(monkeypatch, {"npm": r"C:\Program Files\nodejs\npm.CMD"})
+        cmd = verify.detect_verify_command(tmp_path)
+        assert cmd == [r"C:\Program Files\nodejs\npm.CMD", "test",
+                       "--passWithNoTests"]
+
+    def test_yarn_project_gates_on_yarn_not_npm(self, tmp_path, monkeypatch):
+        """The lockfile picks the runner, so the availability check has to follow
+        it - npm being installed says nothing about yarn."""
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}))
+        (tmp_path / "yarn.lock").write_text("")
+        self._fake_which(monkeypatch, {"npm": "/usr/bin/npm"})
+        assert verify.detect_verify_command(tmp_path) is None
+        self._fake_which(monkeypatch, {"yarn": "/usr/bin/yarn"})
+        assert verify.detect_verify_command(tmp_path)[0] == "/usr/bin/yarn"
+
+    def test_python_project_without_pytest_importable_is_not_a_check(
+            self, tmp_path, monkeypatch):
+        """The interpreter always launches, so the launch check cannot see this
+        one: with no pytest importable the check exits 1 with "No module named
+        pytest" on every run, unfixable by the model and wearing an exit code
+        that looks like a genuine test failure."""
+        (tmp_path / "pytest.ini").write_text("[pytest]\n")
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name, *a, **k: None if name == "pytest" else object())
+        assert verify.detect_verify_command(tmp_path) is None
+
+    def test_python_project_with_pytest_still_detects(self, tmp_path):
+        """The other direction, unpatched: pytest is importable here (it is
+        running this test), so the oracle must still be offered."""
+        (tmp_path / "pytest.ini").write_text("[pytest]\n")
+        assert verify.detect_verify_command(tmp_path)[0] == sys.executable
+
+    def test_whatever_is_detected_here_can_actually_be_launched(self, tmp_path):
+        """The invariant, against the REAL environment rather than a fake: for
+        every project shape, detection returns either None or a command whose
+        argv[0] this platform can genuinely start. This is the assertion that
+        fails on the pre-fix code on Windows, where npm resolves but `['npm',
+        ...]` raises WinError 2."""
+        import shutil
+        import subprocess
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}}))
+        if shutil.which("npm") is None:
+            pytest.skip("npm not installed on this box")
+        cmd = verify.detect_verify_command(tmp_path)
+        assert cmd is not None, "npm is installed, so the oracle should exist"
+        try:
+            subprocess.run([cmd[0], "--version"], capture_output=True,
+                           timeout=120)
+        except FileNotFoundError as exc:
+            pytest.fail(
+                f"detection returned a command that cannot be launched: "
+                f"{cmd!r} ({exc})")
+
+
 # --------------------------------------------------------------------------- #
 #  The gate at the pre-done boundary                                           #
 # --------------------------------------------------------------------------- #
 
 class TestVerifyGate:
+    _NO_TOOL_SCRIPT = ["Nothing to do here."]
+    _SCRIPT_THEN_ANSWER = [
+        _tool_call("write_file", path="mod.py", content="x = 1\n"),
+        "All done.",
+    ]
+
     def test_no_command_configured_is_a_no_op(self, tmp_path):
         agent = _make_agent(tmp_path)
         _record_write(agent)
@@ -315,6 +482,61 @@ class TestVerifyGate:
         assert st.verify_settled is True                    # no pointless retries
         assert agent.last_run_ok is True                    # not a failure either
         assert "inconclusive" in warn.call_args[0][0]       # and never called a pass
+
+    def test_a_check_that_could_not_run_is_neither_a_failure_nor_a_pass(
+            self, tmp_path):
+        """X4 END TO END at the gate. The command names a binary that does not
+        exist, so it never starts. The model must not be asked to fix it, the
+        task must not be marked failed, and nothing may report a pass."""
+        agent = _make_agent(tmp_path,
+                            verify_cmd=["definitely-not-a-real-binary-xyz"],
+                            verify_max_retries=2)
+        _record_write(agent)
+        st = _fresh_state(agent)
+        with patch("localm.plugins.coder.agent.print_warning") as warn:
+            assert agent._run_verify_gate("done", False, st) is None
+        assert st.verify_settled is True          # not a retry loop
+        assert st.verify_retries == 0             # not one attempt was billed
+        assert agent.last_run_ok is True          # not reported as task failure
+        assert agent.last_verify_state == "inconclusive"   # and not as a pass
+        assert "could not run" in warn.call_args[0][0]
+        assert "nothing was actually verified" in warn.call_args[0][0]
+
+    def test_a_genuinely_failing_check_still_reports_failure(self, tmp_path):
+        """FIRES-CONTROL for the test above, in the same run: the oracle must
+        still fail the things it is there to fail. If widening "inconclusive"
+        had disarmed it, this is what would go quiet."""
+        agent = _make_agent(tmp_path, verify_cmd="exit 1", verify_max_retries=1)
+        _record_write(agent)
+        st = _fresh_state(agent)
+        assert agent._run_verify_gate("done", False, st) == (False, "")
+        assert st.verify_retries == 1             # the model IS asked to fix it
+        should_break, text = agent._run_verify_gate("done", False, st)
+        assert should_break is True
+        assert "verification FAILED" in text
+        assert agent.last_run_ok is False
+        assert agent.last_verify_state == "failed"
+
+    def test_verify_state_records_a_pass(self, tmp_path):
+        agent = _make_agent(tmp_path, verify_cmd="exit 0")
+        _record_write(agent)
+        agent._run_verify_gate("done", False, _fresh_state(agent))
+        assert agent.last_verify_state == "passed"
+
+    def test_verify_state_is_none_when_no_check_ran(self, tmp_path):
+        agent = _make_agent(tmp_path, self._NO_TOOL_SCRIPT)
+        agent.chat("just answer")
+        assert agent.last_verify_state is None
+
+    def test_verify_state_is_per_run_like_last_run_ok(self, tmp_path):
+        """A later clean turn must not keep reporting the earlier turn's verdict
+        (the #792 defect, applied to the new field before it can happen)."""
+        agent = _make_agent(tmp_path, self._SCRIPT_THEN_ANSWER,
+                            verify_cmd="exit 1", verify_max_retries=1)
+        agent.chat("write mod.py")
+        assert agent.last_verify_state == "failed"
+        agent.chat("thanks, what does it do?")    # writes nothing -> no gate
+        assert agent.last_verify_state is None
 
     def test_gate_is_skipped_for_a_malformed_tool_call(self, tmp_path):
         """A response that only looks like a broken tool call is mid-call, not a
@@ -429,11 +651,13 @@ class TestSessionWiring:
             MockPM.build.return_value.file_count.return_value = 0
             return CoderSession(tmp_path, _ScriptedBackend(["done"]), **kwargs)
 
-    def test_gui_session_auto_detects(self, tmp_path):
+    def test_gui_session_auto_detects(self, tmp_path, runners_installed):
         (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n")
         session = self._session(tmp_path)
-        assert session.agent.verify_cmd == ["cargo", "test", "--color=never"]
-        assert session.info()["verify"] == "cargo test --color=never"
+        assert session.agent.verify_cmd == [
+            _FAKE_BIN % "cargo", "test", "--color=never"]
+        assert session.info()["verify"] == (
+            f"{_FAKE_BIN % 'cargo'} test --color=never")
 
     def test_gui_session_explicit_command_wins(self, tmp_path):
         (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n")
@@ -450,6 +674,38 @@ class TestSessionWiring:
         (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n")
         session = self._session(tmp_path, restricted=True, verify="make check")
         assert session.agent.verify_cmd is None
+
+    def test_final_event_distinguishes_unverified_from_a_clean_finish(
+            self, tmp_path):
+        """X7: the GUI is the consumer that reads the gate's verdict as a
+        boolean. A check that could not run leaves ok true, so without a second
+        field the one machine-readable answer says "clean finish" about a task
+        nothing verified."""
+        import queue as _queue
+        import time as _time
+        from localm.plugins.coder.sessions import CoderSession
+
+        script = [_tool_call("write_file", path="mod.py", content="x = 1\n"),
+                  "All done."]
+        session = CoderSession(
+            tmp_path, _ScriptedBackend(script), auto_approve=True,
+            verify=["definitely-not-a-real-binary-xyz"], max_turns=10)
+        try:
+            assert session.send_message("write mod.py") == "started"
+            deadline = _time.monotonic() + 15.0
+            final = None
+            while _time.monotonic() < deadline and final is None:
+                try:
+                    ev = session.events.get(timeout=0.2)
+                except _queue.Empty:
+                    continue
+                if ev["type"] == "final":
+                    final = ev
+            assert final is not None, "no final event within 15s"
+            assert final["ok"] is True            # the run itself was fine
+            assert final["verify_state"] == "inconclusive"   # but unverified
+        finally:
+            session.close()
 
 
 class TestSelfVerifyNudge:
@@ -469,7 +725,8 @@ class TestSelfVerifyNudge:
 
 
 class TestCliWiring:
-    def test_repl_session_gets_the_detected_command(self, tmp_path, monkeypatch):
+    def test_repl_session_gets_the_detected_command(self, tmp_path, monkeypatch,
+                                                    runners_installed):
         """`localcoder` with no TASK is the interactive path the oracle targets."""
         from localm.plugins.coder.cli import _main
         (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n")
@@ -480,7 +737,8 @@ class TestCliWiring:
 
         monkeypatch.setattr(_main, "_repl", _fake_repl)
         self._run_cli(monkeypatch, tmp_path, [])
-        assert captured["verify_cmd"] == ["cargo", "test", "--color=never"]
+        assert captured["verify_cmd"] == [
+            _FAKE_BIN % "cargo", "test", "--color=never"]
 
     def test_no_verify_flag_turns_it_off(self, tmp_path, monkeypatch):
         from localm.plugins.coder.cli import _main
