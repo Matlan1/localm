@@ -15,6 +15,9 @@ task_kind "coder": a coder Agent runs the prompt in the job's ``cwd`` with the
     job's ``scope`` and the current privacy mode. The coder path is best-effort:
     a full agentic run needs the coder extra installed and a working backend; it
     is unit-tested with the agent/backend mocked.
+task_kind "rag":   the job's ``collection`` is re-synced against the folders it
+    was indexed from (``Collection.resync``), picking up files added or changed
+    since and flagging ones that vanished. Loads no chat model.
 
 Results are explicit user data (the store saves them in every privacy mode), but
 any session TRACE a run would leave (audit JSONL, transcripts) still honours
@@ -75,6 +78,8 @@ def run_job(job: Job, *, engine=None) -> dict:
             output = _run_coder(job, engine=engine)
         elif job.task_kind == "memory":
             output = _run_memory(job, engine=eng)
+        elif job.task_kind == "rag":
+            output = _run_rag(job)
         else:
             raise ValueError(f"unknown task_kind: {job.task_kind!r}")
         return {
@@ -325,6 +330,120 @@ def _run_memory(job: Job, *, engine=None) -> str:
         return "memory synthesis: no new durable facts found" + suffix
     return ("memory synthesis: added %d fact(s):\n" % result["added"]) + \
            "\n".join(f"- {f}" for f in facts) + suffix
+
+
+# --------------------------------------------------------------------------- #
+#  rag (scheduled folder re-sync)                                              #
+# --------------------------------------------------------------------------- #
+
+def _rag_embed_fn():
+    """The embedding callable a re-sync indexes with, or None when no embedding
+    model is available (the collection then indexes lexical-only, exactly like
+    ``rag add`` without ``--embed``).
+
+    Resolved in-process from the shared embedder singleton - the same handle the
+    memory plugin uses - rather than over HTTP, so a re-sync works under
+    ``localm job run`` with no server up. ``embed_texts`` is deliberately NOT used:
+    it returns None when unavailable, and ``add_paths`` cannot consume that.
+
+    This runs on the runner's worker thread, never the event loop: resolving the
+    embedder can trigger a VRAM swap, which must not block the loop (BUG #648)."""
+    try:
+        from localm.inference.embedder import get_embedder
+        emb = get_embedder()
+        return emb.embed if emb is not None else None
+    except Exception as e:
+        logger.debug("jobs: rag embedder resolution failed (%s); "
+                     "re-syncing lexical-only", e)
+        return None
+
+
+def _run_rag(job: Job) -> str:
+    """Re-sync a knowledge collection against the folders it was indexed from.
+
+    Reuses the incremental index wholesale (``Collection.resync`` -> the same
+    ``add_paths`` hash-skip path an interactive add uses), so an unchanged file
+    costs a hash and nothing else, and reports what the run actually did.
+
+    No CHAT model is loaded: a re-sync needs neither the format tie-break nor
+    image description (both are optional refinements of an interactive add), so
+    unlike a chat/memory job this never loads or unloads one. It does resolve the
+    shared EMBEDDER, which on a tight card can itself evict a resident chat model
+    (embedder._maybe_swap_for_embedder -> vram.evict_chat_for_embedder) - the
+    same swap an interactive index or a memory write already performs, and the
+    reason this must run off the event loop (BUG #648).
+
+    Confinement: the run always passes ``indexing_policy()``. A scheduled job is
+    not the local CLI operator - it can be created through the API by a
+    jobs-scoped key - so it must never index a path an interactive add would
+    refuse, including a root that has since fallen outside the owner's allowed
+    folders. Deletion is non-destructive by design (see ``Collection.resync``).
+
+    Privacy: a collection is explicit user data and is written in every session
+    mode (the localm.rag docstring), exactly as an interactive add is; this path
+    adds no session trace of its own."""
+    from localm.rag import Collection
+    from localm.rag.store import indexing_policy
+
+    name = (job.collection or "").strip()
+    if not name:
+        raise RuntimeError("this rag job has no collection configured")
+    coll = Collection(name)
+    if not coll.exists():
+        raise RuntimeError(f"no such collection: {name}")
+    if not coll.roots() and not coll.documents():
+        return (f"'{name}' has nothing to re-sync: no indexed folders and no "
+                f"documents. Index a folder first "
+                f"(localm rag add {name} <folder>).")
+
+    had_vectors = bool(coll.stats().get("has_vectors"))
+    embed_fn = _rag_embed_fn()
+    lines: list = []
+    result = coll.resync(embed_fn=embed_fn, policy=indexing_policy(),
+                         on_progress=lines.append)
+    return _format_rag_result(name, result, lines,
+                              embedded=embed_fn is not None,
+                              had_vectors=had_vectors)
+
+
+def _format_rag_result(name: str, result: dict, lines: list, *,
+                       embedded: bool, had_vectors: bool) -> str:
+    """Render a re-sync result as the job's output.
+
+    Every degrade is stated, not implied (AGENTS.md rule 5): a skipped root, a
+    flagged-missing document, a per-file failure, and - the easy one to hide -
+    new documents indexed WITHOUT embeddings into a collection that had semantic
+    search, which silently pushes vector coverage down and can drop the whole
+    collection to BM25."""
+    out = [f"re-synced '{name}': {result['added']} added, "
+           f"{result['updated']} updated, {result['skipped']} unchanged - "
+           f"{result['chunks']} chunks over {len(result['roots'])} folder(s)"]
+    if result["missing"]:
+        out.append(f"{len(result['missing'])} document(s) are no longer on disk. "
+                   f"They are FLAGGED, not removed, so nothing is lost if this "
+                   f"was temporary; remove them from the collection yourself when "
+                   f"you are sure:")
+        out.extend(f"  missing: {p}" for p in result["missing"][:10])
+    if result["restored"]:
+        out.append(f"{len(result['restored'])} previously missing document(s) "
+                   f"are back.")
+    for r in result["unavailable_roots"] + result["blocked_roots"]:
+        out.append(f"skipped folder {r['root']}: {r['reason']} "
+                   f"(nothing under it was indexed, flagged, or removed)")
+    if result["failed"]:
+        out.append(f"{len(result['failed'])} file(s) failed:")
+        out.extend(f"  {f['path']}: {f['error']}" for f in result["failed"][:10])
+    if not embedded and had_vectors and (result["added"] or result["updated"]):
+        out.append(
+            "NOTE: no embedding model was available, so the newly indexed "
+            "documents have no vectors while the rest of this collection does. "
+            "Semantic search degrades as that gap grows - run "
+            "'localm setup-embeddings' and re-sync again to close it.")
+    # The per-file progress lines carry store-level degrades (an embedder that
+    # raised mid-run, a non-finite vector) that would otherwise be dropped.
+    degrades = [t for t in lines if t.startswith("embeddings")]
+    out.extend(f"NOTE: {t}" for t in dict.fromkeys(degrades))
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------- #

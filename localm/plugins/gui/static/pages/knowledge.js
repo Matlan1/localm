@@ -618,10 +618,27 @@ export async function kbInfoModal(name) {
       warn.style.color = "var(--yellow)";
       body.appendChild(warn);
     }
+    // A re-sync flags documents whose source file has vanished rather than
+    // deleting them, so the index can be ahead of the disk. Say so here, where
+    // the documents are listed - otherwise the only place it surfaces is the
+    // job's run output (AGENTS rule 5).
+    if (data.n_missing) {
+      const gone = el("div", "sub",
+        `⚠ ${data.n_missing} document(s) are no longer on disk. They are still ` +
+        "indexed and searchable, flagged rather than deleted, so nothing is " +
+        "lost if that was temporary. Remove one below when you are sure.");
+      gone.style.color = "var(--yellow)";
+      body.appendChild(gone);
+    }
     for (const d of data.docs) {
       const row = el("div", "log-entry");
       row.appendChild(iconEl("file", "ic ic-doc log-ic"));
       row.appendChild(el("span", "t", `${d.chunks} chunks`));
+      if (d.missing) {
+        const tag = el("span", "t", "file missing");
+        tag.style.color = "var(--yellow)";
+        row.appendChild(tag);
+      }
       row.appendChild(document.createTextNode(d.path + " "));
       const rm = el("button", "action", "remove");
       rm.onclick = async () => {

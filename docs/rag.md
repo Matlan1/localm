@@ -121,6 +121,32 @@ By default CLI indexing is lexical-only (no running engine); pass `--embed` to
 `localm rag add` / `localm rag query` to compute vectors via a running localm
 server, matching the GUI.
 
+## Keeping an index current
+
+Indexing a folder records the folder itself, not just the files it held at the
+time, so the index can be brought back in line with the disk later:
+
+```bash
+localm rag resync NAME                     # by hand
+localm job add sync-NAME --rag --collection NAME --cron "0 3 * * *"   # scheduled
+```
+
+A re-sync re-walks each indexed folder and re-indexes incrementally: new files
+are added, changed files re-indexed, unchanged files skipped by content hash.
+There is no filesystem watcher and there will not be one - a watcher daemon
+would break the self-contained design - so a schedule is how an index stays
+fresh.
+
+A document whose source file has vanished is **flagged, not deleted**
+(`missing` in the collection's document list, counted as `n_missing` in its
+stats): its chunks stay searchable and the flag clears by itself if the file
+returns, so a moved file or an unplugged drive cannot silently destroy part of
+an index. Pass `--prune-missing` to actually remove those entries. A folder that
+is not reachable at run time is reported and skipped whole - nothing under it is
+indexed, flagged, or pruned. Scheduled re-syncs run under the same indexing
+policy as an interactive add. Full details in
+[docs/jobs.md](jobs.md#keeping-an-indexed-folder-current).
+
 ## Limits worth knowing
 
 - Retrieval quality is bounded by BM25 unless an embedding model is installed

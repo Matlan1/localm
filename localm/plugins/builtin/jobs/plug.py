@@ -10,7 +10,8 @@ Routes (mounted by the engine, auto-scoped to the ``jobs`` capability):
   POST   /api/jobs/{id}/run        - run the job now
   GET    /api/jobs/{id}/results    - past run results (newest first)
 
-A job runs a chat or coder prompt on an interval or 5-field cron schedule. The
+A job runs a chat or coder prompt, a memory-synthesis pass, or a RAG collection
+re-sync, on an interval or 5-field cron schedule. The
 JobScheduler wakes periodically (~30s) and runs every enabled + due job via the
 runner, recording each result. Job RESULTS are explicit user data (saved in any
 privacy mode, like generated images); a coder/chat RUN's own session trace still
@@ -52,13 +53,17 @@ _host = None
 
 class JobCreate(BaseModel):
     name: str
-    task_kind: str = "chat"             # "chat" | "coder"
-    prompt: str
+    task_kind: str = "chat"             # "chat" | "coder" | "memory" | "rag"
+    # memory and rag jobs are fully specified without one, so this cannot be a
+    # required field; Job.validate() still rejects an empty prompt for the kinds
+    # that need it, so the rule stays in ONE place.
+    prompt: str = ""
     schedule_kind: str = "interval"     # "interval" | "cron"
     schedule: "int | str" = 3600        # seconds, or a 5-field cron string
     model: "str | None" = None
     cwd: "str | None" = None
     scope: "str | None" = None
+    collection: "str | None" = None     # rag jobs: the collection to re-sync
     allow_shell: bool = False           # coder jobs: opt in to full shell exec
     enabled: bool = True
 
@@ -72,6 +77,7 @@ class JobUpdate(BaseModel):
     model: "str | None" = None
     cwd: "str | None" = None
     scope: "str | None" = None
+    collection: "str | None" = None
     allow_shell: "bool | None" = None
     enabled: "bool | None" = None
 
@@ -232,6 +238,7 @@ async def create_job(req: JobCreate, request: Request):
             model=req.model,
             cwd=req.cwd,
             scope=req.scope,
+            collection=req.collection,
             allow_shell=req.allow_shell,
             enabled=req.enabled,
             owner=principal_id(request),    # bind the job to its creator
