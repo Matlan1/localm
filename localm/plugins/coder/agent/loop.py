@@ -143,6 +143,8 @@ class _LoopMixin:
                                            # too. The session-wide "did anything
                                            # fail" answer lives in _had_any_failure,
                                            # recorded in the finally below.
+        self._last_verify_state = None     # per-run, same reasoning: this run has
+                                           # not been verified until its own gate says so
         start_turns = self._turns          # turns used by *this* task only
         budget_escalated = False           # uncertainty escalation fires at most once per task
         # Per-task one-shot flags for the no-tool-calls handler (split out below):
@@ -554,7 +556,12 @@ class _LoopMixin:
         self._emit("info", text=f"verification: running `{label}`")
         if interactive:
             print_info(f"(verification: running `{label}`)")
-        code, output = _verify.run_verify(cmd, self.cwd)
+        outcome = _verify.run_verify(cmd, self.cwd)
+        code, output = outcome
+        # Whether the command STARTED is the runner's own knowledge, carried on
+        # the outcome; inferring it from the exit code would misread a genuine
+        # 127 from a check that ran as "nothing was verified".
+        did_not_start = _verify.launch_failed(outcome)
 
         if code == 0:
             # Passing is not terminal: anything written AFTER this point (a fix
@@ -566,18 +573,23 @@ class _LoopMixin:
             # and the writes it guards are genuinely verified.
             st.verify_nudged = True
             self._unverified_writes.clear()
+            self._last_verify_state = "passed"
             self._emit("info", text=f"verification passed: `{label}` exited 0")
             if interactive:
                 print_success(f"Verification passed: `{label}` exited 0.")
             return None
 
-        if _verify.is_inconclusive(cmd, code):
-            # Not a pass and not a fixable failure: the check collected nothing.
-            # Retrying would burn every attempt on something no code change can
-            # affect, so stop - but say plainly that nothing was verified rather
-            # than letting an exit code the model never saw look like success.
+        if _verify.is_inconclusive(cmd, code, did_not_start):
+            # Not a pass and not a fixable failure: the check either could not
+            # start or collected nothing. Retrying would burn every attempt on
+            # something no code change can affect, so stop - but say plainly that
+            # nothing was verified rather than letting an exit code the model
+            # never saw look like success, and record the third state so a
+            # programmatic consumer is not left reading an unqualified ok.
             st.verify_settled = True
-            msg = (f"verification inconclusive: `{label}` collected no tests "
+            self._last_verify_state = "inconclusive"
+            msg = (f"verification inconclusive: `{label}` "
+                   f"{_verify.inconclusive_reason(cmd, code, did_not_start)} "
                    f"(exit {code}) - nothing was actually verified")
             self._emit("info", text=msg)
             _agent.print_warning(msg)
@@ -599,6 +611,7 @@ class _LoopMixin:
         # not-ok and the failure is stated, never papered over as success.
         st.verify_settled = True
         self._last_run_ok = False
+        self._last_verify_state = "failed"
         notice = (
             f"\n\n[verification FAILED] `{label}` still exits {code} after "
             f"{self.verify_max_retries} fix attempt(s). This task is NOT verified."

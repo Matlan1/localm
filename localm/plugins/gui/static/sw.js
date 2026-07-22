@@ -97,7 +97,11 @@
 // endpoints answer 409 while another localm process is writing the collection,
 // and that detail names the holder and says it is worth retrying; a stale-cached
 // client would keep swallowing it and leave the user with a dead end.
-const CACHE = "localm-shell-v79";
+// v80: a coder task whose verification could not run is now labelled "not
+// verified" on the final line (app/coder.js reads the final event's new
+// `verify_state`) - a stale-cached client would render the old unqualified
+// "Task finished" and report an unverified task as a clean one.
+const CACHE = "localm-shell-v80";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

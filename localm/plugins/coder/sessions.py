@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
-from .verify import command_text as _verify_text
+from .verify import VerifyCommand as _VerifyCommand, command_text as _verify_text
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
 # Overridable via the "coder_confirm_timeout" config key (seconds).
@@ -76,7 +76,9 @@ class CoderSession:
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
         custom_instructions: Optional[str] = None,
-        verify: Optional[str] = None,
+        # A shell string OR an argv list, the same union the agent's verify_cmd
+        # holds: auto-detection assigns a list to this very field below.
+        verify: Optional["_VerifyCommand"] = None,
         auto_verify: bool = True,
         **gen_kwargs,
     ) -> None:
@@ -309,6 +311,10 @@ class CoderSession:
                     "type": "final",
                     "text": final,
                     "ok": self.agent.last_run_ok,
+                    # "passed"/"failed"/"inconclusive"/null. Separate from "ok"
+                    # because a check that could not run is neither: ok alone
+                    # would report an unverified task as a clean finish.
+                    "verify_state": self.agent.last_verify_state,
                     "turns": self.agent.turns,
                     "total_tokens": self.agent.total_tokens,
                     "changed_files": [f["path"] for f in
