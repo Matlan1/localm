@@ -113,6 +113,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   execution. Tools registered by MCP servers, plugins, and skills are excluded
   from a role by default rather than inherited. Omitting `role` keeps the
   previous behavior (the sub-agent gets the parent's full toolset).
+- **Coder: `edit_files` applies one exact-string edit across several files at
+  once, all-or-nothing.** The coder could already replace an exact snippet in a
+  single file (`edit_file`) or run a regex substitution across many
+  (`search_replace`), but not the common middle case: change this exact text in
+  these five files. `edit_files` takes a list of `{path, old, new}` edits, checks
+  every one before writing anything, and if any edit fails - a path outside the
+  project, a missing file, text that does not match - it reports which one and
+  why and leaves every file exactly as it was. If a write fails partway through,
+  the files already written are restored from snapshots taken before the batch;
+  should that restore itself fail, the result says so rather than claiming a
+  clean rollback. Edits keep `edit_file`'s behaviour otherwise: first occurrence
+  only, matched exactly, with the closest-match hint on a miss and the post-write
+  syntax check on each file. It honours an active `--scope`, is undoable, and is
+  captured (not written to disk) in patch mode.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
@@ -255,6 +269,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   combined capacity instead of "this GPU".
 
 ### Changed
+- **Coder: `grep` is much faster on real repositories, and its limits are now
+  settings.** It streams files line by line instead of reading each one whole,
+  and it no longer reads what it cannot use: files under noise directories
+  (`.git`, `node_modules`, `__pycache__`, `.venv`, ...), binaries, and files
+  above a size cap are skipped before being read. On a 4103-file / 50.6 MB test
+  repository a default search went from 6.90s to 0.56s and from 123 MB to 5.7 MB
+  of peak memory. Every skip is reported in the result, with the reason and the
+  setting that changes it, so a narrower search never looks like a complete one;
+  searching a skipped directory on purpose still works by naming it in `path=`
+  or `glob=`. The matches-per-file cap (20), the output-line cap (300), and the
+  new file-size cap (4 MB) are now the `coder_grep_max_per_file`,
+  `coder_grep_max_output_lines`, and `coder_grep_max_file_bytes` settings, each
+  overridable per search; 0 means no cap. Line numbers now count line feeds
+  only, matching what an editor shows, so a file containing form feeds no longer
+  reports shifted numbers - in such a file `^`/`$` anchors now also treat only
+  line feeds as line boundaries.
 - **NVIDIA on Windows now recommends CUDA.** The setup menu's default backend for
   an NVIDIA GPU on Windows is now `cuda` (peak performance) rather than Vulkan: it
   fetches a self-contained CUDA runtime (no CUDA Toolkit needed) and falls back to

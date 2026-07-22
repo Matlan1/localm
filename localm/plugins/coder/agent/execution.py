@@ -14,7 +14,10 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     console, print_tool_call, print_tool_error, print_tool_result,
 )
-from ..diffutil import compute_tool_diff, read_old_content, resolve_new_content
+from ..diffutil import (
+    compute_multifile_diff, compute_tool_diff, read_old_content,
+    resolve_new_content,
+)
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..audit import SessionMode
@@ -23,7 +26,7 @@ from .constants import (
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_EXEC_TOOLS,
     _SHELL_UNSCOPED_TOOLS,
-    _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS,
+    _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
 
@@ -86,6 +89,12 @@ class _ExecutionMixin:
         if call.name.startswith(("mcp_", "plugin_")):
             arg_names = _MCP_SCOPE_PATH_ARGS
         else:
+            # A nested-path tool (edit_files) has NO top-level `path` arg, so
+            # checking arg names alone would find nothing and let the call
+            # through - fail-OPEN. Check its real targets first.
+            for value in _call_target_paths(call.name, call.args):
+                if not self._scope_allows(value):
+                    return value
             arg_names = _SCOPE_PATH_ARGS.get(call.name, ("path",))
         for name in arg_names:
             value = call.args.get(name)
@@ -197,8 +206,14 @@ class _ExecutionMixin:
             chunk = self._patch_mode_intercept(call)
             if chunk is not None:
                 self._patch_chunks.append(chunk)
+                # Name the files the DIFF actually covers, not every path the
+                # call mentioned: a file whose edit produced no change is not
+                # "captured", and saying it was overstates what patch mode holds.
+                targets = list(dict.fromkeys(_call_target_paths(call.name, call.args)))
+                covered = [t for t in targets if f"b/{t}" in chunk] or targets
+                label = ", ".join(covered) if covered else "?"
                 result = ToolResult.success(
-                    f"[patch-mode] diff captured for {call.args.get('path', '?')}",
+                    f"[patch-mode] diff captured for {label}",
                     summary=f"[patch-mode] {call.name}",
                 )
                 if interactive:
@@ -302,19 +317,27 @@ class _ExecutionMixin:
 
         # Snapshot file content before undoable writes so /undo can restore
         # it and the changed-files tracker can diff against the original
-        snapshot_old: bytes | None = None
+        # (edit_files targets several files in one call, so this is a list: one
+        # undo entry per file, or /undo would restore only the first of them.)
+        snapshots: dict[str, bytes | None] = {}
         if call.name in _UNDOABLE_TOOLS:
-            path_arg = call.args.get("path", "")
-            if path_arg:
+            # One id per CALL: a multi-file call pushes several entries, and
+            # undo() reverts them together (see persistence.undo) so /undo can
+            # never leave a batch half-restored.
+            self._undo_seq = getattr(self, "_undo_seq", 0) + 1
+            undo_call_id = self._undo_seq
+            for path_arg in dict.fromkeys(_call_target_paths(call.name, call.args)):
                 abs_path = (self.cwd / path_arg).resolve()
                 try:
-                    snapshot_old = abs_path.read_bytes() if abs_path.is_file() else None
+                    old_bytes = abs_path.read_bytes() if abs_path.is_file() else None
                 except Exception:
-                    snapshot_old = None
+                    old_bytes = None
+                snapshots[path_arg] = old_bytes
                 self._undo_stack.append({
                     "path": abs_path,
-                    "old_content": snapshot_old,
+                    "old_content": old_bytes,
                     "tool": call.name,
+                    "call_id": undo_call_id,
                 })
 
         # Episodic change-detection baseline: snapshot the git work-tree state
@@ -355,7 +378,7 @@ class _ExecutionMixin:
         if result.ok and call.name in _MUTATING_TOOLS:
             self._refresh_map_for_tool(call)
 
-        self._post_tool_success(call, result, snapshot_old)
+        self._post_tool_success(call, result, snapshots)
 
         return result
 
@@ -401,19 +424,22 @@ class _ExecutionMixin:
         return result
 
     def _post_tool_success(self, call: ToolCall, result: ToolResult,
-                           snapshot_old: "bytes | None") -> None:
+                           snapshots: "dict[str, bytes | None]") -> None:
         """Post-success bookkeeping split out of _execute_tool: record changed
         code files for the changed-files tracker and clear the unverified-writes
-        set when the agent runs the test suite (or a test command)."""
+        set when the agent runs the test suite (or a test command).
+
+        *snapshots* maps each path the call targeted to its pre-call bytes (a
+        multi-file tool such as edit_files supplies several), so every file it
+        wrote is tracked, not just the first."""
         # Self-verification bookkeeping: remember code files changed on disk,
         # forget them once the agent runs the test suite (or a test command)
         if result.ok and not self.dry_run and not self.patch_mode:
             if call.name in _UNDOABLE_TOOLS:
-                path_arg = call.args.get("path", "")
-                if path_arg:
+                for path_arg, snapshot_old in snapshots.items():
                     self._record_changed_file(path_arg, snapshot_old, call.name)
-                if path_arg and Path(path_arg).suffix.lower() in _CODE_EXTS:
-                    self._unverified_writes.add(path_arg)
+                    if Path(path_arg).suffix.lower() in _CODE_EXTS:
+                        self._unverified_writes.add(path_arg)
             elif call.name == "run_tests":
                 self._unverified_writes.clear()
             elif call.name == "run_shell":
@@ -427,6 +453,11 @@ class _ExecutionMixin:
 
         Returns the diff string, or None if the diff cannot be computed.
         """
+        # edit_files spans several files, so it has no single old_content -
+        # without this branch compute_tool_diff returns None, the intercept
+        # reports "cannot be captured", and patch mode silently loses the edit.
+        if call.name == "edit_files":
+            return compute_multifile_diff(self.cwd, call.args.get("edits"))
         path_arg = call.args.get("path", "")
         old_text = read_old_content(self.cwd, path_arg)
         return compute_tool_diff(call.name, call.args, old_text)
@@ -464,6 +495,19 @@ class _ExecutionMixin:
             print_diff_preview(old_content, new_content, path_label=path_arg)
             return confirm_diff(path_arg or "file")
 
+        # A multi-file edit is the LAST thing to approve blind, so show the same
+        # kind of diff, concatenated over every file the call would touch.
+        if call.name == "edit_files":
+            targets = dict.fromkeys(_call_target_paths(call.name, call.args))
+            label = ", ".join(targets) if targets else "files"
+            diff = compute_multifile_diff(self.cwd, call.args.get("edits"))
+            if diff:
+                from ..display import console as _con
+                from rich.syntax import Syntax
+                _con.print()
+                _con.print(Syntax(diff, "diff", theme="monokai", line_numbers=False))
+            return confirm_diff(label)
+
         if call.name == "patch_file":
             path_arg = call.args.get("path", "")
             patch    = call.args.get("diff", "")
@@ -478,10 +522,12 @@ class _ExecutionMixin:
 
     def _refresh_map_for_tool(self, call: ToolCall) -> None:
         """Update the project map for files touched by a write/edit tool call."""
-        path_arg = call.args.get("path")
-        if path_arg:
-            abs_path = (self.cwd / path_arg).resolve()
-            self._project_map.refresh_file(abs_path)
+        paths = dict.fromkeys(_call_target_paths(call.name, call.args))
+        if paths:
+            for path_arg in paths:
+                abs_path = (self.cwd / path_arg).resolve()
+                self._project_map.refresh_file(abs_path)
             # Regenerate the system prompt with the updated map (combined mcp+
             # plugin+skill tool docs preserved - see _rebuild_system_prompt).
+            # Once, after ALL the call's files, not once per file.
             self._rebuild_system_prompt()

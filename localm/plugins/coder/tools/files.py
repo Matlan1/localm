@@ -7,12 +7,20 @@ from __future__ import annotations
 import difflib
 import glob as _glob
 import json
+import os
+import os.path as _os_path
 import re
+import stat as _stat
 import textwrap
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
 from .base import ToolResult, _confine, _truncate
+# The indexer's own skip/file-type tables, so grep and the project map agree on
+# what counts as noise and what counts as source (indexer imports nothing from
+# this package, so this is not a cycle).
+from ..indexer import _SKIP_DIRS, _SYMBOL_LANGS, _TEXT_EXTS
 
 def _render_notebook(nb: dict) -> str:
     """Convert a parsed .ipynb dict to a human-readable text representation."""
@@ -234,17 +242,7 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
         )
 
     if old not in text:
-        wanted = textwrap.shorten(repr(old[:120]), width=120)
-        nearest = _closest_snippet(text, old)
-        hint = (f"Closest match in the file:\n{nearest}\n"
-                if nearest else "")
-        return ToolResult.error(
-            f"String not found in {path}.\n"
-            f"Looking for: {wanted}\n"
-            f"{hint}"
-            "Hint: `old` must match the file exactly (whitespace and "
-            "indentation included) - read the file first and copy the text."
-        )
+        return ToolResult.error(_edit_miss_message(path, old, text))
 
     count = text.count(old)
     new_text = text.replace(old, new, 1)
@@ -266,6 +264,172 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
             summary=result.summary + " ⚠ syntax error",
         )
     return result
+
+
+def _edit_miss_message(path: str, old: str, text: str) -> str:
+    """The 'string not found' error for an exact-string edit, including the
+    closest-region hint. Shared by edit_file and edit_files so a miss reads
+    the same (and stays as helpful) whichever tool the model reached for."""
+    wanted = textwrap.shorten(repr(old[:120]), width=120)
+    nearest = _closest_snippet(text, old)
+    hint = f"Closest match in the file:\n{nearest}\n" if nearest else ""
+    return (
+        f"String not found in {path}.\n"
+        f"Looking for: {wanted}\n"
+        f"{hint}"
+        "Hint: `old` must match the file exactly (whitespace and "
+        "indentation included) - read the file first and copy the text."
+    )
+
+
+def _restore_snapshots(snapshots: dict, written: list) -> list[str]:
+    """Restore each already-written file from its pre-edit bytes.
+
+    Returns the paths that could NOT be restored (with the reason), so a failed
+    rollback is surfaced rather than swallowed - a caller told "rolled back"
+    when a file is still half-edited is worse than no rollback at all.
+    """
+    failures: list[str] = []
+    for p in written:
+        original = snapshots.get(p)
+        if original is None:
+            continue
+        try:
+            p.write_bytes(original)
+        except Exception as e:
+            failures.append(f"{p} ({e})")
+    return failures
+
+
+def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
+    """
+    Apply the same class of exact-string edit as ``edit_file`` across several
+    files in ONE call, all-or-nothing.
+
+    *edits* is a list of ``{"path": ..., "old": ..., "new": ...}`` dicts; each
+    replaces the FIRST occurrence of ``old`` with ``new`` in ``path``, exactly
+    like ``edit_file`` (this is NOT ``search_replace``, which is a regex).
+
+    Every target file is snapshotted BEFORE anything is written. If any edit
+    fails - a bad path, a missing file, a string that does not match, an
+    unwritable file - every already-written file is restored from its snapshot
+    and the whole call reports which edit failed and why. A caller therefore
+    never has to reason about a half-applied multi-file change.
+    """
+    if not isinstance(edits, list) or not edits:
+        return ToolResult.error(
+            "`edits` must be a non-empty list of {path, old, new} objects. "
+            "For a single file, edit_file is simpler."
+        )
+
+    # ---- Phase 1: validate every edit and snapshot every target, no writes ----
+    # Validation is complete BEFORE the first byte is written, so the common
+    # failure (a typo'd `old`) costs no disk churn and no rollback at all.
+    planned: list[tuple[Path, str]] = []   # (abs path, text after this edit)
+    snapshots: dict[Path, bytes] = {}      # abs path -> original bytes on disk
+    current: dict[Path, str] = {}          # abs path -> text as edits so far left it
+    for i, edit in enumerate(edits):
+        label = f"edits[{i}]"
+        if not isinstance(edit, dict):
+            return ToolResult.error(
+                f"{label} is not an object - each edit must be "
+                '{"path": ..., "old": ..., "new": ...}.')
+        path = edit.get("path") or ""
+        old  = edit.get("old")
+        new  = edit.get("new")
+        if not path:
+            return ToolResult.error(f"{label} has no `path`.")
+        if old is None or new is None:
+            return ToolResult.error(
+                f"{label} ({path}) needs both `old` and `new`.")
+        old, new = str(old), str(new)
+
+        # '' is "in" every string, so an empty `old` would silently prepend
+        # `new` to the file - reject it exactly as edit_file does.
+        if not old:
+            return ToolResult.error(
+                f"{label} ({path}): `old` is empty - pass the exact text to "
+                "replace (read the file first and copy the snippet). To "
+                "replace the whole file, use write_file."
+            )
+        try:
+            p = _confine(cwd, str(path))
+        except PermissionError as e:
+            return ToolResult.error(f"{label}: {e}")
+        if not p.exists():
+            return ToolResult.error(f"{label}: File not found: {p}")
+        if not p.is_file():
+            return ToolResult.error(f"{label}: Not a file: {p}")
+
+        # Later edits must see the text as EARLIER edits in this batch left it,
+        # so two edits to the same file compose instead of the second silently
+        # missing (or clobbering the first). The SNAPSHOT stays the original
+        # on-disk bytes, so a rollback still undoes the whole batch.
+        if p in current:
+            text = current[p]
+        else:
+            try:
+                snapshots[p] = p.read_bytes()
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                return ToolResult.error(f"{label} ({path}): {e}")
+
+        if old not in text:
+            return ToolResult.error(
+                f"{label}: " + _edit_miss_message(str(path), old, text))
+        current[p] = text.replace(old, new, 1)
+        planned.append((p, current[p]))
+
+    # ---- Phase 2: write, rolling every file back if any write fails ----
+    # One write per FILE (not per edit): several edits to the same file were
+    # already composed in phase 1, so the final text is written once.
+    targets: list[Path] = []
+    for p, _text in planned:
+        if p not in targets:
+            targets.append(p)
+    written: list[Path] = []
+    for p in targets:
+        try:
+            p.write_text(current[p], encoding="utf-8")
+            written.append(p)
+        except Exception as e:
+            # The FAILING file is restored too, not just the ones before it:
+            # write_text opens with "w", which truncates before writing, so a
+            # failure partway through leaves that file empty or half-written.
+            # Restoring it is a no-op when the write never started.
+            rollback_errors = _restore_snapshots(snapshots, written + [p])
+            failed_rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+            msg = (f"Failed to write {failed_rel}: {e}\n"
+                   f"Rolled back {len(written) + 1} file(s) - no file was left "
+                   "partially edited.")
+            if rollback_errors:
+                # RULE 5: a rollback that itself failed must NEVER be reported as
+                # a clean all-or-nothing. Say exactly which files are now suspect.
+                msg += ("\nWARNING: the rollback ITSELF failed for: "
+                        + "; ".join(rollback_errors)
+                        + "\nThese files may hold a partial edit - inspect them "
+                        "before continuing.")
+            return ToolResult.error(msg)
+
+    # ---- Phase 3: post-write syntax check (same soft check as edit_file) ----
+    warnings: list[str] = []
+    for p in targets:
+        warn = _verify_syntax(p, current[p])
+        if warn:
+            rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+            warnings.append(f"{rel}: {warn}")
+
+    touched = len(targets)
+    lines = [f"Applied {len(planned)} edit(s) across {touched} file(s):"]
+    for p in targets:
+        rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+        lines.append(f"  - {rel}")
+    summary = f"edited {touched} file(s) ({len(planned)} edit(s))"
+    output  = "\n".join(lines)
+    if warnings:
+        output += "\n\n[syntax check] " + "\n[syntax check] ".join(warnings)
+        summary += " ⚠ syntax error"
+    return ToolResult.success(output, summary=summary)
 
 
 def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
@@ -527,36 +691,233 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
     )
 
 
-def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context: int = 2) -> ToolResult:
-    """Search file contents with a regex pattern (pure Python, no external tools)."""
+# ---------------------------------------------------------------------------
+#  grep: caps, skip rules, and the streaming matcher
+# ---------------------------------------------------------------------------
+
+# Defaults for grep's three caps. Each is overridable PER CALL (max_per_file,
+# max_output_lines, max_file_bytes) and persistently via the matching
+# coder_grep_* config key; these are only the fallbacks. Every cap that actually
+# bites is reported in the output - a cap the caller cannot see is a silent lie
+# about coverage (AGENTS.md rule 5), which is why none of them is quiet.
+_GREP_MAX_PER_FILE     = 20          # hits shown per file (the rest are COUNTED)
+_GREP_MAX_OUTPUT_LINES = 300         # output lines before the sweep stops
+_GREP_MAX_FILE_BYTES   = 4 * 1024 * 1024   # per-file size cap
+
+# Bytes sniffed to tell text from binary. A NUL in the first chunk is the same
+# heuristic git uses; it needs no new extension table (the known-text extensions
+# below skip the sniff entirely).
+_GREP_SNIFF_BYTES = 4096
+
+
+def _grep_config() -> dict:
+    """The config dict for grep's cap settings, or {} if config is unreadable.
+
+    Read ONCE per search and passed to each _grep_cap call: three separate
+    load_config() calls per grep would be three file reads for one search.
+    Never raises - a search must not fail because config could not be read."""
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _grep_cap(arg_value, cfg: dict, config_key: str, fallback: int) -> int:
+    """Resolve one grep cap: explicit call arg > config key > module default.
+
+    ``None`` means "not specified" (fall through); an explicit ``0`` means NO
+    CAP and is honoured as such, which is why the sentinel is None and not 0.
+    Never raises - a broken config value falls back to the default rather than
+    failing the search."""
+    if arg_value is not None:
+        try:
+            return max(0, int(arg_value))
+        except (TypeError, ValueError):
+            pass
+    raw = cfg.get(config_key)
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return fallback
+
+
+def _is_probably_binary(fp: Path) -> bool:
+    """True if *fp* looks like a binary file.
+
+    Known-text extensions (the indexer's own tables, so grep and the project map
+    agree on what counts as source) short-circuit to False; everything else is
+    sniffed for a NUL byte, so an extensionless Makefile or LICENSE is still
+    searched while a .pyc or a pack file is not.
+    """
+    ext = fp.suffix.lower()
+    if ext in _SYMBOL_LANGS or ext in _TEXT_EXTS:
+        return False
+    try:
+        with fp.open("rb") as fh:
+            return b"\x00" in fh.read(_GREP_SNIFF_BYTES)
+    except Exception:
+        return False   # unreadable is reported separately, not as "binary"
+
+
+def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
+    """Stream *fp* one line at a time and collect matches.
+
+    Returns ``(hits, total)``: up to *cap* hits as
+    ``(lineno, context_lines, hit_offset)``, and the TOTAL number of matching
+    lines in the file. The total keeps counting past the cap (a bare
+    ``rx.search`` per line, no context bookkeeping) so the "N more match(es)
+    not shown" note stays exact instead of degrading to "at least N".
+
+    The file is never materialised: only the trailing *context* lines are held,
+    plus the windows of hits still collecting their following context.
+    """
+    before: deque = deque(maxlen=context)
+    pending: list = []   # [lineno, window, hit_offset, wanted_len] - awaiting trailing context
+    hits:    list = []
+    total = 0
+    with fp.open("r", encoding="utf-8", errors="replace") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            # Text mode is universal-newline: \r\n and a lone \r are already
+            # translated to \n on read, so stripping \n is the whole job here
+            # (verified against io.TextIOWrapper, not assumed).
+            line = raw.rstrip("\n")
+            if pending:
+                still = []
+                for entry in pending:
+                    entry[1].append(line)
+                    if len(entry[1]) >= entry[3]:
+                        hits.append((entry[0], entry[1], entry[2]))
+                    else:
+                        still.append(entry)
+                pending = still
+            if rx.search(line):
+                total += 1
+                if cap <= 0 or len(hits) + len(pending) < cap:
+                    window = list(before) + [line]
+                    hit_offset = len(before)
+                    wanted = len(window) + context
+                    if len(window) >= wanted:
+                        # Already complete (context=0: the hit line IS the whole
+                        # window). Closing it here rather than on the next line
+                        # is what keeps a context=0 hit a ONE-line window.
+                        hits.append((lineno, window, hit_offset))
+                    else:
+                        pending.append([lineno, window, hit_offset, wanted])
+            if context > 0:
+                before.append(line)
+    # Hits still short of their trailing context at EOF (the old whole-file
+    # implementation clamped the slice at the last line - same result).
+    hits.extend((entry[0], entry[1], entry[2]) for entry in pending)
+    return hits, total
+
+
+def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
+              context: int = 2, max_per_file: Optional[int] = None,
+              max_output_lines: Optional[int] = None,
+              max_file_bytes: Optional[int] = None) -> ToolResult:
+    """Search file contents with a regex pattern (pure Python, no external tools).
+
+    Files are streamed line by line rather than read whole, and three classes of
+    file are skipped before any content is read: those under a noise directory
+    (the indexer's ``_SKIP_DIRS``: .git, node_modules, __pycache__, .venv, ...),
+    binaries, and files over the size cap. Every skip is COUNTED and reported,
+    so a narrowed search never masquerades as a complete one.
+
+    The caps (*max_per_file*, *max_output_lines*, *max_file_bytes*) default to
+    the ``coder_grep_*`` config settings; pass a value to override one for a
+    single call, or 0 for "no cap".
+    """
     try:
         base = _confine(cwd, path)
     except PermissionError as e:
         return ToolResult.error(str(e))
-    file_glob = glob or "**/*"
-    files = sorted(base.glob(file_glob)) if base.is_dir() else [base]
 
-    # Confine glob results to cwd: a traversal glob like '../*' makes
-    # base.glob() climb above the project root, so filter the matches back
-    # inside cwd (the same guard tool_search_files applies). _confine() only
-    # protects the `path` arg, not the `glob` arg.
-    cwd_resolved = cwd.resolve()
-    files = [f for f in files if f.resolve().is_relative_to(cwd_resolved)]
+    cfg = _grep_config()
+    per_file_cap = _grep_cap(max_per_file, cfg, "coder_grep_max_per_file",
+                             _GREP_MAX_PER_FILE)
+    output_cap   = _grep_cap(max_output_lines, cfg, "coder_grep_max_output_lines",
+                             _GREP_MAX_OUTPUT_LINES)
+    size_cap     = _grep_cap(max_file_bytes, cfg, "coder_grep_max_file_bytes",
+                             _GREP_MAX_FILE_BYTES)
+    context = max(0, int(context))
+
+    file_glob = glob or "**/*"
+    candidates = sorted(base.glob(file_glob)) if base.is_dir() else [base]
 
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
     except re.error as e:
         return ToolResult.error(f"Invalid regex: {e}")
 
+    # ---- Pre-filter: decide what to read BEFORE reading anything ----
+    # Ordered cheapest-check-first, because on a real repo most candidates are
+    # rejected: name-only checks (free), then ONE stat (regular-file + size),
+    # then the cwd-confinement resolve(), then the binary sniff (the only step
+    # that opens the file). Enumeration itself is cheap (measured ~0.08s for
+    # 4.5k entries); resolve() and stat() are what cost, so they run on
+    # survivors, not on every .git object.
+    #
+    # Confinement still gates every file that is READ: a traversal glob like
+    # '../*' makes base.glob() climb above the project root, so the resolved
+    # path is checked back inside cwd (the same guard tool_search_files
+    # applies - _confine() only protects the `path` arg, not the `glob` arg).
+    # It sits BEFORE the sniff so an out-of-cwd file is never even opened.
+    # normcase both sides so the prefix test is case-correct on Windows, matching
+    # WindowsPath.is_relative_to (which compares case-insensitively); realpath is
+    # exactly what Path.resolve() calls, minus the Path object churn - measured
+    # ~1.9x cheaper, and this runs once per candidate file.
+    cwd_prefix = _os_path.normcase(str(cwd.resolve()))
+    cwd_prefix_sep = cwd_prefix + os.sep
+    base_depth = len(base.parts)
+    # A noise directory the CALLER named in glob= is not noise - they asked for
+    # it. Without this, glob="build/**/*.py" returns nothing (build/, dist/,
+    # target/, venv/ are all in _SKIP_DIRS), which is a silent coverage loss
+    # dressed up as "no matches".
+    requested = {seg for seg in file_glob.replace("\\", "/").split("/")
+                 if seg in _SKIP_DIRS}
+    prune_dirs = _SKIP_DIRS - requested
+    files: list[Path] = []
+    skipped_noise: set = set()
+    skipped_binary = skipped_large = 0
+    for fp in candidates:
+        # Noise directories are pruned by NAME and only BELOW the search root,
+        # so pointing path= AT one (grep inside node_modules) still works.
+        noise_dir = next((part for part in fp.parts[base_depth:-1]
+                          if part in prune_dirs), None)
+        if noise_dir is not None:
+            # Count the DIRECTORY, not each entry under it: glob yields
+            # directories as well as files, so counting entries reported
+            # thousands of "files" not searched when a handful were.
+            skipped_noise.add(noise_dir)
+            continue
+        try:
+            st = fp.stat()
+        except OSError:
+            continue          # vanished or unstattable: nothing to search
+        if not _stat.S_ISREG(st.st_mode):
+            continue
+        if size_cap and st.st_size > size_cap:
+            skipped_large += 1
+            continue
+        real = _os_path.normcase(_os_path.realpath(fp))
+        if real != cwd_prefix and not real.startswith(cwd_prefix_sep):
+            continue
+        if _is_probably_binary(fp):
+            skipped_binary += 1
+            continue
+        files.append(fp)
+
     results = []
     total_hits = 0
     capped_note = ""
     unreadable = []  # files we could not read, surfaced below so coverage stays honest
     for file_idx, fp in enumerate(files):
-        if not fp.is_file():
-            continue
         try:
-            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            hits, hit_total = _grep_file_hits(fp, rx, context, per_file_cap)
         except Exception:
             # Record (do not silence) the skip so an incomplete match set is not reported as complete.
             try:
@@ -565,30 +926,23 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
                 unreadable.append(str(fp))
             continue
 
-        hits = []
-        for i, line in enumerate(lines):
-            if rx.search(line):
-                start = max(0, i - context)
-                end   = min(len(lines), i + context + 1)
-                hits.append((i + 1, lines[start:end], i - start))
-
         if hits:
             try:
                 rel = fp.relative_to(cwd)
             except ValueError:
                 rel = fp
             results.append(f"## {rel}")
-            for lineno, ctx_lines, hit_offset in hits[:20]:
+            for lineno, ctx_lines, hit_offset in hits:
                 for j, ctx_line in enumerate(ctx_lines):
                     marker = "→ " if j == hit_offset else "  "
                     results.append(f"{marker}{lineno - hit_offset + j:4d}: {ctx_line}")
                 results.append("")
-            if len(hits) > 20:
-                results.append(f"[... {len(hits) - 20} more match(es) in {rel} not shown]")
+            if hit_total > len(hits):
+                results.append(f"[... {hit_total - len(hits)} more match(es) in {rel} not shown]")
                 results.append("")
-            total_hits += len(hits)
-            if len(results) > 300:
-                remaining = sum(1 for f in files[file_idx + 1:] if f.is_file())
+            total_hits += hit_total
+            if output_cap and len(results) > output_cap:
+                remaining = len(files) - file_idx - 1
                 if remaining:
                     capped_note = (
                         f"\n[output cap reached - {remaining} more file(s) were NOT "
@@ -606,13 +960,39 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
             f"\n[{len(unreadable)} file(s) could not be read and were not searched: {shown}]"
         )
 
+    # Note the pre-filter skips for the same reason: a faster search that quietly
+    # covers less is exactly the "hidden problem" rule 5 forbids.
+    skipped_note = ""
+    reasons = []
+    if skipped_noise:
+        # Name the ACTUAL directories skipped, and the way to search them
+        # anyway. "(.git, node_modules, ...)" told the caller neither which dir
+        # was dropped nor how to get it back.
+        named = ", ".join(sorted(skipped_noise)[:6])
+        if len(skipped_noise) > 6:
+            named += f", +{len(skipped_noise) - 6} more"
+        reasons.append(f"noise dir(s) {named} (search one anyway by naming it "
+                       "in path= or glob=)")
+    if skipped_binary:
+        reasons.append(f"{skipped_binary} binary file(s)")
+    if skipped_large:
+        reasons.append(f"{skipped_large} file(s) over the "
+                       f"{size_cap / (1024 * 1024):.1f} MB size cap "
+                       "(raise with max_file_bytes=)")
+    if reasons:
+        skipped_note = ("\n[not searched: " + "; ".join(reasons) + "]")
+
     if not results:
         msg = f"No matches for '{pattern}'"
+        if skipped_note:
+            msg += skipped_note
         if unreadable_note:
             msg += unreadable_note
         return ToolResult.success(msg, summary="0 matches")
     if capped_note:
         results.append(capped_note)
+    if skipped_note:
+        results.append(skipped_note)
     if unreadable_note:
         results.append(unreadable_note)
 

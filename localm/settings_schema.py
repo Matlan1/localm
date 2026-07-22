@@ -405,6 +405,24 @@ CORE_FIELDS: list = [
                  "limit; scan to completion however long it takes). Raise this on "
                  "a very large repo if the map is being cut off.",
                  group="Coder", owner="coder", min=0, step=5),
+    SettingField("coder_grep_max_per_file", Widget.NUMBER,
+                 "Coder grep matches per file",
+                 "How many matches the coder's grep shows per file before it "
+                 "summarises the rest (0 = show all). Matches beyond the cap are "
+                 "still counted and reported, never hidden.",
+                 group="Coder", owner="coder", min=0, step=5),
+    SettingField("coder_grep_max_output_lines", Widget.NUMBER,
+                 "Coder grep output lines",
+                 "How many output lines the coder's grep produces before it stops "
+                 "and reports how many files it did not reach (0 = no cap). Raise "
+                 "it for wide sweeps, lower it to spend less context on search.",
+                 group="Coder", owner="coder", min=0, step=50),
+    SettingField("coder_grep_max_file_bytes", Widget.NUMBER,
+                 "Coder grep file size cap (bytes)",
+                 "Files larger than this are skipped by the coder's grep rather "
+                 "than read (0 = no cap); the skip is always reported. Keeps a "
+                 "multi-MB log or data dump from swamping a code search.",
+                 group="Coder", owner="coder", min=0, step=1048576),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls",
                  "Once the model starts a <tool_call>, force it to be valid "

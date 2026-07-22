@@ -421,6 +421,13 @@ DEFAULT_CONFIG: dict = {
     # Wall-clock cap on the coder's startup project-map scan (CODER-1). <= 0
     # disables the deadline (scan to completion however long it takes).
     "coder_index_timeout": 20,
+    # Caps on the coder's grep tool. Each is overridable per call; 0 = no cap.
+    # Matches shown per file (the rest are still counted and reported), output
+    # lines before the sweep stops, and the per-file size above which a file is
+    # skipped (and the skip reported) rather than read.
+    "coder_grep_max_per_file": 20,
+    "coder_grep_max_output_lines": 300,
+    "coder_grep_max_file_bytes": 4194304,
     # Episodic memory: the coder recalls lessons from past sessions on a project
     # (BM25, free) and at session close distils the session into a new lesson (one
     # model call per session that changed files). Writes skipped in privacy mode

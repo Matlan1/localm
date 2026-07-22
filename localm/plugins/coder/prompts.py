@@ -79,6 +79,10 @@ _TOOL_EXAMPLES: dict = {
     "read_file":     {"path": "src/main.py"},
     "write_file":    {"path": "src/new.py", "content": "..."},
     "edit_file":     {"path": "src/main.py", "old": "def foo():", "new": "def foo(x: int):"},
+    "edit_files":    {"edits": [
+                          {"path": "src/a.py", "old": "from .old import x", "new": "from .new import x"},
+                          {"path": "src/b.py", "old": "from .old import x", "new": "from .new import x"},
+                      ]},
     "patch_file":    {"path": "src/main.py",
                       "diff": "--- a/src/main.py\n+++ b/src/main.py\n@@ -10,4 +10,5 @@\n context line\n-old line\n+new line\n+added line\n"},
     "run_shell":     {"command": "python -m pytest tests/ -x"},
