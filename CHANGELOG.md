@@ -100,6 +100,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   The originals are archived, so any merge you dislike is reversible with
   `--restore-episode`, and a group the model cannot summarize usefully is left
   untouched rather than lost.
+- **Coder sub-agents can now be given a role, which narrows what they can
+  do.** `spawn_agent` takes an optional `role`: `reviewer` (read the code and
+  inspect git, change nothing), `researcher` (read-only investigation of the
+  project, no writes and no network), or `test-writer` (read, write tests, and
+  run them, but no shell and no commit or push). The role gives the sub-agent a
+  focused brief and, more importantly, actually takes the other tools away, so a
+  helper spawned to review a diff can no longer overwrite files, run shell
+  commands, or push. A role can only ever REMOVE capability: it is applied on
+  top of whatever the parent session already forbids, so it can never hand back
+  a tool you disabled, and it never lets a shared, restricted session regain
+  execution. Tools registered by MCP servers, plugins, and skills are excluded
+  from a role by default rather than inherited. Omitting `role` keeps the
+  previous behavior (the sub-agent gets the parent's full toolset).
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
@@ -166,6 +179,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   once at startup, and a shell command that names a path outside the scope
   prints a best-effort warning before it runs. Nothing is blocked: disable the
   shell tools if you need the scope to be a hard boundary.
+- **The coder no longer puts your absolute project path in the model's
+  prompt.** The prompt deliberately shows the working directory home-anchored
+  (`~/projects/app`) so the absolute machine path and your OS username stay out
+  of it, but the codebase map printed immediately below it still carried the raw
+  absolute root, undoing that in the same prompt. The map header is now
+  home-anchored too, so a model that echoes its context back cannot disclose the
+  path.
 - **Mid-chat context growth now sees real free VRAM on Windows + AMD.** When a
   long conversation grows the context window mid-generation, the model worker
   decides whether the grown KV cache still fits in VRAM or must move to system

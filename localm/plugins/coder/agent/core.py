@@ -84,6 +84,7 @@ class Agent(
         scope: Optional[str] = None,
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
+        role: Optional[str] = None,
         self_verify: bool = True,
         turn_budget: Optional[int] = None,
         on_event=None,
@@ -125,6 +126,16 @@ class Agent(
         # Tools removed from THIS session: hidden from the model and hard-refused
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
         self.disabled_tools = expand_shell_disable(frozenset(disabled_tools or ()))
+        # Sub-agent role preset (reviewer / researcher / test-writer): a focused
+        # mission plus a narrowed toolset. Resolved here so an unknown name fails
+        # at construction rather than silently running a full-capability child.
+        # The narrowing itself is applied after tool registration, in
+        # _apply_role_toolset, and is strictly subtractive - see roles.py.
+        from ..roles import resolve_role
+        self.role: Optional[str] = None
+        self._role_preset = resolve_role(role)
+        if self._role_preset is not None:
+            self.role = self._role_preset.name
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
         # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
@@ -228,6 +239,10 @@ class Agent(
         self._init_skill_tools(cwd)
         if self.restricted:
             self._apply_restricted_toolset()
+        # AFTER restriction, and after every external tool has registered, so a
+        # role narrows the COMPLETE registry (see _apply_role_toolset).
+        if self._role_preset is not None:
+            self._apply_role_toolset()
 
         # After the toolset is final: tell the user, once, if their --scope does
         # not mean what they almost certainly think it means.
@@ -420,6 +435,29 @@ class Agent(
         self._mcp_docs = self._plugin_docs = self._skill_docs = ""
         self.disabled_tools = self.disabled_tools | (
             frozenset(TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS)
+
+    def _apply_role_toolset(self) -> None:
+        """Narrow this session to its role's allowlist. STRICTLY SUBTRACTIVE.
+
+        The new disabled set is a UNION with what is already disabled, never an
+        assignment, so a role can only ever REMOVE capability: it cannot hand back
+        a tool the parent disabled, nor one a restricted (shareable, non-owner)
+        session forbids. That ordering matters - this runs after
+        _apply_restricted_toolset, so restricted-then-role composes to the
+        intersection of both allowlists rather than whichever ran last.
+
+        Subtracting from the LIVE registry (like the restricted path above, and
+        for the same reason) means every dynamically registered MCP / plugin /
+        skill tool is denied to a role by default: an allowlist cannot be
+        outflanked by a tool that did not exist when the preset was written.
+        """
+        TOOL_REGISTRY = _agent.TOOL_REGISTRY
+        assert self._role_preset is not None  # guarded at the call site
+        # External tool docs go too: a narrowed child that cannot call any of them
+        # should not be reading their documentation either (REC-N1-PROSE).
+        self._mcp_docs = self._plugin_docs = self._skill_docs = ""
+        self.disabled_tools = self.disabled_tools | (
+            frozenset(TOOL_REGISTRY) - self._role_preset.allowed_tools)
 
     @property
     def turns(self) -> int:

@@ -294,6 +294,14 @@ RULES
         if shell_off else
         "5. Run tests after code changes (run_tests, or run_shell for custom commands)."
     )
+    # Same REC-N1-PROSE reasoning as run_shell above: a narrowed sub-agent (every
+    # role preset disables spawn_agent) or a restricted key must not be told to
+    # delegate with a tool dispatch will refuse. Dropping the line renumbers the
+    # tail so the list stays contiguous - a gap reads as a prompt-assembly bug.
+    delegate_off = "spawn_agent" in disabled_tools
+    rule6 = ("" if delegate_off else
+             "6. For complex tasks, use spawn_agent to delegate focused sub-tasks.\n")
+    n = 6 if delegate_off else 7
     return f"""\
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULES
@@ -304,10 +312,9 @@ RULES
 3. Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.
 {rule4}
 {rule5}
-6. For complex tasks, use spawn_agent to delegate focused sub-tasks.
-7. When you are done, give a concise summary of what you changed and why.
-8. If a tool returns an error, diagnose and retry before giving up.
-9. Ask for clarification only if the task is genuinely ambiguous."""
+{rule6}{n}. When you are done, give a concise summary of what you changed and why.
+{n + 1}. If a tool returns an error, diagnose and retry before giving up.
+{n + 2}. Ask for clarification only if the task is genuinely ambiguous."""
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +346,7 @@ def build_system_prompt(
     disabled_tools: frozenset = frozenset(),
     untrusted_provenance: bool = True,
     custom_instructions: str = "",
+    role_brief: str = "",
 ) -> str:
     """
     Build the system prompt for the main agent.
@@ -364,6 +372,10 @@ def build_system_prompt(
         injected under "## User Instructions". Distinct from ``memory``: these are
         hand-written directives the user wants followed, rather than the running
         list of project facts they keep with /remember.
+    role_brief:
+        Sub-agent role section (see ``build_subagent_system_prompt``); empty for a
+        main agent. Placed after the RULES so a role's focus is the last thing the
+        model reads, and so it cannot displace the safety sections above it.
     """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
     from .agent.constants import expand_shell_disable
@@ -423,6 +435,7 @@ def build_system_prompt(
         f"{tool_docs}\n"
         f"{extra_section}\n"
         f"{rules}\n"
+        f"{role_brief}"
         f"{untrusted}\n"
     )
 
@@ -432,41 +445,56 @@ def build_subagent_system_prompt(
     role: str,
     model_name: str = "",
     disabled_tools: frozenset = frozenset(),
+    mission: str = "",
 ) -> str:
-    """Leaner prompt for sub-agents - focused on their specific role."""
+    """The ROLE BRIEF injected into a spawned sub-agent's system prompt.
+
+    This is a section of the child's prompt, not a replacement for it. It used to
+    return a whole standalone 500-character prompt and had no callers at all,
+    which was lucky: a child built from it would have lost the RULES, the
+    untrusted-content provenance framing (the indirect-prompt-injection defence,
+    and a sub-agent is exactly who fetches web content), the project map and the
+    memory that ``build_system_prompt`` supplies. The child keeps the full prompt
+    and gains this brief, so a role only ever ADDS focus, never removes safety.
+
+    The cwd is HOME-ANCHORED for the same reason as the identity line at the top
+    of ``build_system_prompt``: the raw path carries the OS username and machine
+    layout into the prompt, and from there into anything the model echoes back
+    (AGENTS.md rule 2). The old body interpolated ``{cwd}`` directly.
+
+    ``model_name`` is accepted so callers can pass the family id uniformly, but the
+    brief is deliberately family-neutral: the per-family thinking hint and
+    tool-call syntax already come from ``build_system_prompt``, and repeating them
+    here would state the call format twice in one prompt.
+    """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
+    # Disabling one shell-execution tool disables the whole family, so the brief
+    # must not advertise run_shell when only run_shell_background was named.
     from .agent.constants import expand_shell_disable
     disabled_tools = expand_shell_disable(disabled_tools)
-    family = detect_model_family(model_name) if model_name else "default"
-    think_hint = _thinking_hint(family)
-    # Only advertise tools that are actually enabled for this session so a
-    # restricted key is not told about run_shell etc. it cannot call (REC-N1-PROSE).
+    # Only advertise tools this child can actually call, so a narrowed role is not
+    # told about run_shell etc. it will be refused (REC-N1-PROSE). Ordered, not a
+    # set, so the line is stable across runs.
     _core = ["read_file", "write_file", "edit_file", "patch_file",
              "run_shell", "list_dir", "search_files", "grep"]
     tools_line = ", ".join(t for t in _core if t not in disabled_tools)
 
-    call_fmt: str
-    if family == "gemma":
-        call_fmt = (
-            "XML format:  <tool_call>\n"
-            '{"name": "TOOL_NAME", "args": {...}}\n'
-            "</tool_call>\n\n"
-            "Native format also accepted:\n"
-            "<|tool_call>call:TOOL_NAME{...}<tool_call|>"
-        )
-    else:
-        call_fmt = (
-            "<tool_call>\n"
-            '{"name": "TOOL_NAME", "args": {...}}\n'
-            "</tool_call>"
-        )
-
+    mission_line = f"{mission}\n\n" if mission else ""
+    tools_sentence = (
+        f"Tools available to you here: {tools_line}.\n"
+        if tools_line else
+        "You have no file tools in this role - work from what you are given.\n"
+    )
     return (
-        f"You are a specialised coding sub-agent with the role: {role}.\n"
-        f"Working directory: {cwd}\n"
-        f"{think_hint}\n"
-        f"You have the same tools as the main agent ({tools_line}). Use them as needed.\n\n"
-        f"Call tools with:\n{call_fmt}\n\n"
-        f"Complete your assigned task, then return a clear summary of findings or changes.\n"
-        f"Do not ask questions - make sensible decisions and document your reasoning.\n"
+        f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"YOUR ROLE: {role}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"You are a sub-agent spawned for one focused task in {_display_cwd(cwd)}.\n"
+        f"{mission_line}"
+        f"{tools_sentence}"
+        f"Your toolset is deliberately narrowed for this role. If the task seems "
+        f"to need a tool you do not have, do the part you can and say what you "
+        f"could not do - do not work around the restriction.\n"
+        f"Finish with a clear summary of what you found or changed. Do not ask "
+        f"questions: make sensible decisions and document your reasoning.\n"
     )
