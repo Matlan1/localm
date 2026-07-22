@@ -92,7 +92,7 @@ def compute_multifile_diff(cwd: Path, edits: object) -> Optional[str]:
         old_content = read_old_content(cwd, path_arg)
         diff_lines = list(difflib.unified_diff(
             old_content.splitlines(keepends=True),
-            current[path_arg].splitlines(keepends=True),
+            current[key].splitlines(keepends=True),
             fromfile=f"a/{path_arg}",
             tofile=f"b/{path_arg}",
         ))

@@ -24,7 +24,8 @@ from localm.plugins.coder.agent.constants import (
 )
 
 
-def _make_agent(tmp_path: Path, scope: str | None = None, **kw) -> Agent:
+def _make_agent(tmp_path: Path, scope: str | None = None,
+                patch_mode: bool = False, **kw) -> Agent:
     backend = MagicMock()
     backend.model_id = "test-model"
     with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
@@ -33,6 +34,11 @@ def _make_agent(tmp_path: Path, scope: str | None = None, **kw) -> Agent:
         MockPM.build.return_value.file_count.return_value = 0
         agent = Agent(backend=backend, cwd=tmp_path, scope=scope,
                       auto_approve=True, **kw)
+    # patch_mode is NOT a constructor arg - the CLI sets the attribute directly
+    # (cli/_main.py). Passing it to Agent() would be swallowed by **gen_kwargs
+    # and silently do nothing, so every patch-mode test would pass while
+    # testing the normal write path.
+    agent.patch_mode = patch_mode
     return agent
 
 
@@ -116,11 +122,16 @@ class TestUndoAndTracking:
         assert sorted(undone) == ["main.py", "secrets.txt"]
 
     def test_undo_snapshots_hold_the_pre_edit_bytes(self, project):
+        # Compare against the bytes actually on disk, not a hardcoded literal:
+        # write_text translates \n to the platform line ending, so a literal
+        # would assert LF on a file that is CRLF on Windows and test the
+        # fixture's encoding rather than the snapshot's fidelity.
+        before = (project / "src" / "main.py").read_bytes()
         agent = _make_agent(project)
         agent._execute_tool(_call("edit_files", edits=[_swap("src/main.py")]),
                             interactive=False)
         entry = [e for e in agent._undo_stack if e["tool"] == "edit_files"][0]
-        assert entry["old_content"] == b"import old\n"
+        assert entry["old_content"] == before
 
     def test_every_edited_file_is_tracked_as_changed(self, project):
         agent = _make_agent(project)
@@ -226,7 +237,8 @@ class TestPatchMode:
         agent = _make_agent(project, patch_mode=True)
         result = agent._execute_tool(
             _call("edit_files", edits=[_swap("src/main.py")]), interactive=False)
-        assert "src/main.py" in result.output
+        assert "[patch-mode]" in result.output
+        assert "src/main.py" in result.output.replace("\\", "/")
 
     def test_multifile_diff_composes_repeated_edits_to_one_file(self, project):
         from localm.plugins.coder.diffutil import compute_multifile_diff
