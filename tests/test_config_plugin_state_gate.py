@@ -77,14 +77,19 @@ def test_scoped_key_cannot_write_the_plugins_subtree(app_env):
     """The X8 chain, at the route: a config:write key without ADMIN must not be
     able to set the tts script URL through the generic settings route."""
     c, scoped = app_env
+    before = _stored(c, "plugins")
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"plugins": {"tts": {"library": EVIL_LIBRARY}}})
     assert denied.status_code == 403, denied.text
     assert "owner" in denied.text.lower()
     # Refused means NOT WRITTEN - a 403 that still persisted the value would be
-    # the same vulnerability with a worse error message.
-    assert not (_stored(c, "plugins") or {}).get("tts"), \
-        "the refused plugin subtree must not have been persisted"
+    # the same vulnerability with a worse error message. Compared against the
+    # value BEFORE the attempt rather than against empty, so this keeps testing
+    # the real property even if something else later populates the block.
+    after = _stored(c, "plugins")
+    assert after == before, "a refused write must leave the plugin block untouched"
+    assert EVIL_LIBRARY not in str(after), \
+        "the remote script URL must not have reached the stored config"
 
 
 def test_scoped_key_cannot_toggle_plugins_enabled(app_env):
@@ -92,12 +97,18 @@ def test_scoped_key_cannot_toggle_plugins_enabled(app_env):
     (POST /api/plugins/<name>/enable), a scope a config:write key need not hold,
     and the engine reads config["plugins_enabled"] as its source of truth."""
     c, scoped = app_env
+    # Compare against the value BEFORE the attempt, not against empty: startup
+    # enables the always-on chat plugin, so this key is legitimately non-empty in
+    # a running app. "Refused" means UNCHANGED, which is the property that matters.
+    before = _stored(c, "plugins_enabled")
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"plugins_enabled": ["chat", "coder"]})
     assert denied.status_code == 403, denied.text
     assert "owner" in denied.text.lower()
-    assert not _stored(c, "plugins_enabled"), \
-        "the refused plugin enablement must not have been persisted"
+    after = _stored(c, "plugins_enabled")
+    assert after == before, "a refused write must leave the enabled set untouched"
+    assert "coder" not in (after or []), \
+        "the plugin the caller tried to enable must NOT have been enabled"
 
 
 def test_the_refusal_names_the_key_and_points_at_the_real_surface(app_env):
@@ -268,8 +279,14 @@ def test_key_presets_is_not_a_passthrough():
     this guard wrong."""
     from localm import settings_schema as ss
     assert "key_presets" not in _verbatim_hidden_keys()
+    # The rejected value must be something is_valid_scope really rejects. A bare
+    # identifier like "not-a-scope" is ACCEPTED on purpose (a plugin owns the
+    # scope named after it, and "-" normalises to "_"), so it proves nothing here.
     with pytest.raises(ValueError, match="unknown scope"):
-        ss.validate_update({"key_presets": [{"name": "x", "scopes": ["not-a-scope"]}]})
+        ss.validate_update({"key_presets": [{"name": "x", "scopes": ["not a scope"]}]})
+    # ... and a legitimate preset still round-trips.
+    ok = ss.validate_update({"key_presets": [{"name": "Minimal", "scopes": ["chat"]}]})
+    assert ok["key_presets"] == [{"name": "Minimal", "scopes": ["chat"]}]
 
 
 def test_engine_managed_keys_are_exactly_the_plugin_state_keys():
