@@ -1105,6 +1105,123 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     assert ch.main([]) == 0                    # explicit off stays warn-only
 
 
+def test_baseline_ref_is_pinned_once_per_run(monkeypatch, tmp_path):
+    """The baseline sha must be resolved ONCE per process, not re-resolved by each
+    check. origin/master is a MOVING ref (worktrees share one ref store, so a
+    sibling's fetch or a landing merge can advance it mid-run), and the three
+    callers - the append-only gate, the [Unreleased] warn-only checks, and the
+    service-worker cache-bump gate - would otherwise compare against DIFFERENT
+    baselines within one run. The manual version of this check reported a phantom
+    missing bullet exactly that way. Asserted by counting git invocations."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    ch._BASELINE_REF_CACHE.clear()
+    calls = []
+
+    class _Result:
+        returncode = 0
+        stdout = "feedfacefeedfacefeedfacefeedfacefeedface\n"
+
+    def _fake_git(*args):
+        calls.append(args)
+        return _Result()
+
+    monkeypatch.setattr(ch, "_git", _fake_git)
+    first = ch._changelog_baseline_ref()
+    for _ in range(5):
+        assert ch._changelog_baseline_ref() == first
+    merge_base_calls = [c for c in calls if c[:1] == ("merge-base",)]
+    assert len(merge_base_calls) == 1, merge_base_calls
+
+
+def test_baseline_ref_cache_is_keyed_on_repo(monkeypatch, tmp_path):
+    """Pinning must not leak ACROSS trees: repointing REPO (what every test here
+    does, and what a caller embedding this module could do) resolves afresh rather
+    than reusing another repo's sha."""
+    ch = _load_check_hygiene()
+    ch._BASELINE_REF_CACHE.clear()
+    shas = iter(["a" * 40, "b" * 40])
+    seen = []
+
+    def _fake_git(*args):
+        class _R:
+            returncode = 0
+            stdout = next(shas) + "\n"
+        seen.append(args)
+        return _R()
+
+    monkeypatch.setattr(ch, "_git", _fake_git)
+    monkeypatch.setattr(ch, "REPO", tmp_path / "one")
+    assert ch._changelog_baseline_ref() == "a" * 40
+    monkeypatch.setattr(ch, "REPO", tmp_path / "two")
+    assert ch._changelog_baseline_ref() == "b" * 40
+
+
+# ---- report-only: which [Unreleased] bullets does THIS branch add? -----------
+# The third condition of the frozen manual check, in its readable half. A
+# hand-restored sibling bullet that is NOT a duplicate is textually
+# indistinguishable from one you authored, so nothing can flag it outright;
+# listing the additions lets the human reading a warning spot one.
+
+def test_added_unreleased_bullets_lists_only_new_ones():
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("- my own draft bullet\n",
+                              "- my own draft bullet\n- a bullet this branch adds\n")
+    assert ch._changelog_added_unreleased_bullets(_DRAFT_BASE, new) == [
+        "- a bullet this branch adds"]
+
+
+def test_added_unreleased_bullets_counts_an_extra_copy_as_added():
+    """A second copy of an existing bullet is an addition too (and is separately
+    reported as a duplicate) - so the count cannot be gamed by duplicating."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("- my own draft bullet\n",
+                              "- my own draft bullet\n- my own draft bullet\n")
+    assert ch._changelog_added_unreleased_bullets(_DRAFT_BASE, new) == [
+        "- my own draft bullet"]
+
+
+def test_added_unreleased_bullets_ignores_continuations_and_published():
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("- inference and CLI\n",
+                              "- inference and CLI\n- a published-section bullet\n")
+    assert ch._changelog_added_unreleased_bullets(_DRAFT_BASE, new) == []
+
+
+def test_added_note_is_report_only_and_rides_along_with_a_warning(
+        tmp_path, monkeypatch, capsys):
+    """The added-bullet report is CONTEXT, never its own warning: a run that only
+    ADDS bullets stays completely quiet (this gate is a pre-commit hook), but once
+    a real warning fires the note rides along so the reader can tell which bullets
+    are theirs."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    _init_changelog_repo(tmp_path, _DRAFT_BASE)
+
+    # add-only: quiet, and NOT escalated by --strict either
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace("- my own draft bullet\n",
+                            "- my own draft bullet\n- purely additive bullet\n"),
+        encoding="utf-8")
+    ch._BASELINE_REF_CACHE.clear()
+    assert ch.main(["--strict"]) == 0
+    assert "for context" not in capsys.readouterr().err
+
+    # a real drop alongside an addition: warning + the context note
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace("- sibling bullet a rebase must not eat\n",
+                            "- purely additive bullet\n"),
+        encoding="utf-8")
+    ch._BASELINE_REF_CACHE.clear()
+    assert ch.main([]) == 0
+    err = capsys.readouterr().err
+    assert "sibling bullet a rebase must not eat" in err
+    assert "for context, this branch adds 1 [Unreleased] bullet(s)" in err, err
+    assert "added: '- purely additive bullet'" in err, err
+
+
 def test_strict_env_knob_off_values(monkeypatch):
     """The env knob's off-set is explicit: empty/0/false/no/off (any case, any
     surrounding whitespace) stay warn-only. Anything ELSE means strict, so a

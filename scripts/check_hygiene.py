@@ -305,6 +305,12 @@ def _git(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
+# The baseline sha, resolved AT MOST ONCE per process and per REPO (see
+# _changelog_baseline_ref). Keyed on REPO so a caller that repoints REPO (the tests
+# do, one throwaway repo per test) still resolves afresh for the new tree.
+_BASELINE_REF_CACHE: dict[Path, str | None] = {}
+
+
 def _changelog_baseline_ref() -> str | None:
     """The commit whose CHANGELOG the working tree must not delete entries from.
 
@@ -315,14 +321,33 @@ def _changelog_baseline_ref() -> str | None:
     a web edit is still caught). It also never false-positives on new releases that
     landed on master AFTER this branch (those are not in the merge-base). Falls back
     to HEAD when origin/master is unavailable (offline, a fresh clone), which is the
-    plain "vs the last commit" pre-commit check. None => no git at all."""
+    plain "vs the last commit" pre-commit check. None => no git at all.
+
+    PINNED (resolved once per process): three separate checks call this - the
+    append-only gate, the [Unreleased] warn-only checks, and the service-worker
+    cache-bump gate - and each call otherwise shells out to `git merge-base HEAD
+    origin/master` again. ``origin/master`` is a MOVING ref: worktrees share one
+    ref store, so a sibling session's fetch or a merge landing mid-run can advance
+    it between two of those calls, and the checks would then silently compare
+    against DIFFERENT baselines within a single run. That is not hypothetical - the
+    manual version of this check reported a phantom missing bullet exactly that way
+    (guard passed, a sibling lane merged seconds later, a later command re-read the
+    ref). Resolving to an immutable sha once and reusing it makes every check in a
+    run agree on one baseline; the tell that this matters is two detectors
+    disagreeing, which must always mean "one is stale", never "restore the
+    difference"."""
+    if REPO in _BASELINE_REF_CACHE:
+        return _BASELINE_REF_CACHE[REPO]
     mb = _git("merge-base", "HEAD", "origin/master")
     if mb is None:
-        return None
-    if mb.returncode == 0 and mb.stdout.strip():
-        return mb.stdout.strip()
-    head = _git("rev-parse", "HEAD")            # no origin/master: last commit
-    return head.stdout.strip() if head and head.returncode == 0 else None
+        ref = None
+    elif mb.returncode == 0 and mb.stdout.strip():
+        ref = mb.stdout.strip()
+    else:
+        head = _git("rev-parse", "HEAD")        # no origin/master: last commit
+        ref = head.stdout.strip() if head and head.returncode == 0 else None
+    _BASELINE_REF_CACHE[REPO] = ref
+    return ref
 
 
 def _changelog_append_only() -> list[str]:
@@ -533,6 +558,23 @@ def _changelog_unreleased_drops() -> list[str]:
     ]
 
 
+def _changelog_added_unreleased_bullets(old_text: str, new_text: str) -> list[str]:
+    """Top-level [Unreleased] bullets in *new_text* that were not in *old_text* -
+    this branch's own additions, as far as the text can tell."""
+    from collections import Counter
+    old = Counter(line for line in _changelog_unreleased_lines(old_text)
+                  if line.startswith("- "))
+    seen = Counter()
+    out = []
+    for line in _changelog_unreleased_lines(new_text):
+        if not line.startswith("- "):
+            continue
+        seen[line] += 1
+        if seen[line] > old.get(line, 0):
+            out.append(line)
+    return out
+
+
 def _changelog_unreleased_duplicates() -> list[str]:
     """Warn-only: an [Unreleased] bullet that is newly duplicated in the working
     copy - the artifact left behind when a bullet is hand-restored after a
@@ -553,6 +595,32 @@ def _changelog_unreleased_duplicates() -> list[str]:
         "merged after your branch point). Delete the EXTRA copy only - deleting "
         "both is how the entry disappears for real."
     ]
+
+
+def _changelog_unreleased_added_note() -> list[str]:
+    """REPORT-ONLY context: the [Unreleased] bullets this branch adds relative to
+    the baseline. Not a warning and never escalated by --strict (a branch adding
+    changelog entries is the whole point), so it is emitted ONLY alongside a real
+    warning, where it answers the question the warning immediately raises: "which
+    of these bullets are mine?"
+
+    It is the import detector's readable half. A hand-restored sibling bullet that
+    is NOT a duplicate is textually indistinguishable from one you authored, so no
+    check can flag it outright; listing the additions lets the human reading the
+    warning spot one. Deliberately not printed on clean runs: this gate is a
+    pre-commit hook, and a note on every commit is how a signal becomes noise."""
+    pair = _changelog_baseline_pair()
+    if pair is None:
+        return []
+    _ref, base_text, working = pair
+    added = _changelog_added_unreleased_bullets(base_text, working)
+    if not added:
+        return [f"    for context: this branch adds no new {_CHANGELOG} "
+                "[Unreleased] bullets."]
+    shown = "\n".join(f"    added: {x!r}" for x in added[:6])
+    more = f"\n    (+{len(added) - 6} more)" if len(added) > 6 else ""
+    return [f"    for context, this branch adds {len(added)} [Unreleased] "
+            f"bullet(s) - confirm they are all yours:\n{shown}{more}"]
 
 
 # ---- check 5: raw single-resource accessor guard ----------------------------
@@ -1071,6 +1139,11 @@ def main(argv: list[str]) -> int:
     # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
     # failures for CI-style use.
     warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
+    if warnings:
+        # Report-only context, attached to the warnings rather than escalated with
+        # them: under --strict the added-bullet list is still just context, so it
+        # rides along in the last problem line instead of becoming its own failure.
+        warnings = warnings + _changelog_unreleased_added_note()
     if strict and warnings:
         problems.extend(warnings)
         warnings = []
