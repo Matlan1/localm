@@ -658,6 +658,43 @@ export function speak(text, opts = {}) {
   }
 }
 
+// The chat voice picker is a PER-BROWSER choice, stored here. The tts plugin's
+// server-side `voice` setting (Settings > Text-to-speech) is the DEFAULT for
+// browsers that have not picked one - a different store, which is exactly why
+// picking a voice in chat never moved the server value (2026-07-22
+// settings-exposure audit). Keeping them separate is deliberate (one server,
+// many browsers, one shared account); what was missing is that the split was
+// invisible, so the Settings section names the override and offers to clear it.
+export const TTS_VOICE_KEY = "localm.ttsVoice";
+
+/** This browser's own voice override, or "" when it follows the server default. */
+export function browserVoiceOverride() {
+  try { return localStorage.getItem(TTS_VOICE_KEY) || ""; }
+  catch (e) { return ""; }        // storage blocked: no override is readable
+}
+
+/** Drop this browser's override so the server-side default applies again, and
+ *  re-point the live provider at *serverVoice* straight away (no reload). */
+export function clearBrowserVoiceOverride(serverVoice) {
+  try { localStorage.removeItem(TTS_VOICE_KEY); }
+  catch (e) { /* storage blocked: nothing was stored to clear */ }
+  if (ttsProvider && serverVoice) ttsProvider.setVoice(serverVoice);
+  populateVoicePicker();
+}
+
+/** Apply a just-saved server-side tts config to the RUNNING provider, so a
+ *  Settings save takes effect now instead of on the next reload. The voice is
+ *  only applied when this browser has no override of its own - never silently
+ *  overwrite the user's explicit per-browser pick. Returns true if the live
+ *  voice changed. */
+export function applyServerTtsConfig({ voice, speed } = {}) {
+  if (!ttsProvider || typeof ttsProvider.applyConfig !== "function") return false;
+  const takeVoice = voice && !browserVoiceOverride();
+  ttsProvider.applyConfig({ voice: takeVoice ? voice : undefined, speed });
+  if (takeVoice) populateVoicePicker();
+  return !!takeVoice;
+}
+
 /** Fill the voice picker from the active provider (or, with no provider, the
  *  browser's LOCAL voices) and remember the choice. Hidden when there is
  *  nothing to choose. */
@@ -669,7 +706,16 @@ export function populateVoicePicker() {
   let current = "";
   if (ttsProvider) {
     opts = ttsProvider.voices();
-    current = localStorage.getItem("localm.ttsVoice") || ttsProvider.getVoice();
+    // A stored override that the provider no longer offers (voice list changed,
+    // or a different install shares this origin) is IGNORED rather than pushed
+    // into the provider: setting an unknown id made synthesis fail at speak
+    // time while the picker showed something else entirely.
+    const stored = browserVoiceOverride();
+    const known = stored && opts.some((o) => o.id === stored);
+    current = known ? stored : ttsProvider.getVoice();
+    if (stored && !known) {
+      console.debug(`[tts] stored voice ${stored} is not offered; using ${current}`);
+    }
     if (current) ttsProvider.setVoice(current);
   } else if (window.speechSynthesis) {
     // getVoices() is async-populated; filter to localService so we never offer
@@ -695,14 +741,18 @@ export function populateVoicePicker() {
   if (current) sel.value = current;
 }
 
-/** Persist the picked voice and apply it to the active provider. */
+/** Persist the picked voice and apply it to the active provider. This is a
+ *  THIS-BROWSER choice (see TTS_VOICE_KEY): it overrides the server-side
+ *  default voice here without changing it for anyone else. */
 export function onVoicePick() {
   const id = $("p-voice").value;
   if (ttsProvider) {
     ttsProvider.setVoice(id);
-    localStorage.setItem("localm.ttsVoice", id);
+    try { localStorage.setItem(TTS_VOICE_KEY, id); }
+    catch (e) { toast("This browser blocked storage, so the voice resets on reload", true); }
   } else {
-    localStorage.setItem("localm.ttsVoiceBrowser", id);
+    try { localStorage.setItem("localm.ttsVoiceBrowser", id); }
+    catch (e) { toast("This browser blocked storage, so the voice resets on reload", true); }
   }
 }
 

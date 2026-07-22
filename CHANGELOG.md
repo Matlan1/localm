@@ -12,6 +12,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The text-to-speech voice you picked never reached the server.** The voice
+  picker in the chat parameters saved your choice in the browser only, while
+  the tts plugin's own settings (voice, speaking speed, voice model, compute
+  device, model precision) lived in a server-side block that nothing could
+  write: they could only be changed by hand-editing `config.json`. Picking a
+  voice therefore looked like it changed the setting for good and did not.
+  Settings now has a "Text-to-speech" section that edits those server-side
+  values for real, with validation (an unknown voice, an out-of-range speed or
+  a model that is not a Hugging Face repo id are refused with a clear message
+  instead of silently falling back). The two stores are now clearly separate
+  and both visible: the server value is the default for every browser, the chat
+  picker is labelled "this browser", and when this browser has its own pick the
+  Settings section says so and offers to clear it. Changing the default voice or
+  speed applies immediately in browsers that follow it, and a voice remembered
+  in your browser that the plugin no longer offers is now ignored rather than
+  handed to the voice model (which failed at playback time).
 - **Three media settings were invisible in the GUI.** "ComfyUI launch
   timeout", "Keep ComfyUI headless" (no auto-opened browser tab) and the
   ACE-Step `__func__` crash fix toggle existed as real settings - described,

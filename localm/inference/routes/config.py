@@ -201,6 +201,79 @@ def register(app: FastAPI, ctx) -> None:
         block = (cfg.get("plugins") or {}).get(name) or {}
         return {"plugin": name, "fields": media_schema_json(name, block, cfg)}
 
+    # ---------------------------------------------------------------- #
+    #  The tts plugin's config block (the browser-rendered Kokoro voice) #
+    # ---------------------------------------------------------------- #
+
+    def _tts_payload(request: Request) -> dict:
+        from localm.config import load_config
+        from localm.settings_schema import TTS_PLUGIN, tts_schema_json
+        cfg = load_config()
+        plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
+        block = plugins.get(TTS_PLUGIN)
+        # `active` is INFORMATIONAL (the GUI hides a section whose plugin is not
+        # running); the write itself is deliberately NOT gated on it, so the
+        # settings can be prepared before the plugin is enabled. is_active() is a
+        # pair of set lookups, so there is nothing to guard against here; an app
+        # with no plugin engine attached (a bare test app) simply has no manager.
+        mgr = getattr(request.app.state, "plugin_manager", None)
+        return {"plugin": TTS_PLUGIN,
+                "active": bool(mgr and mgr.is_active(TTS_PLUGIN)),
+                "fields": tts_schema_json(block)}
+
+    @app.get("/v1/tts/config",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def get_tts_config(request: Request):
+        """The tts plugin's editable settings with their RESOLVED values (the
+        user's override, else the shipped template default).
+
+        This is the SETTINGS surface. The plugin's own /api/tts/config is the
+        resolved runtime config the browser loads; this one carries the field
+        metadata (widget/label/help/options) the GUI renders and edits."""
+        return _tts_payload(request)
+
+    @app.post("/v1/tts/config",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def set_tts_config(body: dict, request: Request):
+        """Save the tts plugin's own config block, merged key by key so
+        unlisted keys are untouched. A blank field clears that override (back to
+        the shipped template default)."""
+        from localm.config import update_config
+        from localm.settings_schema import (TTS_PLUGIN, tts_admin_only_fields,
+                                            validate_tts_block)
+        # SEC: library / wasm_paths become a script URL and a WASM base URL that
+        # EVERY browser client loads, so setting them is privilege escalation for
+        # a non-owner config:write key - same shape as the media launch_cmd /
+        # api_url guard (REC-MEDIA-CMD). Checked on the RAW body before
+        # validation, so an unauthorized caller is refused up front. Open mode is
+        # the trusted local owner, so caller_scopes is None and this passes.
+        locked = tts_admin_only_fields() & set(body or {})
+        if locked:
+            held = _hs.caller_scopes(request)
+            if held is not None and scopes.ADMIN not in held:
+                raise HTTPException(
+                    403, "Changing " + ", ".join(sorted(locked)) + " requires an "
+                    "owner (admin) key: it sets the script the text-to-speech "
+                    "plugin loads in every browser.")
+        try:
+            merge = validate_tts_block(body or {})
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        def _mutate(cfg: dict) -> None:
+            plugins = cfg.get("plugins")
+            if not isinstance(plugins, dict):
+                plugins = cfg["plugins"] = {}
+            block = plugins.get(TTS_PLUGIN)
+            if not isinstance(block, dict):
+                block = plugins[TTS_PLUGIN] = {}
+            block.update(merge)
+
+        # Off the event loop for the same reason as patch_config above (REG-586):
+        # update_config() can block on the cross-process lock.
+        await run_in_threadpool(update_config, _mutate)
+        return _tts_payload(request)
+
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
         """Alive status of ComfyUI, and whether localm launched THIS one (so the

@@ -17,37 +17,24 @@ Config resolution mirrors the media plugins' template+override idea: the shipped
 defaults live in the tracked ``tts.example.json`` template, and the user's
 non-tracked overrides under ``config["plugins"]["tts"]`` win over them. The
 default model id lives ONLY in the template, never hard-coded in this module.
+
+WRITING those overrides is deliberately NOT here: the settings surface is
+GET/POST ``/v1/tts/config`` in ``localm.inference.routes.config`` (validated by
+``settings_schema.validate_tts_block``, mirroring the per-plugin media config).
+Routes mounted here are auto-scoped to the ``tts`` capability, so a plain
+"may use text-to-speech" key would otherwise be able to rewrite the model id and
+the script URL every browser loads. Changing settings costs ``config:write``.
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from fastapi import APIRouter
 
 from localm.debuglog import logger
-
-_PLUGIN_DIR = Path(__file__).resolve().parent
-_TEMPLATE = _PLUGIN_DIR / "tts.example.json"
+from localm.plugins.builtin.tts.settings import defaults as _defaults
 
 _router = APIRouter()
 _host = None
-
-
-def _defaults() -> dict:
-    """Shipped defaults from the tracked template (sans documentation keys)."""
-    try:
-        data = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        # The template is a TRACKED shipped file: absent is as abnormal as
-        # corrupt here, and silently returning {} would hide a broken install
-        # behind the frontend's hardcoded fallbacks. Surface it, keep serving.
-        logger.warning("tts: could not read the shipped template %s (%s); "
-                       "falling back to the frontend's built-in defaults",
-                       _TEMPLATE.name, e)
-        return {}
-    return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
 def _resolved() -> dict:
