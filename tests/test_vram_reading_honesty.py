@@ -569,6 +569,24 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
                       f"sibling failure path: {lines}")
 
 
+def _mcp_engine_double(name):
+    """An EngineCache stand-in that honors the real Engine's contract.
+
+    A bare MagicMock answers every getattr with a truthy Mock, so an idle
+    engine reads as ``active_requests != 0`` and ``unloading is True`` to the
+    eviction policy - it is never selected as a victim, the cache logs "no
+    resident model could be evicted", and the unload + wait_for_vram_release
+    cycle these tests exist to guard NEVER RUNS. The stub has to model the
+    attributes the policy reads (engine.py:181-191), or the tests silently
+    stop testing anything.
+    """
+    engine = MagicMock(display_name=name)
+    engine.active_requests = 0
+    engine.unloading = False
+    engine.loaded = True
+    return engine
+
+
 class TestMcpModelSwitchHonesty(unittest.TestCase):
     """The MCP server's model switch runs the same before/after cycle, and made
     the same false "VRAM free did not rise" claim.
@@ -596,7 +614,7 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
         # confound them. The process-scoped (blind) case is its own test below.
         gpu = dict(_IDLE, free_scope=scope) if scope else dict(_IDLE)
         cache = EngineCache(default_model="a",
-                            engine_factory=lambda n: MagicMock(display_name=n))
+                            engine_factory=_mcp_engine_double)
         cache.get("a")                      # load the first model
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([gpu], status)), \
@@ -665,7 +683,7 @@ class TestMcpModelSwitchHonesty(unittest.TestCase):
 
         logs = []
         cache = EngineCache(default_model="a",
-                            engine_factory=lambda n: MagicMock(display_name=n))
+                            engine_factory=_mcp_engine_double)
         cache.get("a")
         with patch("localm.discover.list_gpus", side_effect=_cold_then_warm), \
              patch("localm.vram.wait_for_vram_release", _impatient_wait), \

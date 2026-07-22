@@ -127,6 +127,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   only, matched exactly, with the closest-match hint on a miss and the post-write
   syntax check on each file. It honours an active `--scope`, is undoable, and is
   captured (not written to disk) in patch mode.
+- **The MCP server keeps several models loaded at once, like the HTTP server
+  already did.** `localm mcp` used to hold exactly one model: asking it for a
+  second unloaded the first, so alternating between two models reloaded them
+  every time. It now keeps both resident when a live free-VRAM reading shows
+  the second one fits (its estimated need plus a 1 GB headroom, and enough
+  room on every split device when a GPU split is configured), and only evicts
+  when it genuinely does not fit - least-recently-used first, never a model
+  that is currently generating. On a machine where free VRAM cannot be
+  measured, or where the reading is inconclusive, it stays single-resident
+  exactly as before rather than stacking models until the graphics driver runs
+  out. The HTTP server and the MCP server now share one implementation of this
+  decision, so they cannot drift apart. Shutting the server down frees every
+  model it still has loaded, and says so if one fails to free.
+- **Two optional knobs to decide model residency yourself**, for when you would
+  rather say "keep these loaded" than rely on free-VRAM arithmetic:
+  `localm config max_resident_models 2` caps how many models stay loaded at
+  once (1 restores strict single-resident), and
+  `localm config pinned_models a,b` protects named models from being evicted to
+  make room for another. Both are off by default, so nothing changes unless you
+  set them, and clearing either (`localm config max_resident_models ""`) goes
+  back to the automatic behavior.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
@@ -166,6 +187,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   without a `prompt` field. The prompt requirement now lives in one place (the
   job definition), which accepts a promptless `memory` or `rag` job and still
   refuses a promptless chat or coder one.
+
 - **A coder sub-agent now inherits the scope you set, and two of them can no
   longer run at once.** `spawn_agent` had two independent gaps. It was not
   marked destructive, so when the model asked for several sub-agents in one
