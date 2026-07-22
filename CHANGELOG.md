@@ -54,6 +54,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   config.json.
 
 ### Added
+- **The coder can hand a sub-task off and keep working instead of waiting.**
+  `spawn_agent` runs its sub-agent to completion before the coder does anything
+  else, so delegating a ten-turn job to a local model costs you all of that time
+  staring at a spinner. The new `spawn_agent_background` starts the sub-agent and
+  hands back a job id straight away; you keep working, and `check_agent_job` tells
+  you how it went. A finished sub-agent's result is also folded into the
+  conversation on its own at the start of a later turn, so you do not have to
+  remember to ask. Background sub-agents get the same isolation as parallel
+  dispatch - each works in its own git worktree on its own branch, its changes are
+  committed there and never merged into your working tree, and `/diff` points at
+  the branch rather than pretending the work is in your files. Two can run at
+  once (the same shared ceiling parallel dispatch uses); a third is refused with a
+  clear message naming the two already running, rather than quietly queued. The
+  new `/bg` command lists this session's background work, both shell commands and
+  sub-agents. Starting one asks for confirmation exactly like `spawn_agent` does,
+  and that one approval covers everything the sub-agent then does, because a
+  background sub-agent cannot come back and ask you mid-run - so in a session that
+  confirms at the terminal, localm refuses to start one rather than approving on
+  your behalf. A one-shot `localcoder "task"` run now warns you if it is about to
+  exit while a background sub-agent is still going, instead of dropping it
+  silently.
 - **The coder can run two sub-tasks at once, each in its own checkout.** A new
   `dispatch_parallel` tool gives every child agent its own git worktree on its
   own branch, so two children can work on the same files without interfering and
