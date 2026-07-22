@@ -298,6 +298,12 @@ DEFAULT_CONFIG: dict = {
     # forces CPU offload on a VRAM-limited card (~36 s/it vs ~6-7 s/it). True
     # (default) auto-corrects; False submits your dequant choice verbatim.
     "comfy_fast_dequant": True,
+    # Shared fallback for the per-plugin "Model weight dtype" Media setting
+    # (music/video backends read config["plugins"][<name>]["comfy"]["float_type"],
+    # else this). None = inherit the workflow default. The per-plugin values are
+    # what the GUI's Media section edits; this global is the documented fallback
+    # they inherit (settable via `localm config` / PATCH like any key).
+    "comfy_float_type": None,
     # Suppress ComfyUI opening its own web page when localm auto-launches it.
     # False (default) keeps ComfyUI's tab. True appends --disable-auto-launch so
     # it starts headless; stock run_*.bat / comfyui.* / bare "python main.py"

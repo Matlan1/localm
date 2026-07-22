@@ -11,6 +11,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Three media settings were invisible in the GUI.** "ComfyUI launch
+  timeout", "Keep ComfyUI headless" (no auto-opened browser tab) and the
+  ACE-Step `__func__` crash fix toggle existed as real settings - described,
+  validated, changeable from the CLI - but the Settings page never showed
+  them anywhere: the Media section only rendered its per-plugin boxes plus
+  two hand-picked fields. They now appear in a "Shared" box at the top of
+  Settings > Media, and the section renders every media setting by default
+  rather than from a hand-maintained list, so a future one cannot silently
+  vanish the same way. Also makes the shared `comfy_float_type` fallback (the
+  documented default behind the per-plugin "Model weight dtype" setting) a
+  real, settable key - previously it could only be created by hand-editing
+  config.json.
+
 ### Added
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual

@@ -1021,6 +1021,41 @@ export async function buildMediaSection(form, fields) {
   panel.appendChild(managed);
   renderManagedComfyPanel(managed, { targetField });
 
+  // SHARED media settings: every remaining visible group="Media" schema field
+  // that is neither explicitly placed here (comfy_target above,
+  // comfy_gpu_placement below) nor per-plugin-mapped (media_per_plugin, from
+  // MEDIA_PLUGIN_FIELDS - those render inside the per-plugin boxes instead).
+  // Rendered by EXCLUSION, not an allowlist, on purpose: a name allowlist is
+  // exactly how comfy_launch_timeout / comfy_disable_auto_launch /
+  // comfy_func_shim ended up rendered NOWHERE in the GUI (schema-visible,
+  // CLI-only in practice; 2026-07-22 settings-exposure audit) - this way a
+  // future Media field is visible by default and cannot silently vanish.
+  // Saved through the Media section's generic PATCH /v1/config path.
+  const sharedFields = (fields || []).filter(f =>
+    f.group === "Media" && !f.media_per_plugin
+    && f.key !== "comfy_target" && f.key !== "comfy_gpu_placement");
+  const sharedCtrls = sharedFields.map(f => buildSettingControl(f)).filter(Boolean);
+  if (sharedCtrls.length) {
+    const box = el("div", "media-comfy-box");
+    box.appendChild(el("h4", "media-sub-head", "Shared"));
+    box.appendChild(el("div", "sub",
+      "Applies to every media plugin (whichever ComfyUI is used)."));
+    for (const ctrl of sharedCtrls) {
+      box.appendChild(ctrl.node);
+      // Same de-dup-then-register dance as the boxes below: a re-render must
+      // not pile up stale detached entries for these keys in the shared list.
+      _settingsControls = _settingsControls.filter(c => c.field.key !== ctrl.field.key);
+      _settingsControls.push(ctrl);
+    }
+    const actions = el("div", "actions");
+    const save = el("button", "btn-primary", "Save");
+    save.type = "button";
+    save.onclick = () => saveSettingsSection("media");
+    actions.appendChild(save);
+    box.appendChild(actions);
+    panel.appendChild(box);
+  }
+
   // EXPERIMENTAL per-component GPU placement toggle (comfy_gpu_placement). Unlike
   // the managed box's comfy_target - which only matters once a managed instance is
   // installed - this applies to a user's OWN ComfyUI too, so it renders
