@@ -640,11 +640,15 @@ def tool_dispatch_parallel(
         # repo-wide and takes no pathspec, so it would also drop the record of a
         # USER's worktree that merely lives on a drive that is not mounted right
         # now; and wrapping it in `except: pass` made a failed prune invisible.
-        pruned, pok = git_prune_child_worktrees(repo)
-        if not pok:
-            first = next((o for o in outcomes if not o.cleanup_warning), None)
-            if first is not None:
-                first.cleanup_warning = pruned
+        # Only when we actually created something: a dispatch rejected for lack of
+        # a free slot has nothing of ours to reap, and should not pay for a git
+        # subprocess to discover that.
+        if created:
+            pruned, pok = git_prune_child_worktrees(repo)
+            if not pok:
+                first = next((o for o in outcomes if not o.cleanup_warning), None)
+                if first is not None:
+                    first.cleanup_warning = pruned
 
         # Return the budget only for children that have actually TERMINATED. An
         # abandoned child is still running and still occupying the box, so its slot

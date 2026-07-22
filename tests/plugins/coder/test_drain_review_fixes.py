@@ -338,6 +338,38 @@ def test_a_failed_background_child_is_not_absorbed_as_ok(tmp_path):
     assert _delegated.footer_for(agent)
 
 
+def test_polling_a_failed_background_child_does_not_report_it_finished(tmp_path):
+    """The model's own polling surface (check_agent_job) is a third X3 site."""
+    from localm.plugins.coder.tools.agents import tool_check_agent_job
+
+    class _Job:
+        kind = "agent"
+
+        def status(self):
+            return {"state": "done", "label": "worker", "warnings": [],
+                    "result": {"summary": "[max_turns=10 reached]", "turns": 10,
+                               "ok": False}}
+
+        def elapsed(self):
+            return 1.0
+
+    class _Registry:
+        def get(self, job_id):
+            return _Job()
+
+        def ids(self, kind=None):
+            return ["job1"]
+
+    with patch("localm.plugins.coder.background.get_registry",
+               return_value=_Registry()):
+        res = tool_check_agent_job(tmp_path, "job1")
+
+    assert "DID NOT COMPLETE" in res.output, res.output
+    assert "finished in" not in res.output, res.output
+    # The POLL itself worked, so it must not count against the failure breaker.
+    assert res.ok
+
+
 # --------------------------------------------------------------------------- #
 #  X9 / X10 - a queued child that never started, and the budget it holds
 # --------------------------------------------------------------------------- #
