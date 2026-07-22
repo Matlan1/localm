@@ -352,6 +352,30 @@ class TestInteractiveSessionEndToEnd:
         assert agent.last_run_ok is False
         assert (tmp_path / "mod.py").exists()      # the write really happened
 
+    def test_failed_verification_is_recorded_session_wide(self, tmp_path):
+        """Coexistence with the per-run last_run_ok reset (#792): the gate's write
+        happens mid-run, inside _handle_no_tool_calls, so _loop's finally still
+        folds it into the session-level _had_any_failure the close-time episodic
+        reflection reads. Verified as a call chain, not by line position."""
+        agent = _make_agent(tmp_path, self._SCRIPT,
+                            verify_cmd="exit 1", verify_max_retries=1)
+        agent.chat("write mod.py")
+        assert agent.last_run_ok is False
+        assert agent._had_any_failure is True
+
+    def test_clean_turn_after_a_failed_verification_reports_ok(self, tmp_path):
+        """The other half of that coexistence: #792's per-run reset must still
+        clear a PREVIOUS turn's verification failure, while the session-level
+        record of it survives."""
+        agent = _make_agent(tmp_path, self._SCRIPT,
+                            verify_cmd="exit 1", verify_max_retries=1)
+        agent.chat("write mod.py")
+        assert agent.last_run_ok is False
+        # Second turn writes nothing, so the gate does not fire and the run is clean.
+        agent.chat("thanks, what does it do?")
+        assert agent.last_run_ok is True          # not poisoned by the earlier turn
+        assert agent._had_any_failure is True     # but the session still remembers
+
     def test_passing_check_lets_the_answer_through_clean(self, tmp_path):
         agent = _make_agent(tmp_path, self._SCRIPT,
                             verify_cmd="exit 0", verify_max_retries=1)
