@@ -569,9 +569,11 @@
                 <label>Split across GPUs - spread a model too large for one card over
                   several (check 2 or more)</label>
                 <div id="perf-gpu-split-list"></div>
-                <div class="sub">Saves immediately; applies on the next model load. Overrides
-                Main GPU above when 2 or more are checked. Shown only when more than one GPU
-                is detected.</div>
+                <div class="sub">Each card's share follows its free VRAM at load time
+                (set gpu_split_ratios in config.json to pin fixed shares). Saves
+                immediately; applies on the next model load. Overrides Main GPU above
+                when 2 or more are checked. Shown only when more than one GPU is
+                detected.</div>
               </div>
               <div class="actions">
                 <button class="btn-primary" id="perf-apply">Apply</button>
