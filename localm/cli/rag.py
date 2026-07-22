@@ -251,6 +251,13 @@ def rag_resync(collection, embed, url, prune_missing):
         console.print(f"[yellow]skipped folder {r['root']}: {r['reason']} - "
                       f"nothing under it was indexed, flagged, or removed."
                       f"[/yellow]")
+    if result.get("vector_degrade_reason"):
+        # The store logs this, but a CLI user does not read the debug log.
+        console.print(
+            f"[yellow]Semantic search is degraded: "
+            f"{result['vector_degrade_reason']}. The stored vector index was "
+            f"left in place, not deleted - rebuild it with "
+            f"'localm rag repair {collection} --embed'.[/yellow]")
     _report_add_paths_result(result)
 
 
