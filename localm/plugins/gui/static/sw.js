@@ -88,7 +88,11 @@
 // override is now named and clearable (app/settings-perf.js), and the chat
 // picker label says which store it writes (index.html). A stale-cached client
 // would keep the old picker that silently diverged from the server default.
-const CACHE = "localm-shell-v77";
+// v78: a coder approval card now names the sub-agent that is asking
+// (app/coder.js renders the confirm_request event's new `agent` field, styled by
+// style.css) - a stale-cached client would drop the label and show the anonymous
+// prompt that made two concurrent children indistinguishable.
+const CACHE = "localm-shell-v78";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

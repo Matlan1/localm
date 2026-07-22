@@ -258,6 +258,16 @@ export function buildConfirmCard(s, ev) {
   title.appendChild(el("span", "name", ev.tool));
   title.appendChild(document.createTextNode("?"));
   inner.appendChild(title);
+  // Which sub-agent is asking. Parallel dispatch serialises several children onto
+  // this one channel, so without it two identical cards arrive with nothing to
+  // tell them apart. Absent for the session's own agent - its card is unchanged.
+  if (ev.agent) {
+    const who = el("div", "asker");
+    who.appendChild(document.createTextNode("sub-agent "));
+    who.appendChild(el("span", "name", ev.agent));
+    who.appendChild(document.createTextNode(" is asking"));
+    inner.appendChild(who);
+  }
   if (ev.diff) {
     inner.appendChild(renderDiff(ev.diff));
   } else {

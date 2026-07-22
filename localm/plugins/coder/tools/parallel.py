@@ -49,6 +49,7 @@ from typing import Any, Optional
 
 from .. import child_limit
 from .. import delegated as _delegated
+from ..confirm import invoke_confirm
 from .base import ToolResult, _truncate
 from .git import (
     WORKTREE_PREFIX,
@@ -87,7 +88,9 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
     """The confirmation channel for one concurrent child.
 
     Wraps the parent's real channel so that (a) only one child can prompt at a
-    time, and (b) the human is told WHICH child is asking before the prompt.
+    time, and (b) the human is told WHICH child is asking before the prompt - on
+    the terminal by the announcement line below, and in the GUI by the ``agent``
+    keyword this relays to the parent's handler (../confirm.py).
 
     The fail-closed property is preserved exactly: when the parent has no channel
     at all (a genuinely unattended run), this returns None, and the caller's
@@ -101,7 +104,12 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
         # execution.py's fail-CLOSED branch. Do NOT substitute a permissive default.
         return None
 
-    def handler(call) -> bool:
+    def handler(call, agent: Optional[str] = None) -> bool:
+        # *agent* is the optional attribution keyword (see ../confirm.py). The
+        # child's Agent supplies its own name there, so this normally just relays
+        # it; falling back to child_label keeps the label correct for any caller
+        # that invokes the wrapper directly, as the tests do.
+        agent = agent or child_label
         acquired = _CONFIRM_LOCK.acquire(timeout=_CONFIRM_WAIT_S)
         if not acquired:
             # Another child has held the human's attention past the budget. Deny,
@@ -118,8 +126,8 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
                 pass
             return False
         try:
-            _announce_asker(child_label, call)
-            return base(call)
+            _announce_asker(agent, call)
+            return invoke_confirm(base, call, agent=agent)
         finally:
             _CONFIRM_LOCK.release()
 
@@ -134,10 +142,13 @@ def _announce_asker(child_label: str, call) -> None:
     we deliberately do not rewrite the ToolCall to smuggle a label into it, so this
     prints an attribution line immediately before the prompt instead.
 
-    KNOWN LIMIT, stated rather than hidden: for a GUI/web confirm_handler this line
-    goes to the server console, not the browser, so a GUI user sees a serialised but
-    unlabelled prompt. The serialisation (the correctness half) holds in both cases;
-    labelling in the GUI needs a handler-signature change that belongs with the GUI.
+    This line is the TERMINAL half of the attribution and is still what a REPL user
+    sees, including on the REG-507 path where a child borrows the parent's
+    ``_confirm_tool`` (a plain one-argument handler that cannot be told a label).
+    The GUI half no longer depends on it: the label now travels the confirm chain as
+    the optional ``agent`` keyword (../confirm.py) and reaches the browser on the
+    confirm_request event, so a GUI user sees WHICH child is asking on the approval
+    card itself rather than in a server console they are not looking at.
     """
     try:
         from ..display import console
