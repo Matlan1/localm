@@ -224,6 +224,19 @@ definitions at the bottom are exempt (cutting a release legitimately renames the
 tooling honors the same invariant: `scripts/make_release.py` / `build_release.py`
 never generate or rewrite the changelog - it is hand-maintained and shipped verbatim.
 
+That `[Unreleased]` exemption has one blind spot, so the same pass also WARNS (it
+does not fail) when a draft line that existed at the baseline is missing from your
+working copy. When several branches each add draft bullets, a textually clean
+rebase can mis-anchor a replayed insertion inside the bullet list and silently
+delete a SIBLING branch's bullet: the rebase reports clean, the gate passes, and a
+landed PR's entry is simply gone from the release notes. The warning lists every
+lost line verbatim so you can tell your own edit from a bullet git ate, and restore
+it. Rewording a draft line in place is reported too (matching is exact, so that a
+near-match heuristic can never suppress the real case); that is the intended cost
+of a warning you can read and dismiss. Warnings never change the exit code unless
+you ask: `python scripts/check_hygiene.py --strict`, or `LOCALM_HYGIENE_STRICT=1`,
+turns every warning into a failure.
+
 If you discover a violation already in git history, do not only fix it forward.
 A non-sensitive bad path can be fixed in a normal commit, but a genuine
 disclosure in history (a secret, a personal email, or a real-user absolute path
