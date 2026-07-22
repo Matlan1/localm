@@ -777,3 +777,208 @@ def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
     monkeypatch.setattr(ch, "_raw_accessor_violations", lambda t: [])
     monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
     assert ch.main([]) == 0
+
+
+# ---- [Unreleased] draft drop WARNING (rebase-eats-a-sibling-bullet backstop) --
+# The append-only gate above deliberately EXEMPTS the [Unreleased] draft: it is
+# freely rewritable until cut (test_changelog_rewriting_unreleased_is_allowed).
+# But that exemption has a blind spot: when parallel branches all add draft
+# bullets, a textually clean rebase can mis-anchor a replayed insertion inside
+# the bullet list and silently DELETE a sibling branch's bullet - seen twice in
+# one 12-PR fan-out day (2026-07-22): the rebase reported clean, the hygiene
+# gate passed, and a landed PR's entry vanished from the release notes with no
+# mechanical backstop. These tests pin the warn-only detector for that: a
+# baseline [Unreleased] content line missing from the working copy WARNS (exit
+# stays 0), and fails only under --strict or LOCALM_HYGIENE_STRICT=1.
+
+_DRAFT_BASE = (
+    "# Changelog\n\n"
+    "intro text outside any section\n\n"
+    "## [Unreleased]\n\n"
+    "### Added\n"
+    "- my own draft bullet\n"
+    "- sibling bullet a rebase must not eat\n"
+    "- a wrapped draft bullet whose second line\n"
+    "  carries the rest of the sentence\n\n"
+    "## [0.1.0] - 2026-07-04\n\n"
+    "### Added\n"
+    "- inference and CLI\n\n"
+    "[Unreleased]: https://example.invalid/compare/v0.1.0...HEAD\n"
+    "[0.1.0]: https://example.invalid/releases/tag/v0.1.0\n"
+)
+
+
+def test_unreleased_lines_collects_draft_content_only():
+    """The draft extractor takes bullets AND their wrapped continuation lines
+    from [Unreleased], and nothing else: no headers (## / ###), no blank lines,
+    no link-reference definitions, no intro text, no published-section lines."""
+    ch = _load_check_hygiene()
+    got = ch._changelog_unreleased_lines(_DRAFT_BASE)
+    assert got == [
+        "- my own draft bullet",
+        "- sibling bullet a rebase must not eat",
+        "- a wrapped draft bullet whose second line",
+        "  carries the rest of the sentence",
+    ], got
+
+
+def test_unreleased_drop_of_sibling_bullet_is_reported():
+    """NEGATIVE (the incident): a baseline draft bullet missing from the working
+    copy is reported, carrying the exact lost line so it can be restored
+    verbatim."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("- sibling bullet a rebase must not eat\n", "")
+    dropped = ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new)
+    assert dropped == ["- sibling bullet a rebase must not eat"], dropped
+
+
+def test_unreleased_drop_own_added_bullet_is_clean():
+    """Adding your own draft bullet (the normal PR flow) must not warn."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace(
+        "- my own draft bullet\n",
+        "- my own draft bullet\n- a brand new bullet this PR adds\n")
+    assert ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new) == []
+
+
+def test_unreleased_drop_reworded_bullet_warns_by_design():
+    """Rewording a draft line in place IS reported - a DOCUMENTED accepted cost,
+    not a bug. Exact-line matching is deliberate: a similarity heuristic that
+    suppressed near-matches could suppress exactly the incident case (a
+    sibling's bullet eaten while similar sibling bullets remain). For a
+    warn-only check a false positive costs one glance at the warning; a false
+    negative defeats the whole backstop."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("- my own draft bullet\n",
+                              "- my own draft bullet, reworded\n")
+    dropped = ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new)
+    assert dropped == ["- my own draft bullet"], dropped
+
+
+def test_unreleased_drop_release_cut_move_is_clean():
+    """Cutting a release MOVES the draft bullets under a new version header. The
+    comparison is against the whole working file, not just its [Unreleased]
+    section, precisely so a cut does not read as a mass drop."""
+    ch = _load_check_hygiene()
+    draft_block = (
+        "- my own draft bullet\n"
+        "- sibling bullet a rebase must not eat\n"
+        "- a wrapped draft bullet whose second line\n"
+        "  carries the rest of the sentence\n")
+    new = _DRAFT_BASE.replace(
+        "## [Unreleased]\n\n### Added\n" + draft_block,
+        "## [Unreleased]\n\n## [0.2.0] - 2026-08-01\n\n### Added\n" + draft_block)
+    assert ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new) == []
+
+
+def test_unreleased_drop_continuation_line_loss_is_reported():
+    """A wrapped bullet's continuation line is draft content too: a rebase that
+    eats just the wrapped half must be reported, same as a whole bullet."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("  carries the rest of the sentence\n", "")
+    dropped = ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new)
+    assert dropped == ["  carries the rest of the sentence"], dropped
+
+
+def test_unreleased_drop_subsection_header_removal_is_clean():
+    """'### Added' inside the draft is scaffolding the draft may freely
+    reorganize (e.g. merging two subsections); only content lines are watched.
+    Warning on scaffolding would be noise that trains people to ignore the one
+    warning that matters."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_BASE.replace("### Added\n- my own draft bullet\n",
+                              "- my own draft bullet\n")
+    assert ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new) == []
+
+
+def test_unreleased_drop_no_draft_section_is_clean():
+    """A baseline with no [Unreleased] section at all has nothing to watch."""
+    ch = _load_check_hygiene()
+    old = ("# Changelog\n\n## [0.1.0] - 2026-07-04\n\n### Added\n"
+           "- inference and CLI\n")
+    assert ch._changelog_dropped_unreleased_lines(old, "# Changelog\n") == []
+
+
+def test_unreleased_drop_published_duplicate_does_not_mask():
+    """A draft line whose text ALSO appears in a published section must still be
+    reported when the DRAFT copy is deleted: occurrences are counted across the
+    whole file on both sides, so the surviving published copy cannot satisfy
+    the draft copy's count."""
+    ch = _load_check_hygiene()
+    old = _DRAFT_BASE.replace("- my own draft bullet\n",
+                              "- inference and CLI\n")   # duplicates 0.1.0's bullet
+    new = old.replace("- inference and CLI\n", "", 1)    # deletes the DRAFT copy only
+    dropped = ch._changelog_dropped_unreleased_lines(old, new)
+    assert dropped == ["- inference and CLI"], dropped
+
+
+def test_unreleased_drop_guard_warns_end_to_end(tmp_path, monkeypatch):
+    """The git-wired entrypoint: with the baseline committed, dropping a sibling
+    draft bullet in the working tree yields ONE warning naming the lost line,
+    while the hard append-only gate stays silent (the draft is exempt from it,
+    which is exactly why this warning exists)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _DRAFT_BASE)
+    assert ch._changelog_unreleased_drops() == []          # no change -> quiet
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace("- sibling bullet a rebase must not eat\n",
+                            "- a bullet this branch adds\n"),
+        encoding="utf-8")
+    msgs = ch._changelog_unreleased_drops()
+    assert len(msgs) == 1, msgs
+    assert "sibling bullet a rebase must not eat" in msgs[0]
+    assert "my own draft bullet" not in msgs[0]            # untouched line: not listed
+    assert ch._changelog_append_only() == []               # the hard gate cannot see it
+
+
+def test_unreleased_drop_guard_passes_without_a_git_baseline(tmp_path, monkeypatch):
+    """A never-committed CHANGELOG has no baseline: no warning, no crash."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "CHANGELOG.md").write_text(_DRAFT_BASE, encoding="utf-8")
+    assert ch._changelog_unreleased_drops() == []
+
+
+def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, capsys):
+    """main() end to end on a real throwaway repo: a dropped draft bullet prints
+    a WARNING and still exits 0 by default; --strict and LOCALM_HYGIENE_STRICT=1
+    each escalate the same run to a failure; strict with nothing dropped stays 0
+    (the knob escalates warnings, it does not invent them)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    _init_changelog_repo(tmp_path, _DRAFT_BASE)
+
+    assert ch.main(["--strict"]) == 0          # strict on a clean tree: still 0
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace("- sibling bullet a rebase must not eat\n", ""),
+        encoding="utf-8")
+
+    assert ch.main([]) == 0                    # warn-only by default
+    err = capsys.readouterr().err
+    assert "WARNING" in err, err
+    assert "sibling bullet a rebase must not eat" in err, err
+
+    assert ch.main(["--strict"]) == 1          # the flag escalates
+    err = capsys.readouterr().err
+    assert "FAILED" in err, err
+    assert "sibling bullet a rebase must not eat" in err, err
+
+    monkeypatch.setenv("LOCALM_HYGIENE_STRICT", "1")
+    assert ch.main([]) == 1                    # the env knob escalates
+    monkeypatch.setenv("LOCALM_HYGIENE_STRICT", "0")
+    assert ch.main([]) == 0                    # explicit off stays warn-only
+
+
+def test_real_changelog_unreleased_drops_runs_on_the_real_tree():
+    """Smoke: the drop detector runs against the REAL repo without crashing.
+    Deliberately NOT asserting emptiness: a branch that legitimately rewords an
+    [Unreleased] line would then fail the SUITE, turning the designed warn-only
+    behavior back into a hard failure through the back door."""
+    ch = _load_check_hygiene()
+    assert isinstance(ch._changelog_unreleased_drops(), list)

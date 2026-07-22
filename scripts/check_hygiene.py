@@ -13,6 +13,11 @@ Scans tracked files and fails on:
   4. A CHANGELOG.md that is not append-only: a shipped entry line removed or
      rewritten (vs the published-record baseline) instead of new entries added on
      top. The changelog is the permanent public record of what shipped (AGENTS.md).
+     The [Unreleased] draft stays exempt from that hard gate, but a draft line
+     that existed at the baseline and is gone from the working copy is reported
+     as a WARNING (check 4b below): a textually clean rebase has silently dropped
+     a sibling branch's draft bullet before. --strict (or LOCALM_HYGIENE_STRICT=1)
+     escalates warnings to failures for CI-style use.
   5. A raw call to a single-resource accessor from outside its designated
      aggregate-capacity wrapper (see _RAW_ACCESSOR_GUARDS below). When a feature's
      whole value is "combine capacity across N resources" (multi-GPU VRAM split is
@@ -39,6 +44,8 @@ may go stale. Folding it in here means the ONE CI "Hygiene gate" step and the
 
 Run before committing:   python scripts/check_hygiene.py
 Install as a git hook:    python scripts/check_hygiene.py --install-hook
+Warnings as failures:     python scripts/check_hygiene.py --strict
+                          (equivalently: set LOCALM_HYGIENE_STRICT=1)
 
 A line that genuinely needs an absolute-looking example (help text, a doc
 sample) can carry a trailing  hygiene-ok  marker to be skipped by check 3.
@@ -50,6 +57,7 @@ Stdlib only, so it runs in any environment without installing anything.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -342,6 +350,111 @@ def _changelog_append_only() -> list[str]:
             "line(s) removed or rewritten. The changelog is the permanent public "
             "record: add new entries ABOVE, never delete or rewrite existing ones. "
             f"Removed: {shown}{more}"]
+
+
+# ---- check 4b: [Unreleased] draft lines silently DROPPED (warn-only) --------
+# The append-only gate above deliberately exempts the [Unreleased] draft: it is
+# freely rewritable until cut. That exemption has a blind spot: when parallel
+# branches all add draft bullets, a textually clean rebase can mis-anchor a
+# replayed insertion inside the bullet list and silently DELETE a sibling
+# branch's bullet. Seen twice in one 12-PR fan-out day (2026-07-22): the rebase
+# reported clean, this gate passed, and a landed PR's entry vanished from the
+# release notes with no mechanical backstop. So: any baseline [Unreleased]
+# content line missing from the working copy is reported as a WARNING - not a
+# failure, because rewording or deleting YOUR OWN draft lines is legitimate and
+# must stay frictionless - escalatable with --strict / LOCALM_HYGIENE_STRICT=1
+# where a hard gate is wanted (e.g. a CI job or a release ritual).
+#
+# Design decisions, recorded so they are not re-litigated:
+#   - Matching is EXACT (rstrip'd) line equality, so a REWORDED draft line warns
+#     too. Accepted, documented cost: a similarity heuristic that suppressed
+#     near-matches could suppress exactly the incident case (a sibling's bullet
+#     eaten while similar sibling bullets remain). For a warn-only check a false
+#     positive costs one glance; a false negative defeats the backstop.
+#   - The working side is the WHOLE file, not just its [Unreleased] section, so
+#     cutting a release (which MOVES the draft lines under a new version header)
+#     does not read as a mass drop.
+#   - Occurrences are counted on both sides (Counter), so a draft line whose
+#     text also appears in a published section is still reported when the DRAFT
+#     copy is the one deleted - the surviving published copy cannot satisfy its
+#     count.
+#   - Only bullet/continuation CONTENT lines are watched. Headers ("### Added"),
+#     blank lines and link-reference definitions are scaffolding a draft may
+#     freely reorganize; warning on those would be noise that trains people to
+#     ignore the one warning that matters.
+#   - Scope is [Unreleased] only, not the pending cut-but-untagged section
+#     (_pending_release_version): parallel branches land bullets in
+#     [Unreleased], while a cut section is edited by exactly one release
+#     ritual, so the rebase-collision hazard this backstops does not arise
+#     there.
+_CHANGELOG_UNRELEASED_HEADER = re.compile(r"^##\s+\[unreleased\]", re.I)
+
+
+def _changelog_unreleased_lines(text: str) -> list[str]:
+    """Content lines of the ``## [Unreleased]`` draft section: bullets and their
+    wrapped continuation lines, rstrip()'d. Headers, blank lines and
+    link-reference definitions are excluded (see the block comment above)."""
+    out = []
+    in_draft = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        if stripped.startswith("## "):
+            in_draft = bool(_CHANGELOG_UNRELEASED_HEADER.match(stripped))
+            continue
+        if not in_draft:
+            continue
+        if not stripped or stripped.startswith("#") or _CHANGELOG_LINKREF.match(stripped):
+            continue
+        out.append(line)
+    return out
+
+
+def _changelog_dropped_unreleased_lines(old_text: str, new_text: str) -> list[str]:
+    """Baseline [Unreleased] content lines missing (with multiplicity) from
+    *new_text* AS A WHOLE, in baseline order. Whole-file counting on both sides
+    is what keeps a release cut (a move) clean while still catching a deleted
+    draft copy of a line whose text is duplicated in a published section."""
+    from collections import Counter
+    draft = Counter(_changelog_unreleased_lines(old_text))
+    if not draft:
+        return []
+    old_all = Counter(line.rstrip() for line in old_text.splitlines())
+    new_all = Counter(line.rstrip() for line in new_text.splitlines())
+    dropped = []
+    for line, in_draft in draft.items():
+        lost = min(in_draft, old_all[line] - new_all.get(line, 0))
+        if lost > 0:
+            dropped.extend([line] * lost)
+    return dropped
+
+
+def _changelog_unreleased_drops() -> list[str]:
+    """Warn-only companion to _changelog_append_only: [Unreleased] draft lines
+    present at the baseline but gone from the working copy. Same baseline and
+    the same no-record short-circuits as the hard gate."""
+    ref = _changelog_baseline_ref()
+    if ref is None:
+        return []                       # no git available: nothing to diff against
+    base = _git("show", f"{ref}:{_CHANGELOG}")
+    if base is None or base.returncode != 0:
+        return []                       # CHANGELOG not in the baseline yet: no record
+    try:
+        working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
+    except OSError:
+        working = ""                    # deleted from the tree: every draft line is gone
+    dropped = _changelog_dropped_unreleased_lines(base.stdout, working)
+    if not dropped:
+        return []
+    listing = "\n".join(f"    lost: {x!r}" for x in dropped)
+    return [
+        f"{_CHANGELOG}: {len(dropped)} [Unreleased] draft line(s) present at the "
+        f"baseline ({ref[:8]}) are missing from the working copy:\n{listing}\n"
+        "    Rewording or removing your OWN draft entries is fine, but a textually "
+        "clean rebase has silently eaten a SIBLING branch's bullet before (git can "
+        "mis-anchor a replayed insertion in a bullet list), so confirm every line "
+        "above was removed or reworded on purpose and restore any that were not."
+    ]
 
 
 # ---- check 5: raw single-resource accessor guard ----------------------------
@@ -818,9 +931,18 @@ def _manifest_problems() -> list[str]:
         return [f"release manifest check could not run: {e}"]
 
 
+def _strict_env() -> bool:
+    """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but
+    0/false/no/empty behaves like passing --strict (an env knob because a CI
+    step or a hook cannot always edit the command line it invokes)."""
+    return os.environ.get("LOCALM_HYGIENE_STRICT", "").strip().lower() not in (
+        "", "0", "false", "no")
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
+    strict = "--strict" in argv or _strict_env()
     tracked = _tracked_files()
     if not tracked:
         # `git ls-files` failed or returned nothing, so the dash/disclosure/abs-path
@@ -842,7 +964,20 @@ def main(argv: list[str]) -> int:
     problems.extend(_raw_accessor_violations(tracked))
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_bump_violations())
+    # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
+    # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
+    # failures for CI-style use.
+    warnings = _changelog_unreleased_drops()
+    if strict and warnings:
+        problems.extend(warnings)
+        warnings = []
     manifest = _manifest_problems()
+    if warnings:
+        print("Hygiene WARNING(S) - not failures; pass --strict or set "
+              "LOCALM_HYGIENE_STRICT=1 to escalate them:\n", file=sys.stderr)
+        for w in warnings:
+            print("  " + w, file=sys.stderr)
+        print(file=sys.stderr)
     if problems or manifest:
         if problems:
             print("Hygiene check FAILED (see AGENTS.md):\n", file=sys.stderr)
