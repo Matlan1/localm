@@ -72,12 +72,22 @@ def test_start_cli_mirrors_a_pull_to_the_host(capsys, monkeypatch):
     monkeypatch.setattr(gj.subprocess, "Popen", lambda *a, **k: _FakeProc())
     mgr = gj.JobManager()
     job = mgr.start_cli("pull", ["pull", "foo"], host_label="Model pull foo")
+    # Wait for the ANNOUNCEMENT, not for job.status, and accumulate rather than
+    # draining once. The worker sets job.status = "done" BEFORE it emits the
+    # closing announce (localm/plugins/gui/jobs.py: the status assignment, then
+    # the announcer's end emit several lines later), so a loop that breaks on the
+    # status flip can read capsys inside that window and miss the final line.
+    # That is a real race, not a slow machine: it failed once under -n auto with
+    # "Model pull foo done" present in the captured LOG and absent from capsys.
+    # readouterr() drains the buffer, so each poll appends to what we already saw
+    # instead of discarding the earlier lines.
+    out = ""
     for _ in range(300):                       # await the daemon thread (instant proc)
-        if job.status in ("done", "failed", "cancelled"):
+        out += capsys.readouterr().out
+        if "Model pull foo done" in out:
             break
         time.sleep(0.01)
     assert job.status == "done"
-    out = capsys.readouterr().out
     assert "Model pull foo started" in out
     assert "Model pull foo: 0%" in out         # 5% -> 0% bucket
     assert "Model pull foo: 60%" in out
