@@ -513,23 +513,39 @@ def _changelog_new_duplicate_unreleased_bullets(
     return out
 
 
+# Baseline CHANGELOG text, cached per (REPO, ref). Safe to cache without any
+# staleness risk: the key is an immutable SHA, so its blob content cannot change.
+# Caching it turns three `git show` spawns per run into one - the three warn-only
+# checks each need the same baseline, and this gate runs as a pre-commit hook.
+_BASELINE_TEXT_CACHE: dict[tuple[Path, str], str | None] = {}
+
+
 def _changelog_baseline_pair() -> tuple[str, str, str] | None:
     """(ref, baseline CHANGELOG text, working CHANGELOG text), or None when there
     is nothing to compare against (no git, or no CHANGELOG in the baseline yet).
-    Shared by the two warn-only checks so they cannot drift apart on which
-    baseline they read - the merge-base choice is the whole correctness story
-    here (see the block comment above)."""
+    Shared by the warn-only checks so they cannot drift apart on which baseline
+    they read - the merge-base choice is the whole correctness story here (see the
+    block comment above).
+
+    The BASELINE side is cached (immutable sha => immutable content); the WORKING
+    side is deliberately re-read every call, because it is the thing under test and
+    is cheap to read (no subprocess)."""
     ref = _changelog_baseline_ref()
     if ref is None:
         return None                     # no git available: nothing to diff against
-    base = _git("show", f"{ref}:{_CHANGELOG}")
-    if base is None or base.returncode != 0:
+    key = (REPO, ref)
+    if key not in _BASELINE_TEXT_CACHE:
+        base = _git("show", f"{ref}:{_CHANGELOG}")
+        _BASELINE_TEXT_CACHE[key] = (
+            base.stdout if base is not None and base.returncode == 0 else None)
+    base_text = _BASELINE_TEXT_CACHE[key]
+    if base_text is None:
         return None                     # CHANGELOG not in the baseline yet: no record
     try:
         working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
     except OSError:
         working = ""                    # deleted from the tree: every draft line is gone
-    return ref, base.stdout, working
+    return ref, base_text, working
 
 
 def _changelog_unreleased_drops() -> list[str]:
@@ -586,14 +602,15 @@ def _changelog_unreleased_duplicates() -> list[str]:
     dupes = _changelog_new_duplicate_unreleased_bullets(base_text, working)
     if not dupes:
         return []
-    listing = "\n".join(f"    x{count}: {line!r}" for line, count in dupes)
+    listing = "\n".join(f"    x{count} now: {line!r}" for line, count in dupes)
     return [
-        f"{_CHANGELOG}: {len(dupes)} [Unreleased] bullet(s) now appear more than "
-        f"once and did not at the baseline:\n{listing}\n"
+        f"{_CHANGELOG}: {len(dupes)} [Unreleased] bullet(s) appear MORE OFTEN than "
+        f"at the baseline, and more than once:\n{listing}\n"
         "    A duplicate is usually a bullet that was restored but never actually "
         "lost (a stale-ref drop report false-positives on every sibling bullet "
-        "merged after your branch point). Delete the EXTRA copy only - deleting "
-        "both is how the entry disappears for real."
+        "merged after your branch point). Delete the EXTRA copies so only the one "
+        "you meant to have is left - deleting every copy is how the entry "
+        "disappears for real."
     ]
 
 
@@ -1140,10 +1157,14 @@ def main(argv: list[str]) -> int:
     # failures for CI-style use.
     warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
     if warnings:
-        # Report-only context, attached to the warnings rather than escalated with
-        # them: under --strict the added-bullet list is still just context, so it
-        # rides along in the last problem line instead of becoming its own failure.
-        warnings = warnings + _changelog_unreleased_added_note()
+        # Report-only context, FOLDED INTO the last warning rather than appended as
+        # its own entry. Appending it made --strict print the note inside the FAILED
+        # list and count it as a hygiene issue ("2 issue(s)" for one real warning),
+        # which is exactly what this note must never be: it is context, and a branch
+        # adding changelog bullets is the point of the file.
+        note = _changelog_unreleased_added_note()
+        if note:
+            warnings[-1] = warnings[-1] + "\n" + "\n".join(note)
     if strict and warnings:
         problems.extend(warnings)
         warnings = []

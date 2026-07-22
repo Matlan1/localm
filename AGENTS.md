@@ -226,8 +226,8 @@ never generate or rewrite the changelog - it is hand-maintained and shipped verb
 
 That `[Unreleased]` exemption has one blind spot, so the same pass also WARNS (it
 does not fail) about two things: a draft line that existed at the baseline and is
-missing from your working copy (a DROP), and a draft bullet that now appears more
-than once when it did not at the baseline (a DUPLICATE). When several branches
+missing from your working copy (a DROP), and a draft bullet that appears more often
+than it did at the baseline, and more than once (a DUPLICATE). When several branches
 each add draft bullets, a sibling branch's bullet can vanish around a rebase with
 every mechanical check still reporting clean, and a landed PR's entry is simply
 gone from the release notes. The duplicate half catches the botched remedy: a drop

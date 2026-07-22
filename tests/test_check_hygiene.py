@@ -825,9 +825,11 @@ def test_unreleased_lines_collects_draft_content_only():
 def test_unreleased_lines_keys_on_whole_lines_not_a_bold_title_regex():
     """A first cut of the manual version of this check keyed bullets on a
     single-line bold title (``^- \\*\\*[^*]*\\*\\*``) and was BLIND to bullets
-    whose bold title wraps across lines - measured at 7 of 20 real bullets - so
-    it reported CLEAN on a real drop. Pin that the extractor takes whole lines:
-    a wrapped-title bullet's first line is collected like any other."""
+    whose bold title wraps across lines, so it reported CLEAN on a real drop.
+    Measured against the live CHANGELOG when this was written: 14 of 36
+    [Unreleased] bullets had a title that does not close on the first line. Pin
+    that the extractor takes whole lines: a wrapped-title bullet's first line is
+    collected like any other."""
     ch = _load_check_hygiene()
     text = ("## [Unreleased]\n\n### Added\n"
             "- **A title that does not close its bold marker on the first\n"
@@ -928,6 +930,22 @@ def test_unreleased_drop_no_draft_section_is_clean():
     old = ("# Changelog\n\n## [0.1.0] - 2026-07-04\n\n### Added\n"
            "- inference and CLI\n")
     assert ch._changelog_dropped_unreleased_lines(old, "# Changelog\n") == []
+
+
+def test_unreleased_drop_clamps_to_the_draft_count():
+    """The lost-count is clamped to how many copies the DRAFT actually held, so a
+    line duplicated across the draft AND a published section reports one loss, not
+    two, when both copies go.
+
+    Pins the `min(...)` in _changelog_dropped_unreleased_lines - without it the
+    unclamped subtraction reports the line twice, over-claiming a draft loss that
+    never happened. This was the single surviving mutant in a 16-mutation pass over
+    the new tests, i.e. the one piece of this logic nothing else covers."""
+    ch = _load_check_hygiene()
+    old = _DRAFT_BASE.replace("- my own draft bullet\n", "- inference and CLI\n")
+    new = old.replace("- inference and CLI\n", "")          # BOTH copies removed
+    dropped = ch._changelog_dropped_unreleased_lines(old, new)
+    assert dropped == ["- inference and CLI"], dropped
 
 
 def test_unreleased_drop_published_duplicate_does_not_mask():
@@ -1182,9 +1200,14 @@ def test_added_unreleased_bullets_counts_an_extra_copy_as_added():
 
 
 def test_added_unreleased_bullets_ignores_continuations_and_published():
+    """Neither a new CONTINUATION line in the draft nor a new bullet in a PUBLISHED
+    section counts as an added draft bullet: only top-level [Unreleased] bullets do."""
     ch = _load_check_hygiene()
-    new = _DRAFT_BASE.replace("- inference and CLI\n",
-                              "- inference and CLI\n- a published-section bullet\n")
+    new = (_DRAFT_BASE
+           .replace("- inference and CLI\n",
+                    "- inference and CLI\n- a published-section bullet\n")
+           .replace("  carries the rest of the sentence\n",
+                    "  carries the rest of the sentence\n  and now a third line\n"))
     assert ch._changelog_added_unreleased_bullets(_DRAFT_BASE, new) == []
 
 
@@ -1222,6 +1245,30 @@ def test_added_note_is_report_only_and_rides_along_with_a_warning(
     assert "added: '- purely additive bullet'" in err, err
 
 
+def test_added_note_does_not_inflate_the_strict_failure_count(
+        tmp_path, monkeypatch, capsys):
+    """Under --strict the report-only note must be FOLDED INTO the warning it
+    accompanies, not counted as a hygiene issue of its own.
+
+    Appending it as a separate entry printed it inside the FAILED list and reported
+    '2 hygiene issue(s)' for a single real warning - inflating the tally with a line
+    that is, by design, never a failure."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    _init_changelog_repo(tmp_path, _DRAFT_BASE)
+    (tmp_path / "CHANGELOG.md").write_text(
+        _DRAFT_BASE.replace("- sibling bullet a rebase must not eat\n", ""),
+        encoding="utf-8")
+
+    assert ch.main(["--strict"]) == 1
+    err = capsys.readouterr().err
+    assert "1 hygiene issue(s)" in err, err
+    assert "2 hygiene issue(s)" not in err, err
+    assert "for context" in err, err      # still shown, just not counted
+
+
 def test_strict_env_knob_off_values(monkeypatch):
     """The env knob's off-set is explicit: empty/0/false/no/off (any case, any
     surrounding whitespace) stay warn-only. Anything ELSE means strict, so a
@@ -1249,9 +1296,18 @@ def test_real_changelog_unreleased_checks_run_on_the_real_tree():
 
 def test_real_changelog_has_no_duplicate_unreleased_bullets():
     """The real [Unreleased] section must have no duplicate bullets AT ALL (not
-    just none newly introduced). This one CAN assert emptiness: unlike a reword,
-    a byte-identical duplicate bullet is never legitimate, and the fan-out that
-    motivated this check produced two of them for real."""
+    just none newly introduced).
+
+    Deliberately the OPPOSITE choice from the test directly above, which refuses to
+    assert emptiness. The distinction is whether the thing asserted is ever
+    legitimate: rewording a draft line is normal work, so suite-enforcing "no
+    drops" would turn an intentional warn-only signal into a hard failure for
+    ordinary PRs. A byte-identical duplicate bullet is never intentional, and the
+    fix is deleting one line, so enforcing it costs an honest branch nothing. The
+    cost this DOES carry, stated so it is a choice and not an accident: if master
+    ever lands a duplicate, unrelated PRs go red until someone removes it - which
+    is the intended forcing function, since a duplicated release note is a defect
+    in the published record."""
     ch = _load_check_hygiene()
     from collections import Counter
     text = (ch.REPO / ch._CHANGELOG).read_text(encoding="utf-8")
