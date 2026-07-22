@@ -81,6 +81,33 @@ permanent public record of what shipped and are never rewritten; the in-progress
   through to the backup kill, matching what the other platforms already did.
   Checking a job also no longer reports a job as running and as failed at the same
   time when it happens to finish mid-check.
+- **Running two coder sub-tasks at once never actually worked.** The coder
+  offers `dispatch_parallel`, a tool that runs up to two sub-tasks side by side,
+  each in its own isolated checkout. It was listed in the model's toolbox and it
+  asked you to confirm before running, but the call then failed every single
+  time, because the running session was never handed to it. Nothing was ever
+  dispatched. It works now, and a new check runs every tool the coder offers
+  through the real dispatch path, so a tool can no longer ship advertised but
+  dead. Fixing it also brought several problems in that same path within reach,
+  all addressed here: two malformed calls could permanently use up the machine's
+  budget for sub-agents, leaving every later sub-task in that session refused
+  with only a generic error; a sub-task that ran out of turns or gave up was
+  reported to you, and to the model, as having succeeded (the same was true of
+  background sub-agents, and it meant the coder never learned from the failure);
+  a sub-task that never got a turn to start was described as having run for ten
+  minutes and timed out, and its checkout was left behind on disk; a sub-task
+  abandoned for running too long gave its slot back while it was still running,
+  so further sub-agents could pile onto an already busy machine; and a tool that
+  is meant to run on its own could start while a slow one from the same batch
+  was still going.
+- **The coder no longer discards your own git worktrees while cleaning up after
+  its sub-tasks.** When a sub-task finished, the coder ran a repo-wide `git
+  worktree prune`. That command cannot be limited to particular worktrees: it
+  drops the record of every registered worktree whose folder is missing at that
+  moment, including one of yours that simply lives on an external drive or
+  network share you have not mounted. Recovering from that needs `git worktree
+  repair`. Cleanup is now limited to the coder's own worktrees, and it skips the
+  operation entirely, and says so, whenever anything else would be caught by it.
 - **The coder's forgotten-lessons archive no longer reports "nothing here" when
   it simply could not be read.** `localm coder --episodes-archive` printed "No
   dropped episodes archived for this project", and `--restore-episode ID` printed

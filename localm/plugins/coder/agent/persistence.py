@@ -189,6 +189,21 @@ class _PersistenceMixin:
                     if len(self._error_trace) > _MAX_ERROR_TRACE:
                         self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
+                # DID THE CHILD ACTUALLY SUCCEED? A job reaches state "done"
+                # whenever its thread returned, and run_task RETURNS a failure
+                # message rather than raising, so "done" alone reported a child
+                # that hit max_turns or tripped its circuit breaker as ok - to the
+                # /diff footer and to the model. The child records its own verdict
+                # in the payload (background.py); the live child object is the
+                # fallback for a job that predates it.
+                child_ok = result.get("ok")
+                if child_ok is None:
+                    child_ok = getattr(child, "last_run_ok", True) if child else True
+                if state != "done":
+                    status = state
+                else:
+                    status = "ok" if child_ok else "error"
+
                 # A POINTER to the child's work, never a merge into the parent's
                 # own change map, for the same reason.
                 branch = result.get("branch")
@@ -199,7 +214,7 @@ class _PersistenceMixin:
                         branch=branch,
                         file_count=result.get("file_count", 0),
                         source="background",
-                        status="ok" if state == "done" else state,
+                        status=status,
                         base=result.get("base", ""),
                         diff=result.get("diff", ""),
                     ))
@@ -213,8 +228,13 @@ class _PersistenceMixin:
                     where = (f" Its changes are committed on branch '{branch}' "
                              f"({result.get('file_count', 0)} file(s)) and are NOT "
                              "in your working tree.") if branch else ""
+                    # Say plainly that it did not finish its task. The summary text
+                    # carries the reason ("[max_turns=10 reached]"), but a note that
+                    # reads "finished" for a failed child is the same false ok in
+                    # prose.
+                    verdict = "finished" if child_ok else "DID NOT COMPLETE its task"
                     notes.append(
-                        f"Background sub-agent '{label}' ({job_id}) finished in "
+                        f"Background sub-agent '{label}' ({job_id}) {verdict} after "
                         f"{result.get('turns', 0)} turn(s).{where}\n\n{body}")
 
                 for w in (st.get("warnings") or []):

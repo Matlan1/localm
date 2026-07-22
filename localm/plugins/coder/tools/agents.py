@@ -266,9 +266,20 @@ def tool_spawn_agent(
     # do not wrap it in the untrusted fence, so the parent can still act on a
     # legitimate delegated result (the child runs its own fence internally).
     from ..provenance import neutralise
+    # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
+    # rather than raising, so arriving here is not success: a child that hit
+    # max_turns or tripped its circuit breaker was reported to the model as
+    # "finished", and ToolResult.success additionally CLEARS the parent's per-tool
+    # failure streak. This is the most-used delegation surface, so it is the one
+    # that matters most. The ToolResult itself stays a success - the delegation
+    # ran, and the child's own text carries the reason - but the summary must not
+    # claim an outcome the child did not reach.
+    child_ok = getattr(child, "last_run_ok", True)
+    verdict = ("finished in" if child_ok else
+               "DID NOT COMPLETE its task, stopping after")
     return ToolResult.success(
         neutralise(result_text),
-        summary=f"sub-agent '{name}' finished in {turns_used} turn(s)",
+        summary=f"sub-agent '{name}' {verdict} {turns_used} turn(s)",
     )
 
 
@@ -338,7 +349,9 @@ def _finalize_isolated_child(info: dict):
     """
     def _finalize(child) -> dict:
         from .base import _truncate
-        from .git import _git, git_commit_all_in, git_worktree_prune, git_worktree_remove
+        from .git import (
+            _git, git_commit_all_in, git_prune_child_worktrees, git_worktree_remove,
+        )
 
         worktree, repo, base = info["worktree"], info["repo"], info["base"]
         out: dict = {"branch": info["branch"], "base": base,
@@ -367,10 +380,14 @@ def _finalize_isolated_child(info: dict):
             # it. Report it so the operator can reap it; never --force past it.
             prior = out.get("cleanup_warning")
             out["cleanup_warning"] = f"{prior}; {removed}" if prior else removed
-        try:
-            git_worktree_prune(repo)
-        except Exception:
-            pass
+        # SCOPED prune, and its outcome is reported rather than discarded. A bare
+        # `git worktree prune` is repo-wide and would drop the record of a USER's
+        # worktree that merely sits on an unmounted drive; and swallowing the
+        # result made a failed prune invisible.
+        pruned, pok = git_prune_child_worktrees(repo)
+        if not pok:
+            prior = out.get("cleanup_warning")
+            out["cleanup_warning"] = f"{prior}; {pruned}" if prior else pruned
         return out
 
     return _finalize
@@ -524,7 +541,17 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
 
     body = result.get("summary") or "(no output)"
     warn = ("\nwarnings: " + "; ".join(st["warnings"])) if st.get("warnings") else ""
+    # A job reaches a terminal state whenever its thread returned, and run_task
+    # RETURNS its failure message rather than raising, so "the job ended" is not
+    # "the sub-agent succeeded". Report the child's OWN verdict: this is the
+    # model's polling surface, and telling it a child that hit max_turns
+    # "finished" is the same false ok the turn-boundary absorption used to make.
+    # The ToolResult itself stays a success - the POLL worked; it is the child
+    # that did not - so a poll never counts toward the tool-failure breaker.
+    child_ok = result.get("ok", True)
+    verdict = ("finished in" if child_ok else
+               "DID NOT COMPLETE its task, stopping after")
     return ToolResult.success(
-        f"sub-agent '{st['label']}' ({job_id}) finished in "
+        f"sub-agent '{st['label']}' ({job_id}) {verdict} "
         f"{result.get('turns', 0)} turn(s):\n\n{body}{warn}",
-        summary=f"{job_id}: {state}")
+        summary=f"{job_id}: {state}" if child_ok else f"{job_id}: {state} (failed)")
