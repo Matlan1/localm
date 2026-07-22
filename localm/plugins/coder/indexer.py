@@ -353,10 +353,18 @@ class ProjectMap:
         Produce the block injected into the agent's system prompt.
         Capped at _MAX_MAP_CHARS to avoid dominating context.
         """
+        # HOME-ANCHORED, for the same reason as the prompt's identity line: this
+        # block lands in the SAME system prompt, so printing the raw root here
+        # handed back the absolute machine path and OS username that
+        # _display_cwd had just stripped two lines above (REC-CODER-GUI-PATH,
+        # AGENTS.md rule 2). Imported inside the method because prompts.py
+        # imports this module for ProjectMap.
+        from .prompts import _display_cwd
+        shown_root = _display_cwd(self.root)
         if not self.files:
-            return f"Working directory: {self.root}\n(empty or no source files found)"
+            return f"Working directory: {shown_root}\n(empty or no source files found)"
 
-        lines: list[str] = [f"## Codebase map  ({self.root})"]
+        lines: list[str] = [f"## Codebase map  ({shown_root})"]
         chars_used = len(lines[0])
 
         for f in self.files:

@@ -280,34 +280,67 @@ RULES
 4. Summarise what you changed when done.
 5. If a tool errors, diagnose and retry."""
 
-    # Do not advertise run_shell in the RULES prose when it is disabled for this
-    # session (a restricted, shareable key): telling the model about a capability
-    # it cannot use is a confusing info-leak (REC-N1-PROSE).
-    shell_off = "run_shell" in disabled_tools
-    rule4 = (
-        "4. Prefer the focused tool for the job: grep/search_files to find things, list_dir/tree to explore, run_tests for tests, git_* for git - their output is structured and they need no shell quoting."
-        if shell_off else
-        "4. Prefer the focused tool over run_shell: grep/search_files to find things, list_dir/tree to explore, run_tests for tests, git_* for git - their output is structured and they need no shell quoting."
+    # REC-N1-PROSE: never advertise a capability this session does not have.
+    # Telling a restricted, shareable key about run_shell was the original case;
+    # a narrowed sub-agent generalises it, because a role can remove the write and
+    # test tools too. A reviewer told to "prefer edit_file" three lines above a
+    # brief saying it cannot edit will waste turns discovering the refusal.
+    # The applicable rules are collected and numbered ONCE, at the end: numbering
+    # them inline meant every conditional line had to know the gaps above it.
+    shell_off    = "run_shell" in disabled_tools
+    delegate_off = "spawn_agent" in disabled_tools
+    can_edit     = bool({"write_file", "edit_file", "patch_file"} - disabled_tools)
+    can_test     = bool({"run_tests", "run_shell"} - disabled_tools)
+
+    rules: list[str] = [
+        "GROUNDING: before answering a question about this project (how it works, where something is, whether something exists), read or search the relevant files first with read_file / grep / search_files - never answer from assumption or memory. Base every claim about the code on a tool result.",
+    ]
+    if can_edit:
+        rules.append("Always read_file before edit_file or patch_file - you need the exact text.")
+    rules.append("Use relative paths unless an absolute path is necessary.")
+    if can_edit:
+        rules.append("Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.")
+    # The examples name only tools this session actually has, for the same reason
+    # the rules above are conditional: a reviewer pointed at run_tests and git_*
+    # it cannot call learns nothing except that the prompt is wrong.
+    focused = [
+        (("grep", "search_files"),        "grep/search_files to find things"),
+        (("list_dir", "tree"),            "list_dir/tree to explore"),
+        (("run_tests",),                  "run_tests for tests"),
+        (("git_status", "git_diff", "git_log"), "git_* for git"),
+    ]
+    examples = [text for names, text in focused
+                if set(names) - disabled_tools]
+    if examples:
+        rules.append(
+            ("Prefer the focused tool for the job: " if shell_off else
+             "Prefer the focused tool over run_shell: ")
+            + ", ".join(examples)
+            + " - their output is structured and they need no shell quoting."
+        )
+    if can_test and can_edit:
+        rules.append(
+            "Run tests after code changes with run_tests."
+            if shell_off else
+            "Run tests after code changes (run_tests, or run_shell for custom commands)."
+        )
+    if not delegate_off:
+        rules.append("For complex tasks, use spawn_agent to delegate focused sub-tasks.")
+    rules.append(
+        "When you are done, give a concise summary of what you changed and why."
+        if can_edit else
+        "When you are done, give a concise summary of what you found and why it matters."
     )
-    rule5 = (
-        "5. Run tests after code changes with run_tests."
-        if shell_off else
-        "5. Run tests after code changes (run_tests, or run_shell for custom commands)."
+    rules.append("If a tool returns an error, diagnose and retry before giving up.")
+    rules.append("Ask for clarification only if the task is genuinely ambiguous.")
+
+    numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(rules))
+    return (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "RULES\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{numbered}"
     )
-    return f"""\
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-0. GROUNDING: before answering a question about this project (how it works, where something is, whether something exists), read or search the relevant files first with read_file / grep / search_files - never answer from assumption or memory. Base every claim about the code on a tool result.
-1. Always read_file before edit_file or patch_file - you need the exact text.
-2. Use relative paths unless an absolute path is necessary.
-3. Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.
-{rule4}
-{rule5}
-6. For complex tasks, use spawn_agent to delegate focused sub-tasks.
-7. When you are done, give a concise summary of what you changed and why.
-8. If a tool returns an error, diagnose and retry before giving up.
-9. Ask for clarification only if the task is genuinely ambiguous."""
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +372,7 @@ def build_system_prompt(
     disabled_tools: frozenset = frozenset(),
     untrusted_provenance: bool = True,
     custom_instructions: str = "",
+    role_brief: str = "",
 ) -> str:
     """
     Build the system prompt for the main agent.
@@ -364,6 +398,10 @@ def build_system_prompt(
         injected under "## User Instructions". Distinct from ``memory``: these are
         hand-written directives the user wants followed, rather than the running
         list of project facts they keep with /remember.
+    role_brief:
+        Sub-agent role section (see ``build_subagent_system_prompt``); empty for a
+        main agent. Placed after the RULES so a role's focus is the last thing the
+        model reads, and so it cannot displace the safety sections above it.
     """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
     from .agent.constants import expand_shell_disable
@@ -423,6 +461,7 @@ def build_system_prompt(
         f"{tool_docs}\n"
         f"{extra_section}\n"
         f"{rules}\n"
+        f"{role_brief}"
         f"{untrusted}\n"
     )
 
@@ -432,41 +471,56 @@ def build_subagent_system_prompt(
     role: str,
     model_name: str = "",
     disabled_tools: frozenset = frozenset(),
+    mission: str = "",
 ) -> str:
-    """Leaner prompt for sub-agents - focused on their specific role."""
+    """The ROLE BRIEF injected into a spawned sub-agent's system prompt.
+
+    This is a section of the child's prompt, not a replacement for it. It used to
+    return a whole standalone 500-character prompt and had no callers at all,
+    which was lucky: a child built from it would have lost the RULES, the
+    untrusted-content provenance framing (the indirect-prompt-injection defence,
+    and a sub-agent is exactly who fetches web content), the project map and the
+    memory that ``build_system_prompt`` supplies. The child keeps the full prompt
+    and gains this brief, so a role only ever ADDS focus, never removes safety.
+
+    The cwd is HOME-ANCHORED for the same reason as the identity line at the top
+    of ``build_system_prompt``: the raw path carries the OS username and machine
+    layout into the prompt, and from there into anything the model echoes back
+    (AGENTS.md rule 2). The old body interpolated ``{cwd}`` directly.
+
+    ``model_name`` is accepted so callers can pass the family id uniformly, but the
+    brief is deliberately family-neutral: the per-family thinking hint and
+    tool-call syntax already come from ``build_system_prompt``, and repeating them
+    here would state the call format twice in one prompt.
+    """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
+    # Disabling one shell-execution tool disables the whole family, so the brief
+    # must not advertise run_shell when only run_shell_background was named.
     from .agent.constants import expand_shell_disable
     disabled_tools = expand_shell_disable(disabled_tools)
-    family = detect_model_family(model_name) if model_name else "default"
-    think_hint = _thinking_hint(family)
-    # Only advertise tools that are actually enabled for this session so a
-    # restricted key is not told about run_shell etc. it cannot call (REC-N1-PROSE).
+    # Only advertise tools this child can actually call, so a narrowed role is not
+    # told about run_shell etc. it will be refused (REC-N1-PROSE). Ordered, not a
+    # set, so the line is stable across runs.
     _core = ["read_file", "write_file", "edit_file", "patch_file",
              "run_shell", "list_dir", "search_files", "grep"]
     tools_line = ", ".join(t for t in _core if t not in disabled_tools)
 
-    call_fmt: str
-    if family == "gemma":
-        call_fmt = (
-            "XML format:  <tool_call>\n"
-            '{"name": "TOOL_NAME", "args": {...}}\n'
-            "</tool_call>\n\n"
-            "Native format also accepted:\n"
-            "<|tool_call>call:TOOL_NAME{...}<tool_call|>"
-        )
-    else:
-        call_fmt = (
-            "<tool_call>\n"
-            '{"name": "TOOL_NAME", "args": {...}}\n'
-            "</tool_call>"
-        )
-
+    mission_line = f"{mission}\n\n" if mission else ""
+    tools_sentence = (
+        f"Tools available to you here: {tools_line}.\n"
+        if tools_line else
+        "You have no file tools in this role - work from what you are given.\n"
+    )
     return (
-        f"You are a specialised coding sub-agent with the role: {role}.\n"
-        f"Working directory: {cwd}\n"
-        f"{think_hint}\n"
-        f"You have the same tools as the main agent ({tools_line}). Use them as needed.\n\n"
-        f"Call tools with:\n{call_fmt}\n\n"
-        f"Complete your assigned task, then return a clear summary of findings or changes.\n"
-        f"Do not ask questions - make sensible decisions and document your reasoning.\n"
+        f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"YOUR ROLE: {role}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"You are a sub-agent spawned for one focused task in {_display_cwd(cwd)}.\n"
+        f"{mission_line}"
+        f"{tools_sentence}"
+        f"Your toolset is deliberately narrowed for this role. If the task seems "
+        f"to need a tool you do not have, do the part you can and say what you "
+        f"could not do - do not work around the restriction.\n"
+        f"Finish with a clear summary of what you found or changed. Do not ask "
+        f"questions: make sensible decisions and document your reasoning.\n"
     )

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
 from ..memory import cap_user_instructions, forget, remember
-from ..prompts import build_system_prompt
+from ..prompts import build_subagent_system_prompt, build_system_prompt
 from ..audit import SessionMode
 
 
@@ -55,6 +55,24 @@ class _SessionMixin:
             disabled_tools=self.disabled_tools,
             untrusted_provenance=self._untrusted_provenance,
             custom_instructions=self._custom_instructions,
+            role_brief=self._role_brief(),
+        )
+
+    def _role_brief(self) -> str:
+        """The role section for a spawned sub-agent; empty for a main agent.
+
+        Built from the CURRENT disabled_tools so the advertised tool line tracks
+        the narrowing that was actually applied, rather than the preset's ideal.
+        """
+        preset = getattr(self, "_role_preset", None)
+        if preset is None:
+            return ""
+        return build_subagent_system_prompt(
+            self.cwd,
+            preset.name,
+            model_name=getattr(self, "_family_id", self._model_name),
+            disabled_tools=self.disabled_tools,
+            mission=preset.mission,
         )
 
     def set_cwd(self, cwd: Path) -> None:
