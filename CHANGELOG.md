@@ -12,6 +12,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The coder no longer looks a file up in order to refuse it.** With a `--scope`
+  set, the check that confines the file tools had the same habit as the shell
+  warning below. When a model asked to read or write an absolute path that was
+  not inside your working directory, the coder resolved that path - asking the
+  disk about that exact file, anywhere on the machine - purely to establish that
+  it was out of scope and say no. The refusal was correct; reaching out to make
+  it was not, because at the moment of access a routine check and a command gone
+  wrong look the same. The decision is now made from the text of the path alone,
+  and nothing is touched. Refusals only get stricter, never looser: the single
+  case that changes is an absolute path that points outside your working
+  directory but leads back inside it through a symlink, which is now refused
+  rather than allowed. Traversal out of the working directory is unaffected and
+  is still caught when a tool actually runs.
 - **The coder no longer touches a file just because a model named it.** With a
   `--scope` set, the coder warns you when a shell command it is about to run
   mentions a path outside that scope. Deciding which words in the command were

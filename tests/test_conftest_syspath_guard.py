@@ -1,0 +1,270 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The system-path-touch guard must actually FIRE, and must not false-positive.
+
+conftest's system-path guard exists because a test that reads, stats, or lists a
+REAL system location has stopped testing our code: it depends on the machine it
+runs on, and it is the same shape as the production defect it is usually written
+to cover. The coder's scope gate used to ``resolve()`` a model-supplied absolute
+path in order to REFUSE it, so refusing reached out and stat-ed whatever the model
+named (#802 for the shell warning path, and the enforcement path after it). Four
+confinement test files had to be purged of exactly that pattern.
+
+A guard nobody proves can fire is worth nothing, so this drives the SHIPPED guard
+end to end through real sub-pytest runs, in two halves:
+
+  (i)  the recording machinery, through a benign marker root inside the test's own
+       tmp_path - so the fires-control never goes near a real system path itself;
+  (ii) the matcher, through pure string assertions with no filesystem at all.
+
+Plus the assertion that makes the other two mean something: that the guard is
+ARMED in this very session. Without it, every test here could pass while the
+shipped guard sat inert, and "green" would mean "never ran".
+
+The sub-runs are SUBPROCESS runs, deliberately. This session's own guard is armed
+in-process, and an in-process sub-run would record the sub-test's deliberate touch
+into the outer session's hit table - failing the fires-control test for doing
+exactly what it exists to do.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+from pathlib import Path
+
+import pytest
+
+pytest_plugins = ["pytester"]
+
+_REAL_CONFTEST = str(Path(__file__).parent / "conftest.py").replace("\\", "/")
+
+
+def _real_conftest_module():
+    """Load the SHIPPED tests/conftest.py under its own module name.
+
+    By path rather than ``import``, so these assert against the real file rather
+    than a copy that could drift from it, and under a distinct name because the
+    generated sub-conftest is itself called ``conftest``."""
+    spec = importlib.util.spec_from_file_location(
+        "_localm_syspath_conftest", _REAL_CONFTEST)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _with_real_conftest(pytester):
+    """Point the sub-run at the REAL tests/conftest.py.
+
+    Only the two names the guard needs are re-exported. A ``from conftest import
+    *`` would silently skip every underscore-prefixed name, so the guard would
+    never arrive and the sub-run would pass with nothing installed - green while
+    proving nothing.
+    """
+    pytester.makeconftest(
+        "import importlib.util as _u, sys\n"
+        "_s = _u.spec_from_file_location('_localm_real_conftest', r'"
+        + _REAL_CONFTEST + "')\n"
+        "_m = _u.module_from_spec(_s)\n"
+        "sys.modules['_localm_real_conftest'] = _m\n"
+        "_s.loader.exec_module(_m)\n"
+        "_no_system_path_touches = _m._no_system_path_touches\n"
+        "pytest_sessionfinish = _m.pytest_sessionfinish\n"
+    )
+
+
+@pytest.fixture
+def marker_root(tmp_path, monkeypatch):
+    """A benign, disposable directory that the guard is told to treat as a system
+    location, via the ADD-only extra-markers env var.
+
+    This is the whole trick that lets the guard be proven without any test going
+    near a real system path: the machinery under test is identical, only the
+    marker list differs. The env var can only ADD roots, so a sub-run can never
+    use it to weaken the shipped guard."""
+    root = tmp_path / "pretend-system-root"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "thing.cfg").write_text("data\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALM_TEST_SYSPATH_EXTRA_MARKERS", str(root))
+    return root
+
+
+class TestTheGuardIsActuallyArmed:
+    """The anti-theater half. If these fail, every other test in this file is
+    passing for the wrong reason."""
+
+    def test_the_filesystem_entry_points_are_wrapped_in_this_session(self):
+        """Not 'a guard exists somewhere' but 'this run's os.stat is the guard's'.
+
+        Checked through __qualname__ because the wrapper is a closure defined
+        inside _arm_system_path_guard, so this cannot pass against the unpatched
+        stdlib function."""
+        import io
+        wrapped = {
+            "os.stat": os.stat, "os.lstat": os.lstat, "os.scandir": os.scandir,
+            "os.listdir": os.listdir, "os.path.realpath": os.path.realpath,
+            "io.open": io.open,
+        }
+        for label, func in wrapped.items():
+            assert "guarded" in getattr(func, "__qualname__", ""), (
+                f"{label} is not wrapped: the system-path guard is NOT armed in "
+                "this session, so every syspath test is vacuous")
+
+    def test_a_real_system_root_is_among_the_markers(self):
+        """The guard must be watching something real, derived at runtime rather
+        than hardcoded. On Windows that is %SystemRoot%; elsewhere the FHS config
+        roots. A marker list that had gone empty would make the guard inert while
+        still 'passing'."""
+        conftest = _real_conftest_module()
+        roots = conftest._syspath_marker_roots()
+        assert roots, "no system-path markers at all"
+        if os.name == "nt":
+            expected = (os.environ.get("SystemRoot")
+                        or os.environ.get("windir") or "")
+            assert expected, "no SystemRoot/windir in the environment to derive from"
+            assert expected.replace("\\", "/").rstrip("/").lower() in roots
+        else:
+            assert "/etc" in roots
+
+
+class TestTheMatcher:
+    """Half (ii): pure strings, no filesystem touched at all - not even a benign
+    one. The matcher is where a subtle bug would silently narrow the guard."""
+
+    @pytest.fixture
+    def rx(self):
+        return _real_conftest_module()._syspath_regex(
+            ["c:/pretend", "/etc", "/boot"])
+
+    @pytest.mark.parametrize("path,expected", [
+        ("c:/pretend", True),
+        ("c:/pretend/sub/x.cfg", True),
+        ("C:\\Pretend\\sub", True),          # backslashes normalise
+        ("C:/PRETEND/x", True),              # and case folds
+        ("/etc", True),
+        ("/etc/sub/x.conf", True),
+        ("c:/pretendtoo/x", False),          # segment boundary, not raw prefix
+        ("/etcetera/x", False),
+        ("etc/x", False),                    # relative lookalike
+        ("d:/projects/localm/x.py", False),
+        ("d:/x/etc/y", False),               # marker must be at the START
+    ])
+    def test_marker_matching(self, rx, path, expected):
+        assert _real_conftest_module()._syspath_matches(rx, path) is expected
+
+    def test_non_path_inputs_do_not_explode(self, rx):
+        """os.stat legitimately accepts an int fd, which is not a path at all. A
+        matcher that raised on one would turn the guard into a crash generator."""
+        conftest = _real_conftest_module()
+        assert conftest._syspath_matches(rx, 3) is False
+        assert conftest._syspath_matches(rx, b"/etc/x") is True
+        assert conftest._syspath_matches(None, "/etc/x") is False
+
+    def test_extra_markers_can_only_add(self, monkeypatch):
+        """The env var exists for this file's fires-controls, so it must not be
+        usable to switch the guard off."""
+        conftest = _real_conftest_module()
+        baseline = conftest._syspath_marker_roots()
+        monkeypatch.setenv("LOCALM_TEST_SYSPATH_EXTRA_MARKERS", "d:/somewhere/else")
+        widened = conftest._syspath_marker_roots()
+        assert set(baseline) <= set(widened), "markers were removed, not added"
+        assert "d:/somewhere/else" in widened
+
+
+class TestTheRecordingMachineryFires:
+    """Half (i): every patched entry point, driven through a real sub-pytest run
+    against a benign marker root. Parametrised over the entry points because they
+    are patched individually and any one of them could be missed - as io.open
+    nearly was (it and builtins.open are the same function object but two
+    separate module attributes: bare open() goes through one, Path.read_text()
+    through the other, so patching either alone leaves a hole)."""
+
+    @pytest.mark.parametrize("body,label", [
+        ("os.stat(TARGET)", "os.stat"),
+        ("os.lstat(TARGET)", "os.lstat"),
+        ("os.listdir(SUBDIR)", "os.listdir"),
+        ("list(os.walk(ROOT))", "os.scandir via os.walk"),
+        ("os.path.realpath(TARGET)", "os.path.realpath"),
+        ("Path(TARGET).exists()", "Path.exists -> os.stat"),
+        ("Path(TARGET).resolve()", "Path.resolve -> realpath"),
+        ("Path(TARGET).read_text(encoding='utf-8')", "Path.read_text -> io.open"),
+        ("open(TARGET, encoding='utf-8').close()", "bare open -> builtins.open"),
+        ("list(Path(SUBDIR).glob('*'))", "Path.glob -> os.scandir"),
+    ])
+    def test_a_touch_is_caught_and_fails_the_run(self, pytester, marker_root,
+                                                 body, label):
+        _with_real_conftest(pytester)
+        pytester.makepyfile(
+            "import os, os.path\n"
+            "from pathlib import Path\n"
+            f"ROOT = r'{marker_root}'\n"
+            f"SUBDIR = r'{marker_root / 'sub'}'\n"
+            f"TARGET = r'{marker_root / 'sub' / 'thing.cfg'}'\n"
+            "def test_touches_a_marked_path():\n"
+            f"    {body}\n"
+        )
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        assert result.ret != 0, (
+            f"a test touching a marked path via {label} exited GREEN - the guard "
+            "did not catch this entry point")
+        result.stdout.fnmatch_lines(["*touched a real system path*"])
+
+    def test_the_report_names_the_path_the_frame_and_the_fix(self, pytester,
+                                                             marker_root):
+        _with_real_conftest(pytester)
+        pytester.makepyfile(
+            "import os\n"
+            f"TARGET = r'{marker_root / 'sub' / 'thing.cfg'}'\n"
+            "def test_touches_a_marked_path():\n"
+            "    os.stat(TARGET)\n"
+        )
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        out = result.stdout.str()
+        assert "thing.cfg" in out, "must name the path that was touched"
+        assert "test_the_report_names" in out or "test_touches_a_marked_path" in out, \
+            "must attribute the touch to the test that made it"
+        assert "tmp_path" in out, "must point at the fix, not just complain"
+
+
+class TestTheGuardDoesNotFalsePositive:
+    """A guard that cries wolf gets silenced, so the quiet cases matter as much
+    as the loud ones."""
+
+    def test_ordinary_tmp_path_work_is_fine(self, pytester, marker_root):
+        _with_real_conftest(pytester)
+        pytester.makepyfile("""
+            import os
+            from pathlib import Path
+
+            def test_stays_in_its_own_tmp_path(tmp_path):
+                d = tmp_path / "work" / "src"
+                d.mkdir(parents=True)
+                f = d / "a.py"
+                f.write_text("# hello\\n", encoding="utf-8")
+                assert f.exists()
+                assert f.read_text(encoding="utf-8").startswith("#")
+                assert f.resolve().is_file()
+                assert list(d.glob("*.py")) == [f]
+                assert os.listdir(d) == ["a.py"]
+                list(os.walk(tmp_path))
+        """)
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        result.assert_outcomes(passed=1)
+        assert result.ret == 0
+
+    def test_a_sibling_directory_sharing_a_marker_prefix_is_fine(
+            self, pytester, marker_root):
+        """``pretend-system-root-2`` is not inside ``pretend-system-root``. A
+        raw prefix test would flag it; the segment-boundary match must not."""
+        sibling = Path(str(marker_root) + "-2")
+        (sibling).mkdir()
+        (sibling / "f.txt").write_text("x\n", encoding="utf-8")
+        _with_real_conftest(pytester)
+        pytester.makepyfile(
+            "import os\n"
+            f"TARGET = r'{sibling / 'f.txt'}'\n"
+            "def test_sibling_is_not_the_marked_root():\n"
+            "    os.stat(TARGET)\n"
+        )
+        result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider")
+        result.assert_outcomes(passed=1)
+        assert result.ret == 0

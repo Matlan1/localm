@@ -73,6 +73,66 @@ def _no_filesystem():
             setattr(mod, name, original)
 
 
+@contextlib.contextmanager
+def _records_touches_outside(root: Path):
+    """Record filesystem calls made against paths NOT under *root*.
+
+    The recording twin of :func:`_no_filesystem`, and the enforcement path needs
+    it rather than the raising one. ``_scope_rel`` legitimately resolves its cwd
+    ANCHOR, so a blanket "any syscall fails" guard would fire on the anchor and
+    could never tell that apart from the thing actually under test: a stat of the
+    model-supplied VALUE. Scoping the record to paths outside cwd separates them,
+    and counting rather than raising means the assertion can be an exact number
+    (0) instead of "did not blow up".
+    """
+    touches: list = []
+    root_s = str(root).replace("\\", "/").lower()
+    targets = [(os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
+               (os, "listdir"), (os.path, "realpath")]
+
+    def _record(label, original):
+        def _spy(path, *a, **kw):
+            try:
+                s = str(path).replace("\\", "/").lower()
+            except Exception:
+                s = ""
+            if s and not s.startswith(root_s):
+                touches.append(f"{label}({path!r})")
+            return original(path, *a, **kw)
+        return _spy
+
+    saved = [(mod, name, getattr(mod, name)) for mod, name in targets]
+    for mod, name in targets:
+        setattr(mod, name, _record(f"{mod.__name__}.{name}", getattr(mod, name)))
+    try:
+        yield touches
+    finally:
+        for mod, name, original in saved:
+            setattr(mod, name, original)
+
+
+def _link_dir_or_skip(link: Path, target: Path) -> None:
+    """Create *link* as a directory link to *target*, or skip the test.
+
+    Tries a real symlink first, then a Windows junction (``mklink /J``), which
+    needs no elevation and so works on an ordinary contributor box where
+    ``os.symlink`` raises. Only if BOTH are unavailable is the platform genuinely
+    unable to express the case, which is a documented platform block, not a pass.
+    """
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        import subprocess
+        if subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True, text=True).returncode == 0:
+            return
+    pytest.skip("this platform/account cannot create a directory link "
+                "(no symlink privilege and no junction support)")
+
+
 def _make_agent_with(tmp_path: Path, **kwargs) -> Agent:
     """Return an Agent with a mock backend and any extra constructor kwargs."""
     backend = MagicMock()
@@ -229,6 +289,95 @@ class TestScopeEnforcement:
 #  A scope that does not confine the shell must SAY so (work item A3)
 # ---------------------------------------------------------------------------
 
+class TestScopeEnforcementNeverStatsTheValue:
+    """The hard gate must decide WITHOUT touching the path it is deciding about.
+
+    #802 made the shell WARNING path filesystem-free and deliberately left the
+    ENFORCEMENT path alone; it carried the same defect. ``_scope_rel`` fell back
+    to ``Path(raw).resolve()`` for an absolute path that was not lexically under
+    cwd, so a ``--scope`` session where the model emitted an absolute path
+    anywhere on the machine stat-ed exactly that path in order to REFUSE it
+    (measured: one ``os.path.realpath`` plus one ``os.stat``).
+
+    A stat is an access. At the access point a legitimate gate-check, a command
+    gone wrong and a live injection attempt are indistinguishable, so the gate
+    must not have the capability rather than try to use it carefully.
+
+    These assert an exact ZERO rather than "fewer": the whole property is the
+    ABSENCE of a capability, and any nonzero count is the capability still being
+    there. Every target is a real but disposable file the test created.
+    """
+
+    @pytest.mark.parametrize("tool", ["read_file", "mcp_fs_read_file"])
+    def test_refusing_an_absolute_path_outside_cwd_touches_nothing(
+            self, tmp_path, tmp_path_factory, tool):
+        outside = tmp_path_factory.mktemp("outside-cwd")
+        target = outside / "disposable-target.txt"
+        target.write_text("disposable\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, scope="src/**")
+
+        with _records_touches_outside(tmp_path) as touches:
+            offending = agent._scope_violation(
+                _make_tool_call(tool, path=str(target)))
+
+        assert offending == str(target), "the call must still be refused"
+        assert touches == [], (
+            "the scope gate reached out and touched the path it was refusing: "
+            + "; ".join(touches))
+
+    def test_an_in_cwd_absolute_path_in_scope_is_still_allowed(self, tmp_path):
+        """BUG-6, unchanged: an absolute path INSIDE cwd that matches the scope
+        must pass. It is lexically under cwd, so it never needed the fallback."""
+        (tmp_path / "src").mkdir()
+        target = tmp_path / "src" / "a.py"
+        target.write_text("# in scope\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, scope="src/**")
+        assert agent._scope_violation(
+            _make_tool_call("read_file", path=str(target))) is None
+
+    def test_a_relative_in_scope_path_is_still_allowed(self, tmp_path):
+        agent = _make_agent(tmp_path, scope="src/**")
+        assert agent._scope_violation(
+            _make_tool_call("read_file", path="src/a.py")) is None
+
+    def test_a_path_reaching_into_cwd_through_a_link_is_refused(
+            self, tmp_path, tmp_path_factory):
+        """The accepted COST of the fix, pinned so it cannot be reintroduced by
+        accident or silently regress back to statting.
+
+        An absolute path lexically OUTSIDE cwd that reaches INSIDE through a
+        directory link used to be ALLOWED, because the resolve() fallback looked
+        through the link. Measured both ways before this test was written: with
+        the fallback the verdict is ALLOWED and two out-of-cwd touches are made;
+        without it the verdict is REFUSED and zero. That delta is the whole point
+        - the fallback had no other regression coverage, so a green suite alone
+        would prove nothing about removing it.
+
+        Refusing is the fail-CLOSED direction, which is the only direction a
+        confinement gate may move. The real escape direction (a path lexically
+        INSIDE cwd that links OUT) never used this fallback at all: it satisfies
+        the first ``relative_to``. Escapes are caught by ``tools/base.py::
+        _confine`` at execution time, which is untouched by this.
+        """
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "a.py").write_text("# in scope\n", encoding="utf-8")
+        outside = tmp_path_factory.mktemp("outside-cwd")
+        _link_dir_or_skip(outside / "link", tmp_path / "src")
+        via_link = outside / "link" / "a.py"
+        assert via_link.exists(), "the link must really reach the in-cwd file"
+
+        agent = _make_agent(tmp_path, scope="src/**")
+        with _records_touches_outside(tmp_path) as touches:
+            offending = agent._scope_violation(
+                _make_tool_call("read_file", path=str(via_link)))
+
+        assert offending == str(via_link), (
+            "a path that is lexically outside cwd must be refused even when it "
+            "would resolve back inside - looking through the link is exactly the "
+            "stat this gate may not make")
+        assert touches == [], "; ".join(touches)
+
+
 class TestScopeShellNotice:
     """run_shell / run_tests are deliberately left out of _SCOPED_TOOLS: they
     execute a process, and no path-arg check can confine arbitrary code. That
@@ -313,13 +462,16 @@ class TestShellArgvScopeCheck:
         # Bash and redded under PowerShell on the same machine. `type` is the
         # cmd equivalent and needs nothing installed.
         #
-        # Written explicitly-relative and UNQUOTED. Explicitly-relative so the
-        # lexical check sees a path at all; unquoted because _shell_argv splits
-        # with posix=False on Windows, which KEEPS the quotes in the token, and a
-        # quoted path then goes through `cmd /C` with quotes cmd strips wrongly.
-        # The other tests here never execute, so only this one is exposed to it.
-        read_file = (r"type .\outside\secrets.txt" if sys.platform == "win32"
-                     else "cat ./outside/secrets.txt")
+        # Written explicitly-relative so the lexical check sees a path at all,
+        # and QUOTED, which is how a path is normally written. Quoting used to
+        # break execution on Windows, which is why this said UNQUOTED before:
+        # _shell_argv kept the quote characters in the token, and the shell
+        # route handed cmd an argv list that list2cmdline re-escaped into
+        # MSVCRT syntax cmd.exe misreads. Both are fixed, so the natural form is
+        # used again here (tests/plugins/coder/test_shell_quoting.py covers the
+        # fix itself, including paths that contain spaces).
+        read_file = (r'type ".\outside\secrets.txt"' if sys.platform == "win32"
+                     else 'cat "./outside/secrets.txt"')
         result, warnings, _ = self._run_shell(tmp_path, "src/**", read_file)
         assert [w for w in warnings if "outside the active scope" in w]
         assert result.ok, result.output           # it executed
