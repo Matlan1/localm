@@ -224,6 +224,32 @@ definitions at the bottom are exempt (cutting a release legitimately renames the
 tooling honors the same invariant: `scripts/make_release.py` / `build_release.py`
 never generate or rewrite the changelog - it is hand-maintained and shipped verbatim.
 
+That `[Unreleased]` exemption has one blind spot, so the same pass also WARNS (it
+does not fail) about two things: a draft line that existed at the baseline and is
+missing from your working copy (a DROP), and a draft bullet that appears more often
+than it did at the baseline, and more than once (a DUPLICATE). When several branches
+each add draft bullets, a sibling branch's bullet can vanish around a rebase with
+every mechanical check still reporting clean, and a landed PR's entry is simply
+gone from the release notes. The duplicate half catches the botched remedy: a drop
+check run against the moving `origin/master` ref (rather than the merge-base)
+flags every bullet merged after your branch point as yours to restore, and
+restoring one that was never lost leaves it in twice.
+
+The warnings list every affected line verbatim so you can tell your own edit from
+a bullet you lost. Attribute a line before acting on it
+(`git log -S "<line>" -- CHANGELOG.md`), restore only what you actually dropped,
+delete only the EXTRA copy of a duplicate, and never reset the section to master
+or hand-copy a bullet back in blind. Rewording a draft line in place is reported
+too (matching is exact, so that a near-match heuristic can never suppress the real
+case); that is the intended cost of a warning you can read and dismiss. Warnings
+never change the exit code unless you ask: `python scripts/check_hygiene.py
+--strict`, or `LOCALM_HYGIENE_STRICT=1`, turns every warning into a failure.
+
+On the cause, because a wrong story sends people hunting the wrong thing: it is
+NOT every rebase that replays an `[Unreleased]` insertion (that was falsified by
+direct comparison). What is evidenced is a CONFLICTED rebase resolved
+bulk-take-mine; resolve those additively, keeping both sides' bullets.
+
 If you discover a violation already in git history, do not only fix it forward.
 A non-sensitive bad path can be fixed in a normal commit, but a genuine
 disclosure in history (a secret, a personal email, or a real-user absolute path

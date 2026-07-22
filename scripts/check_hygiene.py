@@ -13,6 +13,11 @@ Scans tracked files and fails on:
   4. A CHANGELOG.md that is not append-only: a shipped entry line removed or
      rewritten (vs the published-record baseline) instead of new entries added on
      top. The changelog is the permanent public record of what shipped (AGENTS.md).
+     The [Unreleased] draft stays exempt from that hard gate, but a draft line
+     that existed at the baseline and is gone from the working copy is reported
+     as a WARNING (check 4b below): a textually clean rebase has silently dropped
+     a sibling branch's draft bullet before. --strict (or LOCALM_HYGIENE_STRICT=1)
+     escalates warnings to failures for CI-style use.
   5. A raw call to a single-resource accessor from outside its designated
      aggregate-capacity wrapper (see _RAW_ACCESSOR_GUARDS below). When a feature's
      whole value is "combine capacity across N resources" (multi-GPU VRAM split is
@@ -39,6 +44,8 @@ may go stale. Folding it in here means the ONE CI "Hygiene gate" step and the
 
 Run before committing:   python scripts/check_hygiene.py
 Install as a git hook:    python scripts/check_hygiene.py --install-hook
+Warnings as failures:     python scripts/check_hygiene.py --strict
+                          (equivalently: set LOCALM_HYGIENE_STRICT=1)
 
 A line that genuinely needs an absolute-looking example (help text, a doc
 sample) can carry a trailing  hygiene-ok  marker to be skipped by check 3.
@@ -50,6 +57,7 @@ Stdlib only, so it runs in any environment without installing anything.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -297,6 +305,12 @@ def _git(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
+# The baseline sha, resolved AT MOST ONCE per process and per REPO (see
+# _changelog_baseline_ref). Keyed on REPO so a caller that repoints REPO (the tests
+# do, one throwaway repo per test) still resolves afresh for the new tree.
+_BASELINE_REF_CACHE: dict[Path, str | None] = {}
+
+
 def _changelog_baseline_ref() -> str | None:
     """The commit whose CHANGELOG the working tree must not delete entries from.
 
@@ -307,14 +321,33 @@ def _changelog_baseline_ref() -> str | None:
     a web edit is still caught). It also never false-positives on new releases that
     landed on master AFTER this branch (those are not in the merge-base). Falls back
     to HEAD when origin/master is unavailable (offline, a fresh clone), which is the
-    plain "vs the last commit" pre-commit check. None => no git at all."""
+    plain "vs the last commit" pre-commit check. None => no git at all.
+
+    PINNED (resolved once per process): three separate checks call this - the
+    append-only gate, the [Unreleased] warn-only checks, and the service-worker
+    cache-bump gate - and each call otherwise shells out to `git merge-base HEAD
+    origin/master` again. ``origin/master`` is a MOVING ref: worktrees share one
+    ref store, so a sibling session's fetch or a merge landing mid-run can advance
+    it between two of those calls, and the checks would then silently compare
+    against DIFFERENT baselines within a single run. That is not hypothetical - the
+    manual version of this check reported a phantom missing bullet exactly that way
+    (guard passed, a sibling lane merged seconds later, a later command re-read the
+    ref). Resolving to an immutable sha once and reusing it makes every check in a
+    run agree on one baseline; the tell that this matters is two detectors
+    disagreeing, which must always mean "one is stale", never "restore the
+    difference"."""
+    if REPO in _BASELINE_REF_CACHE:
+        return _BASELINE_REF_CACHE[REPO]
     mb = _git("merge-base", "HEAD", "origin/master")
     if mb is None:
-        return None
-    if mb.returncode == 0 and mb.stdout.strip():
-        return mb.stdout.strip()
-    head = _git("rev-parse", "HEAD")            # no origin/master: last commit
-    return head.stdout.strip() if head and head.returncode == 0 else None
+        ref = None
+    elif mb.returncode == 0 and mb.stdout.strip():
+        ref = mb.stdout.strip()
+    else:
+        head = _git("rev-parse", "HEAD")        # no origin/master: last commit
+        ref = head.stdout.strip() if head and head.returncode == 0 else None
+    _BASELINE_REF_CACHE[REPO] = ref
+    return ref
 
 
 def _changelog_append_only() -> list[str]:
@@ -342,6 +375,269 @@ def _changelog_append_only() -> list[str]:
             "line(s) removed or rewritten. The changelog is the permanent public "
             "record: add new entries ABOVE, never delete or rewrite existing ones. "
             f"Removed: {shown}{more}"]
+
+
+# ---- check 4b: [Unreleased] draft corruption (warn-only) --------------------
+# The append-only gate above deliberately exempts the [Unreleased] draft: it is
+# freely rewritable until cut. That exemption has a blind spot: when parallel
+# branches all add draft bullets, a sibling branch's bullet can disappear around
+# a rebase while every mechanical check still reports clean. It happened twice in
+# one 12-PR fan-out day (2026-07-22): a landed PR's entry simply vanished from
+# the release notes. So two warnings, not one, matching the two failure shapes
+# actually observed that day:
+#   DROP      - a baseline [Unreleased] content line missing from the working copy.
+#   DUPLICATE - a draft bullet that now appears more than once. This is the
+#               artifact of the REMEDY going wrong: the naive drop check (diff
+#               against the moving origin/master ref) false-positives on every
+#               sibling bullet merged after your branch point, and "restore
+#               anything you did not author" then re-imports a bullet that was
+#               never lost. Two sessions did exactly that.
+# Both are WARNINGS, never failures by default: rewording or deleting YOUR OWN
+# draft lines is legitimate and must stay frictionless. --strict /
+# LOCALM_HYGIENE_STRICT=1 escalates them where a hard gate is wanted.
+#
+# On the CAUSE, stated carefully because a wrong story sends people hunting the
+# wrong thing: "it happens on every rebase that replays an [Unreleased]
+# insertion" was FALSIFIED by direct comparison (a matching branch showed zero
+# drops). What is actually evidenced is a CONFLICTED rebase resolved
+# bulk-take-mine (reproduced end to end while building this check: the sibling
+# bullet is gone, the tree is clean, and the hard gate above returns nothing);
+# a squash or amend across the section is suspected but unproven. So the warning
+# text below points at the resolution step, not at rebases in general.
+#
+# Design decisions, recorded so they are not re-litigated:
+#   - Matching is EXACT (rstrip'd) line equality, so a REWORDED draft line warns
+#     too. Accepted, documented cost: a similarity heuristic that suppressed
+#     near-matches could suppress exactly the incident case (a sibling's bullet
+#     eaten while similar sibling bullets remain). For a warn-only check a false
+#     positive costs one glance; a false negative defeats the backstop.
+#   - The working side is the WHOLE file, not just its [Unreleased] section, so
+#     cutting a release (which MOVES the draft lines under a new version header)
+#     does not read as a mass drop.
+#   - Occurrences are counted on both sides (Counter), so a draft line whose
+#     text also appears in a published section is still reported when the DRAFT
+#     copy is the one deleted - the surviving published copy cannot satisfy its
+#     count. The converse is the accepted cost of counting: when a line is
+#     duplicated EXACTLY across sections, deleting the OTHER copy warns as well,
+#     because counting alone cannot tell two identical lines apart. Warning is
+#     the safe direction (the alternative attribution silently misses the real
+#     incident case), and such a deletion is either already a hard append-only
+#     FAILURE or an edit inside the pending cut section, so the extra line is
+#     noise on a run that is already asking for a human look.
+#   - Only bullet/continuation CONTENT lines are watched. Headers ("### Added"),
+#     blank lines and link-reference definitions are scaffolding a draft may
+#     freely reorganize; warning on those would be noise that trains people to
+#     ignore the one warning that matters.
+#   - Scope is [Unreleased] only, not the pending cut-but-untagged section
+#     (_pending_release_version): parallel branches land bullets in
+#     [Unreleased], while a cut section is edited by exactly one release
+#     ritual, so the rebase-collision hazard this backstops does not arise
+#     there.
+#   - The baseline is the MERGE-BASE with origin/master (_changelog_baseline_ref),
+#     never the origin/master ref itself. This is load-bearing, not incidental:
+#     worktrees share one ref store, so any sibling session's fetch advances
+#     origin/master under you, and a tip-relative comparison then reports every
+#     bullet merged after your branch point as a line YOU dropped. That false
+#     positive is what produced the duplicate-import artifact above.
+#   - DUPLICATES are reported only when NEW relative to the baseline. A duplicate
+#     already present at the baseline is master's defect, not this branch's, and
+#     nagging every session about it on every run is how a warning gets trained
+#     into background noise.
+_CHANGELOG_UNRELEASED_HEADER = re.compile(r"^##\s+\[unreleased\]", re.I)
+
+
+def _changelog_unreleased_lines(text: str) -> list[str]:
+    """Content lines of the ``## [Unreleased]`` draft section: bullets and their
+    wrapped continuation lines, rstrip()'d. Headers, blank lines and
+    link-reference definitions are excluded (see the block comment above)."""
+    out = []
+    in_draft = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        if stripped.startswith("## "):
+            in_draft = bool(_CHANGELOG_UNRELEASED_HEADER.match(stripped))
+            continue
+        if not in_draft:
+            continue
+        if not stripped or stripped.startswith("#") or _CHANGELOG_LINKREF.match(stripped):
+            continue
+        out.append(line)
+    return out
+
+
+def _changelog_dropped_unreleased_lines(old_text: str, new_text: str) -> list[str]:
+    """Baseline [Unreleased] content lines missing (with multiplicity) from
+    *new_text* AS A WHOLE, in baseline order. Whole-file counting on both sides
+    is what keeps a release cut (a move) clean while still catching a deleted
+    draft copy of a line whose text is duplicated in a published section."""
+    from collections import Counter
+    draft = Counter(_changelog_unreleased_lines(old_text))
+    if not draft:
+        return []
+    old_all = Counter(line.rstrip() for line in old_text.splitlines())
+    new_all = Counter(line.rstrip() for line in new_text.splitlines())
+    dropped = []
+    for line, in_draft in draft.items():
+        lost = min(in_draft, old_all[line] - new_all.get(line, 0))
+        if lost > 0:
+            dropped.extend([line] * lost)
+    return dropped
+
+
+def _changelog_new_duplicate_unreleased_bullets(
+        old_text: str, new_text: str) -> list[tuple[str, int]]:
+    """Top-level [Unreleased] bullets that occur MORE often in *new_text* than in
+    *old_text* and now occur at least twice: (line, count-in-working-copy) pairs,
+    in working-copy order.
+
+    Only top-level bullets (a raw line starting with "- ") are counted, not their
+    wrapped continuations: two different bullets can legitimately wrap to the same
+    trailing words, whereas two byte-identical bullet lines are a mistake every
+    time. Baseline-relative so a duplicate that already exists on master does not
+    nag every branch (see the block comment above)."""
+    from collections import Counter
+    old = Counter(line for line in _changelog_unreleased_lines(old_text)
+                  if line.startswith("- "))
+    new = Counter(line for line in _changelog_unreleased_lines(new_text)
+                  if line.startswith("- "))
+    seen = set()
+    out = []
+    for line in _changelog_unreleased_lines(new_text):
+        if not line.startswith("- ") or line in seen:
+            continue
+        seen.add(line)
+        count = new[line]
+        if count >= 2 and count > old.get(line, 0):
+            out.append((line, count))
+    return out
+
+
+# Baseline CHANGELOG text, cached per (REPO, ref). Safe to cache without any
+# staleness risk: the key is an immutable SHA, so its blob content cannot change.
+# Caching it turns three `git show` spawns per run into one - the three warn-only
+# checks each need the same baseline, and this gate runs as a pre-commit hook.
+_BASELINE_TEXT_CACHE: dict[tuple[Path, str], str | None] = {}
+
+
+def _changelog_baseline_pair() -> tuple[str, str, str] | None:
+    """(ref, baseline CHANGELOG text, working CHANGELOG text), or None when there
+    is nothing to compare against (no git, or no CHANGELOG in the baseline yet).
+    Shared by the warn-only checks so they cannot drift apart on which baseline
+    they read - the merge-base choice is the whole correctness story here (see the
+    block comment above).
+
+    The BASELINE side is cached (immutable sha => immutable content); the WORKING
+    side is deliberately re-read every call, because it is the thing under test and
+    is cheap to read (no subprocess)."""
+    ref = _changelog_baseline_ref()
+    if ref is None:
+        return None                     # no git available: nothing to diff against
+    key = (REPO, ref)
+    if key not in _BASELINE_TEXT_CACHE:
+        base = _git("show", f"{ref}:{_CHANGELOG}")
+        _BASELINE_TEXT_CACHE[key] = (
+            base.stdout if base is not None and base.returncode == 0 else None)
+    base_text = _BASELINE_TEXT_CACHE[key]
+    if base_text is None:
+        return None                     # CHANGELOG not in the baseline yet: no record
+    try:
+        working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
+    except OSError:
+        working = ""                    # deleted from the tree: every draft line is gone
+    return ref, base_text, working
+
+
+def _changelog_unreleased_drops() -> list[str]:
+    """Warn-only companion to _changelog_append_only: [Unreleased] draft lines
+    present at the baseline but gone from the working copy."""
+    pair = _changelog_baseline_pair()
+    if pair is None:
+        return []
+    ref, base_text, working = pair
+    dropped = _changelog_dropped_unreleased_lines(base_text, working)
+    if not dropped:
+        return []
+    listing = "\n".join(f"    lost: {x!r}" for x in dropped)
+    return [
+        f"{_CHANGELOG}: {len(dropped)} [Unreleased] draft line(s) present at the "
+        f"baseline ({ref[:8]}) are missing from the working copy:\n{listing}\n"
+        "    Rewording or removing your OWN draft entries is fine. What this "
+        "catches is the other case: a SIBLING branch's bullet lost around a "
+        "rebase (observed after a conflicted rebase resolved bulk-take-mine; "
+        "resolve those additively, keeping BOTH sides' bullets).\n"
+        "    Attribute a line before acting on it - `git log -S \"<line>\" -- "
+        f"{_CHANGELOG}` - then restore only what you actually dropped. Do NOT "
+        "reset the section to master and do NOT hand-copy a bullet back in "
+        "blind: re-importing a bullet that was never lost is how duplicates get "
+        "created."
+    ]
+
+
+def _changelog_added_unreleased_bullets(old_text: str, new_text: str) -> list[str]:
+    """Top-level [Unreleased] bullets in *new_text* that were not in *old_text* -
+    this branch's own additions, as far as the text can tell."""
+    from collections import Counter
+    old = Counter(line for line in _changelog_unreleased_lines(old_text)
+                  if line.startswith("- "))
+    seen = Counter()
+    out = []
+    for line in _changelog_unreleased_lines(new_text):
+        if not line.startswith("- "):
+            continue
+        seen[line] += 1
+        if seen[line] > old.get(line, 0):
+            out.append(line)
+    return out
+
+
+def _changelog_unreleased_duplicates() -> list[str]:
+    """Warn-only: an [Unreleased] bullet that is newly duplicated in the working
+    copy - the artifact left behind when a bullet is hand-restored after a
+    false-positive drop report."""
+    pair = _changelog_baseline_pair()
+    if pair is None:
+        return []
+    _ref, base_text, working = pair
+    dupes = _changelog_new_duplicate_unreleased_bullets(base_text, working)
+    if not dupes:
+        return []
+    listing = "\n".join(f"    x{count} now: {line!r}" for line, count in dupes)
+    return [
+        f"{_CHANGELOG}: {len(dupes)} [Unreleased] bullet(s) appear MORE OFTEN than "
+        f"at the baseline, and more than once:\n{listing}\n"
+        "    A duplicate is usually a bullet that was restored but never actually "
+        "lost (a stale-ref drop report false-positives on every sibling bullet "
+        "merged after your branch point). Delete the EXTRA copies so only the one "
+        "you meant to have is left - deleting every copy is how the entry "
+        "disappears for real."
+    ]
+
+
+def _changelog_unreleased_added_note() -> list[str]:
+    """REPORT-ONLY context: the [Unreleased] bullets this branch adds relative to
+    the baseline. Not a warning and never escalated by --strict (a branch adding
+    changelog entries is the whole point), so it is emitted ONLY alongside a real
+    warning, where it answers the question the warning immediately raises: "which
+    of these bullets are mine?"
+
+    It is the import detector's readable half. A hand-restored sibling bullet that
+    is NOT a duplicate is textually indistinguishable from one you authored, so no
+    check can flag it outright; listing the additions lets the human reading the
+    warning spot one. Deliberately not printed on clean runs: this gate is a
+    pre-commit hook, and a note on every commit is how a signal becomes noise."""
+    pair = _changelog_baseline_pair()
+    if pair is None:
+        return []
+    _ref, base_text, working = pair
+    added = _changelog_added_unreleased_bullets(base_text, working)
+    if not added:
+        return [f"    for context: this branch adds no new {_CHANGELOG} "
+                "[Unreleased] bullets."]
+    shown = "\n".join(f"    added: {x!r}" for x in added[:6])
+    more = f"\n    (+{len(added) - 6} more)" if len(added) > 6 else ""
+    return [f"    for context, this branch adds {len(added)} [Unreleased] "
+            f"bullet(s) - confirm they are all yours:\n{shown}{more}"]
 
 
 # ---- check 5: raw single-resource accessor guard ----------------------------
@@ -818,9 +1114,23 @@ def _manifest_problems() -> list[str]:
         return [f"release manifest check could not run: {e}"]
 
 
+def _strict_env() -> bool:
+    """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but a
+    recognized OFF value behaves like passing --strict (an env knob because a CI
+    step or a hook cannot always edit the command line it invokes).
+
+    "off" is in the off-set alongside 0/false/no: a reviewer pointed out that
+    LOCALM_HYGIENE_STRICT=off silently turning strictness ON is the kind of
+    surprise that gets a knob mistrusted. Anything unrecognized still means ON,
+    so a typo fails toward MORE checking, never less."""
+    return os.environ.get("LOCALM_HYGIENE_STRICT", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
+    strict = "--strict" in argv or _strict_env()
     tracked = _tracked_files()
     if not tracked:
         # `git ls-files` failed or returned nothing, so the dash/disclosure/abs-path
@@ -842,7 +1152,29 @@ def main(argv: list[str]) -> int:
     problems.extend(_raw_accessor_violations(tracked))
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_bump_violations())
+    # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
+    # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
+    # failures for CI-style use.
+    warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
+    if warnings:
+        # Report-only context, FOLDED INTO the last warning rather than appended as
+        # its own entry. Appending it made --strict print the note inside the FAILED
+        # list and count it as a hygiene issue ("2 issue(s)" for one real warning),
+        # which is exactly what this note must never be: it is context, and a branch
+        # adding changelog bullets is the point of the file.
+        note = _changelog_unreleased_added_note()
+        if note:
+            warnings[-1] = warnings[-1] + "\n" + "\n".join(note)
+    if strict and warnings:
+        problems.extend(warnings)
+        warnings = []
     manifest = _manifest_problems()
+    if warnings:
+        print("Hygiene WARNING(S) - not failures; pass --strict or set "
+              "LOCALM_HYGIENE_STRICT=1 to escalate them:\n", file=sys.stderr)
+        for w in warnings:
+            print("  " + w, file=sys.stderr)
+        print(file=sys.stderr)
     if problems or manifest:
         if problems:
             print("Hygiene check FAILED (see AGENTS.md):\n", file=sys.stderr)
