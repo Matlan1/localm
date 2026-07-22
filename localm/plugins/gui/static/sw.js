@@ -92,7 +92,12 @@
 // (app/coder.js renders the confirm_request event's new `agent` field, styled by
 // style.css) - a stale-cached client would drop the label and show the anonymous
 // prompt that made two concurrent children indistinguishable.
-const CACHE = "localm-shell-v78";
+// v79: pages/knowledge.js changed - a failed collection delete or document
+// removal now shows the server's reason instead of a bare "Delete failed". Those
+// endpoints answer 409 while another localm process is writing the collection,
+// and that detail names the holder and says it is worth retrying; a stale-cached
+// client would keep swallowing it and leave the user with a dead end.
+const CACHE = "localm-shell-v79";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
