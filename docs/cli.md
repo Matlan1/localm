@@ -394,9 +394,38 @@ localm coder --model mymodel              # interactive session in the current r
 localm coder "fix the failing test"       # single task
 localcoder --model mymodel                # same thing, standalone entry point (installed with the coder plugin)
 localm coder --system "always run pytest before finishing"   # custom instructions for this run
+localm coder "make the suite pass" --until "pytest -x"       # one-shot, verified by exit code
+localm coder --model mymodel --verify "pytest -x"            # interactive, same check per turn
+localm coder --model mymodel --seed 1234                     # reproducible sampling
 ```
 
 The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+
+**Verification by exit code.** The agent's own "I am done" is not evidence, so localm
+judges a change by running a command and reading its exit code - the harness runs it,
+not the model, which is what makes it un-gameable. For a one-shot task that is
+`--until "pytest -x"`: the task is retried (up to `--goal-max-iters`, default 5) until
+the command exits 0, and a run that never gets there exits non-zero rather than
+claiming success. Interactive sessions (the REPL and the GUI coder) run the same check
+at the moment the agent would otherwise finish a turn that changed files. The command
+defaults to the project's obvious one - `cargo test`, `go test ./...`, `npm test` when
+package.json defines a test script, or pytest when the project has a pytest setup - and
+a project with no detectable check simply runs without one. Override it with
+`--verify COMMAND`, a `verify = "..."` key in `.localcoder/config.toml`, or `/verify`
+mid-session; turn it off with `--no-verify` or `/verify off`. When the check keeps
+failing, the agent is told (and told not to edit the check to force a pass); when the
+attempts run out, the turn is reported as NOT verified rather than as done. Sessions
+opened with a shared, scoped key never run a verify command - those sessions have no
+process execution at all.
+
+**Reproducible runs.** `--seed N` pins the sampler's RNG, so the same seed with the same
+model, prompt and settings reproduces the same output. Measured bit-for-bit on one AMD
+gfx1030 box with the bundled llama.cpp runtime and Qwen2.5-Coder-7B Q6_K: 5/5 identical
+responses at `temperature 0.8` with a seed, 5/5 *different* without one, and identical
+again after a full model reload. That is one hardware and software combination, not a
+guarantee: different GPUs, backends, llama.cpp builds, or concurrent load were not
+measured, and `--anthropic` ignores the flag because the Anthropic API has no seed
+parameter.
 
 Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, the project-memory file, which holds facts **you** add with `/remember` and drop with `/forget`; the agent does not write it itself (its own close-time reflection is stored in the localm data dir, not in your repo).
 

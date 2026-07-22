@@ -159,6 +159,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
   resumes with its plan intact instead of starting over. In the GUI the tool
   card shows progress and the current step at a glance. Privacy mode keeps the
   list in memory only, like everything else about the session.
+- **The coder verifies its work by exit code in interactive sessions too, and
+  finds the check itself.** Judging a change by running a command and reading
+  its exit code - the harness runs it, not the model, so the model cannot talk
+  its way to "done" - used to happen only for a one-shot task with `--until`.
+  The REPL and the GUI coder now run the same check at the point the agent
+  would otherwise finish a turn that changed files. The command no longer has
+  to be typed: localm detects the project's obvious one (`cargo test`,
+  `go test ./...`, `npm test` when package.json actually defines a test script,
+  or pytest when the project has a pytest setup) and runs without one in a
+  project where no check can be found, rather than guessing. Override it with
+  `--verify COMMAND`, a `verify = "..."` key in `.localcoder/config.toml`, or
+  `/verify` mid-session; `--no-verify` / `/verify off` disables it. A failing
+  check is fed back for a fix (with the standing instruction not to edit the
+  check to force a pass); when the attempts run out the turn is reported as NOT
+  verified instead of as finished. Because a real check now runs, the older
+  "verify your work" nudge names that command instead of asking the model to
+  re-read its own edits. Sessions opened with a shared, scoped key never run a
+  verify command: they have no process execution at all, by design.
+- **`localm coder --seed N` for reproducible runs.** Pins the sampler's RNG so
+  the same seed, model, prompt and settings reproduce the same output, which is
+  what makes it possible to compare two harness or prompt changes without the
+  model's own randomness in the way. Measured bit-for-bit on one AMD gfx1030
+  box (bundled llama.cpp, Qwen2.5-Coder-7B Q6_K): 5/5
+  identical responses with a fixed seed at temperature 0.8, 5/5 different
+  without one, and identical again after a full model reload. Different
+  hardware, backends, llama.cpp builds and concurrent load were not measured,
+  so this is a measurement, not a cross-machine guarantee; `--anthropic`
+  ignores the flag and says so, because that API has no seed parameter. A
+  `seed = N` key in `.localcoder/config.toml` sets it per project.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at

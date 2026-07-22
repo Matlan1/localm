@@ -282,6 +282,8 @@ HELP_TEXT = """\
   [bold]/export [path][/bold]        export session transcript to Markdown
   [bold]/scope [glob][/bold]         show or set the file-access scope (e.g. src/**/*.py)
   [bold]/scope clear[/bold]          remove the active scope restriction
+  [bold]/verify [cmd|auto|off][/bold] command that must exit 0 before a turn that
+                        changed files may finish (run by the harness, not the model)
 
 [dim]Tab completes commands and project paths (where readline is available);
 REPL history persists across sessions in log/full modes, never in privacy.[/dim]

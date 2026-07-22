@@ -15,6 +15,9 @@ memory_file     = ".localcoder/memory.md" # overrides default search order
 max_tokens      = 2048
 temperature     = 0.7
 mode            = "privacy"               # privacy | log | full
+seed            = 1234                    # RNG seed for reproducible sampling
+verify          = "pytest -x && ruff check"  # exit-code check for interactive
+                                          # sessions; overrides auto-detection
 
 The file is optional; absent keys fall through to CLI defaults.
 """
@@ -68,5 +71,6 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
         return {}
 
     _KNOWN = {"model", "max_turns", "auto_approve", "always_confirm",
-              "memory_file", "max_tokens", "temperature", "mode"}
+              "memory_file", "max_tokens", "temperature", "mode",
+              "seed", "verify"}
     return {k: v for k, v in raw.items() if k in _KNOWN}

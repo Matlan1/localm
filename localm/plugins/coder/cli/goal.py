@@ -11,26 +11,14 @@ from pathlib import Path
 import localm.plugins.coder.cli as _cli
 from ..agent import Agent
 from ..display import print_error, print_info, print_success, print_warning
-from ..tools.base import _partial_on_timeout, run_subprocess
+from ..verify import run_verify as _run_verify, verify_feedback as _goal_feedback
 
-def _run_verify(command: str, work_dir: Path, timeout: int = 600) -> "tuple[int, str]":
-    """Run the verification *command* in *work_dir*; return (exit_code, output).
-
-    The command is run through the platform shell wrapper (the same list form the
-    run_shell tool uses), so a compound command like 'pytest -x && ruff check'
-    works. The harness - not the model - runs it, so its exit code is an
-    un-gameable judge of success. On a timeout, any output the command produced
-    before the kill is preserved (CODER-2) - this used to be silently dropped,
-    unlike the run_shell tool's own timeout handling."""
-    result = run_subprocess(command, work_dir, timeout=timeout, shell_wrap=True)
-    if result.timed_out:
-        return 124, (
-            "verification command timed out after %ds%s"
-            % (timeout, _partial_on_timeout(result)))
-    if result.not_found or result.error is not None:
-        return 125, "failed to run verification command: %s" % (
-            result.error or "command not found")
-    return result.returncode, (result.stdout or "") + (result.stderr or "")
+# _run_verify and _goal_feedback moved to ../verify.py when the oracle stopped
+# being CLI-only (the agent loop runs the same check at its pre-done boundary in
+# REPL/GUI sessions). They are re-bound here under their original names because
+# the CLI package re-exports them and test_goal_loop patches `cli._run_verify`;
+# _run_goal_loop below reads that patched name live, so both keep working.
+__all__ = ["_run_verify", "_goal_feedback", "_goal_task_wrap", "_run_goal_loop"]
 
 
 def _goal_task_wrap(task: str, until_cmd: str) -> str:
@@ -41,15 +29,6 @@ def _goal_task_wrap(task: str, until_cmd: str) -> str:
         "target itself (the tests or the check) to force a pass - that defeats the "
         "purpose. After you finish, the command is run for you and any failure is "
         "reported back for another attempt."
-    )
-
-
-def _goal_feedback(until_cmd: str, code: int, output: str) -> str:
-    tail = (output or "").strip()[-4000:] or "(no output)"
-    return (
-        f"The verification command `{until_cmd}` failed with exit code {code}. "
-        f"Output:\n{tail}\n\n"
-        "Diagnose the real cause and fix it. Do not modify the check itself."
     )
 
 

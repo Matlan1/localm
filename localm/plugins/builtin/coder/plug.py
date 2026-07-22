@@ -63,6 +63,11 @@ class CreateSessionRequest(BaseModel):
     max_tokens: int | None = None
     resume: bool = False              # restore this cwd's saved conversation (CODER-2)
     custom_instructions: str | None = None   # extra system-prompt guidance (rec#584)
+    # Exit-code oracle: a command the HARNESS runs before a turn that changed
+    # files may finish. None + auto_verify -> the project's detected check.
+    # Ignored for a restricted (scoped-key) session, which has no execution.
+    verify: str | None = None
+    auto_verify: bool = True
 
 
 class MessageRequest(BaseModel):
@@ -223,6 +228,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         dry_run=req.dry_run,
         restricted=restricted,
         custom_instructions=req.custom_instructions,
+        verify=req.verify,
+        auto_verify=req.auto_verify,
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)

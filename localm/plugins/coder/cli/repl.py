@@ -49,7 +49,7 @@ _SLASH_COMMANDS = (
     "/help", "/exit", "/quit", "/clear", "/model", "/mode", "/cwd", "/cd",
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/compact", "/memory", "/remember", "/forget", "/save", "/export",
-    "/scope", "/changes", "/diff",
+    "/scope", "/changes", "/diff", "/verify",
 )
 
 
@@ -380,6 +380,36 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             print_success(f"Session exported → {md_path}")
         except Exception as e:
             print_error(f"Export failed: {e}")
+
+    elif cmd == "verify":
+        from ..verify import command_text, detect_verify_command
+        if not arg:
+            current = (command_text(agent.verify_cmd)
+                       if agent.verify_cmd is not None else "(off)")
+            print_info(
+                f"Verification: {current}\n"
+                "  /verify <command>  check this instead\n"
+                "  /verify auto       re-detect the project's check\n"
+                "  /verify off        no exit-code check")
+        elif arg == "off":
+            agent.verify_cmd = None
+            print_info("Verification off - turns finish without an exit-code "
+                       "check. The model's own 'done' is the only gate again.")
+        elif arg == "auto":
+            detected = detect_verify_command(agent.cwd)
+            agent.verify_cmd = detected
+            if detected is None:
+                print_warning(
+                    "No obvious check found in this project (looked for a "
+                    "verify key in .localcoder/config.toml, Cargo.toml, go.mod, "
+                    "a package.json test script, and a pytest setup). "
+                    "Set one with /verify <command>.")
+            else:
+                print_success(f"Verification: `{command_text(detected)}`")
+        else:
+            agent.verify_cmd = arg
+            print_success(f"Verification: `{arg}` must exit 0 before a turn "
+                          "that changed files finishes.")
 
     elif cmd == "scope":
         if not arg:
