@@ -6,6 +6,7 @@ When an agent has a scope glob set, file-access tools that target a path
 outside the glob pattern must be rejected without reaching the tool function.
 """
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,8 +251,15 @@ class TestShellArgvScopeCheck:
         """Warn, do not block: escalating a legitimate command into a hard failure
         would break working setups for a heuristic's benefit."""
         (tmp_path / "secrets.txt").write_text("token\n")
-        result, warnings, _ = self._run_shell(
-            tmp_path, "src/**", "cat secrets.txt")
+        # This is the one test here that asserts the command really EXECUTED, so
+        # it needs a command that exists on the platform. `cat` is not a cmd.exe
+        # builtin and is not on a stock Windows PATH: it resolves only when
+        # Git-for-Windows' usr/bin happens to be there, so this passed under Git
+        # Bash and redded under PowerShell on the same machine. `type` is the
+        # cmd equivalent and needs nothing installed.
+        read_file = ("type secrets.txt" if sys.platform == "win32"
+                     else "cat secrets.txt")
+        result, warnings, _ = self._run_shell(tmp_path, "src/**", read_file)
         assert [w for w in warnings if "outside the active scope" in w]
         assert result.ok, result.output           # it executed
         assert "token" in result.output           # and really did read the file
