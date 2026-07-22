@@ -167,12 +167,14 @@ CORE_FIELDS: list = [
     # /v1/config and `localm config gpu_split_indices 0,1` like any other field.
     SettingField("gpu_split_indices", Widget.HIDDEN, "Split across GPUs",
                  "Device indices to split a model across when it is too large "
-                 "for one card (2+ needed to take effect). Blank uses a single "
-                 "GPU (Main GPU above).",
+                 "for one card (2+ needed to take effect). Each card's share "
+                 "follows its free VRAM at load time unless GPU split ratios "
+                 "pins exact weights. Blank uses a single GPU (Main GPU above).",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
-                 "(same order/length). Blank splits evenly.",
+                 "(same order/length). Blank distributes by each card's free "
+                 "VRAM at load time (evenly when that cannot be measured).",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "

@@ -11,6 +11,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Multi-GPU split: each card's share is now sized automatically from its
+  free VRAM.** With "Split across GPUs" enabled and no manual
+  `gpu_split_ratios` pinned, localm no longer divides the model equally: at
+  load time it reads every split device's free VRAM and distributes the
+  model proportionally, so a card already half-occupied (another model,
+  another app) gets a half-sized share instead of an equal one that would
+  not fit. Loads that used to be refused with "Not enough VRAM on the
+  configured split device(s)" - because one busy card could not hold an
+  equal share even though the model fit the cards' combined free space -
+  now load with an adapted split; when even the combined space is short,
+  the load falls back to partial offload (some layers on CPU) instead of
+  refusing, matching single-GPU behavior. On the Vulkan runtime the
+  readings come from the runtime's own device registry, so the automatic
+  distribution works there too. Explicit `gpu_split_ratios` values are
+  honored exactly as before (pinning ratios opts out of the automatic
+  distribution), and when per-device free VRAM cannot be measured the
+  split falls back to the previous equal shares; the chosen distribution
+  is logged either way.
+
 ### Fixed
 - **No more repeated "Windows fatal exception" traces when the native runtime
   and a ROCm torch share a process.** On Windows with the AMD ROCm install,

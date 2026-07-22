@@ -495,6 +495,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional["threading.Event"] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
+        gpu_split_ratios: Optional[list] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -558,9 +559,14 @@ class LlamaCpp:
         apply_main_gpu(mp)
         # Multi-GPU tensor-split: spreads the model across 2+ configured
         # devices when gpu_split_indices is set (see discover.apply_gpu_split).
+        # gpu_split_ratios carries the PARENT's already-resolved effective
+        # ratios (auto free-VRAM-proportional distribution,
+        # discover.resolve_auto_split_ratios) into this isolated worker, which
+        # must not probe for them itself - see that function's docstring.
         # The returned buffer must stay alive through llama_load_model_from_file
         # below - it is read once at load time, not held as a live pointer.
-        _tensor_split_keepalive = apply_gpu_split(mp)
+        _tensor_split_keepalive = apply_gpu_split(
+            mp, ratios_override=gpu_split_ratios)
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false

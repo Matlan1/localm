@@ -48,6 +48,7 @@ class GgufWorker(VramSizingMixin):
         n_ctx_grow: int,
         cancel_event=None,
         vram_overhead_bytes: Optional[int] = None,
+        gpu_split_ratios: Optional[list] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -66,6 +67,11 @@ class GgufWorker(VramSizingMixin):
         # class-level default a config override would otherwise silently miss.
         if vram_overhead_bytes is not None:
             self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
+        # The parent's already-resolved effective split ratios (auto
+        # free-VRAM-proportional distribution) - forwarded verbatim to
+        # LlamaCpp, never recomputed here: this process must not probe
+        # (see discover.resolve_auto_split_ratios).
+        self.gpu_split_ratios = gpu_split_ratios
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
@@ -101,6 +107,7 @@ class GgufWorker(VramSizingMixin):
             mmproj_path=self.mmproj_path,        # C1: in-process vision via mtmd
             cancel_event=self.cancel_event,       # abort mid-load if superseded
             vram_check=self._check_context_fit,   # guard context GROWTH too
+            gpu_split_ratios=self.gpu_split_ratios,
             verbose=False,
         )
         self._loaded = True

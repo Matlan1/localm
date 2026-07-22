@@ -283,12 +283,15 @@ class TestIsolatedEmbedderGpuSplitPreflight:
         a configured split device's own proportional share is short, even
         though embedding models are typically small (this module's own
         docstring: 24-90 MB) - a tight-enough split device can still be short
-        of even a few MB."""
+        of even a few MB. Ratios PINNED equal: unset, the auto free-VRAM-
+        proportional split gives the tight device a near-zero share and this
+        load correctly proceeds instead (the auto-split feature; see
+        tests/test_gpu_split_auto_ratios.py)."""
         model_file = tmp_path / "embed.gguf"
         model_file.write_bytes(b"\0" * (2 * 1024 * 1024))   # 2 MB, realistic size
         monkeypatch.setattr(
             "localm.config.load_config",
-            lambda: {"gpu_split_indices": [0, 1]})
+            lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
         monkeypatch.setattr(
             "localm.discover.list_gpus",
             lambda: [{"index": 0, "name": "A", "total": 1024, "free": 512},

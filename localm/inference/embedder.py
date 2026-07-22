@@ -322,7 +322,8 @@ class GGUFEmbedder:
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
-                 pooling_type: object = _POOLING_DEFAULT) -> None:
+                 pooling_type: object = _POOLING_DEFAULT,
+                 gpu_split_ratios: Optional[list] = None) -> None:
         from localm.inference.backends.llamacpp import _api as api
         from localm.inference.backends.llamacpp._structs import llama_token
         self._api = api
@@ -365,7 +366,11 @@ class GGUFEmbedder:
         # here on, isolated inside a child process by _embedder_runner.py.
         from localm.discover import apply_gpu_split, apply_main_gpu
         apply_main_gpu(mp)
-        _tensor_split_keepalive = apply_gpu_split(mp)
+        # gpu_split_ratios: the PARENT's already-resolved effective ratios
+        # (auto free-VRAM-proportional distribution) - this isolated child
+        # must not probe for them itself (discover.resolve_auto_split_ratios).
+        _tensor_split_keepalive = apply_gpu_split(
+            mp, ratios_override=gpu_split_ratios)
         self._model = api.llama_load_model_from_file(model_path, mp)
         if not self._model:
             raise RuntimeError(f"failed to load embedding model: {model_path}")
@@ -597,9 +602,21 @@ class IsolatedEmbedder(VramSizingMixin):
         point on re-asserts the guarantee, not just the first one."""
         self._preflight_vram()
         from ._embedder_runner import EmbedderRunner
+        # Same parent-pins-worker-consumes contract as GgufBackend._load_native:
+        # the effective split distribution (auto free-VRAM-proportional when
+        # gpu_split_ratios is unset) is resolved HERE and carried into the
+        # child, which must not probe for it (see resolve_auto_split_ratios).
+        # Skipped when this embedder is CPU-bound anyway (cpu_only, or zero
+        # GPU layers): no layer will be offloaded, so there is nothing to
+        # distribute and the probe would be pure cost.
+        from localm.discover import resolve_auto_split_ratios
+        cpu_only = self.gpu_fallback_reason is not None
+        auto_ratios = None
+        if not cpu_only and self.n_gpu_layers != 0:
+            auto_ratios = resolve_auto_split_ratios()
         params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
                       n_ctx=self._requested_n_ctx, pooling_type=self._pooling_type,
-                      cpu_only=self.gpu_fallback_reason is not None)
+                      cpu_only=cpu_only, gpu_split_ratios=auto_ratios)
         self._runner = EmbedderRunner()
         meta = self._runner.spawn_and_load(params)
         self.dim = meta["dim"]

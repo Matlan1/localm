@@ -200,6 +200,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gpu_layers = self._effective_gpu_layers()
             self.effective_gpu_layers = gpu_layers
 
+        # Resolve the effective split distribution HERE, parent-side, and pin
+        # it into the worker: with gpu_split_ratios unset this is the auto
+        # free-VRAM-proportional split (None when no split is configured, the
+        # ratios are pinned by the user, or per-device free is unmeasurable -
+        # the worker then keeps the config-driven equal/pinned behavior). The
+        # worker cannot resolve this itself: probing there is the Windows+AMD
+        # torch DLL conflict (#754/#771), and only the parent has the
+        # #697/#700 corrected readings. By-symbol function-scoped import so
+        # tests can patch localm.discover.resolve_auto_split_ratios.
+        from localm.discover import resolve_auto_split_ratios
         params = dict(
             model_path=self.model_path,
             mmproj_path=self.mmproj_path,       # C1: vision via mtmd, in the child
@@ -213,6 +223,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # initial load, not the class-level default: an instance-level
             # override here would otherwise silently not reach the child process.
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
+            gpu_split_ratios=resolve_auto_split_ratios(),
         )
         timeout = self._load_timeout_seconds()
 

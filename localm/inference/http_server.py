@@ -427,6 +427,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # actual share is short, reaching the native loader with too
             # little room on that device. Only applies to a GGUF-backend load.
             check_split_fit = _is_gguf(m_path)
+            # Pinned vs auto split ratios decide the shortfall branch's
+            # posture below: pinned shares keep the hard per-device 503 (the
+            # loader will not adapt for them, and the backend's sizing only
+            # budgets the split's COMBINED capacity - never one pinned
+            # share); unset ratios mean the loader gets the auto free-VRAM-
+            # proportional distribution (discover.resolve_auto_split_ratios),
+            # under which a non-empty shortfall can only mean the COMBINED
+            # estimate is short - deferred to the backend like the single-GPU
+            # path (#753), since #770 made that sizing split-aware.
+            from localm.config import load_config as _load_config
+            split_ratios_pinned = bool(_load_config().get("gpu_split_ratios"))
             # Peers already asked to cooperate during THIS load attempt: each is
             # answerable once, so the loop below always makes progress (REG-454).
             asked_peers: set = set()
@@ -680,7 +691,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             free_bytes=free_vram, asked=asked_peers))
                     if cooperated:
                         continue
-                    if shortfall:
+                    if shortfall and split_ratios_pinned:
                         # Aggregate may well be enough - it is specifically the
                         # configured split's per-device share that is short, so name
                         # the device(s), not a generic aggregate message. (Said "or
@@ -691,29 +702,39 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # unmeasurable aggregate cannot coexist. Also unreachable now
                         # via the inconclusive branch, which empties shortfall.)
                         #
-                        # This stays a hard refusal even though everything below it
-                        # now defers to the backend: apply_gpu_split() divides a model
-                        # by a STATIC per-config ratio with no live per-device
-                        # awareness of its own (discover.gpu_split_shortfall's own
-                        # docstring), and the backend's own sizing
-                        # (_auto_gpu_layers / _check_vram, llamacpp/_sizing.py)
-                        # budgets the split's COMBINED capacity
-                        # (_split_free_total_bytes), never any one device's
-                        # proportional share - so this per-device check is still
-                        # the only gate that can catch one split device being
-                        # individually short while the aggregate fits. Letting a
-                        # real per-device shortfall through would trade today's
-                        # precise, actionable message for a native worker abort
-                        # with no such visibility.
+                        # PINNED ratios only: this stays a hard refusal even though
+                        # everything below it defers to the backend, because with
+                        # pinned shares apply_gpu_split() divides the model by that
+                        # static per-config ratio with no live per-device awareness
+                        # (discover.gpu_split_shortfall's own docstring), and the
+                        # backend's own sizing (_auto_gpu_layers / _check_vram,
+                        # llamacpp/_sizing.py) budgets the split's COMBINED capacity
+                        # (_split_free_total_bytes), never any one device's pinned
+                        # share - so this per-device check is still the only gate
+                        # that can catch one split device being individually short
+                        # while the aggregate fits. Letting a real per-device
+                        # shortfall through would trade today's precise, actionable
+                        # message for a native worker abort with no such visibility.
                         detail = "; ".join(
                             f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
                             f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
                         raise HTTPException(
                             503, f"Not enough VRAM on the configured split "
                             f"device(s) to load '{name}' ({detail}).")
-                    # Local + cooperative eviction exhausted, no split-specific
-                    # shortfall - what remains is only this loop's own coarse
-                    # "vram_required = file_size * 1.2" estimate not being met. That
+                    # With UNSET ratios (the auto free-VRAM-proportional split), a
+                    # non-empty shortfall can only mean the COMBINED estimate is
+                    # short (each device's auto share fits its free whenever the
+                    # aggregate fits - gpu_split_shortfall computes with the same
+                    # auto ratios the loader will apply), so it falls through to
+                    # the same defer-to-backend path as the aggregate-only miss
+                    # below: the backend's split-aware sizing (#770) is the
+                    # accurate judge there, with partial offload available -
+                    # exactly the #753 posture the single-GPU path already ships.
+                    #
+                    # Local + cooperative eviction exhausted, no hard-refusable
+                    # (pinned-share) shortfall - what remains is this loop's own
+                    # coarse "vram_required = file_size * 1.2" estimate not
+                    # being met (combined across an auto split, or single-GPU). That
                     # estimate assumes the WHOLE model lands in VRAM; it has no idea
                     # the backend's own load() already knows how to make a too-big
                     # model fit anyway: GgufBackend's n_gpu_layers_auto (default ON -
