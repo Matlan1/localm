@@ -123,6 +123,91 @@ class _PersistenceMixin:
             if len(self._error_trace) > _MAX_ERROR_TRACE:
                 self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
+    def _drain_background_agents(self) -> list:
+        """Fold finished background sub-agents into this parent and describe them.
+
+        Called at the TOP of the parent's turn, on the PARENT's own thread. That
+        placement is the whole design, not a convenience: the worker thread never
+        touches parent state, so ``_changed_files`` / ``_error_trace`` keep the
+        single-threaded invariant every other writer relies on, and absorption
+        happens at a deterministic point rather than whenever a thread happened to
+        finish. A lock would have made the mutation atomic but NOT ordered - it
+        could still interleave with the parent's own ``_track_write`` mid-turn, so
+        ``session_diff()`` and the close-time episode could observe a
+        half-absorbed view.
+
+        Returns one note per finished job for the caller to put in front of the
+        model. Best-effort: bookkeeping must never break the turn.
+        """
+        from .constants import _MAX_ERROR_TRACE
+        try:
+            from ..background import get_registry
+            registry = get_registry()
+            finished = registry.drain_finished(kind="agent")
+        except Exception:
+            return []
+
+        notes: list[str] = []
+        for st in finished:
+            try:
+                job_id = st.get("id", "?")
+                label = st.get("label", "sub-agent")
+                result = st.get("result") or {}
+                state = st.get("state", "done")
+                job = registry.get(job_id)
+
+                # ERROR TRACE ONLY. The child ran in its OWN worktree, so its
+                # _changed_files keys are relative to a tree this parent does not
+                # have; merging them would make session_diff() resolve them against
+                # the PARENT's cwd and either fabricate a diff for a file the parent
+                # never touched, or silently report nothing and lose the child's
+                # work entirely. Errors carry no path, so that half stays valid.
+                child = getattr(job, "child", None) if job is not None else None
+                child_errors = getattr(child, "_error_trace", None)
+                if child_errors:
+                    self._error_trace.extend(child_errors)
+                    if len(self._error_trace) > _MAX_ERROR_TRACE:
+                        self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
+
+                # A POINTER to the child's work, never a merge into the parent's
+                # own change map, for the same reason.
+                branch = result.get("branch")
+                if branch:
+                    from .. import delegated as _delegated
+                    _delegated.record(self, _delegated.DelegatedChangeSet(
+                        label=label,
+                        branch=branch,
+                        file_count=result.get("file_count", 0),
+                        source="background",
+                        status="ok" if state == "done" else state,
+                        base=result.get("base", ""),
+                        diff=result.get("diff", ""),
+                    ))
+
+                if st.get("error"):
+                    notes.append(
+                        f"Background sub-agent '{label}' ({job_id}) FAILED: "
+                        f"{st['error']}")
+                else:
+                    body = result.get("summary") or "(no output)"
+                    where = (f" Its changes are committed on branch '{branch}' "
+                             f"({result.get('file_count', 0)} file(s)) and are NOT "
+                             "in your working tree.") if branch else ""
+                    notes.append(
+                        f"Background sub-agent '{label}' ({job_id}) finished in "
+                        f"{result.get('turns', 0)} turn(s).{where}\n\n{body}")
+
+                for w in (st.get("warnings") or []):
+                    notes.append(f"  (warning from {job_id}: {w})")
+                if result.get("cleanup_warning"):
+                    notes.append(
+                        f"  (cleanup warning from {job_id}: "
+                        f"{result['cleanup_warning']})")
+            except Exception:
+                # One malformed job must not cost the others their absorption.
+                continue
+        return notes
+
     def _git_status_map(self) -> "dict[str, str] | None":
         """Map of dirty path -> 2-char ``git status --porcelain`` code in cwd, or
         None when cwd is not a git work tree or git is unavailable. Best-effort

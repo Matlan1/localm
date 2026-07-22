@@ -272,6 +272,110 @@ def tool_spawn_agent(
     )
 
 
+def _isolate_child(cwd: Path, name: str):
+    """Create a git worktree for a background child, mirroring dispatch_parallel.
+
+    Returns ``(child_cwd, info, error)``. *info* carries what the teardown and the
+    parent's change-set record need; *error* is a ToolResult when isolation is
+    impossible and the spawn must be refused.
+
+    A background child MUST be isolated. A synchronous child sharing the parent's
+    cwd is merely untidy - the parent is blocked, so nobody else is writing. A
+    BACKGROUND child writing into the parent's working tree while the parent keeps
+    editing is a data race on the user's files, which is exactly why worktree
+    isolation was a prerequisite for this feature rather than a nicety.
+    """
+    import uuid
+
+    from ..child_limit import MAX_CONCURRENT_CHILDREN  # noqa: F401  (doc anchor)
+    from .git import WORKTREE_PREFIX, WORKTREE_SUBDIR, _git, git_repo_root, git_worktree_add
+    from .parallel import _safe_label
+
+    repo = git_repo_root(cwd)
+    if repo is None:
+        return None, None, ToolResult.error(
+            "spawn_agent_background needs a git repository: the child runs in its "
+            "own worktree so it cannot race your files. Use spawn_agent "
+            "(synchronous) outside a repo.")
+
+    base_sha, ok = _git(repo, "rev-parse", "HEAD")
+    if not ok:
+        return None, None, ToolResult.error(
+            f"'{repo}' has no commits yet, so there is nothing to base an "
+            "isolated worktree on. Make an initial commit first.")
+    base_sha = base_sha.splitlines()[0].strip()
+
+    run_id = uuid.uuid4().hex[:8]
+    label = _safe_label(name) or "child"
+    worktree = repo / WORKTREE_SUBDIR / f"{WORKTREE_PREFIX}{label}-{run_id}"
+    branch = f"coder/{label}-{run_id}"
+    out, ok = git_worktree_add(repo, worktree, branch, base_sha)
+    if not ok:
+        return None, None, ToolResult.error(
+            f"spawn_agent_background: could not create an isolated worktree: {out}")
+
+    # Mirror the parent's position WITHIN the repo, so an inherited scope glob
+    # like "src/**" still means the same thing and the child's reach is not
+    # widened to the worktree root.
+    try:
+        rel = cwd.resolve().relative_to(repo.resolve())
+        rel_cwd = None if str(rel) == "." else rel
+    except ValueError:
+        rel_cwd = None
+    child_cwd = worktree / rel_cwd if rel_cwd else worktree
+
+    return child_cwd, {"repo": repo, "worktree": worktree, "branch": branch,
+                       "base": base_sha, "run_id": run_id, "name": name}, None
+
+
+def _finalize_isolated_child(info: dict):
+    """Teardown closure: commit the child's work, capture its diff, remove its
+    worktree. Runs on the JOB's worker thread; touches no parent state.
+
+    Branch durable, worktree transient - the same contract dispatch_parallel uses:
+    returning a path to a directory we just deleted would be useless, and leaving
+    worktrees behind is the scar this repo already has.
+    """
+    def _finalize(child) -> dict:
+        from .base import _truncate
+        from .git import _git, git_commit_all_in, git_worktree_prune, git_worktree_remove
+
+        worktree, repo, base = info["worktree"], info["repo"], info["base"]
+        out: dict = {"branch": info["branch"], "base": base,
+                     "worktree": str(worktree), "file_count": 0, "diff": ""}
+
+        msg = f"coder background child '{info['name']}' ({info['run_id']})"
+        committed, ok = git_commit_all_in(worktree, msg)
+        if not ok:
+            out["cleanup_warning"] = f"could not commit child work: {committed}"
+        else:
+            diff, dok = _git(worktree, "diff", base, "HEAD", "--stat", "-p",
+                             timeout=30)
+            if dok:
+                out["diff"], _ = _truncate(diff)
+                names, nok = _git(worktree, "diff", "--name-only", base, "HEAD",
+                                  timeout=30)
+                out["file_count"] = (
+                    len([ln for ln in names.splitlines() if ln.strip()])
+                    if nok and names != "(no output)" else 0)
+            else:
+                out["cleanup_warning"] = f"could not read the child's diff: {diff}"
+
+        removed, rok = git_worktree_remove(repo, worktree)
+        if not rok:
+            # A failed removal is REAL - a dirty tree, or a process still holding
+            # it. Report it so the operator can reap it; never --force past it.
+            prior = out.get("cleanup_warning")
+            out["cleanup_warning"] = f"{prior}; {removed}" if prior else removed
+        try:
+            git_worktree_prune(repo)
+        except Exception:
+            pass
+        return out
+
+    return _finalize
+
+
 def tool_spawn_agent_background(
     cwd: Path,
     task: str,
@@ -326,18 +430,11 @@ def tool_spawn_agent_background(
             "working. Use spawn_agent (synchronous) instead, or start the session "
             "with --yes to pre-approve.")
 
-    child, prepared = _prepare_child(
-        cwd, task, name, files, model, max_turns, role, _parent_agent,
-        confirm_handler=explicit_handler, tool="spawn_agent_background",
-    )
-    if child is None:
-        return prepared
-    full_task = prepared
-
     # The AUTHORITATIVE ceiling: one shared gate across every kind of concurrent
     # child, so background jobs and worktree-isolated parallel dispatch cannot
-    # each admit their own quota and jointly overrun the box. Acquired here,
-    # released when the job FINISHES (see AgentJob._finish).
+    # each admit their own quota and jointly overrun the box. Taken BEFORE the
+    # worktree so a refusal costs no filesystem work; released when the job
+    # FINISHES (see AgentJob._finish), not when it is submitted.
     from ..child_limit import describe_holders, release, try_acquire
     token = try_acquire("background", name)
     if token is None:
@@ -347,19 +444,48 @@ def tool_spawn_agent_background(
             "with spawn_agent instead.")
 
     from ..background import AgentJob, get_registry
+    from .git import git_worktree_remove
+    child_cwd = info = None
     try:
+        child_cwd, info, iso_error = _isolate_child(cwd, name)
+        if iso_error is not None:
+            release(token)
+            return iso_error
+
+        child, prepared = _prepare_child(
+            child_cwd, task, name, files, model, max_turns, role, _parent_agent,
+            confirm_handler=explicit_handler, tool="spawn_agent_background",
+        )
+        if child is None:
+            git_worktree_remove(info["repo"], info["worktree"])
+            release(token)
+            return prepared
+        full_task = prepared
+        # Make the child's location introspectable, as dispatch_parallel does.
+        child.worktree_path = str(info["worktree"])
+        child.worktree_branch = info["branch"]
+
         job = get_registry().submit(
-            lambda: AgentJob(child, full_task, label=name, token=token),
+            lambda: AgentJob(child, full_task, label=name, token=token,
+                             finalize=_finalize_isolated_child(info)),
             kind="agent")
     except Exception as exc:                          # noqa: BLE001 - reported
-        # Never leak the slot when the submit is refused or the factory raises.
+        # Never leak the slot OR the worktree when the submit is refused or the
+        # factory raises.
+        if info is not None:
+            try:
+                git_worktree_remove(info["repo"], info["worktree"])
+            except Exception:
+                pass
         release(token)
         return ToolResult.error(f"spawn_agent_background: {exc}")
 
     return ToolResult.success(
-        f"Started sub-agent '{name}' in the background as {job.id}.\n"
+        f"Started sub-agent '{name}' in the background as {job.id}, isolated in "
+        f"its own worktree on branch '{info['branch']}'.\n"
         f"Check it with check_agent_job('{job.id}'); its result is also folded "
-        "in automatically at the start of a later turn.",
+        "in automatically at the start of a later turn. Its changes land on that "
+        "branch and are NEVER merged into your working tree automatically.",
         summary=f"sub-agent '{name}' started in background ({job.id})",
     )
 

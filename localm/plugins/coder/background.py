@@ -98,7 +98,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 # Per-kind ceilings on jobs running at once. Separate numbers because the kinds
 # exhaust different resources: shell jobs are OS processes the model started and
@@ -600,10 +600,18 @@ class AgentJob(BackgroundJob):
     kind = "agent"
 
     def __init__(self, child: Any, task: str, *, label: str,
-                 token: Any = None) -> None:
+                 token: Any = None, finalize: Any = None) -> None:
         super().__init__(label)
         self._child = child
         self._task = task
+        # Optional teardown run on THIS job's worker thread once the child stops:
+        # ``finalize(child) -> dict`` merged into the terminal payload. The
+        # isolation teardown (commit the child's branch, capture its diff, remove
+        # its worktree) lives there rather than here, so this module keeps knowing
+        # nothing about git. It runs on the worker because only the worker knows
+        # when the child finished - but it must NEVER touch parent state; the
+        # parent folds the payload in at its own turn boundary.
+        self._finalize = finalize
         # The child_limit slot this job holds. Released on FINISH, not on submit:
         # the budget is about children that are RUNNING, and a job that has been
         # submitted but not yet finished is still occupying the box.
@@ -631,6 +639,18 @@ class AgentJob(BackgroundJob):
         except Exception as exc:                      # noqa: BLE001 - recorded
             # Surfaced as the job's terminal error, never swallowed.
             outcome = {"error": f"{type(exc).__name__}: {exc}"}
+        # Teardown runs even when the child failed: its worktree still exists and
+        # would leak otherwise, and a failed child may still have committed work
+        # worth pointing at.
+        if self._finalize is not None:
+            try:
+                extra = self._finalize(self._child)
+                if extra:
+                    outcome.update(extra)
+            except Exception as exc:                  # noqa: BLE001 - surfaced
+                # A teardown failure is REAL (a worktree may be left behind), so
+                # it becomes a visible warning rather than a silent pass.
+                self.warnings.append(f"teardown failed: {type(exc).__name__}: {exc}")
         with self._lock:
             self._outcome = outcome
 
@@ -638,17 +658,26 @@ class AgentJob(BackgroundJob):
         return self._outcome
 
     def _result_for(self, poll_value) -> Optional[dict]:
-        if poll_value.get("error"):
-            return {"summary": "", "turns": 0, "error": poll_value["error"]}
         # Defang here, at the single choke point where a child's text becomes
         # readable by the parent: a sub-agent may have quoted untrusted web/MCP
         # content verbatim, and this string re-enters the PARENT loop as a
         # trusted tool result. Same reasoning as the synchronous path.
         from .provenance import neutralise
-        return {
+        payload = {
             "summary": neutralise(poll_value.get("summary") or ""),
             "turns": poll_value.get("turns", 0),
         }
+        if poll_value.get("error"):
+            payload["error"] = poll_value["error"]
+        # Isolation facts produced by finalize(), carried through verbatim so the
+        # parent can record a DelegatedChangeSet at ITS turn boundary. The diff is
+        # NOT neutralised: it is machine-read git output the parent renders in a
+        # clearly-labelled block, never merged into session_diff().
+        for key in ("branch", "base", "file_count", "diff", "worktree",
+                    "cleanup_warning"):
+            if key in poll_value:
+                payload[key] = poll_value[key]
+        return payload
 
     def _terminate(self, *, force: bool) -> None:
         # Cannot preempt a blocking run_task (see the class docstring). Record it

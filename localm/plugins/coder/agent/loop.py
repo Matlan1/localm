@@ -179,6 +179,17 @@ class _LoopMixin:
                     if interactive:
                         print_info("(steering note delivered)")
 
+                # Background sub-agents that finished since the last turn are
+                # absorbed HERE, on this thread, at a defined point - never from
+                # the worker thread that ran them (see _drain_background_agents).
+                # Same place as steering notes so the model reads the result
+                # before its next call.
+                for note in self._drain_background_agents():
+                    self._add_user(f"[background sub-agent result]\n{note}")
+                    self._emit("info", text="background sub-agent result absorbed")
+                    if interactive:
+                        print_info("(background sub-agent finished)")
+
                 self._turns += 1
                 prev_turn_tokens = self._last_turn_tokens
                 self._last_turn_tokens = 0   # reset counter for this turn
