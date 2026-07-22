@@ -155,6 +155,27 @@ def test_dedup_collapses_near_identical_without_losing_a_distinct_one(home, tmp_
     assert arch[0]["reason"] == "merged"
 
 
+def test_merge_keeps_a_failed_predecessors_warning(home, tmp_path):
+    """When a task that once FAILED is done again successfully, the restatement
+    absorbs the older record - and must carry its what_failed forward. Dropping it
+    would delete the most valuable half of the lesson (audit cluster 11) at exactly
+    the moment the merge looks harmless. The outcome, though, is the newer run's:
+    it really did finish this time."""
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="migrate the users table to uuid keys",
+                      outcome="incomplete",
+                      what_failed="alembic upgrade deadlocked on the open session",
+                      lesson="close psql before running the migration"))
+    newer = store.add(Episode(task="migrate the users table to uuid key",
+                              outcome="ok",
+                              lesson="close psql before running the migration"))
+    eps = store.all()
+    assert len(eps) == 1
+    got = eps[0]
+    assert got.id == newer.id and got.outcome == "ok"
+    assert "deadlocked" in got.what_failed        # the warning survived the merge
+
+
 def test_dedup_does_not_collapse_a_shared_generic_lesson(home, tmp_path):
     """Two DIFFERENT tasks that happen to yield the same generic advice stay two
     episodes: the dedup signature is task+lesson, not the lesson alone."""
@@ -215,6 +236,33 @@ def test_restore_survives_the_decay_that_evicted_it(home, tmp_path, monkeypatch)
     live = {e.id for e in store.all()}
     assert old.id in live                       # it stuck
     assert back.ts > now - 60                   # re-stamped, not left ancient
+
+
+def test_restore_does_not_discard_recovery_copies_it_displaces(home, tmp_path,
+                                                               monkeypatch):
+    """Restoring into a FULL store evicts something else, and that eviction's own
+    recovery copy must survive the archive rewrite. Reading the archive before
+    add() and writing it back afterwards silently dropped it."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
+    store = ep_mod.EpisodeStore(tmp_path)
+    now = time.time()
+    first = store.add(ep_mod.Episode(task="rename the config loader",
+                                     lesson="config lives in one place", ts=now - 3))
+    store.add(ep_mod.Episode(task="bump the pillow dependency",
+                             lesson="pin the minor version", ts=now - 2))
+    store.add(ep_mod.Episode(task="delete the unused sprite sheet",
+                             lesson="check references first", ts=now - 1))
+    assert [r["id"] for r in store.forgotten()] == [first.id]
+
+    # Restoring `first` pushes the store back over the cap, evicting another.
+    assert store.restore(first.id) is not None
+    displaced = store.last_evicted
+    assert displaced, "the restore should have displaced something"
+    archived = {r["id"] for r in store.forgotten()}
+    assert {e.id for e in displaced} <= archived, (
+        "the displaced episode's recovery copy was thrown away by the rewrite")
+    assert first.id not in archived          # it is live again, not still forgotten
 
 
 def test_forget_one_episode_by_id(home, tmp_path):

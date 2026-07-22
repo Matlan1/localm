@@ -267,10 +267,11 @@ def _absorb(new: "Episode", dupes: list) -> None:
         for p in (d.files or []):
             if p not in new.files:
                 new.files.append(p)
-        # A failure that was folded into an "ok" restatement still happened; the
-        # record must not quietly lose the fact that this task once did not finish.
-        if d.outcome == "incomplete" and d.what_failed and not new.what_failed:
-            new.what_failed = d.what_failed
+    # Note the field loop above is what carries a failed predecessor's what_failed
+    # into a later successful restatement, so folding a failure into an "ok" record
+    # keeps the warning. The merged record's OUTCOME stays the newer one's, though:
+    # the task did finish this time, and claiming otherwise would be a lie about
+    # the most recent run.
     new.merged += sum(1 + max(0, d.merged) for d in dupes)
 
 
@@ -412,7 +413,15 @@ class EpisodeStore:
             return []
         try:
             text = af.read_text(encoding="utf-8")
-        except (FileNotFoundError, PermissionError):
+        except FileNotFoundError:
+            return []                    # removed between the check and the read
+        except OSError as e:
+            # ABSENT and UNREADABLE are different things: returning [] silently
+            # here would tell the user "nothing was archived" when in fact their
+            # recovery copies exist and could not be read (rule 5).
+            from localm.debuglog import logger
+            logger.warning("episodic memory: archive exists but could not be read "
+                           "(%s); recovery list is INCOMPLETE", e)
             return []
         out: list = []
         for line in text.splitlines():
@@ -524,12 +533,20 @@ class EpisodeStore:
         ep.ts = time.time()
         self.add(ep, dedup=False)
         # It is live again, so it is no longer "forgotten": drop it from the
-        # archive rather than listing it in both places.
-        keep = [r for r in rows if r.get("id") != episode_id]
+        # archive rather than listing it in both places. Re-read the archive
+        # first - putting this record back can push the store over the cap, and
+        # add() archives whatever it evicted; rewriting from the pre-add snapshot
+        # would throw those brand-new recovery copies away.
+        keep = [r for r in self.forgotten() if r.get("id") != episode_id]
         try:
-            self.archive_path.write_text(
+            # temp + replace, like every other write here: a half-written archive
+            # would cost the user the rest of their recovery copies.
+            af = self.archive_path
+            tmp = af.with_name(af.name + ".tmp")
+            tmp.write_text(
                 "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep),
                 encoding="utf-8")
+            tmp.replace(af)
         except OSError as e:
             from localm.debuglog import logger
             logger.debug("episodic memory: archive rewrite after restore failed: %s", e)

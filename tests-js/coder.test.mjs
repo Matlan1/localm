@@ -138,3 +138,31 @@ test("CODER-EMPTY-MODEL: an assistant turn WITH text keeps its Model row", () =>
   window.handleCoderEvent(s, { type: "tool_call", tool: "grep", args: { pattern: "x" } });
   assert.match(feedEl.textContent, /Here is my analysis/, "a real text turn is preserved");
 });
+
+// D2: episodic recall used to be invisible in the GUI - the coder silently
+// prepended past lessons and nothing said which ones, so a lesson that steered a
+// run badly could not be spotted or removed. The run now reports what it recalled,
+// with the id `localcoder --forget-episode <id>` takes.
+test("CODER-EPISODES: recalled lessons render with the id needed to forget them", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "z" }, feedEl, liveBody: null, liveText: "", pendingCards: [] };
+  window.handleCoderEvent(s, {
+    type: "episodes_recalled",
+    episodes: [{ id: "ab12cd34ef56", outcome: "ok",
+                 lesson: "cap the upload timeout at 30s" }],
+  });
+  const row = feedEl.querySelector(".feed-info");
+  assert.ok(row, "a feed row was rendered");
+  assert.match(row.textContent, /Recalled 1 past lesson/);
+  assert.match(row.textContent, /cap the upload timeout at 30s/);
+  assert.match(row.textContent, /ab12cd34ef56/, "the id is shown so it can be forgotten");
+});
+
+test("CODER-EPISODES: an empty recall renders nothing (silence when irrelevant)", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "z" }, feedEl, liveBody: null, liveText: "", pendingCards: [] };
+  window.handleCoderEvent(s, { type: "episodes_recalled", episodes: [] });
+  assert.equal(feedEl.querySelector(".feed-info"), null, "no row for an empty recall");
+});
