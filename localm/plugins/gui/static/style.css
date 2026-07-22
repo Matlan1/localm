@@ -1055,6 +1055,16 @@ pre:hover .canvas-btn { opacity: 1; }
 
 /* Settings: a left section nav + a content area that shows one section (tab) at
    a time. Each core group and each plugin is its own section with its own Save. */
+/* The search box above the layout: filters every group at once. A matched field
+   stays in its section (so its context is visible) and its non-matching siblings
+   are dropped via .filter-hidden, which must beat the .settings-fields grid. */
+.settings-filter {
+  width: 100%; max-width: 420px; margin: 0 0 16px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text); font-size: 13.5px; padding: 8px 10px;
+}
+.settings-filter-empty { margin: 4px 0 0; }
+#settings-content .filter-hidden { display: none !important; }
 .settings-layout { display: flex; gap: 20px; align-items: flex-start; }
 .settings-nav {
   position: sticky; top: 12px; flex: 0 0 192px;
@@ -2159,6 +2169,8 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   #conversations { flex: 1 1 auto; min-height: 45vh; }
   .conv-item { min-height: 44px; padding: 10px 12px; font-size: 14px; }
   #conv-search { padding: 9px 11px; font-size: 16px; }  /* 16px: no iOS zoom-on-focus */
+  /* Same 16px rule for the settings search box, and full width on a phone. */
+  .settings-filter { max-width: none; padding: 9px 11px; font-size: 16px; }
 
   /* U7-PLUGIN-TABLE-MOBILE: a 4-column data table (plugin catalog, key list)
      overflows the narrow viewport. Stack each row as a card so the description

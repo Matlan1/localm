@@ -738,6 +738,109 @@ export function settingsSectionOf(field) {
   return { id: "core-" + field.group, label: field.group, plugin: false };
 }
 
+/* ================================================================ */
+/*  Settings search                                                  */
+/* ================================================================ */
+
+// One box over the WHOLE page. The form is ~80 schema fields plus the hand-built
+// rows, behind a 7-group nav, so finding a setting used to mean knowing (or
+// guessing) its group. With a query, matches from every group show at once, each
+// still inside its own section so you can see where a setting lives; clearing it
+// restores the ordinary one-group-at-a-time view.
+export let _settingsFilterQuery = "";
+
+/** Is this element invisible to the user right now? Gate-hidden content must not
+ *  be findable: the Main GPU / Split rows on a single-GPU box, the keys card for
+ *  a non-owner. Surfacing a control that is not offered would send the user
+ *  hunting through a card that then shows nothing. */
+function filterHiddenFromUser(node) {
+  return !!(node.hidden || (node.classList && node.classList.contains("sec-hidden"))
+    || (node.style && node.style.display === "none"));
+}
+
+/** The text of *root* for matching, skipping anything gate-hidden and, when
+ *  *skipFields* is set, the schema controls (each is indexed on its own). What
+ *  remains is the section's OWN text: its heading plus every hand-built row that
+ *  has no schema field behind it (Main GPU, Split across GPUs, the logo picker,
+ *  the key presets, the server buttons). Indexing those by EXCLUSION rather than
+ *  from a hand-listed set of custom rows is deliberate - a list goes stale, which
+ *  is exactly how three media settings ended up rendered nowhere (2026-07-22
+ *  settings-exposure audit); this way a row added later is searchable already. */
+function filterTextOf(root, skipFields, parts = []) {
+  for (const node of root.childNodes) {
+    if (node.nodeType === 3) { parts.push(node.nodeValue); continue; }   // text
+    if (node.nodeType !== 1) continue;                                    // element
+    if (filterHiddenFromUser(node)) continue;
+    if (skipFields && node.dataset && node.dataset.fieldKey) continue;
+    filterTextOf(node, skipFields, parts);
+  }
+  return parts;
+}
+
+/** Every term must appear (AND), case-insensitively, so "gpu split" narrows. */
+function filterMatches(text, terms) {
+  const hay = text.toLowerCase();
+  return terms.every((t) => hay.includes(t));
+}
+
+/** Apply the search box's current query to the whole page.
+ *
+ *  A section matches either through its own text (heading, hand-built rows), in
+ *  which case it is shown whole, or through individual schema fields, in which
+ *  case only those fields stay visible inside it. Sections that match are shown
+ *  regardless of group; gate-hidden ones never match. An empty query restores the
+ *  grouped view. */
+export function applySettingsFilter() {
+  const content = $("settings-content");
+  if (!content) return;
+  const note = $("settings-filter-empty");
+  const terms = _settingsFilterQuery.toLowerCase().split(/\s+/).filter(Boolean);
+
+  if (!terms.length) {
+    for (const n of content.querySelectorAll(".filter-hidden")) n.classList.remove("filter-hidden");
+    if (note) note.hidden = true;
+    buildSettingsNav();          // back to one group at a time
+    return;
+  }
+
+  let shown = 0;
+  for (const sec of content.querySelectorAll(".settings-section")) {
+    const gated = filterHiddenFromUser(sec);
+    const secText = filterTextOf(sec, true).join(" ") + " " + (sec.dataset.secLabel || "");
+    const secHit = !gated && filterMatches(secText, terms);
+    let fieldHits = 0;
+    for (const field of sec.querySelectorAll("[data-field-key]")) {
+      const hit = !gated && (secHit || filterMatches(
+        filterTextOf(field, false).join(" ") + " " + field.dataset.fieldKey, terms));
+      field.classList.toggle("filter-hidden", !hit);
+      if (hit) fieldHits += 1;
+    }
+    const show = !gated && (secHit || fieldHits > 0);
+    sec.classList.toggle("active", show);
+    if (show) shown += 1;
+  }
+
+  const nav = $("settings-nav");
+  if (nav) {
+    // Results span groups, so no single group is the selected one while filtering.
+    for (const link of nav.querySelectorAll(".settings-nav-link")) link.classList.remove("active");
+  }
+  if (note) {
+    note.textContent = shown ? "" : `No settings match "${_settingsFilterQuery.trim()}".`;
+    note.hidden = shown > 0;
+  }
+}
+
+/** Empty the search box and restore the grouped view (no-op when not filtering,
+ *  so an ordinary group click does not trigger a pointless nav rebuild). */
+export function clearSettingsFilter() {
+  const box = $("settings-filter");
+  if (box) box.value = "";
+  if (!_settingsFilterQuery) return;
+  _settingsFilterQuery = "";
+  applySettingsFilter();
+}
+
 /** Show one top-level GROUP: activate every section assigned to it and hide the
  *  rest, then highlight its nav link. Sections stay `.active` in DOM order, so a
  *  group renders its members stacked. Conditionally-hidden members (Updates/Issues
@@ -747,6 +850,10 @@ export function settingsSectionOf(field) {
 export function showSettingsGroup(groupId) {
   const content = $("settings-content");
   if (!content) return;
+  // While a search is live the page shows matches from every group at once. An
+  // async rebuild (the owner-only keys panel resolving, a post-save re-render)
+  // must not yank the user back to a single group mid-search.
+  if (_settingsFilterQuery) { applySettingsFilter(); return; }
   for (const sec of content.querySelectorAll(".settings-section")) {
     sec.classList.toggle("active", sectionTopGroup(sec) === groupId);
   }
@@ -770,6 +877,7 @@ export function gotoSettingsSection(secId) {
   const groupId = sec ? sectionTopGroup(sec)
     : (SETTINGS_GROUPS.some((g) => g.id === secId) ? secId : null);
   if (!groupId) return;
+  clearSettingsFilter();     // a deep link lands on a group, so leave the search
   _activeSettingsGroup = groupId;
   showSettingsGroup(groupId);
   if (sec && typeof sec.scrollIntoView === "function") {
@@ -806,7 +914,11 @@ export function buildSettingsNav() {
     link.dataset.target = g.id;
     link.appendChild(iconEl(meta.icon || "settings", "nav-ic"));
     link.appendChild(document.createTextNode(g.label));
-    link.onclick = () => { _activeSettingsGroup = g.id; showSettingsGroup(g.id); };
+    link.onclick = () => {
+      clearSettingsFilter();     // picking a group means leaving the search view
+      _activeSettingsGroup = g.id;
+      showSettingsGroup(g.id);
+    };
     nav.appendChild(link);
   }
   let target = null;
@@ -1486,6 +1598,19 @@ export function copyMediaFields(from, to) {
   const label = (_mediaSubs[from] || {}).label || from;
   toast(n ? `Copied ${n} field${n > 1 ? "s" : ""} from ${label} - review, then Save`
           : "No shared fields to copy", !n);
+}
+
+/** Wire the search box (top level, like the other page controls). Typing filters
+ *  live; Escape clears without leaving the page. */
+const _settingsFilterBox = $("settings-filter");
+if (_settingsFilterBox) {
+  _settingsFilterBox.addEventListener("input", () => {
+    _settingsFilterQuery = _settingsFilterBox.value || "";
+    applySettingsFilter();
+  });
+  _settingsFilterBox.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); clearSettingsFilter(); }
+  });
 }
 
 /** Save one media plugin's block: POST only the fields the user changed (so an
