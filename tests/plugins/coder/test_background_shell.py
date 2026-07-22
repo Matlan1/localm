@@ -608,7 +608,7 @@ def test_all_background_tools_are_unscoped():
         assert name in _INTENTIONALLY_UNSCOPED
 
 
-def test_starting_and_killing_are_gated_but_polling_is_not():
+def test_starting_and_killing_are_gated_but_polling_is_not(tmp_path):
     """The confirmation gate belongs on the capability, not on observing it.
 
     Starting a job is arbitrary code execution and killing one tears down a
@@ -616,11 +616,51 @@ def test_starting_and_killing_are_gated_but_polling_is_not():
     field and an output buffer: gating it would put a card in front of every poll
     of a running build, and an unattended run (where the gate fails closed) could
     start a job it could then never observe.
+
+    Drives the REAL dispatch gate rather than reading ToolDef.destructive back:
+    a flag assertion only restates the declaration and would still pass if
+    _execute_tool stopped consulting it. Every call is REJECTED, so the gate is
+    observed without starting or killing anything.
     """
-    from localm.plugins.coder.tools import TOOL_REGISTRY
-    assert TOOL_REGISTRY["run_shell_background"].destructive
-    assert TOOL_REGISTRY["kill_shell_job"].destructive
-    assert not TOOL_REGISTRY["check_shell_job"].destructive
+    from localm.plugins.coder.agent import Agent
+    from localm.plugins.coder.parser import ToolCall
+
+    class _StubBackend:
+        model_id = "stub-model"
+        native_tools = False
+
+        def set_tools(self, defs):
+            pass
+
+    asked: list = []
+
+    def _recording_confirm(call):
+        asked.append(call.name)
+        return False                      # reject: nothing may actually run
+
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=False,
+                  confirm_handler=_recording_confirm)
+
+    def _dispatch(name, **args):
+        return agent._execute_tool(
+            ToolCall(name=name, args=args, raw="", start=0, end=0),
+            interactive=False)
+
+    # Reading a job's status must reach the tool WITHOUT a confirmation.
+    res = _dispatch("check_shell_job", job_id="job_nonexistent")
+    assert asked == [], "polling a job asked for confirmation"
+    assert "Rejected by user" not in res.output
+    assert "job_nonexistent" in res.output   # it really ran and reported
+
+    # Starting and killing must BOTH be stopped at the gate.
+    started = _dispatch("run_shell_background", command="echo should-not-run")
+    assert asked == ["run_shell_background"]
+    assert "Rejected by user" in started.output
+    assert not get_registry().running(), "a rejected start still spawned a job"
+
+    killed = _dispatch("kill_shell_job", job_id="job_nonexistent")
+    assert asked == ["run_shell_background", "kill_shell_job"]
+    assert "Rejected by user" in killed.output
 
 
 def test_unattended_one_shot_gate_covers_the_background_variant():
