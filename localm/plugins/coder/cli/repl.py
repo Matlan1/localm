@@ -295,7 +295,8 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         # core noun (localcoder [TASK], run_task, --task). /bg matches the shell
         # mental model (jobs/bg/fg) and collides with neither.
         from ..background import get_registry
-        rows = get_registry().list_status()
+        registry = get_registry()
+        rows = registry.list_status()
         if not rows:
             print_info("No background work this session. Start some with "
                        "run_shell_background or spawn_agent_background.")
@@ -324,6 +325,25 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                     console.print(
                         f"  [cyan]{r['id']}[/cyan]  {r['kind']:<6} "
                         f"{r['label']}  {flag}{r['state']}{extra and ' - ' + extra}[/]")
+        # The table is bounded, so a long session outgrows it. Say what fell off -
+        # but say it per KIND, because the two do not mean the same thing and
+        # rendering both as an alarm would cry wolf on every long session.
+        dropped = dict(registry.dropped_undrained_by_kind)
+        lost_agents = dropped.pop("agent", 0)
+        if lost_agents:
+            # Real loss: absorption is drain-only, so an evicted sub-agent
+            # completion takes its summary, branch and diff with it.
+            print_warning(
+                f"{lost_agents} background sub-agent result(s) were discarded "
+                "before they could be collected, and are lost.")
+        other = sum(dropped.values())
+        if other:
+            # Not a silent loss: these are polled by id, and asking for an aged-out
+            # one answers "No background job with id ...", listing the ids that do
+            # exist. So this is housekeeping, reported as such.
+            print_info(
+                f"{other} older finished job(s) have aged out of the list "
+                "(it is capped per kind). Check a job before it ages out.")
 
     elif cmd == "compact":
         ratio = agent._fill_ratio()

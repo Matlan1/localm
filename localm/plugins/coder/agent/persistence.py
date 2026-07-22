@@ -148,7 +148,26 @@ class _PersistenceMixin:
         except Exception:
             return []
 
+        # Completions the registry had to evict before this drain reached them.
+        # From here they are indistinguishable from "nothing finished", so they
+        # must be SAID: absorption is drain-only, which makes an evicted child's
+        # summary, branch and diff unrecoverable.
+        #
+        # Deliberately its OWN try, AFTER the drain: drain_finished CONSUMES (it
+        # marks the batch drained), so folding this call into the same try would
+        # let a failure here discard completions that were already handed over -
+        # the exact silent loss this whole reporting path exists to prevent.
+        try:
+            lost = registry.take_dropped_undrained("agent")
+        except Exception:
+            lost = 0
+
         notes: list[str] = []
+        if lost:
+            notes.append(
+                f"WARNING: {lost} background sub-agent completion(s) were "
+                "discarded before this turn could collect them, so their "
+                "results are lost. Re-run that work if you still need it.")
         for st in finished:
             try:
                 job_id = st.get("id", "?")
