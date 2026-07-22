@@ -86,6 +86,20 @@ def _warn_unfinished_background(agent) -> None:
     except Exception:
         return
 
+    # Completions evicted before any drain saw them. Silence here would look
+    # exactly like "nothing else finished", which is the one thing this warning
+    # exists to prevent. Its OWN try, after the drain: drain_finished CONSUMES,
+    # so a failure folded into the same try would discard completions already
+    # handed over.
+    try:
+        lost = registry.take_dropped_undrained("agent")
+    except Exception:
+        lost = 0
+
+    if lost:
+        print_warning(
+            f"{lost} background sub-agent completion(s) were discarded before "
+            "they could be collected, so their results are lost.")
     for st in pending:
         branch = (st.get("result") or {}).get("branch")
         where = (f" Its work is committed on branch '{branch}'."

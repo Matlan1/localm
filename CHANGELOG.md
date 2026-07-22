@@ -52,6 +52,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is, and the coder still gets its attempts to fix it. Sessions in the app now
   also carry that third answer, so a finished task whose check never ran is
   labelled "not verified" rather than reading as a clean finish.
+- **A background job localm could not stop is no longer left behind in silence.**
+  Anything the coder started with `run_shell_background` is stopped when localm
+  exits rather than being orphaned, but a process that refuses to die (one stuck
+  in uninterruptible I/O, or running at a higher integrity level than localm) was
+  counted as stopped anyway and nothing was printed, so the promise held in the
+  report and not on the machine. Exit now names any job it could not stop, and
+  says up front that it is stopping background jobs, so the pause while it tries
+  no longer looks like a hang.
+- **A finished background sub-agent's result is no longer discarded because
+  unrelated shell commands finished.** localm keeps a bounded list of completed
+  background work, and background sub-agents and background shell commands shared
+  one budget. Shell results are kept until you ask for them, so in a long session
+  they filled that budget and pushed out a sub-agent's finished result before the
+  coder collected it, losing its summary, its branch and its diff for good. Each
+  kind of background work now has its own budget, so one can never crowd out the
+  other, and if a result is ever dropped uncollected, the coder and `/bg` say so
+  instead of leaving it looking like nothing had finished.
+- **Stopping a background job now says what it could not confirm.** Killing a job
+  is meant to take down its whole process tree, but only the job's own process was
+  ever checked, so a build tool or dev server that passed the signal to a child
+  which then ignored it was reported as fully stopped while that child kept
+  running and holding its port. Survivors are now detected and stopped, and
+  anything still alive is named in the result; on an install without psutil,
+  where they cannot be detected at all, the result says the tree could not be
+  verified rather than implying it is clean. On Windows, a failure of the
+  underlying `taskkill` was discarded entirely; it is now reported and falls
+  through to the backup kill, matching what the other platforms already did.
+  Checking a job also no longer reports a job as running and as failed at the same
+  time when it happens to finish mid-check.
 - **The coder's forgotten-lessons archive no longer reports "nothing here" when
   it simply could not be read.** `localm coder --episodes-archive` printed "No
   dropped episodes archived for this project", and `--restore-episode ID` printed
