@@ -4,16 +4,21 @@ import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
 // The schema still carries the comfy_* media keys (group "Media"), but the
-// settings form must SKIP them - they are edited in the Media section instead,
-// per-plugin, via /v1/media/config.
+// settings form must SKIP the per-plugin-mapped ones (media_per_plugin, the
+// server-side MEDIA_PLUGIN_FIELDS annotation) - they are edited in the Media
+// section instead, per-plugin, via /v1/media/config. An UN-annotated Media
+// field renders in the Media section's Shared box instead (fail-open; see
+// media-shared-settings.test.mjs), so this fixture mirrors the real
+// schema_json contract: mapped keys carry media_per_plugin: true.
 const SCHEMA = {
   fields: [
     { key: "n_ctx", widget: "number", label: "Context window", help: "",
       group: "Engine", owner: "core", min: 512, step: 512, default: 4096 },
     { key: "comfy_workdir", widget: "folder", label: "ComfyUI folder", help: "",
-      group: "Media", owner: "image", default: "/shared" },
+      group: "Media", owner: "image", default: "/shared", media_per_plugin: true },
     { key: "comfy_delete_outputs", widget: "toggle", label: "Remove copy",
-      help: "", group: "Media", owner: "image", default: false },
+      help: "", group: "Media", owner: "image", default: false,
+      media_per_plugin: true },
   ],
 };
 

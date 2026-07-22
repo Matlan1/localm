@@ -72,7 +72,7 @@
 // controls a multi-GPU box owns.
 // v68: knowledge.js changed (reindex-needed badge fix + gpu_fallback_reason
 // surfacing) - bump so an already-installed PWA picks up the new bytes.
-const CACHE = "localm-shell-v70";
+const CACHE = "localm-shell-v71";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

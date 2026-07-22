@@ -561,6 +561,22 @@ CORE_FIELDS: list = [
                  "one's settings below.",
                  group="Media", owner="image", options=["own", "user"],
                  applies=Applies.RESTART),
+    # The GLOBAL fallback behind the per-plugin "Model weight dtype" Media
+    # field (MEDIA_PLUGIN_FIELDS "float_type"): the music/video backends read
+    # the plugin block's value, else this key. It existed only as that
+    # documented read until 2026-07-22 - absent from DEFAULT_CONFIG and this
+    # schema, so the validated PATCH/CLI paths REJECTED it and the fallback
+    # was hand-edit-only. Options must stay identical to the per-plugin
+    # field's (pinned by a test). Not rendered anywhere itself: like every
+    # per-plugin-mapped comfy_* global, the GUI edits the per-plugin values
+    # (schema_json's media_per_plugin annotation routes it away from the
+    # Media section's shared box).
+    SettingField("comfy_float_type", Widget.SELECT, "Media weight dtype (shared)",
+                 "Shared fallback for the per-plugin 'Model weight dtype' "
+                 "Media setting. Blank inherits the workflow default.",
+                 group="Media", owner="image",
+                 options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn",
+                          "fp8_e5m2"]),
     # ---- Network (web plugin) ----
     SettingField("net_mode", Widget.SELECT, "Network access",
                  "Model-initiated web access: off = blocked (all requests fail); "
@@ -895,11 +911,22 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
     ``binary_dir`` resolves one (the bundled llama.cpp runtime)."""
     from localm.config import DEFAULT_CONFIG
     base = DEFAULT_CONFIG if values is None else values
+    # The GUI's Media section skips group="Media" fields in the flat form and
+    # shows per-plugin-mapped globals ONLY inside the per-plugin boxes, so it
+    # must be able to tell which those are FROM THE SCHEMA - a client-side
+    # name allowlist is exactly how three Media fields (comfy_launch_timeout,
+    # comfy_disable_auto_launch, comfy_func_shim) ended up rendered nowhere
+    # (2026-07-22 settings-exposure audit). MEDIA_PLUGIN_FIELDS is the single
+    # source of truth; every OTHER Media field renders in the section's
+    # shared box by default, so a future field cannot silently vanish.
+    media_mapped = {m.global_key for m in MEDIA_PLUGIN_FIELDS}
     out = []
     for f in CORE_FIELDS:
         if f.admin_only and not is_owner:
             continue
         d = f.to_json()
+        if f.group == "Media":
+            d["media_per_plugin"] = f.key in media_mapped
         if not f.secret and f.key in base:
             d["default"] = base[f.key]
         if f.key == "binary_dir":
