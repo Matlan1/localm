@@ -228,6 +228,10 @@ class Agent(
         if self.restricted:
             self._apply_restricted_toolset()
 
+        # After the toolset is final: tell the user, once, if their --scope does
+        # not mean what they almost certainly think it means.
+        self._notify_scope_does_not_confine_shell()
+
         # Single source of truth for the system prompt (see _rebuild_system_prompt);
         # every later rebuild goes through the same helper so the kwargs - notably
         # the COMBINED mcp+plugin+skill tool docs - cannot drift.
@@ -365,6 +369,37 @@ class Agent(
                 )
         except Exception as e:
             print_warning(f"Skill setup failed: {e}")
+
+    def _notify_scope_does_not_confine_shell(self) -> None:
+        """Once per session: say plainly that an active scope does not confine the
+        shell tools, when any of them is actually enabled.
+
+        ``--scope`` reads as "this session can only touch these files", and for
+        every file tool it is exactly that. run_shell / run_tests execute a
+        process, which no path-arg check can confine, so they are deliberately
+        left out (_INTENTIONALLY_UNSCOPED). That decision is sound and stays; what
+        was wrong is that it lived only in a source comment, so a user running
+        under --scope got no runtime signal and could reasonably believe a
+        confinement they did not have. Silence about a safety property that does
+        not hold is the failure mode AGENTS.md rule 5 exists to prevent."""
+        print_warning = _agent.print_warning
+        if not self.scope:
+            return
+        if self.parent is not None:
+            return    # a sub-agent is not a separate session: the parent already said it
+        from .constants import _SHELL_UNSCOPED_TOOLS
+        enabled = sorted(_SHELL_UNSCOPED_TOOLS - set(self.disabled_tools))
+        if not enabled:
+            return    # e.g. a restricted session: no shell at all, so nothing to warn about
+        msg = (
+            f"scope '{self.scope}' confines the file tools only. "
+            f"{'/'.join(enabled)} execute a process, which a path check cannot "
+            "confine, so a command can still read and write outside the scope. "
+            "Disable them for a hard boundary."
+        )
+        print_warning(msg)
+        self._emit("info", text=msg)
+        self._audit.notice("scope_shell_unconfined", msg)
 
     def _apply_restricted_toolset(self) -> None:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY

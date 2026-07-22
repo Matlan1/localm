@@ -150,6 +150,9 @@ class NullAuditLog:
     def tool_result(self, name: str, ok: bool, summary: str) -> None:
         pass
 
+    def notice(self, kind: str, message: str) -> None:
+        pass
+
     def close(self) -> None:
         pass
 
@@ -218,6 +221,15 @@ class AuditLog:
 
     def tool_result(self, name: str, ok: bool, summary: str) -> None:
         self._write("tool_result", {"name": name, "ok": ok, "summary": summary[:200]})
+
+    def notice(self, kind: str, message: str) -> None:
+        """Record a session-level condition that is neither a turn nor a tool call.
+
+        The trail could previously only describe user/llm/tool events, so a
+        safety-relevant condition with no tool behind it (a self-review that
+        crashed, a scope that does not confine shell execution) had nowhere to be
+        recorded and went unlogged. ``kind`` groups them for later reading."""
+        self._write("notice", {"kind": kind, "message": str(message)[:500]})
 
     def close(self) -> None:
         try:

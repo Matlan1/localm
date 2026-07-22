@@ -37,6 +37,25 @@ _INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
     "run_shell", "run_tests", "git_diff", "git_log",
 })
 
+# The subset of _INTENTIONALLY_UNSCOPED that EXECUTES a process, and so is the
+# part a user who set --scope can be genuinely misled by: git_diff / git_log only
+# read. The trade-off itself is deliberate and stays (a path-arg check cannot
+# confine arbitrary code), but it used to be documented ONLY here, in the source -
+# a user running under --scope had no runtime signal at all that their shell was
+# unconfined. These tools get a one-per-session notice plus a best-effort argv
+# path check (see _ExecutionMixin._warn_shell_outside_scope). Warn, never block.
+_SHELL_UNSCOPED_TOOLS: frozenset[str] = frozenset({"run_shell", "run_tests"})
+
+# Args of the shell tools that can carry a path. run_shell has a whole command
+# line to tokenise; run_tests takes a target path plus free-form extra args.
+_SHELL_COMMAND_ARGS: dict[str, tuple[str, ...]] = {
+    "run_shell": ("command",),
+    "run_tests": ("path", "extra_args"),
+}
+
+# How many out-of-scope paths one warning names before it says "and N more".
+_MAX_SHELL_SCOPE_FLAGS = 3
+
 # For each scoped tool, the arg names holding a path/glob to enforce scope against.
 # Any present arg outside the scope rejects the call (order only sets which value is
 # reported first). Tools default to "path"; entries here add/replace the real target.
