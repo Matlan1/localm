@@ -270,6 +270,17 @@ class _ExecutionMixin:
                 try:
                     # posix=False keeps Windows backslashes intact; quotes survive
                     # as part of the token and are stripped below.
+                    #
+                    # Deliberately NOT tools/shell.py:_split_command, which is what
+                    # actually EXECUTES the command. posix=False honours a quote
+                    # only where one opens a token, so a quoted path containing
+                    # spaces arrives here as fragments. The warning still fires on
+                    # it (every fragment is checked, and a path reaching out of the
+                    # workspace is out of scope in pieces too); it can just name a
+                    # fragment. Kept as is on purpose: this is a lexical
+                    # best-effort warning that blocks nothing, and its tokenising
+                    # is what the false-positive classes fixed in #800 and #802
+                    # were tuned around.
                     tokens = shlex.split(text, posix=False)
                 except ValueError:
                     # Unbalanced quotes: fall back to whitespace splitting rather

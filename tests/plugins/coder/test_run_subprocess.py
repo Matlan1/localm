@@ -51,20 +51,41 @@ class TestArgvMode:
 class TestShellWrapMode:
     def test_wraps_command_string_through_platform_shell(self, tmp_path):
         import sys
-        captured = []
+        captured = {}
 
         def fake_run(argv, **kwargs):
-            captured.extend(argv)
+            captured["argv"] = argv
             return _make_proc()
 
         with patch(_RUN, side_effect=fake_run):
             run_subprocess("echo hi && echo bye", tmp_path, timeout=10, shell_wrap=True)
 
+        launched = captured["argv"]
         if sys.platform == "win32":
-            assert captured[0] == "cmd" and captured[1] == "/C"
+            # A raw command line, not ["cmd", "/C", command]: an argv list is
+            # rendered by list2cmdline, whose MSVCRT-style \" escaping cmd.exe
+            # misreads, which broke every quoted path. See base.platform_shell.
+            assert launched == "cmd /C echo hi && echo bye"
         else:
-            assert captured[0] == "/bin/sh" and captured[1] == "-c"
-        assert captured[-1] == "echo hi && echo bye"
+            assert launched[0] == "/bin/sh" and launched[1] == "-c"
+            assert launched[-1] == "echo hi && echo bye"
+
+    def test_shell_wrap_passes_a_quoted_argument_through_unchanged(self, tmp_path):
+        """The command text must reach the shell verbatim - re-quoting it is
+        exactly the defect this wrapping was fixed for."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return _make_proc()
+
+        command = 'type "a dir with spaces/f.txt"'
+        with patch(_RUN, side_effect=fake_run):
+            run_subprocess(command, tmp_path, timeout=10, shell_wrap=True)
+
+        launched = captured["argv"]
+        tail = launched if isinstance(launched, str) else launched[-1]
+        assert tail.endswith(command), tail
 
     def test_default_does_not_shell_wrap(self, tmp_path):
         captured = []

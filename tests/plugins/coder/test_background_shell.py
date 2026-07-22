@@ -522,12 +522,17 @@ def test_background_uses_the_same_argv_routing_as_run_shell(tmp_path, monkeypatc
     assert seen["argv"] == [plain], seen["argv"]
     assert seen["argv"] == _shell_argv(plain), "diverged from run_shell's routing"
 
-    # Shell metacharacters -> the platform shell, same as run_shell.
+    # Shell metacharacters -> the platform shell, same as run_shell. The launch
+    # form differs by platform on purpose: a raw command-line STRING on Windows,
+    # an argv list on POSIX (see tools/base.py:platform_shell), so compare
+    # against _shell_argv rather than assuming a list here.
     piped = f"{plain} | more" if sys.platform == "win32" else f"{plain} | cat"
     res2 = tool_run_shell_background(tmp_path, piped)
     assert res2.ok, res2.output
     assert seen["argv"] == _shell_argv(piped)
-    assert seen["argv"][0] in ("cmd", "/bin/sh")
+    launched = seen["argv"]
+    first = launched.split()[0] if isinstance(launched, str) else launched[0]
+    assert first in ("cmd", "/bin/sh")
 
 
 def test_background_and_blocking_shell_share_one_routing_function():

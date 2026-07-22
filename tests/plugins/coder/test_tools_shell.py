@@ -5,7 +5,6 @@ Tests for shell and test-runner tools in localm.plugins.coder.tools:
 """
 
 import subprocess
-import sys
 from unittest.mock import patch, MagicMock
 
 from localm.plugins.coder.tools import (
@@ -14,6 +13,17 @@ from localm.plugins.coder.tools import (
     _detect_test_runner,
     _needs_shell,
 )
+
+
+def _launcher(launched) -> str:
+    """The program *launched* actually starts.
+
+    The platform shell's launch form differs on purpose: POSIX gets an argv list
+    (execv receives it verbatim), Windows a raw command-line STRING, because an
+    argv list is re-quoted by list2cmdline in syntax cmd.exe misreads. See
+    tools/base.py:platform_shell.
+    """
+    return launched.split()[0] if isinstance(launched, str) else launched[0]
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +124,10 @@ class TestRunShell:
     def test_shell_builtin_routed_through_shell(self, tmp_path):
         """echo/dir/type have no executable on disk - must use the shell,
         otherwise argument-list mode fails with 'file not found'."""
-        captured_cmd = []
+        captured = {}
 
         def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
+            captured["cmd"] = cmd
             return self._make_proc(stdout="hi\n")
 
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run), \
@@ -125,24 +135,25 @@ class TestRunShell:
             r = tool_run_shell(tmp_path, "echo hi")
 
         assert r.ok
-        assert captured_cmd[0] in ("cmd", "/bin/sh")
+        assert _launcher(captured["cmd"]) in ("cmd", "/bin/sh"), captured["cmd"]
 
     def test_pipe_uses_shell(self, tmp_path):
         """Commands with pipe operators are routed through the system shell."""
-        captured_cmd = []
+        captured = {}
 
         def fake_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
+            captured["cmd"] = cmd
             return self._make_proc(stdout="")
 
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
             tool_run_shell(tmp_path, "echo hi | cat")
 
-        if sys.platform == "win32":
-            assert captured_cmd[0].lower().endswith("cmd.exe") or "cmd" in captured_cmd[0].lower()
-        else:
-            assert captured_cmd[0] == "/bin/sh"
-            assert "-c" in captured_cmd
+        launched = captured["cmd"]
+        assert _launcher(launched) in ("cmd", "/bin/sh"), launched
+        # The command text must reach the shell UNCHANGED - re-quoting it is the
+        # defect that made a quoted path unopenable.
+        tail = launched if isinstance(launched, str) else launched[-1]
+        assert tail.endswith("echo hi | cat"), tail
 
 
 # ---------------------------------------------------------------------------

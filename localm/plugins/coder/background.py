@@ -451,17 +451,20 @@ class BackgroundJob:
 class ShellJob(BackgroundJob):
     """A background OS process with its stdout/stderr drained into ring buffers.
 
-    *argv* is an already-routed argument list - the caller decides shell vs
+    *argv* is an already-routed launch form - the caller decides shell vs
     argument-list mode (``tools/shell.py:_shell_argv``), so the background path
     and the blocking ``run_shell`` path make that security decision in exactly
-    one place.
+    one place. Usually an argument list; a STRING is the Windows shell route's
+    raw command line, which ``CreateProcess`` receives verbatim (an argv list
+    would be re-quoted by ``list2cmdline`` in syntax cmd.exe misreads - see
+    ``tools/base.py:platform_shell``).
 
     Its opaque result payload is ``{"exit_code": int}``.
     """
 
     kind = "shell"
 
-    def __init__(self, argv: list, cwd: Path, *, label: str,
+    def __init__(self, argv: list | str, cwd: Path, *, label: str,
                  env: Optional[dict] = None,
                  max_chars: int = _RING_MAX_CHARS) -> None:
         super().__init__(label)
