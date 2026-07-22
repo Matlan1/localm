@@ -31,15 +31,54 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
 import localm.rag.collection_lock as cl
 from localm.rag import Collection, CollectionLockedError, collection_names
 from localm.rag.collection_lock import collection_write_lock, lock_path_for
+
+
+@pytest.fixture
+def heavy_slot():
+    """Let only ONE subprocess-heavy test in this file run at a time, across all
+    xdist workers.
+
+    These tests start real Python interpreters, which is the whole point of them
+    - but four such tests landing on different workers at once measurably starved
+    a neighbour: tests/test_config_cross_process_lock.py's two writers exceeded
+    the product's own 10 s lock budget and the run went red. Measured, not
+    guessed: the same command without this file passed 69/69, and with it 5
+    failed. Serialising our own heavy tests keeps the cost to this file instead
+    of taxing whatever else the scheduler happens to run alongside it.
+
+    A plain O_EXCL file, because it has to work across PROCESSES (xdist workers
+    are separate interpreters, so a threading lock would not be seen) and under
+    a bare `-n auto` with no --dist loadgroup. The slot is force-taken if a
+    crashed test ever leaves it behind, so this convenience lock can never wedge
+    a suite run."""
+    slot = Path(tempfile.gettempdir()) / "localm-rag-collection-lock-heavy.slot"
+    deadline = time.time() + 240
+    while True:
+        try:
+            os.close(os.open(str(slot), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            if time.time() > deadline:
+                break             # a leftover slot must never block the suite
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            slot.unlink()
+        except OSError:
+            pass
 
 
 @pytest.fixture
@@ -127,7 +166,11 @@ coll.create()
 coll.add_paths([doc])
 """
 
-_RACE_DELAY = 1.0
+# Long enough to swamp the residual skew the rendezvous leaves (milliseconds),
+# short enough that four real interpreters are not held on the box any longer
+# than the race needs. Measured: at 1.0s this file's subprocesses starved a
+# neighbouring test whose own lock budget is 10s.
+_RACE_DELAY = 0.5
 
 
 def _race_two_writers(tmp_path, base, docs, name, *, neuter: bool):
@@ -156,7 +199,8 @@ def _race_two_writers(tmp_path, base, docs, name, *, neuter: bool):
     return {os.path.basename(k) for k in meta.get("docs", {})}
 
 
-def test_two_processes_indexing_one_collection_lose_nothing(tmp_path, base, docs):
+def test_two_processes_indexing_one_collection_lose_nothing(heavy_slot, tmp_path,
+                                                            base, docs):
     """The headline case: `localm rag add` in its own process racing another
     localm process on the SAME collection. Both documents must survive."""
     survived = _race_two_writers(tmp_path, base, docs, "kb", neuter=False)
@@ -164,7 +208,8 @@ def test_two_processes_indexing_one_collection_lose_nothing(tmp_path, base, docs
         f"a concurrent index from a SEPARATE OS process was lost: {survived}")
 
 
-def test_the_two_process_harness_does_catch_a_lost_update(tmp_path, base, docs):
+def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path,
+                                                          base, docs):
     """FIRES-CONTROL for the test above.
 
     Same two processes, same timing, with the cross-process lock neutralised in
@@ -480,7 +525,7 @@ def _run_cli(args, home, *, wait: str = "0.5"):
         env=env, capture_output=True, text=True, timeout=180)
 
 
-def test_cli_waits_then_refuses_naming_the_holder(tmp_path, docs):
+def test_cli_waits_then_refuses_naming_the_holder(heavy_slot, tmp_path, docs):
     """`localm rag resync` against a collection another process is writing must
     WAIT (and say so), then REFUSE with a message naming the holder and a
     non-zero exit - never block for ever, never interleave silently."""
@@ -512,7 +557,7 @@ def test_cli_waits_then_refuses_naming_the_holder(tmp_path, docs):
         "the refused CLI run still modified the collection")
 
 
-def test_cli_succeeds_once_the_holder_releases(tmp_path, docs):
+def test_cli_succeeds_once_the_holder_releases(heavy_slot, tmp_path, docs):
     """The other half of the bounded wait: a CLI that waits out a SHORT hold
     goes on to do its work. A lock that only ever refuses would be useless."""
     home = tmp_path / "home"

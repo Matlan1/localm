@@ -130,6 +130,11 @@ def test_a_full_rebuild_clears_the_degrade_but_keeps_the_evidence(base, docs):
     user to run it is a dead end (that is X12's real complaint). A COMPLETE index
     is the all-clear; the preserved bytes stay on disk regardless."""
     coll = _degrade_it(base, docs)
+    # A re-sync that indexes NOTHING deliberately does not rewrite anything (that
+    # is #795's other half), so it never reaches _save and never quarantines.
+    # Change a file, so this run really does write.
+    (docs / "a.txt").write_text("alpha turbines maintenance, revised",
+                                encoding="utf-8")
     coll.resync(embed_fn=None, policy=None)               # quarantines
     assert _sidecars(base)
 
@@ -152,7 +157,7 @@ def test_emptying_a_collection_does_not_pin_an_unclearable_degrade(base, docs):
     so a sidecar kept here could never be cleared by any means the product
     offers."""
     coll = _degrade_it(base, docs)
-    coll.remove_doc(next(iter(coll.docs()))["source"])     # chunks remain
+    coll.remove_doc(coll.documents()[0])                   # chunks remain
     assert _sidecars(base), "setup: the first removal should have quarantined"
 
     for d in list(coll.documents()):
@@ -169,6 +174,8 @@ def test_a_second_quarantine_does_not_destroy_the_first_copy(base, docs):
     name meant incident two destroyed incident one's preserved bytes while the
     log asserted "Nothing was deleted" - data loss plus a false safety claim."""
     coll = _degrade_it(base, docs)
+    (docs / "a.txt").write_text("alpha turbines maintenance, revised",
+                                encoding="utf-8")          # so the run really writes
     coll.resync(embed_fn=None, policy=None)
     first = sorted((base / "kb").glob("vectors.json.rejected*"))[0]
     first.write_text("FIRST-COPY", encoding="utf-8")
@@ -199,6 +206,12 @@ def test_the_scheduled_job_reports_the_degrade_it_would_have_hidden(base, docs,
     rag = tmp_path / "rag"
     monkeypatch.setattr("localm.rag.store.rag_dir", lambda: rag)
     monkeypatch.setattr(runner, "_rag_embed_fn", lambda: _embed)
+    # The scheduled path confines indexing to the owner's allowed folders, and a
+    # pytest tmp dir is outside them - which would block the root and make this
+    # run index nothing, so it would pass for the wrong reason (it did: the
+    # degrade was reported off the LOAD while no re-index ever happened).
+    # Confinement has its own tests; this one is about what the run REPORTS.
+    monkeypatch.setattr("localm.rag.store.indexing_policy", lambda: None)
     _degrade_it(rag, docs)
     (docs / "a.txt").write_text("alpha turbines maintenance, revised",
                                 encoding="utf-8")
