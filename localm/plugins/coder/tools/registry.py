@@ -73,6 +73,17 @@ SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def _spawn_role_help() -> str:
+    """The spawn_agent ``role`` parameter description, built from the presets so
+    the tool schema cannot drift out of step with the roles that actually exist."""
+    from ..roles import role_catalogue
+    return (
+        "Optional role preset giving the sub-agent a focused mission and a "
+        "narrowed toolset (it can never exceed your own). One of: "
+        f"{role_catalogue()}. Omit to give it your full toolset."
+    )
+
+
 TOOL_REGISTRY: dict[str, ToolDef] = {
     "read_file": ToolDef(
         name="read_file",
@@ -287,6 +298,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "files":     {"type": "array",  "description": "Files to pre-load into sub-agent (the call fails if one cannot be read)", "required": False},
             "model":     {"type": "string", "description": "Override model for sub-agent",      "required": False},
             "max_turns": {"type": "int",    "description": "Max iterations (default 10)",       "required": False},
+            "role":      {"type": "string", "description": _spawn_role_help(),                  "required": False},
         },
         # A child agent runs write_file/run_shell/git_* of its own in the PARENT's
         # cwd, so spawn_agent is at least as destructive as the tools it grants.

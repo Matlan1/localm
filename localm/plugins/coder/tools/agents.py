@@ -54,6 +54,7 @@ def tool_spawn_agent(
     files: Optional[list] = None,
     model: Optional[str] = None,
     max_turns: int = 10,
+    role: Optional[str] = None,
     _parent_agent: Optional[Any] = None,
 ) -> ToolResult:
     """
@@ -63,10 +64,25 @@ def tool_spawn_agent(
     gets ``files`` pre-loaded into its first user message, and runs until
     it produces a final answer or ``max_turns`` is reached.
 
+    ``role`` selects a preset (reviewer / researcher / test-writer) that gives the
+    child a focused mission AND narrows its toolset to that role's allowlist. The
+    narrowing is strictly subtractive on top of everything the parent already
+    forbids, so a role can only ever remove capability (see roles.py). Without a
+    role the child keeps the parent's full toolset, as before.
+
     Returns the child agent's final response as a string.
     """
     if _parent_agent is None:
         return ToolResult.error("spawn_agent requires a running parent agent")
+
+    # Validate before any work: an unknown role must not quietly fall back to a
+    # full-capability child, which is the exact over-capable delegate roles exist
+    # to prevent. Report the valid names so the model can retry.
+    from ..roles import resolve_role
+    try:
+        resolve_role(role)
+    except ValueError as exc:
+        return ToolResult.error(f"spawn_agent: {exc}")
 
     from ..agent import Agent
 
@@ -143,6 +159,10 @@ def tool_spawn_agent(
         restricted=getattr(_parent_agent, "restricted", False),
         disabled_tools=getattr(_parent_agent, "disabled_tools", frozenset()),
         scope=getattr(_parent_agent, "scope", None),
+        # Narrows FURTHER still: the role's allowlist is subtracted from the live
+        # registry on top of the inherited disabled set, never in place of it, so
+        # this line can only ever take capability away from the child.
+        role=role,
     )
     result_text = child.run_task(full_task)
     turns_used  = child.turns
