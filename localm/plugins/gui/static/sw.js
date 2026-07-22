@@ -72,7 +72,10 @@
 // controls a multi-GPU box owns.
 // v68: knowledge.js changed (reindex-needed badge fix + gpu_fallback_reason
 // surfacing) - bump so an already-installed PWA picks up the new bytes.
-const CACHE = "localm-shell-v72";
+// v73: knowledge.js now surfaces documents a folder re-sync found missing from
+// disk (flagged, not deleted) - a stale-cached client would show the collection
+// as fully healthy while part of its index no longer matches the filesystem.
+const CACHE = "localm-shell-v73";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

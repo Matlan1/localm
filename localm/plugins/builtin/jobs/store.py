@@ -41,7 +41,7 @@ _STORE_LOCK = threading.RLock()
 
 # Task kinds and schedule kinds the store accepts. Kept here (not in the
 # scheduler) so the store can validate a job def before it is ever persisted.
-TASK_KINDS = ("chat", "coder", "memory")
+TASK_KINDS = ("chat", "coder", "memory", "rag")
 SCHEDULE_KINDS = ("interval", "cron")
 
 # A job id is a short opaque token; we also accept any string but confine it to
@@ -58,6 +58,8 @@ class Job:
                                  ("minute hour dom month dow").
     task_kind == "chat":  run ``prompt`` against the inference engine.
     task_kind == "coder": run a coder agent for ``prompt`` in ``cwd``.
+    task_kind == "rag":   re-sync the RAG ``collection`` against the folders it
+                          was indexed from (no prompt, no chat model).
     """
 
     name: str
@@ -68,6 +70,8 @@ class Job:
     model: Optional[str] = None
     cwd: Optional[str] = None
     scope: Optional[str] = None        # coder file-access glob, optional
+    # rag jobs: the knowledge collection to re-sync.
+    collection: Optional[str] = None
     # Coder jobs run RESTRICTED by default (read + confined edit, no shell, no
     # network, no sub-agents) so an unattended run that ingests hostile content
     # cannot be steered into run_shell (indirect prompt-injection -> RCE). The
@@ -131,11 +135,21 @@ class Job:
             if not isinstance(self.schedule, str) or not self.schedule.strip():
                 raise ValueError("cron schedule must be a 5-field cron string")
             validate_cron(self.schedule)        # raises ValueError on a bad field
-        # memory jobs synthesise from session logs and need no user prompt.
-        if self.task_kind != "memory" and not str(self.prompt).strip():
+        # memory jobs synthesise from session logs and rag jobs re-walk indexed
+        # folders: both are fully specified without a user prompt.
+        if self.task_kind not in ("memory", "rag") and not str(self.prompt).strip():
             raise ValueError("prompt is required")
         if self.task_kind == "coder" and not (self.cwd and str(self.cwd).strip()):
             raise ValueError("coder jobs require a cwd")
+        if self.task_kind == "rag":
+            if not (self.collection and str(self.collection).strip()):
+                raise ValueError("rag jobs require a collection")
+            # Validate the NAME here (not just at run time) so a typo is refused
+            # when the job is created, instead of failing silently on every
+            # unattended tick. Existence is not checked: a collection may be
+            # created after the schedule, and the runner reports a missing one.
+            from localm.rag.store import check_collection_name
+            self.collection = check_collection_name(str(self.collection).strip())
 
     def to_dict(self) -> dict:
         return asdict(self)

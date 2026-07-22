@@ -4,6 +4,7 @@
 Subcommands:
   localm job add NAME --prompt "..." [--cron "..." | --every SECONDS]
                                      [--coder --cwd DIR --scope GLOB --allow-shell]
+                                     [--rag --collection NAME]
                                      [--model M] [--disabled]
   localm job list
   localm job run JOB_ID              run a job once now (records a result)
@@ -45,6 +46,12 @@ def _store():
 @click.option("--memory", "memory", is_flag=True, default=False,
               help="Synthesise durable facts from recent sessions into the "
                    "assistant memory (no prompt needed).")
+@click.option("--rag", "rag", is_flag=True, default=False,
+              help="Re-sync a knowledge collection against the folders it was "
+                   "indexed from, picking up files added or changed since "
+                   "(needs --collection, no prompt).")
+@click.option("--collection", default=None,
+              help="The knowledge collection a --rag job re-syncs.")
 @click.option("--cwd", default=None, help="Working directory for a coder job.")
 @click.option("--scope", default=None, help="File-access glob for a coder job.")
 @click.option("--allow-shell", "allow_shell", is_flag=True, default=False,
@@ -55,13 +62,15 @@ def _store():
 @click.option("--model", default=None, help="Model to run the job with.")
 @click.option("--disabled", is_flag=True, default=False,
               help="Create the job disabled (it will not run until enabled).")
-def job_add(name, prompt, cron, every, coder, memory, cwd, scope, allow_shell,
-            model, disabled):
+def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
+            scope, allow_shell, model, disabled):
     """Add a new scheduled job."""
     from localm.plugins.builtin.jobs.store import Job
 
-    if coder and memory:
-        click.echo("Use either --coder or --memory, not both.", err=True)
+    picked = [f for f, on in (("--coder", coder), ("--memory", memory),
+                              ("--rag", rag)) if on]
+    if len(picked) > 1:
+        click.echo(f"Use only one of {', '.join(picked)}.", err=True)
         sys.exit(1)
     if cron and every is not None:
         click.echo("Use either --cron or --every, not both.", err=True)
@@ -73,15 +82,22 @@ def job_add(name, prompt, cron, every, coder, memory, cwd, scope, allow_shell,
     else:
         schedule_kind, schedule = "interval", int(every)
     try:
+        kind = "chat"
+        for flag, kind_name in ((memory, "memory"), (coder, "coder"),
+                                (rag, "rag")):
+            if flag:
+                kind = kind_name
+                break
         job = Job(
             name=name,
-            task_kind="memory" if memory else ("coder" if coder else "chat"),
+            task_kind=kind,
             prompt=prompt or "",
             schedule_kind=schedule_kind,
             schedule=schedule,
             model=model,
             cwd=cwd,
             scope=scope,
+            collection=collection,
             allow_shell=allow_shell,
             enabled=not disabled,
         )

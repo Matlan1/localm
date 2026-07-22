@@ -215,8 +215,17 @@ otherwise it uses your own ComfyUI.
 localm rag add NAME PATH...      # index files/folders into a collection
 localm rag list                  # collections with doc/chunk counts
 localm rag query NAME "text"     # show the top matching excerpts
+localm rag resync NAME           # re-walk the indexed folders: pick up new and
+                                 # changed files, flag ones that have vanished
+localm rag repair NAME           # re-index every known document from scratch
 localm rag rm NAME [--yes]       # delete a collection (index only, files kept)
 ```
+
+`resync` is the incremental one to run regularly (`--prune-missing` to also drop
+entries whose file is gone; off by default so an unplugged drive cannot delete
+your index). Put it on a schedule with
+`localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"` - see
+[docs/jobs.md](../docs/jobs.md#keeping-an-indexed-folder-current).
 
 Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. See [docs/rag.md](../docs/rag.md) for retrieval design.
 
