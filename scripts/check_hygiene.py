@@ -1030,11 +1030,16 @@ def _manifest_problems() -> list[str]:
 
 
 def _strict_env() -> bool:
-    """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but
-    0/false/no/empty behaves like passing --strict (an env knob because a CI
-    step or a hook cannot always edit the command line it invokes)."""
+    """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but a
+    recognized OFF value behaves like passing --strict (an env knob because a CI
+    step or a hook cannot always edit the command line it invokes).
+
+    "off" is in the off-set alongside 0/false/no: a reviewer pointed out that
+    LOCALM_HYGIENE_STRICT=off silently turning strictness ON is the kind of
+    surprise that gets a knob mistrusted. Anything unrecognized still means ON,
+    so a typo fails toward MORE checking, never less."""
     return os.environ.get("LOCALM_HYGIENE_STRICT", "").strip().lower() not in (
-        "", "0", "false", "no")
+        "", "0", "false", "no", "off")
 
 
 def main(argv: list[str]) -> int:

@@ -1105,6 +1105,21 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     assert ch.main([]) == 0                    # explicit off stays warn-only
 
 
+def test_strict_env_knob_off_values(monkeypatch):
+    """The env knob's off-set is explicit: empty/0/false/no/off (any case, any
+    surrounding whitespace) stay warn-only. Anything ELSE means strict, so a
+    typo fails toward MORE checking rather than silently disabling the gate."""
+    ch = _load_check_hygiene()
+    for off in ("", "0", "false", "FALSE", "no", "off", "OFF", "  off  "):
+        monkeypatch.setenv("LOCALM_HYGIENE_STRICT", off)
+        assert ch._strict_env() is False, off
+    for on in ("1", "true", "yes", "on", "strict", "please"):
+        monkeypatch.setenv("LOCALM_HYGIENE_STRICT", on)
+        assert ch._strict_env() is True, on
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    assert ch._strict_env() is False
+
+
 def test_real_changelog_unreleased_checks_run_on_the_real_tree():
     """Smoke: both detectors run against the REAL repo without crashing.
     Deliberately NOT asserting emptiness: a branch that legitimately rewords an
