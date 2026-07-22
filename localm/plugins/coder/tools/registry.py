@@ -42,6 +42,7 @@ from .git import (
 from .env import tool_read_env
 from .web import tool_fetch_url, tool_web_search
 from .agents import tool_spawn_agent
+from .parallel import tool_dispatch_parallel
 from .media import tool_generate_image
 from .tasks import tool_read_todos, tool_set_todos
 
@@ -493,5 +494,26 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "resuming a session, or whenever you are unsure what is left to do."
         ),
         params={},
+    ),
+    "dispatch_parallel": ToolDef(
+        name="dispatch_parallel",
+        fn=tool_dispatch_parallel,
+        description=(
+            "Run up to 2 sub-tasks AT THE SAME TIME, each in its own isolated git "
+            "worktree on its own branch. Use when two pieces of work are genuinely "
+            "independent - the children can even edit the same file without "
+            "interfering, and your working tree is never touched. Each child's diff "
+            "is returned for you to review; nothing is ever merged automatically. "
+            "For a single sub-task, use spawn_agent instead."
+        ),
+        params={
+            "tasks":     {"type": "array",  "description": "1 or 2 sub-tasks: strings, or objects with task/name/model", "required": True},
+            "max_turns": {"type": "int",    "description": "Per-child iteration cap (default 10)", "required": False},
+            "timeout_s": {"type": "int",    "description": "Per-child wall-clock budget in seconds (default 600)", "required": False},
+        },
+        # Destructive so _execute_tools runs it ALONE. The tool manages its own
+        # internal 2-way concurrency; letting the batch executor also run it
+        # alongside other tools would stack concurrency the box cannot serve.
+        destructive=True,
     ),
 }
