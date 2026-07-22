@@ -25,9 +25,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and both visible: the server value is the default for every browser, the chat
   picker is labelled "this browser", and when this browser has its own pick the
   Settings section says so and offers to clear it. Changing the default voice or
-  speed applies immediately in browsers that follow it, and a voice remembered
-  in your browser that the plugin no longer offers is now ignored rather than
-  handed to the voice model (which failed at playback time).
+  speed takes effect right away in the browser you saved from (other open
+  browsers pick it up on their next load), and a voice remembered in your
+  browser that the plugin no longer offers is now ignored rather than handed to
+  the voice model (which failed at playback time).
 - **Three media settings were invisible in the GUI.** "ComfyUI launch
   timeout", "Keep ComfyUI headless" (no auto-opened browser tab) and the
   ACE-Step `__func__` crash fix toggle existed as real settings - described,

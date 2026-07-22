@@ -213,9 +213,11 @@ def register(app: FastAPI, ctx) -> None:
         block = plugins.get(TTS_PLUGIN)
         # `active` is INFORMATIONAL (the GUI hides a section whose plugin is not
         # running); the write itself is deliberately NOT gated on it, so the
-        # settings can be prepared before the plugin is enabled. is_active() is a
-        # pair of set lookups, so there is nothing to guard against here; an app
-        # with no plugin engine attached (a bare test app) simply has no manager.
+        # settings can be prepared before the plugin is enabled. An app with no
+        # plugin engine attached (a bare test app) simply has no manager.
+        # is_active() does touch the disk (it lists the installed-plugins dir and
+        # reads the config), the same blocking reads this handler already makes
+        # via load_config(), exactly like the media GET beside it.
         mgr = getattr(request.app.state, "plugin_manager", None)
         return {"plugin": TTS_PLUGIN,
                 "active": bool(mgr and mgr.is_active(TTS_PLUGIN)),

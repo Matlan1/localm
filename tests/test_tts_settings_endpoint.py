@@ -143,6 +143,30 @@ def test_validate_confines_library_and_wasm_paths_to_the_plugin_assets():
         {"wasm_paths": "vendor/"}
 
 
+def test_validate_rejects_asset_paths_that_would_404_in_the_browser():
+    """Existing on disk is not enough: the browser fetches these over HTTP."""
+    # A file that is simply not there (a typo) is caught at set time rather than
+    # breaking text-to-speech for every client later.
+    with pytest.raises(ValueError):
+        ss.validate_tts_block({"library": "vendor/nope.js"})
+    # library must be a FILE: a folder imports as nothing.
+    with pytest.raises(ValueError):
+        ss.validate_tts_block({"library": "vendor"})
+    # An empty segment ("a//b") resolves on disk but is a different URL path.
+    with pytest.raises(ValueError):
+        ss.validate_tts_block({"library": "vendor//kokoro.min.js"})
+    # Windows/macOS filesystems are case-insensitive; the HTTP path is not. The
+    # rejection REASON differs by platform (a case-insensitive filesystem finds
+    # the file and reports the real spelling; a case-sensitive one simply does
+    # not find it), so only the refusal itself is asserted here.
+    with pytest.raises(ValueError):
+        ss.validate_tts_block({"library": "VENDOR/kokoro.min.js"})
+    # Same canonical-spelling rule, platform-independently: "./x" is a different
+    # URL path from "x", and the error names the spelling to use.
+    with pytest.raises(ValueError, match="vendor/kokoro.min.js"):
+        ss.validate_tts_block({"library": "./vendor/kokoro.min.js"})
+
+
 def test_validate_blank_clears_an_override():
     assert ss.validate_tts_block({"voice": ""}) == {"voice": None}
     assert ss.validate_tts_block({"speed": ""}) == {"speed": None}
@@ -271,6 +295,41 @@ def test_write_requires_config_write_scope(client, monkeypatch):
         m.setenv("LOCALM_API_KEY", "tts-cfg-key")
         assert client.post("/v1/tts/config",
                            json={"voice": "am_onyx"}).status_code == 401
+
+
+def test_a_tts_capability_key_cannot_read_or_write_these_settings(env):
+    """The REASON these routes are core and not on the plugin's own router.
+
+    Routes mounted by a plugin are auto-scoped to that plugin's capability, so a
+    key that merely grants "may use text-to-speech" would have been able to
+    rewrite the voice model id and the script URL every browser loads. Settings
+    cost config:read / config:write instead."""
+    from localm import auth, scopes
+    from localm.inference.http_server import create_app
+
+    auth.set_api_key("owner-secret-key-123")                 # protected mode
+    tts_only = auth.create_key("speaker", ["tts"])["key"]    # a plain TTS user
+    client = TestClient(create_app(None))
+    hdr = {"Authorization": f"Bearer {tts_only}"}
+
+    assert client.get("/v1/tts/config", headers=hdr).status_code == 403
+    assert client.post("/v1/tts/config", json={"voice": "am_onyx"},
+                       headers=hdr).status_code == 403
+    # ... and nothing was written
+    from localm.config import load_config
+    assert not (load_config().get("plugins") or {}).get("tts")
+
+    # A config:read key may READ but still not write.
+    reader = auth.create_key("reader", [scopes.CONFIG_READ])["key"]
+    rhdr = {"Authorization": f"Bearer {reader}"}
+    assert client.get("/v1/tts/config", headers=rhdr).status_code == 200
+    assert client.post("/v1/tts/config", json={"voice": "am_onyx"},
+                       headers=rhdr).status_code == 403
+
+
+def test_active_is_false_when_the_plugin_is_not_installed(client):
+    """The GUI hides the section on this flag, so it must not lie."""
+    assert client.get("/v1/tts/config").json()["active"] is False
 
 
 def test_script_url_fields_require_an_owner_admin_key(env):

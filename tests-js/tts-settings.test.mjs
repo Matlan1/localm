@@ -162,6 +162,65 @@ test("saving POSTs only the fields the user actually changed", async () => {
     "untouched fields must not be sent (they would pin an override)");
 });
 
+test("saving another field never wipes a value the dropdown cannot show", async () => {
+  // A <select> whose value is absent from its options reads back as "" = clear
+  // this override, so saving ONLY the speed used to silently delete the voice.
+  // Two shapes of that: a value outside the list, and no list at all (the
+  // shipped voice list could not be read, where the server falls back to a
+  // shape check - the GUI must stay usable rather than render an empty,
+  // value-destroying dropdown).
+  const outside = ttsPayload();
+  outside.fields[0] = { ...outside.fields[0], value: "hand_edited", is_override: true };
+  const posts = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch({ tts: outside, posts }) });
+  await render(win);
+  const sec = section(win);
+  const sel = sec.querySelector('[data-field-key="voice"] select');
+  assert.ok([...sel.options].some((o) => o.value === "hand_edited"),
+    "the current value must remain selectable so it survives a save");
+  assert.equal(sel.value, "hand_edited");
+  sec.querySelector('[data-field-key="speed"] input').value = "1.5";
+  sec.querySelector(".settings-section-save").click();
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(posts, [{ speed: 1.5 }], "only the speed changed");
+
+  const noList = ttsPayload();
+  noList.fields[0] = { ...noList.fields[0], options: undefined,
+                       option_labels: undefined, value: "af_heart" };
+  const posts2 = [];
+  const { window: win2 } = loadAppWithPages({
+    fetchImpl: makeFetch({ tts: noList, posts: posts2 }) });
+  await render(win2);
+  const sec2 = section(win2);
+  const voice2 = sec2.querySelector('[data-field-key="voice"]');
+  assert.equal(voice2.querySelector("select"), null,
+    "with no voice list the field falls back to a text box, not an empty select");
+  assert.equal(voice2.querySelector("input").value, "af_heart");
+  sec2.querySelector('[data-field-key="speed"] input').value = "1.5";
+  sec2.querySelector(".settings-section-save").click();
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(posts2, [{ speed: 1.5 }], "the voice must not be cleared");
+});
+
+test("an overridden field offers (inherit) so a dropdown override is clearable", async () => {
+  const overridden = ttsPayload({ voice: "am_onyx" });      // is_override: true
+  const posts = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch({ tts: overridden, posts }) });
+  await render(win);
+  const sec = section(win);
+  const sel = sec.querySelector('[data-field-key="voice"] select');
+  const inherit = [...sel.options].find((o) => o.value === "");
+  assert.ok(inherit, "an overridden select must offer a way back to the default");
+  assert.equal(inherit.textContent, "(inherit)");
+  sel.value = "";
+  sec.querySelector(".settings-section-save").click();
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+  // null and "" both mean "clear this override" to validate_tts_block.
+  assert.deepEqual(posts, [{ voice: null }], "blank clears the server-side override");
+});
+
 test("saving nothing does not POST", async () => {
   const posts = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ posts }) });
@@ -195,6 +254,21 @@ test("no override note when this browser follows the server default", async () =
   assert.equal(section(win2).querySelector(".tts-browser-override"), null);
 });
 
+test("a stored voice the picker ignores is NOT announced as in effect", async () => {
+  // The chat picker discards a stored voice the provider no longer offers, so
+  // Settings must not tell the user "this browser plays <that voice>" - it
+  // plays the server default, and the live-apply on save must not be blocked
+  // by a pick that is not in force.
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  win.localStorage.setItem("localm.ttsVoice", "zz_gone");
+  runScript(win, FAKE_PROVIDER);                 // offers af_heart + am_onyx only
+  await render(win);
+  assert.equal(section(win).querySelector(".tts-browser-override"), null,
+    "no override note for a voice nothing actually plays");
+  runScript(win, "window.__live = applyServerTtsConfig({ voice: 'am_onyx' });");
+  assert.equal(win.__live, true, "a stale stored id must not block the live apply");
+});
+
 test("clearing the override drops the stored key so the server default applies", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   win.localStorage.setItem("localm.ttsVoice", "am_onyx");
@@ -222,11 +296,16 @@ const FAKE_PROVIDER = `
   });
 `;
 
+// Values built inside the jsdom realm have that realm's prototypes, so
+// node:assert/strict's deepEqual rejects them as "not reference-equal" even when
+// the structure matches. Re-create them in this realm before comparing.
+const calls = (win) => [...win.__setVoiceCalls];
+
 test("a stored voice the provider no longer offers is ignored, not fed to the model", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   win.localStorage.setItem("localm.ttsVoice", "zz_gone");
   runScript(win, FAKE_PROVIDER);
-  assert.deepEqual(win.__setVoiceCalls, ["af_heart"],
+  assert.deepEqual(calls(win), ["af_heart"],
     "the provider's own voice is used, never the unknown stored id");
   assert.equal(win.document.getElementById("p-voice").value, "af_heart");
 });
@@ -235,7 +314,7 @@ test("a stored voice the provider offers still wins (the browser's explicit pick
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   win.localStorage.setItem("localm.ttsVoice", "am_onyx");
   runScript(win, FAKE_PROVIDER);
-  assert.deepEqual(win.__setVoiceCalls, ["am_onyx"]);
+  assert.deepEqual(calls(win), ["am_onyx"]);
   assert.equal(win.document.getElementById("p-voice").value, "am_onyx");
 });
 
@@ -244,13 +323,16 @@ test("a saved server voice applies live only when this browser has no override",
   runScript(win, FAKE_PROVIDER);
   runScript(win, "window.__live = applyServerTtsConfig({ voice: 'am_onyx', speed: 1.5 });");
   assert.equal(win.__live, true);
-  assert.deepEqual(win.__applied, { voice: "am_onyx", speed: 1.5 });
+  assert.equal(win.__applied.voice, "am_onyx");
+  assert.equal(win.__applied.speed, 1.5);
 
   const { window: win2 } = loadAppWithPages({ fetchImpl: makeFetch() });
   win2.localStorage.setItem("localm.ttsVoice", "af_heart");   // explicit pick
   runScript(win2, FAKE_PROVIDER);
   runScript(win2, "window.__live = applyServerTtsConfig({ voice: 'am_onyx', speed: 1.5 });");
   assert.equal(win2.__live, false, "an explicit per-browser pick is never overwritten");
-  assert.deepEqual(win2.__applied, { voice: undefined, speed: 1.5 },
+  assert.equal(win2.__applied.voice, undefined,
+    "the browser's own voice is left alone");
+  assert.equal(win2.__applied.speed, 1.5,
     "speed still applies - only the voice is the browser's own choice");
 });

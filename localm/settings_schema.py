@@ -1344,8 +1344,11 @@ def _tts_relative_asset(key: str, value: str) -> str:
     if value.startswith("/") or value.startswith("\\") or "\\" in value:
         raise ValueError(
             f"{key}: must be a relative path using forward slashes, got {value!r}")
-    if ".." in value.split("/"):
+    parts = value.split("/")
+    if ".." in parts:
         raise ValueError(f"{key}: must not step outside the plugin folder, got {value!r}")
+    if any(p == "" for p in parts[:-1]):        # a trailing "/" is fine, "a//b" is not
+        raise ValueError(f"{key}: has an empty path segment, got {value!r}")
     from localm.plugins.builtin.tts.settings import asset_root
     root = asset_root().resolve()
     target = (root / value).resolve()
@@ -1355,6 +1358,18 @@ def _tts_relative_asset(key: str, value: str) -> str:
         raise ValueError(
             f"{key}: no such file or folder under the tts plugin's static folder "
             f"({value!r}); text-to-speech would fail to load for every browser")
+    if key == "library" and not target.is_file():
+        raise ValueError(f"{key}: must point at a file, not a folder ({value!r})")
+    # The browser requests this path over HTTP, where it is case-SENSITIVE, but
+    # Windows and macOS filesystems are not - so an existing-but-differently-spelled
+    # path passes the check above and then 404s for every client. Path.resolve()
+    # yields the on-disk spelling on those platforms, so comparing tells the user
+    # the exact string to use instead of letting text-to-speech quietly break.
+    canonical = "." if target == root else target.relative_to(root).as_posix()
+    if canonical != value.rstrip("/"):
+        raise ValueError(
+            f"{key}: write it exactly as it is on disk, {canonical!r} (the browser "
+            f"loads this over HTTP, where the path is case-sensitive)")
     return value
 
 

@@ -90,11 +90,28 @@ def voice_ids() -> list:
 
 
 def asset_root() -> Path:
-    """The plugin's static asset directory.
+    """The static asset directory the BROWSER is served from.
 
     ``library`` / ``wasm_paths`` are resolved by the browser against this
     directory (tts.js uses ``import.meta.url``, which is
-    ``/plugins/tts/tts.js``), so the validator checks a candidate path against
-    the same root the client will actually load it from.
+    ``/plugins/tts/tts.js``), so the validator has to check a candidate path
+    against the tree that is actually mounted. That is the INSTALLED copy under
+    the data directory (``PluginHost.mount_static`` roots at the installed
+    plugin's path), not this in-tree source: the two are kept hash-identical by
+    the builtin refresh, but a user who drops their own onnxruntime WASM folder
+    into the installed copy would otherwise be told it does not exist. Falls
+    back to the shipped source when the plugin is not installed (so the setting
+    can still be validated before the plugin is added).
     """
+    try:
+        from localm.config import home_dir
+        installed = Path(home_dir()) / "plugins" / "tts" / "static"
+        if installed.is_dir():
+            return installed
+    except Exception as e:
+        # Resolving the data directory is best effort here: the in-tree copy is
+        # byte-identical in a normal install, so falling back to it keeps the
+        # validator working rather than failing every write. Logged, not hidden.
+        logger.debug("tts: could not resolve the installed asset dir (%s); "
+                     "validating against the shipped copy", e)
     return _PLUGIN_DIR / "static"

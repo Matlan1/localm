@@ -1242,6 +1242,7 @@ export let _ttsControls = [];
  *  otherwise changing the default here would look like it did nothing. */
 export async function buildTtsSection(form) {
   let data;
+  _ttsControls = [];               // reset first: a failed fetch renders no controls
   try {
     const r = await fetch("/v1/tts/config", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
@@ -1258,7 +1259,6 @@ export async function buildTtsSection(form) {
     form.appendChild(fail);
     return;
   }
-  _ttsControls = [];
   if (!data.active) return;        // plugin not installed/enabled: nothing to set
 
   const fields = (data.fields || []).filter(f => f.gui);
@@ -1273,17 +1273,39 @@ export async function buildTtsSection(form) {
     + "These are the server-side defaults, shared by every browser."));
 
   const mkControl = (f) => {
+    // A SELECT can only round-trip a value that is one of its options: a value
+    // outside the list reads back as "" (= clear this override), so saving any
+    // OTHER field in the section would silently wipe it. Two guards:
+    //   - no options at all (the shipped voice list could not be read - the
+    //     server then falls back to a shape check) -> render a text box, so the
+    //     setting stays usable instead of an empty, value-destroying dropdown;
+    //   - a current value outside the list (hand-edited config, or a list that
+    //     changed) -> keep it as an option so it displays and survives a save.
+    // "(inherit)" is offered whenever the field IS overridden, so a select-backed
+    // override can be cleared from the GUI, not only through the API.
+    const hasOptions = !!(f.options || []).length;
+    const widget = (f.widget === "select" && !hasOptions) ? "text" : f.widget;
+    let options = hasOptions ? [...f.options] : f.options;
+    let labels = f.option_labels ? [...f.option_labels] : null;
+    if (options && f.value != null && f.value !== "" && !options.includes(f.value)) {
+      options.unshift(f.value);
+      if (labels) labels.unshift(f.value);
+    }
+    if (options && f.is_override) {
+      options.unshift("");                   // buildSettingControl labels it "(inherit)"
+      if (labels) labels.unshift("(inherit)");
+    }
     const ctrl = buildSettingControl({
-      key: f.key, widget: f.widget, label: f.label, help: f.help,
-      default: f.value, options: f.options, min: f.min, max: f.max, step: f.step,
+      key: f.key, widget, label: f.label, help: f.help,
+      default: f.value, options, min: f.min, max: f.max, step: f.step,
     });
     if (!ctrl) return null;
     // Show the friendly voice names ("Heart (en-us, Female, A)") the chat picker
     // uses, while the option VALUES stay the ids the server validates.
-    if (f.option_labels) {
+    if (labels) {
       const sel = ctrl.node.querySelector("select");
       if (sel) for (const [i, o] of [...sel.options].entries()) {
-        if (f.option_labels[i]) o.textContent = f.option_labels[i];
+        if (labels[i]) o.textContent = labels[i];
       }
     }
     ctrl.orig = f.value;
@@ -1316,7 +1338,14 @@ export async function buildTtsSection(form) {
                      "Use the server default in this browser");
     clear.type = "button";
     clear.onclick = () => {
-      clearBrowserVoiceOverride(serverVoice);
+      // Never report a clear that did not happen (rule 5): this button exists
+      // only because the value was READ back, so a failure is a real one and
+      // the override is still in force.
+      if (!clearBrowserVoiceOverride(serverVoice)) {
+        toast("Could not clear it: this browser is blocking storage, so its own "
+              + "voice is still in use here", true);
+        return;
+      }
       toast("This browser now follows the server default voice");
       refreshSettingsPage();
     };
@@ -1365,15 +1394,31 @@ export async function saveTtsSettings() {
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { toast(data.detail || "Save failed", true); return; }
+  if (!Array.isArray(data.fields)) {
+    // A 200 whose body we cannot read means the save probably landed but we
+    // cannot say what is now in effect - do not claim a clean "Saved".
+    toast("Saved, but the server's reply could not be read - reloading the "
+          + "settings to show what is actually stored", true);
+    refreshSettingsPage();
+    return;
+  }
   const saved = {};
-  for (const f of (data.fields || [])) saved[f.key] = f.value;
+  for (const f of data.fields) saved[f.key] = f.value;
   const live = applyServerTtsConfig({ voice: saved.voice, speed: saved.speed });
-  // Honest about what actually took effect: voice/speed apply now (unless this
-  // browser has its own voice), the model/device/precision need a reload.
-  const needsReload = ["model", "device", "dtype"].some(k => k in updates);
-  toast(needsReload ? "Saved - the voice model reloads on the next page load"
-        : (live || !("voice" in updates) ? "Saved"
-           : "Saved - this browser keeps its own voice until you clear it"));
+  // Say what actually took effect, per case - never a flat "Saved" that leaves
+  // the user waiting to hear a change that cannot happen yet. The model, device
+  // and precision are baked into the loaded model; this browser's own voice pick
+  // deliberately still wins until it is cleared.
+  const voiceChanged = "voice" in updates;
+  let msg = "Saved";
+  if (["model", "device", "dtype"].some(k => k in updates)) {
+    msg = "Saved - the voice model reloads on the next page load";
+  } else if (voiceChanged && browserVoiceOverride()) {
+    msg = "Saved - this browser keeps its own voice until you clear it below";
+  } else if (voiceChanged && !live) {
+    msg = "Saved - the new voice applies on the next page load";
+  }
+  toast(msg);
   refreshSettingsPage();
 }
 
