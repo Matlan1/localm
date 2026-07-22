@@ -280,41 +280,67 @@ RULES
 4. Summarise what you changed when done.
 5. If a tool errors, diagnose and retry."""
 
-    # Do not advertise run_shell in the RULES prose when it is disabled for this
-    # session (a restricted, shareable key): telling the model about a capability
-    # it cannot use is a confusing info-leak (REC-N1-PROSE).
-    shell_off = "run_shell" in disabled_tools
-    rule4 = (
-        "4. Prefer the focused tool for the job: grep/search_files to find things, list_dir/tree to explore, run_tests for tests, git_* for git - their output is structured and they need no shell quoting."
-        if shell_off else
-        "4. Prefer the focused tool over run_shell: grep/search_files to find things, list_dir/tree to explore, run_tests for tests, git_* for git - their output is structured and they need no shell quoting."
-    )
-    rule5 = (
-        "5. Run tests after code changes with run_tests."
-        if shell_off else
-        "5. Run tests after code changes (run_tests, or run_shell for custom commands)."
-    )
-    # Same REC-N1-PROSE reasoning as run_shell above: a narrowed sub-agent (every
-    # role preset disables spawn_agent) or a restricted key must not be told to
-    # delegate with a tool dispatch will refuse. Dropping the line renumbers the
-    # tail so the list stays contiguous - a gap reads as a prompt-assembly bug.
+    # REC-N1-PROSE: never advertise a capability this session does not have.
+    # Telling a restricted, shareable key about run_shell was the original case;
+    # a narrowed sub-agent generalises it, because a role can remove the write and
+    # test tools too. A reviewer told to "prefer edit_file" three lines above a
+    # brief saying it cannot edit will waste turns discovering the refusal.
+    # The applicable rules are collected and numbered ONCE, at the end: numbering
+    # them inline meant every conditional line had to know the gaps above it.
+    shell_off    = "run_shell" in disabled_tools
     delegate_off = "spawn_agent" in disabled_tools
-    rule6 = ("" if delegate_off else
-             "6. For complex tasks, use spawn_agent to delegate focused sub-tasks.\n")
-    n = 6 if delegate_off else 7
-    return f"""\
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-0. GROUNDING: before answering a question about this project (how it works, where something is, whether something exists), read or search the relevant files first with read_file / grep / search_files - never answer from assumption or memory. Base every claim about the code on a tool result.
-1. Always read_file before edit_file or patch_file - you need the exact text.
-2. Use relative paths unless an absolute path is necessary.
-3. Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.
-{rule4}
-{rule5}
-{rule6}{n}. When you are done, give a concise summary of what you changed and why.
-{n + 1}. If a tool returns an error, diagnose and retry before giving up.
-{n + 2}. Ask for clarification only if the task is genuinely ambiguous."""
+    can_edit     = bool({"write_file", "edit_file", "patch_file"} - disabled_tools)
+    can_test     = bool({"run_tests", "run_shell"} - disabled_tools)
+
+    rules: list[str] = [
+        "GROUNDING: before answering a question about this project (how it works, where something is, whether something exists), read or search the relevant files first with read_file / grep / search_files - never answer from assumption or memory. Base every claim about the code on a tool result.",
+    ]
+    if can_edit:
+        rules.append("Always read_file before edit_file or patch_file - you need the exact text.")
+    rules.append("Use relative paths unless an absolute path is necessary.")
+    if can_edit:
+        rules.append("Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.")
+    # The examples name only tools this session actually has, for the same reason
+    # the rules above are conditional: a reviewer pointed at run_tests and git_*
+    # it cannot call learns nothing except that the prompt is wrong.
+    focused = [
+        (("grep", "search_files"),        "grep/search_files to find things"),
+        (("list_dir", "tree"),            "list_dir/tree to explore"),
+        (("run_tests",),                  "run_tests for tests"),
+        (("git_status", "git_diff", "git_log"), "git_* for git"),
+    ]
+    examples = [text for names, text in focused
+                if set(names) - disabled_tools]
+    if examples:
+        rules.append(
+            ("Prefer the focused tool for the job: " if shell_off else
+             "Prefer the focused tool over run_shell: ")
+            + ", ".join(examples)
+            + " - their output is structured and they need no shell quoting."
+        )
+    if can_test and can_edit:
+        rules.append(
+            "Run tests after code changes with run_tests."
+            if shell_off else
+            "Run tests after code changes (run_tests, or run_shell for custom commands)."
+        )
+    if not delegate_off:
+        rules.append("For complex tasks, use spawn_agent to delegate focused sub-tasks.")
+    rules.append(
+        "When you are done, give a concise summary of what you changed and why."
+        if can_edit else
+        "When you are done, give a concise summary of what you found and why it matters."
+    )
+    rules.append("If a tool returns an error, diagnose and retry before giving up.")
+    rules.append("Ask for clarification only if the task is genuinely ambiguous.")
+
+    numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(rules))
+    return (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "RULES\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{numbered}"
+    )
 
 
 # ---------------------------------------------------------------------------

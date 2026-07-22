@@ -102,6 +102,14 @@ def resolve_role(name: str | None) -> RolePreset | None:
     """
     if name is None:
         return None
+    # A model can emit anything for an argument. Coercing a non-string here (say
+    # {"role": 123} or a list) would guess at intent; raising the SAME clear
+    # ValueError keeps the fail-closed path single and tells it what to send.
+    if not isinstance(name, str):
+        raise ValueError(
+            f"unknown role {name!r}: role must be a string. "
+            f"Available roles: {', '.join(sorted(ROLE_PRESETS))}"
+        )
     key = name.strip().lower()
     if not key:
         return None

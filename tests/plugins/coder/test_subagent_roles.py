@@ -19,6 +19,7 @@ never re-enable a tool the parent disabled, nor one a restricted (shareable,
 non-owner) session forbids.
 """
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -200,6 +201,15 @@ class TestUnknownRoleFailsClosed:
             for name in ROLE_PRESETS:
                 assert name in str(exc)
 
+    @pytest.mark.parametrize("bad", [123, ["reviewer"], {"name": "reviewer"}, True])
+    def test_a_non_string_role_fails_closed(self, tmp_path, bad):
+        """A model can emit anything for an argument; it must not become a
+        full-capability child or an obscure AttributeError."""
+        result, child = _spawn_child(tmp_path, role=bad)
+        assert not result.ok
+        assert "unknown role" in result.output
+        assert child is None
+
     def test_no_role_keeps_the_previous_full_toolset(self, tmp_path):
         """Regression guard: roles are opt-in, an ordinary spawn is unchanged."""
         result, child = _spawn_child(tmp_path, role=None)
@@ -318,10 +328,27 @@ class TestChildPromptHygiene:
         assert "use spawn_agent to delegate" not in prompt
         assert "run_shell" not in prompt
 
-    def test_rules_stay_contiguously_numbered_when_delegation_is_dropped(self, tmp_path):
-        """Dropping rule 6 must renumber the tail; a gap reads as a bug."""
+    def test_read_only_role_is_not_told_to_edit_or_run_tests(self, tmp_path):
+        """A reviewer told to "prefer edit_file" three lines above a brief saying
+        it cannot edit contradicts itself and wastes turns on refusals."""
         _, child = _spawn_child(tmp_path, role="reviewer")
-        rules = child._system_prompt.split("RULES")[-1]
-        for n in range(9):
-            assert f"\n{n}. " in rules, f"rule {n} missing from narrowed RULES"
-        assert "\n9. " not in rules
+        rules = child._system_prompt.split("RULES")[-1].split("YOUR ROLE")[0]
+        for gone in ("edit_file", "patch_file", "write_file", "run_tests", "run_shell"):
+            assert gone not in rules, f"reviewer RULES still advertise {gone}"
+
+    def test_test_writer_keeps_the_edit_and_test_rules_it_can_use(self, tmp_path):
+        """The converse: the prose must not be stripped for a role that CAN edit."""
+        _, child = _spawn_child(tmp_path, role="test-writer")
+        rules = child._system_prompt.split("RULES")[-1].split("YOUR ROLE")[0]
+        assert "edit_file" in rules
+        assert "run_tests" in rules
+        assert "run_shell" not in rules   # test-writer has no shell
+
+    def test_rules_are_contiguously_numbered_whatever_is_dropped(self, tmp_path):
+        """A gap in the numbering reads as a prompt-assembly bug."""
+        for role in list(ROLE_PRESETS) + [None]:
+            _, child = _spawn_child(tmp_path, role=role)
+            rules = child._system_prompt.split("RULES")[-1].split("YOUR ROLE")[0]
+            numbers = [int(m) for m in re.findall(r"^(\d+)\. ", rules, re.MULTILINE)]
+            assert numbers == list(range(len(numbers))), (role, numbers)
+            assert len(numbers) >= 5, (role, numbers)
