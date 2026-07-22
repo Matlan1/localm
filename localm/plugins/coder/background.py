@@ -30,6 +30,41 @@ threads plus a bounded buffer that drops the oldest entry when full. That
 module's ``queue.Queue`` is per-session and not reusable as a general table, so
 the pattern is reproduced here rather than lifted.
 
+Why this is NOT the builtin jobs plugin
+---------------------------------------
+``localm/plugins/builtin/jobs/`` already exists and owns the word "job" in the
+user-facing product: a GUI Jobs tab, ``localm job ...``, ``/api/jobs``. This
+table is a DIFFERENT thing that happens to share a noun, and the five reasons
+are recorded here so nobody later "consolidates" the two (which would break the
+CLI case outright) or flags this module as duplicating shipped infrastructure.
+Each was checked against the source, not assumed:
+
+1. That plugin is SCHEDULE-CENTRIC. Every ``Job`` carries ``schedule_kind``
+   ("interval" | "cron") and ``store.py`` validates it against ``SCHEDULE_KINDS``.
+   A one-shot background command has no schedule; we would have to invent one.
+2. It is DURABLE USER DATA, stored under ``<data dir>/jobs/`` (``store.jobs_dir``)
+   and, per ``docs/jobs.md``, its "recorded results are saved in every session
+   mode, including privacy". An ephemeral in-session thread is not user data and
+   must not land in the user's jobs store or the Jobs tab.
+3. It is an OPTIONAL plugin (``localm plugin install jobs``; docs/jobs.md line 5).
+   A core coder capability cannot require an optional plugin to be present.
+4. Decisively: its scheduler "starts only when the plugin is loaded under a
+   running event loop" (``jobs/plug.py``), i.e. inside ``localm gui`` / ``serve``.
+   A plain ``localcoder`` REPL has no event loop, so background work routed
+   through it would SILENTLY NEVER RUN - exactly the case this module exists for.
+5. Lifetimes are opposite: theirs survive restarts, ours are in-process threads
+   scoped to one session and killed at exit.
+
+The existing integration also runs the other way (a jobs task_kind of "coder"
+runs a coder agent). This is coder -> background work, the reverse direction.
+
+Naming: nothing here is a bare "job" - ``check_shell_job`` / ``kill_shell_job``
+read as shell job control (jobs/bg/fg/kill %1), not as a schedule entry. A
+user-facing listing command should be ``/bg``, never ``/jobs``; "tasks" was
+considered and rejected because ``task`` is already the coder's own core noun
+(``localcoder [TASK]``, ``run_task``), which would be a worse ambiguity inside
+one component.
+
 Three invariants are load-bearing:
 
 1. **No pid-reuse window.** ``Popen.poll()`` is called ONLY under the job lock,

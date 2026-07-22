@@ -600,12 +600,27 @@ def test_background_tools_are_not_available_to_restricted_sessions():
         assert name not in SAFE_RESTRICTED_TOOLS
 
 
-def test_background_tools_are_destructive_and_unscoped():
+def test_all_background_tools_are_unscoped():
+    """A path-arg check cannot confine arbitrary code, so none of these are
+    scope-confined - that is deliberate and must stay explicit, not accidental."""
     from localm.plugins.coder.agent.constants import _INTENTIONALLY_UNSCOPED
-    from localm.plugins.coder.tools import TOOL_REGISTRY
     for name in ("run_shell_background", "check_shell_job", "kill_shell_job"):
-        assert TOOL_REGISTRY[name].destructive, f"{name} must hit the confirm gate"
         assert name in _INTENTIONALLY_UNSCOPED
+
+
+def test_starting_and_killing_are_gated_but_polling_is_not():
+    """The confirmation gate belongs on the capability, not on observing it.
+
+    Starting a job is arbitrary code execution and killing one tears down a
+    process tree, so both must be confirmed. check_shell_job only reads a status
+    field and an output buffer: gating it would put a card in front of every poll
+    of a running build, and an unattended run (where the gate fails closed) could
+    start a job it could then never observe.
+    """
+    from localm.plugins.coder.tools import TOOL_REGISTRY
+    assert TOOL_REGISTRY["run_shell_background"].destructive
+    assert TOOL_REGISTRY["kill_shell_job"].destructive
+    assert not TOOL_REGISTRY["check_shell_job"].destructive
 
 
 def test_unattended_one_shot_gate_covers_the_background_variant():
