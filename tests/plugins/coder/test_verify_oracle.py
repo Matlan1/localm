@@ -517,6 +517,28 @@ class TestVerifyGate:
         assert agent.last_run_ok is False
         assert agent.last_verify_state == "failed"
 
+    def test_a_run_that_collected_nothing_is_never_reported_as_a_pass(
+            self, tmp_path):
+        """FALSE-GREEN fires-control. A mangled invocation (args split wrong, a
+        filter matching nothing) makes pytest collect zero tests and exit 5 in
+        about a second, and the wrapper log looks clean. Nothing about that run
+        verified anything, so the machine-readable answer must say so - "the
+        harness did not fall over" is not evidence of a passing check.
+
+        Before the third state existed this could only be asserted negatively
+        (last_run_ok stayed True either way, so a consumer could not tell this
+        from a green run). Now it is a positive assertion."""
+        agent = _make_agent(
+            tmp_path,
+            verify_cmd=[sys.executable, "-c",
+                        "import sys; sys.stderr.write('pytest: no tests ran\\n');"
+                        " raise SystemExit(5)"])
+        _record_write(agent)
+        with patch("localm.plugins.coder.agent.print_warning"):
+            agent._run_verify_gate("done", False, _fresh_state(agent))
+        assert agent.last_verify_state == "inconclusive"
+        assert agent.last_verify_state != "passed"
+
     def test_verify_state_records_a_pass(self, tmp_path):
         agent = _make_agent(tmp_path, verify_cmd="exit 0")
         _record_write(agent)
