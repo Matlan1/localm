@@ -266,9 +266,20 @@ def tool_spawn_agent(
     # do not wrap it in the untrusted fence, so the parent can still act on a
     # legitimate delegated result (the child runs its own fence internally).
     from ..provenance import neutralise
+    # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
+    # rather than raising, so arriving here is not success: a child that hit
+    # max_turns or tripped its circuit breaker was reported to the model as
+    # "finished", and ToolResult.success additionally CLEARS the parent's per-tool
+    # failure streak. This is the most-used delegation surface, so it is the one
+    # that matters most. The ToolResult itself stays a success - the delegation
+    # ran, and the child's own text carries the reason - but the summary must not
+    # claim an outcome the child did not reach.
+    child_ok = getattr(child, "last_run_ok", True)
+    verdict = ("finished in" if child_ok else
+               "DID NOT COMPLETE its task, stopping after")
     return ToolResult.success(
         neutralise(result_text),
-        summary=f"sub-agent '{name}' finished in {turns_used} turn(s)",
+        summary=f"sub-agent '{name}' {verdict} {turns_used} turn(s)",
     )
 
 

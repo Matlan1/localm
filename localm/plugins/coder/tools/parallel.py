@@ -635,6 +635,14 @@ def tool_dispatch_parallel(
                 # A failed removal is REAL (dirty tree, or a process still holding
                 # it). Report it so the operator can reap it; never --force past it.
                 outcome.cleanup_warning = out
+                continue
+            if outcome.status == "not_started" and branch:
+                # Nothing ever ran on it, so the branch is still exactly base_sha
+                # and there is no work to preserve. Leaving it would litter the
+                # user's branch list with an empty branch per never-started child.
+                # -d (never -D): if it somehow does carry a commit, git refuses and
+                # we keep it rather than destroy work.
+                _git(repo, "branch", "-d", branch)
 
         # SCOPED prune, with its outcome REPORTED. A bare `git worktree prune` is
         # repo-wide and takes no pathspec, so it would also drop the record of a
@@ -645,10 +653,15 @@ def tool_dispatch_parallel(
         # subprocess to discover that.
         if created:
             pruned, pok = git_prune_child_worktrees(repo)
-            if not pok:
-                first = next((o for o in outcomes if not o.cleanup_warning), None)
-                if first is not None:
-                    first.cleanup_warning = pruned
+            if not pok and outcomes:
+                # APPEND to whatever is there. Picking "the first outcome with no
+                # warning yet" finds nothing when every child already has one, and
+                # the prune failure then disappears - the exact swallow this change
+                # exists to remove.
+                target = outcomes[0]
+                target.cleanup_warning = (
+                    f"{target.cleanup_warning}; {pruned}"
+                    if target.cleanup_warning else pruned)
 
         # Return the budget only for children that have actually TERMINATED. An
         # abandoned child is still running and still occupying the box, so its slot
@@ -659,10 +672,35 @@ def tool_dispatch_parallel(
         # the rule the background path already states: released on FINISH, not on
         # submit. add_done_callback fires immediately if the future finished in the
         # meantime, so there is no lost-release race.
-        still_running = [f for f in futures_started if not f.done()]
-        for tok in tokens[len(still_running):]:
+        #
+        # Pair each token with the child it was TAKEN FOR wherever the two line up,
+        # because child_limit's holder list is what a later rejection NAMES: keeping
+        # child1's token alive to cover child2's thread reports a child that
+        # finished long ago as the one still running. Where they cannot line up -
+        # fewer slots than tasks, so child2 is occupying the slot child1 finished
+        # with - a spare token is held back instead. The budget counts RUNNING
+        # children, so the COUNT is what must never be wrong; the label is the
+        # diagnostic.
+        keep: list = []
+        spare: list = []
+        unpaired: list = []
+        for i in range(max(len(tokens), len(futures_started))):
+            tok = tokens[i] if i < len(tokens) else None
+            fut = futures_started[i] if i < len(futures_started) else None
+            live = fut is not None and not fut.done()
+            if tok is not None and live:
+                keep.append((fut, tok))
+            elif tok is not None:
+                spare.append(tok)
+            elif live:
+                unpaired.append(fut)
+        for fut in unpaired:
+            if not spare:
+                break
+            keep.append((fut, spare.pop(0)))
+        for tok in spare:
             child_limit.release(tok)
-        for fut, tok in zip(still_running, tokens[:len(still_running)]):
+        for fut, tok in keep:
             fut.add_done_callback(
                 lambda _f, _tok=tok: child_limit.release(_tok))
 

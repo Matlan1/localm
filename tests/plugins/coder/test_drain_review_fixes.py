@@ -33,7 +33,6 @@ from localm.plugins.coder import child_limit
 from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.parser import ToolCall
 from localm.plugins.coder.tools import ToolResult
-from localm.plugins.coder.tools import parallel as par
 from localm.plugins.coder.tools.git import (
     WORKTREE_PREFIX, git_list_child_worktrees, git_prune_child_worktrees,
 )
@@ -243,27 +242,39 @@ def test_a_malformed_model_value_is_rejected_cleanly(repo):
         "two malformed calls leaked the process-wide child budget")
 
 
-def test_the_child_budget_is_returned_when_anything_after_the_acquire_raises(
+def test_the_child_budget_is_returned_when_the_acquire_loop_itself_raises(
         repo, monkeypatch):
-    """The STRUCTURAL half of X2: the acquire lives inside the try/finally.
+    """The STRUCTURAL half of X2, with an oracle that can actually tell.
 
-    Independent of which specific value triggers it - any exception raised after
-    the slots are taken must still return them, or the gate (a process-wide
-    singleton with no reaper) stays down for the life of the session.
+    The window the fix closed is between the FIRST successful acquire and the
+    `try`. Raising from anything further in (say the first `_git` call) does NOT
+    discriminate: that call was already inside the try before the fix, and the
+    old `finally` already released. So this raises from the acquire LOOP itself,
+    on the second slot, which is only covered once the loop moved inside the
+    try/finally. Hoist the acquire back out and this goes red; the sibling
+    malformed-model test would not.
     """
     before = child_limit.available()
-    assert before > 0
+    assert before >= 2, "this test needs at least two free slots to be meaningful"
 
-    def boom(*a, **kw):
-        raise RuntimeError("synthetic failure after the acquire")
+    real_acquire = child_limit.try_acquire
+    calls = {"n": 0}
 
-    monkeypatch.setattr(par, "_git", boom)
+    def acquire_once_then_explode(kind, label):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_acquire(kind, label)
+        raise RuntimeError("synthetic failure with one slot already held")
+
+    monkeypatch.setattr(child_limit, "try_acquire", acquire_once_then_explode)
     agent = _agent(repo)
     res = _call(agent, "dispatch_parallel", tasks=["a", "b"])
 
     assert not res.ok
+    assert calls["n"] == 2, "the acquire loop did not reach the second slot"
     assert child_limit.available() == before, (
-        "the child budget leaked when the dispatch raised after acquiring slots")
+        "the slot taken before the raise was never returned - the acquire is "
+        "outside the try/finally again, and child_limit has no reaper")
 
 
 # --------------------------------------------------------------------------- #
@@ -414,6 +425,57 @@ def slow_child(monkeypatch):
     _SlowChild.release.set()
 
 
+def test_synchronous_spawn_agent_does_not_report_a_failed_child_as_finished(
+        repo, monkeypatch):
+    """The FOURTH X3 site, and the most-used delegation surface."""
+    from localm.plugins.coder.tools import agents as ag
+
+    class _Child:
+        turns = 7
+        last_run_ok = False
+        _error_trace: list = []
+        _changed_files: dict = {}
+
+        def run_task(self, task):
+            return "[max_turns=7 reached]"
+
+    monkeypatch.setattr(ag, "_prepare_child",
+                        lambda *a, **kw: (_Child(), "the task"))
+    agent = _agent(repo)
+    res = ag.tool_spawn_agent(repo, task="do a thing", _parent_agent=agent)
+
+    assert "DID NOT COMPLETE" in res.summary, res.summary
+    assert "finished in" not in res.summary, res.summary
+
+
+def test_the_scoped_prune_probe_forces_english_git_messages(repo, monkeypatch):
+    """D2: the line we parse is gettext-translated.
+
+    On a git build shipping message catalogs, a localized line fails the regex,
+    the fail-closed branch reports OUR OWN records as foreign, and cleanup is
+    disabled permanently on that machine. The probe must pin the locale.
+    """
+    from localm.plugins.coder.tools import git as gitmod
+
+    seen: dict = {}
+    real_git = gitmod._git
+
+    def spy(cwd, *args, **kw):
+        if "prune" in args and "-n" in args:
+            seen["env"] = kw.get("env")
+        return real_git(cwd, *args, **kw)
+
+    monkeypatch.setattr(gitmod, "_git", spy)
+    gitmod.git_prune_child_worktrees(repo)
+
+    env = seen.get("env")
+    assert env is not None, "the prune probe ran with the ambient locale"
+    assert env.get("LC_ALL") == "C", env.get("LC_ALL")
+    # Merged onto the real environment, never passed bare: env REPLACES the
+    # child's environment, and a git without PATH does not run at all.
+    assert "PATH" in env or "Path" in env, sorted(env)[:10]
+
+
 def test_a_queued_child_that_never_started_says_so_and_leaves_no_worktree(
         repo, slow_child):
     """X9: one slot, two tasks, deadline burned by the first child.
@@ -435,10 +497,14 @@ def test_a_queued_child_that_never_started_says_so_and_leaves_no_worktree(
     assert "never started" in res.output, res.output
     assert "[not_started]" in res.output, res.output
 
-    # And nothing of the never-started child was left on disk.
+    # And nothing of the never-started child was left on disk: not its worktree,
+    # and not the empty branch that `git worktree add -b` created for it.
     slow_child.release.set()
     leftover = [p for p in git_list_child_worktrees(repo) if "child2" in p.name]
     assert leftover == [], f"the never-started child leaked a worktree: {leftover}"
+    branches = _run(repo, "git", "branch", "--list", "coder/*")
+    assert "child2" not in branches, (
+        f"the never-started child left an empty branch behind: {branches}")
 
 
 def test_the_budget_is_held_until_an_abandoned_child_actually_ends(repo, slow_child):
@@ -581,6 +647,45 @@ def test_a_destructive_tool_does_not_run_beside_an_abandoned_peer(tmp_path,
     joined = "\n".join(blocks)
     assert "runs alone" in joined, joined
     assert "still running" in joined, joined
+
+
+def test_the_destructive_gate_survives_into_the_next_turn(tmp_path, monkeypatch):
+    """The refusal tells the model to wait, so the NEXT turn must gate too.
+
+    _execute_tools runs once per turn. When the abandoned list lived in that call
+    frame it was empty again immediately, so a model that did what the refusal
+    said walked into an ungated dispatch while the peer was still running - the
+    fix's own advice routing it into the hole the fix exists to close.
+    """
+    agent = _agent(tmp_path)
+    monkeypatch.setattr(type(agent), "_PARALLEL_BATCH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(type(agent), "_ABANDONED_PEER_GRACE_S", 0.2)
+
+    release = threading.Event()
+    executed: list = []
+
+    def fake_execute(call, interactive=False):
+        executed.append(call.name)
+        if call.name in ("read_file", "grep"):
+            release.wait(timeout=30)
+        return ToolResult.success("done")
+
+    monkeypatch.setattr(agent, "_execute_tool", fake_execute)
+
+    turn1 = [ToolCall(name=n, args={}, raw="", start=0, end=0)
+             for n in ("read_file", "grep")]
+    # A LATER, SEPARATE turn - exactly what the refusal text tells the model to do.
+    turn2 = [ToolCall(name="dispatch_parallel", args={}, raw="", start=0, end=0)]
+    try:
+        agent._execute_tools(turn1, interactive=False)
+        blocks = agent._execute_tools(turn2, interactive=False)
+    finally:
+        release.set()
+
+    assert "dispatch_parallel" not in executed, (
+        "the destructive tool ran on the next turn while the abandoned peer from "
+        "the previous turn was still running")
+    assert "still running" in "\n".join(blocks)
 
 
 def test_a_destructive_tool_still_runs_when_its_peers_finished(tmp_path,

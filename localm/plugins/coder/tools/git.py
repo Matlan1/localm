@@ -11,15 +11,22 @@ to the one caller that needs them."""
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Optional
 
 from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
 
-def _git(cwd: Path, *args: str, timeout: int = 10) -> tuple[str, bool]:
-    """Run a git command and return (output, ok)."""
-    result = run_subprocess(["git", *args], cwd, timeout=timeout)
+def _git(cwd: Path, *args: str, timeout: int = 10,
+         env: Optional[dict] = None) -> tuple[str, bool]:
+    """Run a git command and return (output, ok).
+
+    *env* REPLACES the child's whole environment (that is subprocess semantics),
+    so a caller that only wants to add a variable must merge it onto os.environ -
+    a git invoked without PATH does not run at all.
+    """
+    result = run_subprocess(["git", *args], cwd, timeout=timeout, env=env)
     if result.not_found:
         return "git not found in PATH", False
     if result.timed_out:
@@ -254,15 +261,6 @@ def git_worktree_remove(repo: Path, path: Path) -> tuple[str, bool]:
     return f"could not remove worktree {path}: {reason}: {out}", False
 
 
-def git_worktree_prune(repo: Path) -> tuple[str, bool]:
-    """Drop administrative records for worktrees whose directories are gone.
-
-    REPO-WIDE and unscopable. Prefer :func:`git_prune_child_worktrees`, which
-    refuses to run this when it would destroy a record we do not own.
-    """
-    return _git(repo, "worktree", "prune", timeout=30)
-
-
 # `git worktree prune -n -v` reports each record it WOULD drop as
 # "Removing worktrees/<name>: <reason>", where <name> is the administrative
 # record under .git/worktrees/ and derives from the worktree directory's own
@@ -292,7 +290,16 @@ def git_prune_child_worktrees(repo: Path) -> tuple[str, bool]:
     Returns (message, ok). ok=False means nothing was pruned and the message says
     what stopped it, for the caller to surface rather than swallow.
     """
-    out, ok = _git(repo, "worktree", "prune", "-n", "-v", timeout=30)
+    # Force git's own messages to English FOR THIS PROBE. The line we parse is
+    # gettext-translated (git's source emits `Removing %s/%s: %s` through _()),
+    # so on a build that ships message catalogs a localized line would fail the
+    # regex below - and the fail-closed branch would then report OUR OWN records
+    # as foreign, print a message that is simply untrue, and disable the cleanup
+    # permanently on that machine. Merged onto os.environ, never passed bare:
+    # env REPLACES the environment, and a git without PATH does not run at all.
+    probe_env = {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
+    out, ok = _git(repo, "worktree", "prune", "-n", "-v", timeout=30,
+                   env=probe_env)
     if not ok:
         return f"could not check what `git worktree prune` would remove: {out}", False
 
