@@ -29,6 +29,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   browsers pick it up on their next load), and a voice remembered in your
   browser that the plugin no longer offers is now ignored rather than handed to
   the voice model (which failed at playback time).
+- **A knowledge collection's vector index is never deleted to hide a problem.**
+  When localm finds stored embeddings it cannot trust - unreadable, malformed, or
+  no longer lining up with the documents - it answers lexically instead and says
+  why. It then used to DELETE that file on the next indexing run, including a run
+  that indexed nothing at all, so the evidence disappeared with it and the
+  collection went on to look like a perfectly healthy lexical-only one. The file
+  is now kept where it is, or moved aside as `vectors.json.rejected` when the
+  documents around it had to be rewritten, and the reason is repeated by the
+  Knowledge page, by `localm rag resync` and by every scheduled re-sync until you
+  rebuild the index with `localm rag repair NAME --embed`. Search results are
+  unaffected: a collection in that state has always answered lexically.
 - **Three media settings were invisible in the GUI.** "ComfyUI launch
   timeout", "Keep ComfyUI headless" (no auto-opened browser tab) and the
   ACE-Step `__func__` crash fix toggle existed as real settings - described,

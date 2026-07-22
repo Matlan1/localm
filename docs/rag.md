@@ -158,9 +158,17 @@ policy as an interactive add. Full details in
   query-time index cache), so retrieval is brute force by design: fast at home
   scale (thousands of chunks), but query latency grows with collection size and
   it is not built for millions of chunks.
-- One indexing job per collection at a time is the supported pattern; the
-  files are rewritten atomically, so a concurrent query sees a consistent
-  snapshot.
+- **One writer per collection at a time.** Writes are serialised inside a single
+  localm process, so the server's own API adds and scheduled re-syncs cannot lose
+  each other's changes, and every file is rewritten atomically, so a concurrent
+  query always sees a consistent snapshot. That serialisation does not reach
+  across processes: `localm rag add` and `localm rag resync` run in their own
+  process and open the collection directly, so running one by hand while the
+  server is re-syncing the *same* collection lets the two interleave and one
+  update win. Let a scheduled re-sync finish, or work on a different collection,
+  rather than racing it. If it does happen the result is a lost update, not a
+  destroyed index: a vector index that no longer matches its chunks is detected
+  and reported, never silently used or deleted (see Troubleshooting).
 - `POST .../add` accepts up to 50 paths per request (a path may itself be a
   folder); `POST .../upload` accepts up to 50 files per request, 30 MB each
   and 100 MB total. Split a larger batch across multiple calls.
@@ -177,3 +185,11 @@ policy as an interactive add. Full details in
 - **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
   snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
   are an unreadable/encrypted file or a missing `[rag]` extra for PDF parsing.
+- **"Semantic search is degraded".** localm checked the stored vector index
+  against the chunks and refused to use it (unreadable, malformed, or no longer
+  lining up), and answered lexically instead. Nothing is deleted to make that go
+  away: the vector file is kept as it is, or moved aside to
+  `vectors.json.rejected` in the collection folder if the chunks were rewritten
+  in the meantime, and the reason is repeated by the Knowledge page, `rag resync`
+  and every scheduled run until you rebuild the index with
+  `localm rag repair NAME --embed`.
