@@ -269,10 +269,17 @@ def test_a_pin_never_costs_a_sibling_instance_its_models(monkeypatch):
     client = TestClient(app)
 
     assert _chat(client, "model-a").status_code == 200
+    # The FIRST load legitimately asks a peer: VRAM is short and nothing is
+    # resident yet, so local eviction is empty for reasons that have nothing to
+    # do with pinning. That is pre-existing behavior and not what this guards -
+    # so measure only the asks made during the SECOND load, where the pinned
+    # model-a is the sole reason nothing local can be freed.
+    asked_before = len(asked)
     assert _chat(client, "model-b").status_code == 200
 
-    assert asked == [], (
-        f"a pin made this instance yank a sibling's models: {asked}")
+    assert len(asked) == asked_before, (
+        "a pin made this instance yank a sibling's models: "
+        f"{asked[asked_before:]}")
     assert hs._engines["model-a"].loaded, "the pinned model must survive"
 
 
@@ -290,9 +297,12 @@ def test_an_unpinned_shortfall_still_asks_a_peer(monkeypatch):
 
     assert _chat(client, "model-a").status_code == 200
     hs._engines["model-a"].active_requests = 1        # busy, not evictable
+    asked_before = len(asked)                         # ignore the first load's ask
     assert _chat(client, "model-b").status_code == 200
 
-    assert asked, "an unpinned, genuinely exhausted shortfall must still ask a peer"
+    assert len(asked) > asked_before, (
+        "an unpinned, genuinely exhausted shortfall must still ask a peer - "
+        "the pin guard must not disable the cooperative path wholesale")
 
 
 def test_busy_chat_peer_not_evicted_but_new_load_still_succeeds(monkeypatch):
