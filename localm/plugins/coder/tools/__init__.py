@@ -59,6 +59,13 @@ from .env import _redact_env_value, tool_read_env
 from .web import tool_fetch_url, tool_web_search
 from .agents import tool_spawn_agent
 from .media import tool_generate_image
+from .tasks import (
+    normalize_todos,
+    render_todos,
+    todos_summary,
+    tool_read_todos,
+    tool_set_todos,
+)
 from .registry import SAFE_RESTRICTED_TOOLS, TOOL_REGISTRY, ToolDef
 
 __all__ = [
@@ -74,4 +81,6 @@ __all__ = [
     "tool_git_status", "tool_git_diff", "tool_git_log", "tool_git_commit",
     "tool_git_push", "tool_git_create_branch", "tool_read_env",
     "tool_fetch_url", "tool_web_search", "tool_spawn_agent", "tool_generate_image",
+    "tool_set_todos", "tool_read_todos",
+    "normalize_todos", "render_todos", "todos_summary",
 ]

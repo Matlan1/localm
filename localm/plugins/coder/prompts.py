@@ -104,6 +104,9 @@ _TOOL_EXAMPLES: dict = {
     "git_commit":    {"message": "fix: handle empty config"},
     "git_create_branch": {"name": "feat/my-feature"},
     "search_replace": {"pattern": "old_name", "replacement": "new_name", "glob": "**/*.py", "dry_run": True},
+    "set_todos":     {"items": ["[x] read the failing test",
+                                "[>] fix the parser",
+                                "[ ] run the suite"]},
 }
 
 _TYPE_PLACEHOLDERS = {"string": "...", "int": 1, "float": 1.0, "bool": False, "array": []}

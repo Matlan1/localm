@@ -156,6 +156,16 @@ ws     ::= [ \t\n\r]*
         else:
             summary = raw
 
+        # The task list lives on the Agent, so compaction never destroys it - but
+        # the model only sees what is in the messages. Carry the surviving list
+        # into the summary verbatim so the plan is still in front of the model
+        # after the turns that built it were summarised away (that loss is the
+        # whole reason the store exists). Read back with read_todos.
+        todos = self.get_todos()
+        if todos:
+            from ..tools.tasks import render_todos
+            summary += "\n\nTask list (set_todos):\n" + render_todos(todos)
+
         self._messages = [
             {"role": "user",      "content": f"[Session summary]\n{summary}"},
             {"role": "assistant", "content": "Understood. Continuing from this context."},

@@ -26,7 +26,7 @@ from .constants import (
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_EXEC_TOOLS,
     _SHELL_UNSCOPED_TOOLS,
-    _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS, _call_target_paths,
+    _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
 
@@ -355,6 +355,10 @@ class _ExecutionMixin:
         args = dict(call.args)
         if call.name == "spawn_agent":
             args["_parent_agent"] = self
+        # The task-list tools operate on THIS session's state (tools/tasks.py).
+        # Injected after the copy, so a model-supplied "_session" cannot win.
+        if call.name in _TODO_TOOLS:
+            args["_session"] = self
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True

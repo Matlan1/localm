@@ -81,7 +81,9 @@
 // v75: coder.js renders the new episodes_recalled event (which past lessons a
 // run pulled in, with the id to forget one by) - a stale-cached client would
 // silently ignore the event and show nothing.
-const CACHE = "localm-shell-v75";
+// v76: coder.js changed (set_todos tool cards show plan progress on the head
+// line) - bump so an already-installed PWA picks up the new bytes.
+const CACHE = "localm-shell-v76";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
