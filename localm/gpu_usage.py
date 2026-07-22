@@ -421,14 +421,19 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
     Mapping rules, in order:
     - ADL: match each adapter's PCI bus number to torch's own ``pci_bus_id``. Exact,
       so it is safe on a multi-GPU box.
-    - ADL, torch-less: when torch cannot supply a bus id (the GGUF worker) but
-      ADL reports EXACTLY one AMD adapter and exactly one GPU was asked about,
-      the pairing is unambiguous without one - the same only-one-candidate rule
-      the PDH path below already applies. Gated on
-      :func:`raw_reading_is_process_scoped` so it can never fire on a box whose
-      single detected GPU is NOT the blind-HIP one (e.g. an NVIDIA dGPU next to
-      an idle AMD iGPU, where this pairing would "correct" an already
-      device-global reading with the WRONG adapter's usage).
+    - ADL, torch-less: when torch cannot supply a bus id for ANY requested
+      device (the GGUF worker) but ADL reports EXACTLY one AMD adapter and
+      exactly one GPU was asked about, the pairing is unambiguous without one -
+      the same only-one-candidate rule the PDH path below already applies.
+      Gated on :func:`raw_reading_is_process_scoped` so it can never fire on a
+      box whose single detected GPU is NOT the blind-HIP one (e.g. an NVIDIA
+      dGPU next to an idle AMD iGPU, where this pairing would "correct" an
+      already device-global reading with the WRONG adapter's usage). Strictly
+      no-bus-AVAILABLE, never bus-CONTRADICTS: when torch DID answer a bus and
+      it matched no ADL adapter, that is an affirmative mismatch (or a
+      degraded ADL view - `_adl_used_by_bus` drops adapters whose usage query
+      fails, so a 2-GPU box can transiently present only the wrong one), and
+      the reading stays uncorrected exactly as before this rule existed.
     - PDH: used ONLY when there is exactly one GPU and exactly one adapter instance
       reporting. Its LUID instance name carries no PCI bus, so on a multi-GPU box the
       mapping would be a GUESS - and a confidently-wrong per-device number is worse
@@ -443,13 +448,16 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
         by_bus = _adl_used_by_bus()
         if by_bus:
             mapped = {}
+            any_bus_answered = False
             for g in gpus:
                 bus = _torch_pci_bus(g.get("index"))
-                if bus is not None and bus in by_bus:
-                    mapped[g["index"]] = by_bus[bus]
+                if bus is not None:
+                    any_bus_answered = True
+                    if bus in by_bus:
+                        mapped[g["index"]] = by_bus[bus]
             if mapped:
                 return mapped
-            if (len(by_bus) == 1 and len(gpus) == 1
+            if (not any_bus_answered and len(by_bus) == 1 and len(gpus) == 1
                     and raw_reading_is_process_scoped()):
                 only_bus, only_used = next(iter(by_bus.items()))
                 logger.debug(

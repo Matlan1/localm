@@ -3160,6 +3160,16 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
         monkeypatch.setattr(gu, "_torch_pci_bus", lambda index: 45)
         assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
 
+    def test_rule_does_not_fire_when_torch_bus_contradicts(self, monkeypatch):
+        """An ANSWERED bus that matches no ADL adapter is an affirmative
+        mismatch (or a degraded ADL view - a 2-GPU box can transiently report
+        only the wrong adapter, since per-adapter query failures are dropped):
+        the fallback is strictly for no-bus-AVAILABLE, so this must decline
+        exactly as the pre-rule code did, not pair the contradiction away."""
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True)
+        monkeypatch.setattr(gu, "_torch_pci_bus", lambda index: 3)
+        assert gu.device_global_used_bytes(gpus) == {}
+
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestUncorrectedScopeIsNotAlwaysProcess:

@@ -974,8 +974,9 @@ def _probe_roundtrip(request: str, parse) -> "Optional[object]":
         timeout = _ISOLATED_PROBE_SPAWN_TIMEOUT if first_spawn else _ISOLATED_PROBE_TIMEOUT
         line = _readline_with_timeout(proc.stdout, timeout)
         if line is None:
-            logger.debug("vram-probe: no reply within %.1fs (daemon rc=%s); "
-                         "killed, a fresh daemon spawns on the next query",
+            logger.debug("vram-probe: no reply (timeout after %.1fs, or EOF - "
+                         "daemon rc=%s, None means still running); killed, a "
+                         "fresh daemon spawns on the next query",
                          timeout, proc.poll())
             _kill_and_clear_probe()
             return None
