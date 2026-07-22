@@ -210,8 +210,14 @@ def test_evicted_episode_is_recoverable_from_the_archive(home, tmp_path, monkeyp
     assert back is not None and back.id == doomed.id
     assert doomed.id in {e.id for e in store.all()}
     assert back.lesson == "thin lesson"
-    # Live again means no longer listed as forgotten.
-    assert [r["id"] for r in store.forgotten()] == []
+    # Live again means no longer listed as forgotten...
+    assert doomed.id not in {r["id"] for r in store.forgotten()}
+    # ...but the store was FULL, so putting it back pushed another episode out,
+    # and THAT one's recovery copy must now be in the archive. (Asserting the
+    # archive is empty here would be asserting the bug: the first cut rewrote the
+    # archive from a pre-restore snapshot and destroyed exactly this record.)
+    assert [e.task for e in store.last_evicted] == ["second task"]
+    assert {r["id"] for r in store.forgotten()} == {e.id for e in store.last_evicted}
     # And a restore of something that was never archived says so, rather than
     # inventing an episode.
     assert store.restore("nope-not-here") is None
