@@ -5,6 +5,7 @@ loop, and the /command handler."""
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from ..agent import Agent
@@ -49,7 +50,7 @@ _SLASH_COMMANDS = (
     "/help", "/exit", "/quit", "/clear", "/model", "/mode", "/cwd", "/cd",
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/compact", "/memory", "/remember", "/forget", "/save", "/export",
-    "/scope", "/changes", "/diff", "/verify",
+    "/scope", "/changes", "/diff", "/bg", "/verify",
 )
 
 
@@ -285,6 +286,44 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             console.print(Syntax(diff, "diff", theme="monokai", line_numbers=False))
         if delegated:
             console.print(delegated)
+
+    elif cmd == "bg":
+        # "/bg", not "/jobs": an installed jobs plugin already owns that noun for
+        # SCHEDULED recurring jobs (localm job ..., the GUI Jobs tab, /api/jobs),
+        # and those are a completely disjoint list from this session's background
+        # work. "/tasks" would be worse still - "task" is already this coder's own
+        # core noun (localcoder [TASK], run_task, --task). /bg matches the shell
+        # mental model (jobs/bg/fg) and collides with neither.
+        from ..background import get_registry
+        rows = get_registry().list_status()
+        if not rows:
+            print_info("No background work this session. Start some with "
+                       "run_shell_background or spawn_agent_background.")
+        else:
+            running = [r for r in rows if r["state"] == "running"]
+            done    = [r for r in rows if r["state"] != "running"]
+            if running:
+                console.print("[bold]Running[/bold]")
+                for r in running:
+                    age = time.time() - r["started_at"]
+                    console.print(
+                        f"  [cyan]{r['id']}[/cyan]  {r['kind']:<6} "
+                        f"{r['label']}  [dim]{age:.0f}s[/dim]")
+            if done:
+                console.print("[bold]Finished[/bold]")
+                for r in done:
+                    res = r.get("result") or {}
+                    extra = ""
+                    if r["kind"] == "shell" and "exit_code" in res:
+                        extra = f"exit {res['exit_code']}"
+                    elif r["kind"] == "agent":
+                        extra = f"{res.get('turns', 0)} turn(s)"
+                        if res.get("branch"):
+                            extra += f", branch {res['branch']}"
+                    flag = "[red]" if r["state"] in ("failed", "killed") else "[dim]"
+                    console.print(
+                        f"  [cyan]{r['id']}[/cyan]  {r['kind']:<6} "
+                        f"{r['label']}  {flag}{r['state']}{extra and ' - ' + extra}[/]")
 
     elif cmd == "compact":
         ratio = agent._fill_ratio()

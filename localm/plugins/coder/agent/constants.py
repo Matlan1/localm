@@ -113,9 +113,28 @@ _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_backgroun
 # follow the shell-exec family wherever it is disabled.
 _SHELL_JOB_TOOLS: frozenset[str] = frozenset({"check_shell_job", "kill_shell_job"})
 
+# The delegation family, exactly parallel to the shell one above and for the same
+# reason: spawning a sub-agent grants a child unbounded write+shell in this cwd,
+# and the background variant is that same capability minus the wait. A caller that
+# disables spawn_agent (the restricted/shareable-key path does) must not be left
+# with spawn_agent_background still enabled - that would be an RCE escape by a
+# tool added after the caller was written, which is the precise hole the shell
+# family closes on its side.
+#
+# A SEPARATE set, deliberately not merged into _SHELL_EXEC_TOOLS: the helper keys
+# on set intersection, so one combined family would mean disabling spawn_agent
+# also disabled run_shell (and vice versa) - welding two unrelated capabilities
+# together.
+_AGENT_EXEC_TOOLS: frozenset[str] = frozenset(
+    {"spawn_agent", "spawn_agent_background"})
+
+# check_agent_job is useless without a way to start a job, so it follows the
+# delegation family wherever that is disabled - same rule as _SHELL_JOB_TOOLS.
+_AGENT_JOB_TOOLS: frozenset[str] = frozenset({"check_agent_job"})
+
 
 def expand_shell_disable(disabled: frozenset) -> frozenset:
-    """Disabling any shell-execution tool disables the whole family.
+    """Disabling any tool in a capability family disables the whole family.
 
     A caller that passes ``{"run_shell"}`` means "this session must not execute
     arbitrary commands" (that is exactly how the shareable-key path uses it).
@@ -124,14 +143,24 @@ def expand_shell_disable(disabled: frozenset) -> frozenset:
     the safety choice would be silently defeated by a tool added after the
     caller was written. Expand the intent instead.
 
+    Two families, expanded INDEPENDENTLY: shell execution, and sub-agent
+    delegation. Keeping them separate matters - a single merged family would make
+    disabling ``spawn_agent`` also disable ``run_shell``, silently removing a
+    capability the caller never asked to lose.
+
     Applied at BOTH boundaries that consume a disabled set: the Agent (which
     hard-refuses at dispatch) and the prompt builders (which decide what the
     model is told exists). Applying it in only one leaves the other advertising
-    or accepting a tool the caller meant to switch off.
+    or accepting a tool the caller meant to switch off. (The name is historical -
+    it predates the second family - but every consuming site already calls it, so
+    extending it here is what keeps both boundaries covered for free.)
     """
-    if disabled & _SHELL_EXEC_TOOLS:
-        return frozenset(disabled) | _SHELL_EXEC_TOOLS | _SHELL_JOB_TOOLS
-    return frozenset(disabled)
+    out = frozenset(disabled)
+    if out & _SHELL_EXEC_TOOLS:
+        out = out | _SHELL_EXEC_TOOLS | _SHELL_JOB_TOOLS
+    if out & _AGENT_EXEC_TOOLS:
+        out = out | _AGENT_EXEC_TOOLS | _AGENT_JOB_TOOLS
+    return out
 
 # For each scoped tool, the arg names holding a path/glob to enforce scope against.
 # Any present arg outside the scope rejects the call (order only sets which value is

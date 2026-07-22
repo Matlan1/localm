@@ -353,7 +353,7 @@ class _ExecutionMixin:
 
         # Inject hidden runtime args into specific tools
         args = dict(call.args)
-        if call.name == "spawn_agent":
+        if call.name in ("spawn_agent", "spawn_agent_background"):
             args["_parent_agent"] = self
         # The task-list tools operate on THIS session's state (tools/tasks.py).
         # Injected after the copy, so a model-supplied "_session" cannot win.
