@@ -381,3 +381,41 @@ class TestTurnBudgetEscalation:
             "[turn budget]" in str(m.get("content", ""))
             for m in agent._messages
         )
+
+
+class TestEventSinkFailureIsVisible:
+    """A sink that raises must not kill the agent loop, but the event must not
+    vanish in silence either: a consumer wired up before it is ready would drop
+    every event with nothing left in the log to find it by (AGENTS.md rule 5)."""
+
+    @staticmethod
+    def _agent_with_broken_sink(tmp_path):
+        # Set the sink AFTER construction: startup notices emit too, and this
+        # test is about one explicit _emit call, not the constructor's.
+        agent = _make_agent(tmp_path)
+        agent.on_event = MagicMock(side_effect=RuntimeError("sink not ready"))
+        return agent
+
+    def test_a_raising_sink_does_not_propagate(self, tmp_path):
+        agent = self._agent_with_broken_sink(tmp_path)
+        agent._emit("info", text="hello")        # must not raise
+        assert agent.on_event.called
+
+    def test_a_raising_sink_leaves_a_debug_trace(self, tmp_path):
+        agent = self._agent_with_broken_sink(tmp_path)
+        with patch("localm.debuglog.logger") as logger:
+            agent._emit("info", text="hello")
+        assert logger.debug.called, "a dropped event left no trace at all"
+        logged = " ".join(str(a)
+                          for call in logger.debug.call_args_list
+                          for a in call.args)
+        assert "info" in logged and "sink not ready" in logged, logged
+
+    def test_a_working_sink_is_not_reported_as_a_failure(self, tmp_path):
+        """Control: the debug line marks a real drop, not every emit."""
+        agent = _make_agent(tmp_path)
+        agent.on_event = MagicMock()
+        with patch("localm.debuglog.logger") as logger:
+            agent._emit("info", text="hello")
+        assert agent.on_event.called
+        assert not logger.debug.called

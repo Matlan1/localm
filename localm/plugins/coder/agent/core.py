@@ -532,8 +532,12 @@ class Agent(
             return
         try:
             self.on_event({"type": event_type, **data})
-        except Exception:
-            pass  # a broken sink must not kill the agent loop
+        except Exception as e:
+            # A broken sink must not kill the agent loop, but dropping the event
+            # in total silence hides the breakage: a consumer wired before it is
+            # ready loses every event with nothing to find later. Log, continue.
+            from localm.debuglog import logger
+            logger.debug("on_event sink raised on a %r event: %s", event_type, e)
 
     def _record_error(self, tool: str, output: str) -> None:
         """Append a tool/command failure to the bounded session error trace that

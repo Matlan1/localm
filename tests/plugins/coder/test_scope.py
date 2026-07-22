@@ -6,6 +6,7 @@ When an agent has a scope glob set, file-access tools that target a path
 outside the glob pattern must be rejected without reaching the tool function.
 """
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,8 +251,15 @@ class TestShellArgvScopeCheck:
         """Warn, do not block: escalating a legitimate command into a hard failure
         would break working setups for a heuristic's benefit."""
         (tmp_path / "secrets.txt").write_text("token\n")
-        result, warnings, _ = self._run_shell(
-            tmp_path, "src/**", "cat secrets.txt")
+        # This is the one test here that asserts the command really EXECUTED, so
+        # it needs a command that exists on the platform. `cat` is not a cmd.exe
+        # builtin and is not on a stock Windows PATH: it resolves only when
+        # Git-for-Windows' usr/bin happens to be there, so this passed under Git
+        # Bash and redded under PowerShell on the same machine. `type` is the
+        # cmd equivalent and needs nothing installed.
+        read_file = ("type secrets.txt" if sys.platform == "win32"
+                     else "cat secrets.txt")
+        result, warnings, _ = self._run_shell(tmp_path, "src/**", read_file)
         assert [w for w in warnings if "outside the active scope" in w]
         assert result.ok, result.output           # it executed
         assert "token" in result.output           # and really did read the file
@@ -305,6 +313,127 @@ class TestShellArgvScopeCheck:
         warnings = [str(c.args[0]) for c in warn.call_args_list]
         assert [w for w in warnings if "outside the active scope" in w], warnings
         assert result.ok                # still ran; the check only warns
+
+
+class TestShellArgvScopeHeuristicPrecision:
+    """A warning nobody believes is worse than no warning. Two token shapes were
+    reported as out-of-scope paths when they are not paths at all: anything with
+    a colon in position 1 (``5:30``, ``s:old:new:``) and a command verb that
+    happens to match a directory name (``npm test`` in a repo with ``test/``).
+    Both must go quiet without the real findings going quiet with them."""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        """An utterly ordinary layout: these directory names are exactly the ones
+        common command verbs collide with."""
+        for name in ("src", "test", "tests", "docs", "build", "scripts", "tools"):
+            (tmp_path / name).mkdir()
+        (tmp_path / "secrets.txt").write_text("token\n")
+        (tmp_path / "build" / "run.sh").write_text("#!/bin/sh\n")
+        (tmp_path / "tools" / "gen.py").write_text("pass\n")
+        return tmp_path
+
+    def _flagged(self, cwd, tool="run_shell", **args):
+        with patch("localm.plugins.coder.agent.print_warning"):
+            agent = _make_agent_with(cwd, scope="src/**")
+        return agent._shell_paths_outside_scope(_make_tool_call(tool, **args))
+
+    @pytest.mark.parametrize("command", [
+        "ffmpeg -ss 5:30 -i in.mp4 out.mp4",       # a timestamp offset
+        "ffmpeg -aspect 4:3 -i in.mp4 out.mp4",    # an aspect ratio
+        "sed s:old:new: notes.txt",                # a sed delimiter
+        "prog a:b",                                # a generic key:value argument
+    ])
+    def test_a_colon_token_is_not_read_as_a_drive_path(self, repo, command):
+        assert self._flagged(repo, command=command) == []
+
+    def test_a_real_drive_path_is_still_flagged(self, repo):
+        """Fires-control for the case above: the same colon check, still loud on a
+        genuinely drive-qualified path."""
+        assert self._flagged(repo, command=r"cat C:\Windows\win.ini") == [
+            r"C:\Windows\win.ini"]
+        assert self._flagged(repo, command="cat D:/other/file.txt") == [
+            "D:/other/file.txt"]
+        assert self._flagged(repo, command="cat E:") == ["E:"]
+
+    @pytest.mark.parametrize("command", [
+        "npm test",                  # test/ exists
+        "make docs",                 # docs/ exists
+        "cargo build",               # build/ exists
+        "npm run build",             # a dispatch subcommand, then a script name
+        "uv run build",              # the same, for a non-npm runner
+        "npm --silent test",         # a flag does not take the subcommand slot
+        "echo start && make docs",   # && starts a new command, so make is a program
+        "CI=1 npm test",             # an env assignment is not the program word
+        "NODE_ENV=test make docs",
+        "sudo npm test",             # nor is a transparent wrapper
+        "time make docs",
+        "env CI=1 npm test",
+    ])
+    def test_a_command_verb_is_not_read_as_a_path(self, repo, command):
+        assert self._flagged(repo, command=command) == []
+
+    def test_a_token_with_a_path_separator_is_never_a_command_verb(self, repo):
+        """`sub/dir/script.sh` is the ordinary way to run a script (the leading
+        ./ is optional once the path has a separator). Suppressing the program
+        word must not suppress those: a bare verb never contains a separator, so
+        the presence of one settles it."""
+        assert self._flagged(repo, command="build/run.sh --fast") == ["build/run.sh"]
+        assert self._flagged(repo, command="uv run tools/gen.py") == ["tools/gen.py"]
+        assert self._flagged(repo, command="docker run build/run.sh") == [
+            "build/run.sh"]
+
+    def test_a_path_valued_flag_still_has_its_value_checked(self, repo):
+        """`git -C dir` and `make -C dir` move the process's working directory
+        outside the scope, which is the strongest signal this warning exists for.
+        The flag itself is skipped, so without care its VALUE lands in the
+        suppressed subcommand slot and the reference disappears."""
+        assert self._flagged(repo, command="git -C docs status") == ["docs"]
+        assert self._flagged(repo, command="make -C build all") == ["build"]
+        assert self._flagged(repo, command="npm --prefix docs test") == ["docs"]
+        # The subcommand slot survives the flag: `status` is still a verb.
+        assert self._flagged(repo, command="git -C C:/other status") == ["C:/other"]
+
+    def test_a_colon_delimiter_holding_slashes_is_not_a_drive_path(self, repo):
+        """A colon is chosen as the sed delimiter precisely BECAUSE the pattern
+        contains slashes, so this is the common form. A real drive-qualified path
+        carries exactly one colon."""
+        assert self._flagged(
+            repo, command="sed s:/usr/local:/opt:g notes.txt") == []
+        assert self._flagged(
+            repo, command="sed -i s:/old/path:/new/path: notes.txt") == []
+
+    def test_the_same_word_is_still_flagged_in_argument_position(self, repo):
+        """Fires-control for the case above: ``docs`` is quiet as a make target and
+        loud as a real argument, so the check became precise rather than mute."""
+        assert self._flagged(repo, command="make docs") == []
+        assert self._flagged(repo, command="cp -r docs backup") == ["docs"]
+        assert self._flagged(repo, command="git add docs") == ["docs"]
+
+    def test_an_explicit_path_in_command_position_is_still_flagged(self, repo):
+        """Only the exists-under-cwd guess is skipped for a command word. Running a
+        script written out as an out-of-scope path is what the warning is for."""
+        assert self._flagged(repo, command="./build/run.sh --fast") == [
+            "./build/run.sh"]
+        assert self._flagged(repo, command="/usr/local/bin/deploy") == [
+            "/usr/local/bin/deploy"]
+        assert self._flagged(repo, command="make ../other/target") == [
+            "../other/target"]
+
+    def test_a_real_out_of_scope_reference_still_warns(self, repo):
+        """The #781 behaviour restated against this layout: an existing relative
+        path and an absolute path, both outside the scope, both still reported."""
+        assert self._flagged(repo, command="cat secrets.txt") == ["secrets.txt"]
+        assert self._flagged(repo, command="cat /etc/passwd") == ["/etc/passwd"]
+        assert self._flagged(repo, command="cat ../../elsewhere.txt") == [
+            "../../elsewhere.txt"]
+
+    def test_run_tests_args_are_not_treated_as_a_command_line(self, repo):
+        """run_tests passes a target PATH plus extra args, not a command line, so
+        the program-word suppression must not reach either of them."""
+        assert self._flagged(repo, tool="run_tests", path="tests") == ["tests"]
+        assert self._flagged(repo, tool="run_tests",
+                             path="tests", extra_args="docs") == ["tests", "docs"]
 
 
 class TestScopedToolsSet:
