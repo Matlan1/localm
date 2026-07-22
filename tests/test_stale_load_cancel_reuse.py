@@ -102,7 +102,9 @@ def registered(monkeypatch):
     monkeypatch.setattr("localm.discover.vram_capacity",
                         probe_double({"free": 32 * 1024 ** 3,
                                       "total": 32 * 1024 ** 3}))
-    monkeypatch.setattr("localm.discover.gpu_split_shortfall", lambda need: [])
+    monkeypatch.setattr("localm.discover.gpu_split_shortfall",
+                        lambda need, **k: ([], False)
+                        if k.get("return_shares_adaptive") else [])
     monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
     monkeypatch.setattr("localm.vram.wait_for_vram_release",
                         lambda free_fn, before_bytes=None: (0, before_bytes))

@@ -1378,7 +1378,8 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
 
 
 def resolve_auto_split_ratios(config: Optional[dict] = None, *,
-                              gpus: Optional[list] = None) -> Optional[list]:
+                              gpus: Optional[list] = None,
+                              wait_for_inflight: bool = False) -> Optional[list]:
     """Free-VRAM-proportional split ratios for the configured
     ``gpu_split_indices``, or ``None`` when automatic distribution does not
     apply - the parent-side decision behind "query free vram from each card,
@@ -1469,7 +1470,13 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
             frees.append(free)
     else:
         if gpus is None:
-            gpus, status = _list_gpus_reading()
+            # wait_for_inflight (load-path callers pass True): a concurrent
+            # probe (the GUI's 2.5s stats heartbeat) holding the slot would
+            # otherwise hand this an instant BUSY + stale reading, silently
+            # degrading the load to the equal split on exactly the asymmetric
+            # box auto exists for. Joining is safe: every probing caller here
+            # is off the event loop (executor / CLI thread).
+            gpus, status = _list_gpus_reading(wait_for_inflight=wait_for_inflight)
             if status != GPU_PROBE_OK:
                 return _fallback(
                     f"no fresh per-device VRAM reading (probe status {status})")
@@ -1895,7 +1902,8 @@ def applied_split_device_count(config: Optional[dict] = None) -> int:
         cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios")))
 
 
-def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
+def _list_gpus_reading(deadline: Optional[float] = None, *,
+                       wait_for_inflight: bool = False) -> tuple:
     """``(gpus, status)`` from :func:`list_gpus`, tolerant of a test double patched
     in as a plain no-kwarg callable - the historical bare-list contract that the
     ~28 test modules stubbing ``list_gpus`` rely on. A double whose signature does
@@ -1913,22 +1921,35 @@ def _list_gpus_reading(deadline: Optional[float] = None) -> tuple:
     default cap untouched), so an OFF-event-loop caller can spend a longer budget on
     a cold driver init that overruns the short server cap - the only way to get a
     FRESH first-load reading (a timed-out probe cannot be retried: it is abandoned,
-    not cancelled, and a retry short-circuits to the frozen last-known-good)."""
+    not cancelled, and a retry short-circuits to the frozen last-known-good).
+
+    *wait_for_inflight* (opt-in, off-loop callers only - see :func:`list_gpus`)
+    JOINS a probe another caller already holds (e.g. the GUI's 2.5s stats
+    heartbeat) instead of taking an instant BUSY + stale reading. Forwarded only
+    when the callable's signature can accept it (a named parameter or
+    ``**kwargs``), so a status-capable test double without it keeps working."""
     try:
-        accepts = "return_status" in inspect.signature(list_gpus).parameters
+        params = inspect.signature(list_gpus).parameters
+        accepts = "return_status" in params
+        accepts_wfi = ("wait_for_inflight" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()))
     except (TypeError, ValueError):
         accepts = False
+        accepts_wfi = False
     if accepts:
         kw = {"return_status": True}
         if deadline is not None:
             kw["deadline"] = deadline
+        if wait_for_inflight and accepts_wfi:
+            kw["wait_for_inflight"] = True
         return list_gpus(**kw)
     return list_gpus(), GPU_PROBE_OK
 
 
 def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
                         *, return_status: bool = False,
-                        deadline: Optional[float] = None):
+                        deadline: Optional[float] = None,
+                        return_shares_adaptive: bool = False):
     """``[{"index", "needed", "free"}, ...]`` for every configured split device
     whose free VRAM, read from a FRESH probe this call (:data:`GPU_PROBE_OK`),
     cannot cover its proportional share of *vram_required*. Empty when no split is
@@ -1959,12 +1980,24 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     With ratios UNSET the loader itself now adapts: the parent pins
     :func:`resolve_auto_split_ratios`'s free-VRAM-proportional shares into the
     load, and this gate computes its per-device shares with the SAME auto
-    ratios (from its own fresh reading, below). That makes the asymmetric-
-    occupancy refusal structurally impossible in auto mode (a device's
-    proportional share fits its free whenever the aggregate fits), so a
-    non-empty result there means the COMBINED estimate is short - which
-    ``switch_engine`` defers to the backend's split-aware sizing (#770)
-    instead of hard-refusing, the same #753 posture as the single-GPU path.
+    ratios (from its own fresh reading, below). When those adaptive shares
+    are in effect, the asymmetric-occupancy refusal is structurally
+    impossible (a device's proportional share fits its free whenever the
+    aggregate fits), so a non-empty result means the COMBINED estimate is
+    short - which ``switch_engine`` defers to the backend's split-aware
+    sizing (#770) instead of hard-refusing, the same #753 posture as the
+    single-GPU path. But auto can DECLINE (a configured index not currently
+    detected, a device without a free reading) and fall back to the equal-
+    share math, where that invariant does NOT hold and a non-empty result is
+    exactly the pre-feature per-device hazard - so a caller deciding
+    refuse-vs-defer MUST know which math produced the result, not infer it
+    from the config shape. ``return_shares_adaptive=True`` appends that
+    fact: ``True`` only when live auto ratios were actually used for the
+    shares below; ``False`` for pinned ratios, the equal fallback, and every
+    early return (no split, vulkan skip, non-OK probe - where the list is
+    empty anyway). Appended AFTER ``status`` when both opt-ins are set:
+    ``(shortfall, status, shares_adaptive)``; alone:
+    ``(shortfall, shares_adaptive)``. The bare-call shape is untouched.
 
     Probe freshness (AGENTS.md rule 5). ``list_gpus()`` is deadline-bounded: on a
     TIMEOUT/BUSY it serves a FROZEN last-known-good reading. The default deadline
@@ -2028,8 +2061,13 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     from localm.config import load_config
     cfg = config if config is not None else load_config()
 
-    def _ret(shortfall, status):
-        return (shortfall, status) if return_status else shortfall
+    def _ret(shortfall, status, shares_adaptive=False):
+        out = [shortfall]
+        if return_status:
+            out.append(status)
+        if return_shares_adaptive:
+            out.append(shares_adaptive)
+        return out[0] if len(out) == 1 else tuple(out)
 
     if not cfg.get("gpu_split_indices"):
         # No split configured: a conclusive answer that needs no hardware probe.
@@ -2089,13 +2127,20 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
     # so gate and shares come from one snapshot) - under which a device's
     # share is needed_i = R * free_i / total_free <= free_i whenever the
     # aggregate R fits, making the asymmetric-occupancy refusal structurally
-    # impossible in auto mode; a non-empty result then means the COMBINED
-    # estimate is short. Pinned ratios keep the historical static-share math
-    # (the loader will not adapt for them). Auto declining (a device's free
-    # unmeasurable) falls back to the historical equal-split math unchanged.
+    # impossible; a non-empty result then means the COMBINED estimate is
+    # short. Pinned ratios keep the historical static-share math (the loader
+    # will not adapt for them). Auto declining (a device's free unmeasurable,
+    # a configured index not detected) falls back to the historical
+    # equal-split math unchanged - and shares_adaptive stays False there, so
+    # a refuse-vs-defer caller (switch_engine) can tell a genuine adaptive
+    # all-short result from the pre-feature static-share hazard (see the
+    # docstring: the invariant above holds ONLY for adaptive shares).
     cfg_ratios = cfg.get("gpu_split_ratios")
+    shares_adaptive = False
     if not cfg_ratios:
-        cfg_ratios = resolve_auto_split_ratios(cfg, gpus=gpus)
+        auto_ratios = resolve_auto_split_ratios(cfg, gpus=gpus)
+        shares_adaptive = auto_ratios is not None
+        cfg_ratios = auto_ratios
     pairs = resolve_gpu_split(
         cfg.get("gpu_split_indices"), cfg_ratios, gpus=gpus)
     if len(pairs) < 2:
@@ -2121,7 +2166,7 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
         free = g["free"]
         if free < needed:
             shortfall.append({"index": idx, "needed": needed, "free": free})
-    return _ret(shortfall, status)
+    return _ret(shortfall, status, shares_adaptive)
 
 
 def _device_choice_configured(cfg: dict) -> bool:

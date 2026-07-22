@@ -613,7 +613,10 @@ class IsolatedEmbedder(VramSizingMixin):
         cpu_only = self.gpu_fallback_reason is not None
         auto_ratios = None
         if not cpu_only and self.n_gpu_layers != 0:
-            auto_ratios = resolve_auto_split_ratios()
+            # wait_for_inflight: off-loop here (loads run in an executor/CLI
+            # thread); a heartbeat-probe collision joins instead of declining
+            # auto into the equal fallback (same as GgufBackend._load_native).
+            auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
         params = dict(model_path=self.model_path, n_gpu_layers=self.n_gpu_layers,
                       n_ctx=self._requested_n_ctx, pooling_type=self._pooling_type,
                       cpu_only=cpu_only, gpu_split_ratios=auto_ratios)

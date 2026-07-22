@@ -427,17 +427,6 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             # actual share is short, reaching the native loader with too
             # little room on that device. Only applies to a GGUF-backend load.
             check_split_fit = _is_gguf(m_path)
-            # Pinned vs auto split ratios decide the shortfall branch's
-            # posture below: pinned shares keep the hard per-device 503 (the
-            # loader will not adapt for them, and the backend's sizing only
-            # budgets the split's COMBINED capacity - never one pinned
-            # share); unset ratios mean the loader gets the auto free-VRAM-
-            # proportional distribution (discover.resolve_auto_split_ratios),
-            # under which a non-empty shortfall can only mean the COMBINED
-            # estimate is short - deferred to the backend like the single-GPU
-            # path (#753), since #770 made that sizing split-aware.
-            from localm.config import load_config as _load_config
-            split_ratios_pinned = bool(_load_config().get("gpu_split_ratios"))
             # Peers already asked to cooperate during THIS load attempt: each is
             # answerable once, so the loop below always makes progress (REG-454).
             asked_peers: set = set()
@@ -535,21 +524,32 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # to a thinner margin than the aggregate ceiling it composes
                 # with (see gpu_split_shortfall's own docstring: it does not
                 # bake in headroom itself, that is the caller's decision).
-                # Bare call, and it is SAFE to be bare as of #699: gpu_split_shortfall
-                # is now status-aware and admits-on-non-OK (a stale/timed-out per-device
-                # probe yields an EMPTY shortfall, never a fabricated one), and it omits
-                # a device whose reading is blind/stale rather than quoting it. So a bare
-                # call can no longer turn a stale reading into a spurious refusal or a
-                # quoted figure. It also runs WARM here: the vram_capacity probe above
-                # already paid the cold-init cost, so gpu_split_shortfall's own probe
-                # completes fast. The one thing a bare call does NOT get is #701's
-                # in-flight JOIN (wait_for_inflight) - a tiny follow-up owned by the
-                # gpu_split_shortfall session, and moot in practice given the warm-driver
-                # ordering. Passing the deadline/status through is therefore unnecessary.
-                shortfall = (
+                # No return_status opt-in, and that is SAFE as of #699:
+                # gpu_split_shortfall is status-aware and admits-on-non-OK (a
+                # stale/timed-out per-device probe yields an EMPTY shortfall, never a
+                # fabricated one), and it omits a device whose reading is blind/stale
+                # rather than quoting it. So this call can no longer turn a stale
+                # reading into a spurious refusal or a quoted figure. It also runs
+                # WARM here: the vram_capacity probe above already paid the cold-init
+                # cost, so gpu_split_shortfall's own probe completes fast. The one
+                # thing it does NOT get is #701's in-flight JOIN (wait_for_inflight)
+                # - a tiny follow-up owned by the gpu_split_shortfall session, and
+                # moot in practice given the warm-driver ordering. Passing the
+                # deadline/status through is therefore unnecessary.
+                #
+                # return_shares_adaptive: the refuse-vs-defer branch below MUST know
+                # whether the shares were the live auto free-VRAM-proportional ones
+                # (their all-short can only mean combined-short -> defer) or static
+                # pinned/equal-fallback shares (the pre-feature per-device hazard ->
+                # hard 503). Config shape alone cannot answer that: auto can DECLINE
+                # (stale index, unmeasurable device) and fall back to equal shares
+                # with ratios still unset - see gpu_split_shortfall's docstring.
+                shortfall, shares_adaptive = (
                     await loop.run_in_executor(
-                        None, gpu_split_shortfall, vram_required + headroom)
-                    if check_split_fit else [])
+                        None, functools.partial(
+                            gpu_split_shortfall, vram_required + headroom,
+                            return_shares_adaptive=True))
+                    if check_split_fit else ([], False))
                 # PERMIT only on a reading that was actually taken. A frozen
                 # last-known-good that happens to read HIGH would otherwise pass here
                 # and admit a load with ZERO eviction on top of resident peers - the
@@ -691,7 +691,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                             free_bytes=free_vram, asked=asked_peers))
                     if cooperated:
                         continue
-                    if shortfall and split_ratios_pinned:
+                    if shortfall and not shares_adaptive:
                         # Aggregate may well be enough - it is specifically the
                         # configured split's per-device share that is short, so name
                         # the device(s), not a generic aggregate message. (Said "or
@@ -702,30 +702,38 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         # unmeasurable aggregate cannot coexist. Also unreachable now
                         # via the inconclusive branch, which empties shortfall.)
                         #
-                        # PINNED ratios only: this stays a hard refusal even though
-                        # everything below it defers to the backend, because with
-                        # pinned shares apply_gpu_split() divides the model by that
-                        # static per-config ratio with no live per-device awareness
+                        # STATIC shares only (pinned ratios, or auto declined into
+                        # the equal fallback - a stale configured index, a device
+                        # without a free reading): this stays a hard refusal even
+                        # though everything below it defers to the backend, because
+                        # with static shares apply_gpu_split() divides the model by
+                        # a ratio that ignores live per-device free VRAM
                         # (discover.gpu_split_shortfall's own docstring), and the
                         # backend's own sizing (_auto_gpu_layers / _check_vram,
                         # llamacpp/_sizing.py) budgets the split's COMBINED capacity
-                        # (_split_free_total_bytes), never any one device's pinned
+                        # (_split_free_total_bytes), never any one device's static
                         # share - so this per-device check is still the only gate
                         # that can catch one split device being individually short
                         # while the aggregate fits. Letting a real per-device
                         # shortfall through would trade today's precise, actionable
                         # message for a native worker abort with no such visibility.
+                        # Keyed on shares_adaptive, NOT on whether ratios are set in
+                        # config: with ratios unset but auto DECLINED, the loader
+                        # will apply the same equal fallback the gate just checked,
+                        # so this hazard is fully live there (review finding on
+                        # this feature's first cut - the config shape alone admitted
+                        # exactly that case).
                         detail = "; ".join(
                             f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
                             f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
                         raise HTTPException(
                             503, f"Not enough VRAM on the configured split "
                             f"device(s) to load '{name}' ({detail}).")
-                    # With UNSET ratios (the auto free-VRAM-proportional split), a
+                    # ADAPTIVE shares (live auto free-VRAM-proportional split): a
                     # non-empty shortfall can only mean the COMBINED estimate is
                     # short (each device's auto share fits its free whenever the
-                    # aggregate fits - gpu_split_shortfall computes with the same
-                    # auto ratios the loader will apply), so it falls through to
+                    # aggregate fits - gpu_split_shortfall computed with the same
+                    # auto ratios the loader will pin), so it falls through to
                     # the same defer-to-backend path as the aggregate-only miss
                     # below: the backend's split-aware sizing (#770) is the
                     # accurate judge there, with partial offload available -

@@ -223,7 +223,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # initial load, not the class-level default: an instance-level
             # override here would otherwise silently not reach the child process.
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
-            gpu_split_ratios=resolve_auto_split_ratios(),
+            # wait_for_inflight: this runs off the event loop (executor/CLI
+            # thread), and a collision with the GUI's stats-heartbeat probe
+            # must JOIN rather than decline auto into the equal fallback.
+            gpu_split_ratios=resolve_auto_split_ratios(wait_for_inflight=True),
         )
         timeout = self._load_timeout_seconds()
 

@@ -414,6 +414,119 @@ class TestShortfallAutoShares:
         assert result == [{"index": 1, "needed": 4 * GB, "free": 3 * GB}]
 
 
+class TestShortfallSharesAdaptiveFlag:
+    """return_shares_adaptive: the refuse-vs-defer caller (switch_engine) must
+    know which math produced the shares - True only when the live auto ratios
+    were actually used. Keying the defer on the CONFIG shape instead admitted
+    exactly the declined-auto case (equal fallback, per-device hazard fully
+    live) - the confirmed review finding on this feature's first cut."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 14 * GB},
+    ]
+
+    def _no_vulkan(self, monkeypatch):
+        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+
+    def test_true_when_auto_shares_in_effect(self, monkeypatch):
+        self._no_vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
+        shortfall, adaptive = discover.gpu_split_shortfall(
+            8 * GB, {"gpu_split_indices": [0, 1], "gpu_split_ratios": None},
+            return_shares_adaptive=True)
+        assert shortfall == [] and adaptive is True
+
+    def test_false_when_auto_declines_on_a_stale_index(self, monkeypatch):
+        """A configured index no longer detected: auto declines all-or-nothing,
+        the surviving devices get the equal fallback, and the flag must say
+        static - a non-empty result here is the pre-feature hazard."""
+        self._no_vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
+        shortfall, adaptive = discover.gpu_split_shortfall(
+            8 * GB, {"gpu_split_indices": [0, 1, 5], "gpu_split_ratios": None},
+            return_shares_adaptive=True)
+        assert adaptive is False
+        # Equal fallback across the two survivors: device 0's 4 GB share is
+        # short of its 2 GB free - the exact case the 503 must still catch.
+        assert shortfall == [{"index": 0, "needed": 4 * GB, "free": 2 * GB}]
+
+    def test_false_for_pinned_ratios(self, monkeypatch):
+        self._no_vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
+        shortfall, adaptive = discover.gpu_split_shortfall(
+            8 * GB,
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]},
+            return_shares_adaptive=True)
+        assert adaptive is False
+        assert shortfall == [{"index": 0, "needed": 4 * GB, "free": 2 * GB}]
+
+    def test_false_on_the_no_split_early_return(self, monkeypatch):
+        self._no_vulkan(monkeypatch)
+        shortfall, adaptive = discover.gpu_split_shortfall(
+            8 * GB, {"gpu_split_indices": None},
+            return_shares_adaptive=True)
+        assert shortfall == [] and adaptive is False
+
+    def test_composes_with_return_status(self, monkeypatch):
+        self._no_vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
+        shortfall, status, adaptive = discover.gpu_split_shortfall(
+            8 * GB, {"gpu_split_indices": [0, 1], "gpu_split_ratios": None},
+            return_status=True, return_shares_adaptive=True)
+        assert shortfall == []
+        assert status == discover.GPU_PROBE_OK
+        assert adaptive is True
+
+    def test_bare_call_shape_unchanged(self, monkeypatch):
+        self._no_vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
+        result = discover.gpu_split_shortfall(
+            8 * GB, {"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
+        assert result == []   # a plain list, not a tuple
+
+
+class TestWaitForInflightForwarding:
+    """resolve_auto_split_ratios(wait_for_inflight=True): the load-path
+    callers must JOIN a concurrent heartbeat probe instead of taking an
+    instant BUSY that silently declines auto into the equal fallback on
+    exactly the asymmetric box the feature targets."""
+
+    def test_forwarded_to_a_production_signature_probe(self, monkeypatch):
+        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+        seen = {}
+
+        def fake(*a, return_status=False, wait_for_inflight=False, **k):
+            seen["wfi"] = wait_for_inflight
+            gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB},
+                    {"index": 1, "free": 6 * GB, "total": 8 * GB}]
+            return (gpus, discover.GPU_PROBE_OK) if return_status else gpus
+
+        monkeypatch.setattr(discover, "list_gpus", fake)
+        ratios = resolve_auto_split_ratios(
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": None},
+            wait_for_inflight=True)
+        assert ratios == pytest.approx([0.25, 0.75])
+        assert seen["wfi"] is True
+
+    def test_not_forced_on_a_double_without_the_kwarg(self, monkeypatch):
+        """A status-capable double lacking wait_for_inflight (and **kwargs)
+        must not be handed a kwarg it never agreed to accept - same tolerance
+        contract as _list_gpus_reading's return_status inspection."""
+        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+
+        def fake(*a, return_status=False):
+            gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB},
+                    {"index": 1, "free": 6 * GB, "total": 8 * GB}]
+            return (gpus, discover.GPU_PROBE_OK) if return_status else gpus
+
+        monkeypatch.setattr(discover, "list_gpus", fake)
+        ratios = resolve_auto_split_ratios(
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": None},
+            wait_for_inflight=True)
+        assert ratios == pytest.approx([0.25, 0.75])
+
+
 # --------------------------------------------------------------------------- #
 #  Parent -> worker pinning: the chat chain                                     #
 # --------------------------------------------------------------------------- #
@@ -429,8 +542,13 @@ class TestChatParamChain:
     def test_load_native_pins_auto_ratios_into_worker_params(
             self, tmp_path, monkeypatch):
         from localm.inference.backends.gguf import GgufBackend
-        monkeypatch.setattr(discover, "resolve_auto_split_ratios",
-                            lambda *a, **k: [0.6, 0.4])
+        seen = {}
+
+        def _resolve(*a, **k):
+            seen.update(k)
+            return [0.6, 0.4]
+
+        monkeypatch.setattr(discover, "resolve_auto_split_ratios", _resolve)
         b = self._backend(tmp_path)
         with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner."
@@ -440,6 +558,9 @@ class TestChatParamChain:
             b._load_native()
         params = spawn.call_args.args[0]
         assert params["gpu_split_ratios"] == [0.6, 0.4]
+        # Off-loop load path: must join a concurrent heartbeat probe rather
+        # than decline auto into the equal fallback on an instant BUSY.
+        assert seen.get("wait_for_inflight") is True
 
     def test_load_native_passes_none_when_auto_declines(
             self, tmp_path, monkeypatch):
@@ -563,7 +684,7 @@ class TestSwitchEngineAutoDefer:
     remains the only protection against a per-device abort there."""
 
     def _install(self, monkeypatch, tmp_path, *, gpus, gpu_split_ratios=None,
-                 fails_to_fit=False):
+                 gpu_split_indices=(0, 1), fails_to_fit=False):
         model_file = tmp_path / "model-a.gguf"
         fake_registry = {"model-a": {"path": str(model_file), "source": "local"}}
         monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
@@ -576,7 +697,7 @@ class TestSwitchEngineAutoDefer:
         base_cfg = real_load_config()
 
         def _cfg():
-            return {**base_cfg, "gpu_split_indices": [0, 1],
+            return {**base_cfg, "gpu_split_indices": list(gpu_split_indices),
                     "gpu_split_ratios": gpu_split_ratios}
 
         monkeypatch.setattr("localm.config.load_config", _cfg)
@@ -640,5 +761,30 @@ class TestSwitchEngineAutoDefer:
         client = TestClient(app)
         r = _chat(client, "model-a")
         assert r.status_code == 503
+        assert "configured split" in r.text
+        assert "GPU 0" in r.text
+
+    def test_declined_auto_keeps_the_hard_refusal(self, monkeypatch, tmp_path):
+        """THE review-finding regression pin (confirmed by live repro on the
+        first cut): ratios UNSET but a configured index is no longer detected,
+        so auto declines all-or-nothing and the LOADER will apply the equal
+        fallback across the survivors - the per-device hazard is fully live,
+        and keying the defer on the config shape alone silently removed this
+        503. The gate must key on whether ADAPTIVE shares were actually in
+        effect: here they were not, so the pre-feature refusal fires, naming
+        the short device."""
+        gpus = [
+            {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
+            {"index": 1, "name": "B", "total": 32 * GB, "free": 30 * GB},
+        ]
+        self._install(monkeypatch, tmp_path, gpus=gpus,
+                      gpu_split_indices=(0, 1, 2))   # device 2 vanished
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, (
+            f"auto declined (stale index) -> the loader will equal-split the "
+            f"survivors -> GPU 0 cannot hold its equal share -> the hard 503 "
+            f"must fire exactly as pre-feature: {r.text}")
         assert "configured split" in r.text
         assert "GPU 0" in r.text
