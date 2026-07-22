@@ -524,6 +524,7 @@ def tool_dispatch_parallel(
                 source="parallel",
                 status=outcome.status,
                 base=base_sha,
+                diff=outcome.diff,
             ))
 
     finally:

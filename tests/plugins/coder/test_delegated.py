@@ -41,12 +41,62 @@ def test_footer_names_branch_file_count_and_view_command():
     assert "git diff" in out
 
 
-def test_footer_contains_no_raw_diff_hunks():
-    """The footer must not inline foreign hunks: /diff renders its diff through
-    Syntax(..., "diff"), so inlined hunks would read as directly applicable."""
-    out = d.render_footer([_cs(), _cs(label="child2", branch="coder/child2-ff99")])
-    for marker in ("@@", "+++ ", "--- ", "diff --git"):
-        assert marker not in out, f"footer leaked a diff hunk marker: {marker}"
+def test_inlined_diff_is_labelled_as_not_in_this_tree():
+    """The hunks ARE inlined (discoverability), so the labelling is what stops a
+    user reading them as changes already applied to their working tree."""
+    out = d.render_footer([_cs(diff="diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")])
+    assert "NOT in your working tree" in out
+    assert "have not been merged" in out
+    # The hunks are present, but the branch that holds them is named right there.
+    assert "@@" in out
+    assert "coder/child1-ab12ef34" in out
+
+
+def test_inlined_diff_is_capped_and_says_so():
+    """/diff is invoked repeatedly; two unbounded child diffs would drown the
+    parent's own changes. The cap must announce itself and stay reachable."""
+    huge = "\n".join(f"+line {i}" for i in range(4000))
+    out = d.render_footer([_cs(diff=huge)])
+    assert len(out) < 6000, "an unbounded child diff was inlined"
+    assert "truncated" in out
+    assert "git diff" in out, "the full diff must stay reachable after truncation"
+
+
+def test_footer_is_never_wired_into_a_model_facing_site():
+    """STRUCTURAL GUARD. session_diff() feeds the self-reviewer (loop.py) and
+    episodic memory (session.py). Appending the delegated section AT THOSE CALL
+    SITES corrupts those loops just as merging foreign keys would, even though
+    session_diff() itself is untouched. Pin it in the source so a future
+    well-meaning edit cannot quietly reintroduce it.
+    """
+    from pathlib import Path
+    import localm.plugins.coder as pkg
+
+    root = Path(pkg.__file__).parent
+    for module in ("agent/loop.py", "agent/session.py"):
+        src = (root / module).read_text(encoding="utf-8", errors="replace")
+        for banned in ("footer_for", "render_footer", "delegated_report"):
+            assert banned not in src, (
+                f"{module} references {banned}: the delegated section must never "
+                "reach the self-reviewer or the episode"
+            )
+
+
+def test_recording_delegated_work_does_not_change_what_the_reviewer_would_see():
+    """The reviewer is handed session_diff()'s return. Recording delegated work
+    must leave that byte-identical."""
+    from localm.plugins.coder.agent.persistence import PersistenceMixin
+
+    class Agent(PersistenceMixin):
+        def __init__(self):
+            self.cwd = __import__("pathlib").Path(".")
+            self._changed_files = {}
+
+    a = Agent()
+    before = a.session_diff()
+    d.record(a, _cs(diff="diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n"))
+    assert a.session_diff() == before, \
+        "delegated work altered what the self-reviewer and episode receive"
 
 
 def test_failed_and_timed_out_children_are_flagged():
