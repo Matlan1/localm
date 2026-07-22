@@ -907,6 +907,29 @@ class TestRunCoderTask:
         assert r["result"]["isError"] is False
         assert "created hello.txt" in r["result"]["content"][0]["text"]
 
+    def test_console_messages_after_json_are_ignored(self, coder_active, tmp_path):
+        """The mirror of the before-json guard above, found live 2026-07-22
+        driving the REAL chain end to end: with the coder session in
+        `--mode full`, "Session transcript saved -> <path>" prints AFTER the
+        --output-format json dump, and parsing "from the last lone '{' to the
+        end of stdout" choked on that trailing text - reporting a fully
+        successful task (success: true in the payload) as an error."""
+        server, _ = _server()
+        payload = {"success": True, "response": "IDENTITY-FIX-OK", "turns": 1,
+                   "total_tokens": 1988}
+        stdout = (
+            "No server running. Starting one in the background...\n"
+            "connected to newly started server at a loopback address\n"
+            + json.dumps(payload, indent=2) + "\n"
+            + "Session transcript saved ->\n"
+            "some/project/.localcoder/sessions/2026-07-22_101521.md\n"
+        )
+        fake = MagicMock(stdout=stdout, stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is False
+        assert "IDENTITY-FIX-OK" in r["result"]["content"][0]["text"]
+
     def test_no_json_object_in_stdout_falls_back_cleanly(self, coder_active, tmp_path):
         server, _ = _server()
         fake = MagicMock(stdout="some console message, no JSON at all\n",
