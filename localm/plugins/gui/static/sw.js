@@ -78,7 +78,10 @@
 // v74: index.html, pages/settings.js and style.css changed (the Settings page
 // gained a search box that filters every group at once) - a stale-cached client
 // would keep the old markup, so the box would be missing entirely.
-const CACHE = "localm-shell-v74";
+// v75: coder.js renders the new episodes_recalled event (which past lessons a
+// run pulled in, with the id to forget one by) - a stale-cached client would
+// silently ignore the event and show nothing.
+const CACHE = "localm-shell-v75";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

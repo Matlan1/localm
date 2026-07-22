@@ -153,6 +153,9 @@ class NullAuditLog:
     def notice(self, kind: str, message: str) -> None:
         pass
 
+    def episodes_recalled(self, episodes: list) -> None:
+        pass
+
     def close(self) -> None:
         pass
 
@@ -230,6 +233,16 @@ class AuditLog:
         crashed, a scope that does not confine shell execution) had nowhere to be
         recorded and went unlogged. ``kind`` groups them for later reading."""
         self._write("notice", {"kind": kind, "message": str(message)[:500]})
+    def episodes_recalled(self, episodes: list) -> None:
+        """Record WHICH past lessons were injected into this session (id + the
+        lesson text, which the injected prompt already carries verbatim into the
+        ``user`` entry above). Makes a lesson that steered a run badly traceable
+        afterwards, and gives the user the id to forget it by."""
+        self._write("episodes_recalled", {"episodes": [
+            {"id": str(e.get("id", ""))[:64],
+             "outcome": str(e.get("outcome", ""))[:32],
+             "lesson": str(e.get("lesson", ""))[:200]}
+            for e in (episodes or [])]})
 
     def close(self) -> None:
         try:

@@ -260,6 +260,13 @@ class Agent(
         # localm home dir, never the project tree.
         self._episode_task: str = ""
         self._episode_store = None
+        # WHICH past lessons this run actually recalled ({id, lesson, outcome}),
+        # and why recall came back empty when it did. Without this the injected
+        # text was untraceable: a bad lesson steering a run was invisible and
+        # there was no id to forget it by (memory-audit finding 39 / D2). The chat
+        # side keeps the same record in ctx.state["memory_used"].
+        self._episodes_used: list = []
+        self._episodes_degrade_reason: str = ""
         try:
             from localm.config import load_config
             _cfg = load_config()
