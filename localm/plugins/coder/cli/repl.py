@@ -251,8 +251,13 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
     bool return keeps a uniform signature with _handle_command."""
     if cmd == "changes":
         files = agent.changed_files()
+        # Delegated work lives in another tree, so it is deliberately absent from
+        # changed_files(). The footer is how it stays discoverable ("" if none).
+        from ..delegated import footer_for
+        delegated = footer_for(agent)
         if not files:
-            print_info("No files changed this session.")
+            print_info("No files changed this session."
+                       if not delegated else "No files changed in this tree.")
         else:
             for f in files:
                 badge = "new" if f["created"] else "edited"
@@ -262,15 +267,24 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                     f"{f['writes']} write(s) via {f['last_tool']}[/dim]{gone}"
                 )
             print_info("Use /diff [path] for the cumulative changes.")
+        if delegated:
+            console.print(delegated)
 
     elif cmd == "diff":
         diff = agent.session_diff(arg or None)
+        # Rendered separately from the diff document below, never appended into
+        # it: Syntax(..., "diff") presents ONE applicable patch, and foreign hunks
+        # inlined there would read as directly applicable when they are not.
+        from ..delegated import footer_for
+        delegated = footer_for(agent) if not arg else ""
         if not diff:
             print_info("No changes to show."
                        + (f" ('{arg}' was not changed this session)" if arg else ""))
         else:
             from rich.syntax import Syntax
             console.print(Syntax(diff, "diff", theme="monokai", line_numbers=False))
+        if delegated:
+            console.print(delegated)
 
     elif cmd == "compact":
         ratio = agent._fill_ratio()
