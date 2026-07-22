@@ -93,17 +93,40 @@ _RESOURCE_GATES = (
 )
 
 
-def pytest_collection_modifyitems(config, items):
-    available: dict = {}
-    for item in items:
-        for marker, check, reason in _RESOURCE_GATES:
-            if marker not in item.keywords:
-                continue
-            ok = available.get(marker)
-            if ok is None:
-                ok = available[marker] = check()
-            if not ok:
-                item.add_marker(pytest.mark.skip(reason=f"{marker}: {reason}"))
+_resource_available: dict = {}
+
+
+def pytest_runtest_setup(item):
+    """Skip resource-gated tests whose resource is unavailable - evaluated
+    LAZILY, at a gated test's own setup, never at collection.
+
+    This was an eager pytest_collection_modifyitems pass until 2026-07-22, and
+    the eager form was a real bug: merely COLLECTING a real_gguf test (any run
+    naming test_kv_bytes_offload.py, for example) ran _runtime_available() ->
+    load_lib() in-process, mapping the bundled HIP/ROCm runtime into the shared
+    pytest worker even when -m "not integration" deselected every gated test
+    (pytest's own -m deselection hook is trylast, so it ran AFTER the gate).
+    That cost seconds of native DLL load for tests that never run, and poisoned
+    any LATER real `import torch` in the same process: torch's rocm_sdk preload
+    of hipsolver.dll resolved its rocsolver.dll import BY NAME to the
+    already-resident bundled build, which lacks the rocsolver_?sytrs_64
+    entrypoints -> STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139), printed per
+    affected test as a scary "Windows fatal exception" by pytest's
+    faulthandler. Full root-cause evidence:
+    dev-notes/pytest-collection-native-load-torch-fault-2026-07-22.md.
+
+    Lazily, a deselected gated test triggers nothing, and a selected one loads
+    the runtime at its own setup - exactly what it was about to do anyway.
+    Results stay memoized per marker (and per xdist worker, as before, where
+    each worker ran its own collection pass)."""
+    for marker, check, reason in _RESOURCE_GATES:
+        if marker not in item.keywords:
+            continue
+        ok = _resource_available.get(marker)
+        if ok is None:
+            ok = _resource_available[marker] = check()
+        if not ok:
+            pytest.skip(f"{marker}: {reason}")
 
 
 @pytest.fixture(autouse=True)
@@ -158,17 +181,19 @@ def _reset_gpu_probe_cache():
 @pytest.fixture(autouse=True)
 def _neutralise_backend_vram_query():
     """loader.gpu_memory() reads the ACTIVE ggml backend's free VRAM (the signal
-    GgufBackend._free_vram_bytes prefers). The real_gguf resource gate above calls
-    load_lib() at COLLECTION time, so _loaded_lib is set for the whole session -
-    which would make gpu_memory() return THIS machine's real free VRAM inside the
-    many unit tests that simulate VRAM by patching _free_total_vram_bytes, silently
-    defeating their mock. Force the resolver cache to the 'unavailable' sentinel so
-    gpu_memory() returns None (and _free_vram_bytes falls back to the patched torch
-    reader) unless a test opts in by setting the cache / patching gpu_memory itself.
+    GgufBackend._free_vram_bytes prefers). Once a real_gguf-gated test has RUN
+    in this worker (its lazy resource gate above, or the test itself, calls
+    load_lib() at that test's setup), _loaded_lib stays set for the rest of the
+    session - which would make gpu_memory() return THIS machine's real free VRAM
+    inside the many unit tests that simulate VRAM by patching
+    _free_total_vram_bytes, silently defeating their mock. Force the resolver
+    cache to the 'unavailable' sentinel so gpu_memory() returns None (and
+    _free_vram_bytes falls back to the patched torch reader) unless a test opts
+    in by setting the cache / patching gpu_memory itself.
     We do NOT reset _loaded_lib: dropping that reference could unload the DLL out
     from under an integration test's live model.
 
-    _loader.native_lib_loaded() (added by #754) has the SAME collection-time-load
+    _loader.native_lib_loaded() (added by #754) has the SAME loaded-runtime
     exposure in principle, but is deliberately NOT neutralised here (global,
     autouse, every test): tests/test_native_dll_conflict_guard.py directly unit-
     tests native_lib_loaded() itself by patching the _loaded_lib variable it reads

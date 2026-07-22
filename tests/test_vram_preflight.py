@@ -67,9 +67,9 @@ def _reset_torch_broken_flag():
 @pytest.fixture(autouse=True)
 def _neutralise_native_lib_loaded():
     """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY
-    xdist worker that has collected a real_gguf-gated test (conftest.py's
-    _neutralise_backend_vram_query docstring explains why: load_lib() runs once
-    at collection time and _loaded_lib is deliberately never reset). Once True,
+    xdist worker in which a real_gguf-gated test has RUN (conftest.py's lazy
+    resource gate - or the test itself - calls load_lib() at that test's setup,
+    and _loaded_lib is deliberately never reset). Once True,
     _free_total_vram_bytes() skips the torch attempt entirely and returns
     (None, None) - silently defeating every test in this module that mocks
     torch via patch.dict(sys.modules, ...) to exercise that path (confirmed by
