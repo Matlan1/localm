@@ -139,12 +139,22 @@ def test_a_rag_job_survives_a_scheduler_round_trip(home):
 
 
 def test_a_rag_job_is_creatable_over_the_api(home, monkeypatch):
+    """Through the real plugin engine (open mode, no key), mirroring
+    tests/test_jobs_plugin.py::test_plugin_routes_via_engine."""
+    from pathlib import Path
+
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from localm.plugins.builtin.jobs import plug
+    from localm.plugins.engine import PluginManager
 
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+
+    store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
     app = FastAPI()
-    app.include_router(plug._router)
+    PluginManager(app, store_root=store_root,
+                  installed_root=home / "plugins").install("jobs")
+
     with TestClient(app) as client:
         r = client.post("/api/jobs", json={
             "name": "kb-sync", "task_kind": "rag", "collection": "kb",
@@ -152,9 +162,16 @@ def test_a_rag_job_is_creatable_over_the_api(home, monkeypatch):
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["task_kind"] == "rag" and body["collection"] == "kb"
+        # No prompt was sent at all: a rag job must not need one.
+        assert body["prompt"] == ""
 
-        # And the collection is required, with a clear 400 rather than a run-time
-        # surprise.
+        # It is really persisted, not just echoed.
+        from localm.plugins.builtin.jobs.store import JobStore
+        stored = JobStore().get(body["id"])
+        assert stored is not None and stored.collection == "kb"
+
+        # And the collection is required, with a clear 400 rather than a
+        # run-time surprise on every unattended tick.
         bad = client.post("/api/jobs", json={
             "name": "kb-sync-2", "task_kind": "rag",
             "schedule_kind": "interval", "schedule": 3600})
