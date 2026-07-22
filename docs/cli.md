@@ -303,6 +303,35 @@ How much of the model lands on each card is figured out automatically: at load t
 
 GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. Fewer than 2 currently-detected devices in `gpu_split_indices` (a stale index, or only one still present) falls back to the single-GPU behavior above, with a logged warning - it never crashes a load. On the `vulkan` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only devices, so there is nothing to cross-check them against); there the numbers mean the Vulkan backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown, and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
 
+### Keeping more than one model loaded
+
+localm already keeps several models resident at once when they fit: loading a
+second model does **not** evict the first if a live free-VRAM reading shows it
+fits alongside (the model's estimated need plus a 1 GB headroom, and, with a
+split configured, enough room on every split device). Only when it does not fit
+is a resident model evicted, least-recently-used first, and never one that is
+currently generating. When free VRAM cannot be measured, or the reading is
+inconclusive, localm deliberately stays single-resident rather than stacking
+models until the driver runs out. This applies to the HTTP server (`localm
+serve` / `localm gui`) and the MCP server (`localm mcp`) alike.
+
+Two optional knobs override that arithmetic when you would rather decide
+yourself:
+
+```bash
+localm config max_resident_models 2         # keep at most 2 models loaded at once
+localm config max_resident_models 1         # strict single-resident (evict on every switch)
+localm config pinned_models tiny-a,tiny-b   # never evict these to make room
+localm config max_resident_models ""        # clear the cap - back to free-VRAM arithmetic
+localm config pinned_models ""              # clear every pin
+```
+
+Both are off by default, so behavior is unchanged unless you set them. The cap
+bounds how many models stay loaded regardless of how much headroom there is;
+pinning protects named models from being chosen as the eviction victim (it never
+loads a model on its own). If pins leave nothing that can be evicted, the load
+still goes ahead and the missed policy is logged rather than silently dropped.
+
 **Note:** the native 2-device split load path is verified end to end (real device enumeration, a lopsided configured ratio honored in the per-layer placement, coherent inference across the split) against two genuinely distinct Vulkan devices, and the ratio/index validation and parameter wiring are unit-tested. Not yet verified on real multi-GPU hardware: VRAM pressure and out-of-memory behavior across cards (the second test device is a software one backed by system RAM), and the amd-rocm (HIP) multi-device path. Report an issue if a split load misbehaves.
 
 ---

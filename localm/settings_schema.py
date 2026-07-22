@@ -176,6 +176,21 @@ CORE_FIELDS: list = [
                  "(same order/length). Blank distributes by each card's free "
                  "VRAM at load time (evenly when that cannot be measured).",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    # HIDDEN, like the GPU knobs above: these tune the same VRAM-residency
+    # decision and are set from the CLI / PATCH /v1/config, not the generic
+    # settings form. HIDDEN also routes them to the explicit branches in
+    # _validate_one - a Widget.NUMBER field whose default is None derives
+    # want_int=False and would store a cap of 2 as 2.0.
+    SettingField("max_resident_models", Widget.HIDDEN, "Max resident models",
+                 "How many models may stay loaded at once. Blank lets free-VRAM "
+                 "arithmetic decide (a model loads alongside the others only "
+                 "when it provably fits); 1 forces strict single-resident.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1),
+    SettingField("pinned_models", Widget.HIDDEN, "Pinned models",
+                 "Model names that are never evicted to make room for another. "
+                 "Pinning only protects an already-loaded model; it never loads "
+                 "one. Blank pins nothing.",
+                 group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "
@@ -827,6 +842,20 @@ def _validate_one(key: str, val, field: "SettingField", default):
                     raise ValueError(f"{key}: {r} must be greater than 0")
                 out.append(r)
             return out
+        if key == "max_resident_models":
+            # A HIDDEN nullable INT (see its schema comment). Blank clears the
+            # cap back to "no cap" - a cap you could set but never un-set from
+            # the CLI would be a trap - so "" is accepted here rather than
+            # falling into _to_number, where int("") is a hard error.
+            if isinstance(val, str) and not val.strip():
+                return None
+            return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
+        if key == "pinned_models":
+            # A HIDDEN list-of-strings field: HIDDEN skips the Widget.LIST
+            # branch above, so normalize here. Accepts a CLI CSV string
+            # ("a,b") or a JSON list; empty clears every pin.
+            tokens = _to_str_list(key, val)
+            return tokens or None
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.
