@@ -940,10 +940,11 @@ class Collection:
         purpose when it finds a corrupt or stale vector sidecar
         (``vector_degrade_reason``). A metadata-only write must not turn that
         recoverable state into real data loss. ``_save`` now refuses that
-        particular deletion itself (see its ``_vectors_file_rejected`` branch),
-        but the two guards are deliberately independent: this one keeps a
-        metadata write from touching chunks or vectors AT ALL, which is the
-        property callers here actually want. Chunks are untouched, so the cached
+        particular deletion itself (it sets a rejected file aside before any
+        branch can write or unlink that filename), but the two guards are
+        deliberately independent: this one keeps a metadata write from touching
+        chunks or vectors AT ALL, which is the property callers here actually
+        want. Chunks are untouched, so the cached
         BM25 index stays valid too."""
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
