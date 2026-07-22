@@ -270,6 +270,17 @@ Personal model/voice choices, such as the tts plugin's, belong under
 `config["plugins"]["tts"]` in the gitignored `config.json`, never committed;
 the tracked `tts.example.json` only supplies the shipped defaults.
 
+A plugin block that users are meant to EDIT needs a write surface, or those
+settings are hand-edit-only in practice. The two worked examples are the media
+blocks (`GET/POST /v1/media/config`) and the tts block (`GET/POST
+/v1/tts/config`): both validate the update in
+[settings_schema.py](../localm/settings_schema.py) and merge it into the plugin's
+own block, and both are gated on `config:read` / `config:write` rather than on
+the plugin's own capability, so a key that may merely USE a plugin cannot
+reconfigure it. Fields that widen a trust boundary (a shell command, a network
+target, a script URL loaded by every browser) additionally require an owner
+(admin) key.
+
 ## Third-party plugins
 
 Any directory with a valid `plugin.toml` can be installed as a plugin:

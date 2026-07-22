@@ -29,7 +29,11 @@ export async function register(ctx) {
   }
   const model = cfg.model || "onnx-community/Kokoro-82M-v1.0-ONNX";
   const libraryURL = new URL(cfg.library || "vendor/kokoro.min.js", import.meta.url);
-  const speed = Number(cfg.speed) || 1;
+  // `let`, not `const`: a Settings save applies voice + speed to the running
+  // provider through applyConfig() below, so the change is audible immediately
+  // instead of only after a reload. model/device/dtype cannot follow suit - the
+  // model is compiled once at load - and the Settings section says so.
+  let speed = Number(cfg.speed) || 1;
 
   // Voice list for the picker, loaded statically (no model download needed).
   let voiceList = [];
@@ -220,5 +224,15 @@ export async function register(ctx) {
     ready: ensureLoaded,
     speak,
     stop,
+    // Apply a freshly saved server-side config without a reload. Only the
+    // fields present are touched, and an unknown voice id is ignored rather
+    // than handed to the model (which would throw at synthesis time).
+    applyConfig: ({ voice, speed: newSpeed } = {}) => {
+      if (voice && (!voiceList.length || voiceList.some((v) => v.id === voice))) {
+        currentVoice = voice;
+      }
+      const n = Number(newSpeed);
+      if (Number.isFinite(n) && n > 0) speed = n;
+    },
   });
 }

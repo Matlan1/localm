@@ -9,7 +9,7 @@
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, confirmDanger, el, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
-import { caps } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -1030,6 +1030,12 @@ export async function refreshSettingsPage() {
   await buildMediaSection(form, fields);
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
+  // The tts plugin's own settings block (its own section in the Plugins group).
+  // Not part of the core schema: those keys live under config["plugins"]["tts"]
+  // and are edited through /v1/tts/config, like the media blocks above.
+  await buildTtsSection(form);
+  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
@@ -1215,6 +1221,205 @@ export async function buildMediaSection(form, fields) {
   }
 
   form.appendChild(panel);
+}
+
+/* ---------------- Text-to-speech (the tts plugin's own block) -------------- */
+
+// The controls currently rendered in the tts section, for the save pass. Kept
+// out of _settingsControls: those are PATCH /v1/config keys, and these are the
+// plugin block's own fields (POSTed to /v1/tts/config).
+export let _ttsControls = [];
+
+/** Build the "Text-to-speech" settings section: the tts plugin's own config
+ *  block (voice / speed / model, plus an Advanced box for device + precision),
+ *  edited through /v1/tts/config. Skipped when the plugin is not active - those
+ *  settings would do nothing - but a FAILED fetch still renders a visible
+ *  failure rather than silently vanishing (binding rule 5).
+ *
+ *  It also names the split the settings-exposure audit found: the server-side
+ *  voice is the DEFAULT, while the chat picker stores a per-browser override.
+ *  When this browser has one, the section says so and offers to clear it -
+ *  otherwise changing the default here would look like it did nothing. */
+export async function buildTtsSection(form) {
+  let data;
+  _ttsControls = [];               // reset first: a failed fetch renders no controls
+  try {
+    const r = await fetch("/v1/tts/config", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    data = await r.json();
+  } catch (e) {
+    const fail = el("section", "card settings-section");
+    fail.id = "settings-sec-tts";
+    fail.dataset.sec = "tts";
+    fail.dataset.group = "plugins";
+    fail.dataset.secLabel = "Text-to-speech";
+    fail.appendChild(settingsSectionHead("Text-to-speech", "plugins"));
+    fail.appendChild(el("div", "sub",
+      "Could not load the text-to-speech settings (" + e.message + ")."));
+    form.appendChild(fail);
+    return;
+  }
+  if (!data.active) return;        // plugin not installed/enabled: nothing to set
+
+  const fields = (data.fields || []).filter(f => f.gui);
+  const panel = el("section", "card settings-section");
+  panel.id = "settings-sec-tts";
+  panel.dataset.sec = "tts";
+  panel.dataset.group = "plugins";
+  panel.dataset.secLabel = "Text-to-speech";
+  panel.appendChild(settingsSectionHead("Text-to-speech plugin", "plugins"));
+  panel.appendChild(el("div", "sub",
+    "Replies are spoken by the Kokoro voice model running in your browser. "
+    + "These are the server-side defaults, shared by every browser."));
+
+  const mkControl = (f) => {
+    // A SELECT can only round-trip a value that is one of its options: a value
+    // outside the list reads back as "" (= clear this override), so saving any
+    // OTHER field in the section would silently wipe it. Two guards:
+    //   - no options at all (the shipped voice list could not be read - the
+    //     server then falls back to a shape check) -> render a text box, so the
+    //     setting stays usable instead of an empty, value-destroying dropdown;
+    //   - a current value outside the list (hand-edited config, or a list that
+    //     changed) -> keep it as an option so it displays and survives a save.
+    // "(inherit)" is offered whenever the field IS overridden, so a select-backed
+    // override can be cleared from the GUI, not only through the API.
+    const hasOptions = !!(f.options || []).length;
+    const widget = (f.widget === "select" && !hasOptions) ? "text" : f.widget;
+    let options = hasOptions ? [...f.options] : f.options;
+    let labels = f.option_labels ? [...f.option_labels] : null;
+    if (options && f.value != null && f.value !== "" && !options.includes(f.value)) {
+      options.unshift(f.value);
+      if (labels) labels.unshift(f.value);
+    }
+    if (options && f.is_override) {
+      options.unshift("");                   // buildSettingControl labels it "(inherit)"
+      if (labels) labels.unshift("(inherit)");
+    }
+    const ctrl = buildSettingControl({
+      key: f.key, widget, label: f.label, help: f.help,
+      default: f.value, options, min: f.min, max: f.max, step: f.step,
+    });
+    if (!ctrl) return null;
+    // Show the friendly voice names ("Heart (en-us, Female, A)") the chat picker
+    // uses, while the option VALUES stay the ids the server validates.
+    if (labels) {
+      const sel = ctrl.node.querySelector("select");
+      if (sel) for (const [i, o] of [...sel.options].entries()) {
+        if (labels[i]) o.textContent = labels[i];
+      }
+    }
+    ctrl.orig = f.value;
+    if (!f.is_override) ctrl.node.classList.add("media-inherited");
+    _ttsControls.push(ctrl);
+    return ctrl;
+  };
+
+  const grid = el("div", "settings-fields");
+  for (const f of fields.filter(f => !f.advanced)) {
+    const ctrl = mkControl(f);
+    if (ctrl) grid.appendChild(ctrl.node);
+  }
+  panel.appendChild(grid);
+
+  // This browser's own voice override, if any: without this the user changes
+  // the default above, hears the old voice, and concludes the setting is fake.
+  const voiceField = fields.find(f => f.key === "voice") || {};
+  const serverVoice = voiceField.value || "";
+  const voiceName = (id) => {
+    const i = (voiceField.options || []).indexOf(id);
+    return (i >= 0 && (voiceField.option_labels || [])[i]) || id;
+  };
+  const override = browserVoiceOverride();
+  if (override && override !== serverVoice) {
+    const note = el("div", "sub tts-browser-override");
+    note.append("This browser plays " + voiceName(override) + ", picked in chat. "
+      + "That overrides the default above, here only. ");
+    const clear = el("button", "btn-secondary tts-clear-override",
+                     "Use the server default in this browser");
+    clear.type = "button";
+    clear.onclick = () => {
+      // Never report a clear that did not happen (rule 5): this button exists
+      // only because the value was READ back, so a failure is a real one and
+      // the override is still in force.
+      if (!clearBrowserVoiceOverride(serverVoice)) {
+        toast("Could not clear it: this browser is blocking storage, so its own "
+              + "voice is still in use here", true);
+        return;
+      }
+      toast("This browser now follows the server default voice");
+      refreshSettingsPage();
+    };
+    note.appendChild(clear);
+    panel.appendChild(note);
+  }
+
+  const advanced = fields.filter(f => f.advanced);
+  if (advanced.length) {
+    const box = el("div", "media-comfy-box");
+    box.appendChild(el("h4", "media-sub-head", "Advanced"));
+    box.appendChild(el("div", "sub",
+      "How the browser runs the voice model. Changes here (and to the model "
+      + "above) apply the next time the page is loaded."));
+    const advGrid = el("div", "settings-fields");
+    for (const f of advanced) {
+      const ctrl = mkControl(f);
+      if (ctrl) advGrid.appendChild(ctrl.node);
+    }
+    box.appendChild(advGrid);
+    panel.appendChild(box);
+  }
+
+  const actions = el("div", "actions");
+  const save = el("button", "btn-primary settings-section-save", "Save Text-to-speech");
+  save.type = "button";
+  save.dataset.sec = "tts";
+  save.onclick = () => saveTtsSettings();
+  actions.appendChild(save);
+  panel.appendChild(actions);
+  form.appendChild(panel);
+}
+
+/** Save the tts block: POST only the fields the user changed (so an untouched
+ *  field is never pinned as an override), then apply the new voice/speed to the
+ *  RUNNING provider so the change is audible without a reload. */
+export async function saveTtsSettings() {
+  const updates = {};
+  for (const c of _ttsControls) {
+    const cur = c.read();
+    if (_mediaChanged(cur, c.orig)) updates[c.field.key] = cur === undefined ? "" : cur;
+  }
+  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  const r = await fetch("/v1/tts/config", {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(data.detail || "Save failed", true); return; }
+  if (!Array.isArray(data.fields)) {
+    // A 200 whose body we cannot read means the save probably landed but we
+    // cannot say what is now in effect - do not claim a clean "Saved".
+    toast("Saved, but the server's reply could not be read - reloading the "
+          + "settings to show what is actually stored", true);
+    refreshSettingsPage();
+    return;
+  }
+  const saved = {};
+  for (const f of data.fields) saved[f.key] = f.value;
+  const live = applyServerTtsConfig({ voice: saved.voice, speed: saved.speed });
+  // Say what actually took effect, per case - never a flat "Saved" that leaves
+  // the user waiting to hear a change that cannot happen yet. The model, device
+  // and precision are baked into the loaded model; this browser's own voice pick
+  // deliberately still wins until it is cleared.
+  const voiceChanged = "voice" in updates;
+  let msg = "Saved";
+  if (["model", "device", "dtype"].some(k => k in updates)) {
+    msg = "Saved - the voice model reloads on the next page load";
+  } else if (voiceChanged && browserVoiceOverride()) {
+    msg = "Saved - this browser keeps its own voice until you clear it below";
+  } else if (voiceChanged && !live) {
+    msg = "Saved - the new voice applies on the next page load";
+  }
+  toast(msg);
+  refreshSettingsPage();
 }
 
 /** (Re)render the compact "localm's own ComfyUI" box in *host*: read
