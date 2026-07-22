@@ -719,16 +719,29 @@ class Collection:
             # refused it (the reason was reset to None immediately above, so
             # nothing else can have set it). Remember that for _save().
             self._vectors_file_rejected = self.vector_degrade_reason is not None
-        elif (self.dir / _REJECTED_VECTORS).is_file():
-            # An earlier write set an unusable sidecar aside rather than deleting
-            # it (_quarantine_rejected_vectors). Nothing was lost, but semantic
-            # search IS still degraded and stays that way until the index is
-            # rebuilt - so keep saying so. Tidying a fault out of the way must not
-            # also tidy away the fact that it happened (AGENTS rule 5).
+        # An earlier write set an unusable sidecar aside rather than deleting it
+        # (_quarantine_rejected_vectors). Nothing was lost, but semantic search is
+        # still degraded until the index is actually REBUILT - so keep saying so.
+        # Tidying a fault out of the way must not also tidy away the fact that it
+        # happened (AGENTS rule 5).
+        #
+        # Checked independently of vectors.json, and gated on COMPLETENESS rather
+        # than on that file's mere presence. As an `elif` on "no vectors.json" this
+        # went silent the moment anything wrote one - which the commonest path
+        # does: re-embedding a single changed document writes real vectors for it
+        # and null placeholders for every other chunk, a structurally valid file
+        # that loads clean. The collection then reported no degrade at all while
+        # most of its chunks had silently lost their vectors. A COMPLETE index is
+        # the honest all-clear, because it is exactly what the prescribed remedy
+        # ('rag repair --embed') produces; anything less still needs saying.
+        if (self.vector_degrade_reason is None       # keep a more specific reason
+                and not self._vector_index_complete()
+                and self._rejected_vector_files()):
             self._note_vector_degrade(
-                f"the stored vector index was unusable and was set aside as "
-                f"{_REJECTED_VECTORS} (nothing was deleted); using BM25 lexical "
-                f"retrieval only - rebuild it with 'localm rag repair'",
+                f"an earlier vector index was unusable and was set aside as "
+                f"{_REJECTED_VECTORS} (nothing was deleted), and the current one "
+                f"does not cover every chunk; using BM25 lexical retrieval only - "
+                f"rebuild it with 'localm rag repair <name> --embed'",
                 warn=True)
         self._bm25 = None
         # If meta.json was corrupt but chunks survived, rebuild a minimal docs
@@ -757,43 +770,97 @@ class Collection:
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
         self._atomic_write("chunks.jsonl", "\n".join(
             json.dumps(c, ensure_ascii=False) for c in self._chunks))
+        # The fate of a REJECTED vectors.json is decided FIRST, before anything
+        # below writes or unlinks that filename. Setting it aside from inside only
+        # one branch loses the bytes on every other one, and the branch it lived in
+        # was not the common case: with an embedder available, re-indexing a single
+        # changed document produces some real vectors, which took the WRITE branch
+        # and overwrote the rejected file (and the evidence) at the same time.
+        if self._vectors_file_rejected:
+            if self._chunks:
+                self._quarantine_rejected_vectors()
+            self._vectors_file_rejected = False
+        # "Complete" means every chunk has a usable vector: the state the
+        # prescribed remedy ('rag repair --embed') produces, and the only honest
+        # all-clear. Partial coverage is a legitimate, supported state - it just is
+        # not a rebuild, so it does not clear a set-aside sidecar's degrade.
+        complete = self._vector_index_complete()
         if self._vectors is not None and any(v for v in self._vectors):
             self._vec_dim = _first_dim(self._vectors)
             self._atomic_write("vectors.json", json.dumps(
                 {"dim": self._vec_dim, "vectors": self._vectors}))
-            # A real index replaced whatever _load() rejected: what we just wrote
-            # is well-formed, finite and aligned with the chunks written above, so
-            # the load-time degrade no longer describes the disk. Clearing it here
-            # keeps stats() and the re-sync result honest without a reload (a
-            # coverage shortfall is re-noted by _vector_scores at query time).
-            self._vectors_file_rejected = False
-            self.vector_degrade_reason = None
-        elif self._vectors_file_rejected and self._chunks:
-            # We have no vectors to write AND the vectors.json on disk is one
-            # _load() refused to use. Deleting it here would destroy the only copy
-            # of that data AND the only evidence of the fault: the next _load()
-            # would find no file, record no vector_degrade_reason, and the
-            # collection would read as legitimately lexical-only. An unattended
-            # re-sync tick would then quietly erase a fault nobody ever saw
-            # (AGENTS rule 5 - never turn a diagnosable problem into a silent
-            # one). Keep the file; _load() keeps reporting why, stats() keeps
-            # showing it, and `localm rag repair <name> --embed` rebuilds it.
-            #
-            # Once no chunks are left (every document removed or pruned) the
-            # exception ends: stored vectors are positional against chunks, so
-            # with nothing to realign them to they are unrecoverable rather than
-            # recoverable, and keeping them would pin a permanent degrade on an
-            # empty collection.
-            #
-            # We are rewriting chunks.jsonl just above, so the file is set ASIDE
-            # rather than left in place: see _quarantine_rejected_vectors.
-            self._quarantine_rejected_vectors()
-            self._vec_dim = None
         else:
+            # Nothing usable to write. Whatever is at this filename now is either
+            # ours from a previous save or nothing at all - a REJECTED file was
+            # already moved out of the way above, so this can no longer delete the
+            # only copy of a fault's evidence, which is what it used to do.
             (self.dir / "vectors.json").unlink(missing_ok=True)
-            self._vectors_file_rejected = False
             self._vec_dim = None
+        if not self._chunks:
+            # Every document is gone. Stored vectors are positional against
+            # chunks, so with nothing left to realign them to they are
+            # unrecoverable rather than recoverable, and a sidecar kept here would
+            # pin a degrade on an empty collection that no rebuild could ever
+            # clear ('rag repair' returns early with no documents to re-index).
+            # This deletion is not hiding a fault: there is no longer a collection
+            # for the fault to be about.
+            self._discard_rejected_vectors("the collection no longer has any "
+                                           "documents to realign them to")
+            self.vector_degrade_reason = None
+        elif complete:
+            # Every chunk has a vector: exactly what 'rag repair --embed'
+            # produces, so the fault the sidecar recorded is genuinely fixed and
+            # the degrade must clear, or the remedy we print would never work.
+            # The sidecar itself is KEPT - the bytes cost little and are the only
+            # record of what went wrong - it just stops meaning "still broken".
+            self.vector_degrade_reason = None
+        elif self._rejected_vector_files():
+            self.vector_degrade_reason = (
+                f"an earlier vector index was unusable and was set aside as "
+                f"{_REJECTED_VECTORS} (nothing was deleted), and the current one "
+                f"does not cover every chunk; using BM25 lexical retrieval only - "
+                f"rebuild it with 'localm rag repair <name> --embed'")
+        else:
+            self.vector_degrade_reason = None
         self._bm25 = None
+
+    def _vector_index_complete(self) -> bool:
+        """True when every chunk currently has a usable vector.
+
+        The all-clear condition for a set-aside sidecar, and deliberately
+        stricter than "a vectors.json exists": partial coverage is a legitimate
+        state (a collection mid-embed), but it is not a REBUILD, so it must not
+        clear a recorded fault. Empty chunks is not "complete" - there is nothing
+        to be complete about, and that case is handled on its own."""
+        return bool(self._chunks) and (
+            self._vectors is not None
+            and len(self._vectors) == len(self._chunks)
+            and all(v for v in self._vectors))
+
+    def _rejected_vector_files(self) -> list:
+        """Every set-aside vectors sidecar, oldest name first."""
+        try:
+            return sorted(p for p in self.dir.glob(_REJECTED_VECTORS + "*")
+                          if p.is_file())
+        except OSError:
+            return []
+
+    def _discard_rejected_vectors(self, why: str) -> None:
+        """Delete set-aside sidecars, saying why.
+
+        The ONLY place they are ever removed, and only when they have become
+        unrecoverable rather than merely inconvenient. Announced at warning level
+        because deleting preserved evidence is exactly the kind of thing that
+        must never happen quietly (AGENTS rule 5)."""
+        for p in self._rejected_vector_files():
+            try:
+                p.unlink()
+            except OSError as e:
+                _log.warning("RAG collection %r: could not remove %s (%s); it is "
+                             "left in place", self.name, p.name, e)
+                continue
+            _log.warning("RAG collection %r: removed the set-aside vector index "
+                         "%s - %s.", self.name, p.name, why)
 
     def _quarantine_rejected_vectors(self) -> None:
         """Set a rejected vectors.json aside as ``vectors.json.rejected``.
@@ -816,21 +883,52 @@ class Collection:
         src = self.dir / "vectors.json"
         if not src.is_file():
             return
+        dest = self._free_rejected_name()
+        if dest is None:
+            _log.warning(
+                "RAG collection %r: an unusable vectors.json could not be set "
+                "aside because %s and its numbered siblings all exist; it is "
+                "left in place so nothing is overwritten. Rebuild the index "
+                "('localm rag repair %s --embed') or clear the old .rejected "
+                "files by hand.", self.name, _REJECTED_VECTORS, self.name)
+            return
         try:
-            os.replace(src, self.dir / _REJECTED_VECTORS)
+            os.replace(src, dest)
         except OSError as e:
             # Best-effort, and the failure is NOT silent. Leaving the file where
             # it is still preserves the data and the evidence (the property that
             # actually matters); only the re-adoption guard is lost.
             _log.warning("RAG collection %r: could not set the unusable "
                          "vectors.json aside as %s (%s); it is left in place",
-                         self.name, _REJECTED_VECTORS, e)
+                         self.name, dest.name, e)
             return
         _log.warning("RAG collection %r: the unusable vectors.json was set aside "
                      "as %s (%s). Nothing was deleted; rebuild the index with "
                      "'localm rag repair %s --embed'.",
-                     self.name, _REJECTED_VECTORS,
+                     self.name, dest.name,
                      self.vector_degrade_reason or "unusable", self.name)
+
+    def _free_rejected_name(self):
+        """An unused ``vectors.json.rejected[.N]`` path, or None if there is none.
+
+        A collection can degrade more than once (it can be repaired back to
+        health and break again; and _save writes meta, chunks and vectors as
+        three independent atomic writes, so an ill-timed crash is a repeatable
+        route to a second rejection). ``os.replace`` overwrites its destination
+        without a word, so a fixed name meant the SECOND incident destroyed the
+        first preserved copy while this very function logged "Nothing was
+        deleted" - a false safety statement on top of real data loss. Numbering
+        keeps every copy. The cap is not a limit on preservation but a limit on
+        silently filling a disk: past it we keep the file where it is and say so,
+        which loses only the re-adoption guard, never the bytes."""
+        first = self.dir / _REJECTED_VECTORS
+        if not first.exists():
+            return first
+        for n in range(2, 21):
+            candidate = self.dir / f"{_REJECTED_VECTORS}.{n}"
+            if not candidate.exists():
+                return candidate
+        return None
 
     def _save_meta(self) -> None:
         """Persist meta.json ONLY, leaving chunks.jsonl / vectors.json alone.

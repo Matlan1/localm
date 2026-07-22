@@ -214,4 +214,12 @@ policy as an interactive add. Full details in
   `vectors.json.rejected` in the collection folder if the chunks were rewritten
   in the meantime, and the reason is repeated by the Knowledge page, `rag resync`
   and every scheduled run until you rebuild the index with
-  `localm rag repair NAME --embed`.
+  `localm rag repair NAME --embed`. Only a rebuild that covers **every** chunk
+  clears it. Indexing one more document meanwhile does not, even with embeddings
+  on: that leaves the older chunks without vectors, which is a thinner index than
+  you had, not a repaired one. Each incident keeps its own set-aside copy
+  (`vectors.json.rejected`, then `.rejected.2`, and so on), and they stay after a
+  successful rebuild as a record of what happened - delete them yourself if you
+  want the space back. The one time localm removes them is when the collection
+  has no documents left at all, since stored vectors are positional and there is
+  then nothing they could ever be matched back up with.
