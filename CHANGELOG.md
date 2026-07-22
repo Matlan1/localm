@@ -134,6 +134,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Vulkan automatically if your driver is too old. Vulkan is still one keypress
   away in the menu, and stays the default for Intel GPUs and for NVIDIA/AMD on
   Linux (where the CUDA build needs a system CUDA runtime).
+- **The coder's project memory and user instructions are now bounded.**
+  `LOCALCODER.md` (project memory) and `.localcoder/system.md` (user
+  instructions) are injected into the coder's system prompt on every turn, and
+  both were previously injected whole with no limit, so a file that grew over
+  time could crowd out the repo map and the conversation itself. Each is now
+  capped at 3000 characters, the same budget the repo map already uses. Normal
+  files are unaffected and injected verbatim. Going over is never silent: the
+  agent tells you which file was over budget and by how many characters, and the
+  prompt itself carries a note so the model knows it is reading a partial file.
+  The same cap applies to a `--system` string. A memory file that exists but
+  cannot be read is now also reported instead of silently ignored.
+- **Corrected the docs on who writes `LOCALCODER.md`.** The CLI docs described it
+  as auto-managed project memory that the agent appends to via `/remember` and
+  its own reflection. The agent has no tool that writes it: the file changes only
+  when you run `/remember` or `/forget` (or edit it yourself), and the agent's
+  close-time reflection is stored in the localm data directory, not in your repo.
 
 ## [0.1.2] - 2026-07-18
 
