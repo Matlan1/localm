@@ -59,6 +59,69 @@ def test_schema_json_serializable_with_defaults():
     assert by_key["mode"]["options"] == ["privacy", "log", "full"]
 
 
+class TestMediaPerPluginAnnotation:
+    """schema_json's media_per_plugin annotation: the GUI's Media section skips
+    group="Media" fields in the flat form and renders per-plugin-mapped globals
+    ONLY in the per-plugin boxes - so it must be able to tell, from the schema
+    alone, which Media fields those are. Before this annotation the client
+    special-cased two keys by name and every other Media field silently
+    rendered NOWHERE (comfy_launch_timeout / comfy_disable_auto_launch /
+    comfy_func_shim were GUI-invisible; 2026-07-22 settings-exposure audit).
+    MEDIA_PLUGIN_FIELDS is the single source of truth."""
+
+    def test_media_fields_carry_the_annotation(self):
+        js = ss.schema_json()
+        mapped = {m.global_key for m in ss.MEDIA_PLUGIN_FIELDS}
+        for f in js:
+            if f.get("group") != "Media":
+                assert "media_per_plugin" not in f, (
+                    f"{f['key']}: the annotation is Media-only noise elsewhere")
+                continue
+            assert f.get("media_per_plugin") == (f["key"] in mapped), (
+                f"{f['key']}: media_per_plugin must mirror MEDIA_PLUGIN_FIELDS")
+
+    def test_the_previously_orphaned_fields_are_not_per_plugin(self):
+        """The three fields the Media section historically dropped: global-only
+        reads (media/comfy_client.py), so they must be annotated for the
+        SHARED box, never left to the per-plugin boxes that cannot show them."""
+        js = {f["key"]: f for f in ss.schema_json()}
+        for key in ("comfy_launch_timeout", "comfy_disable_auto_launch",
+                    "comfy_func_shim"):
+            assert js[key].get("media_per_plugin") is False, key
+
+    def test_per_plugin_mapped_globals_are_annotated_true(self):
+        js = {f["key"]: f for f in ss.schema_json()}
+        assert js["comfy_workdir"].get("media_per_plugin") is True
+        assert js["model_swap_policy"].get("media_per_plugin") is True
+
+
+class TestComfyFloatTypeGlobalKey:
+    """The per-plugin float_type field (MEDIA_PLUGIN_FIELDS) and the media
+    backends both fall back to a GLOBAL comfy_float_type key - which did not
+    exist in DEFAULT_CONFIG or the schema, so the documented fallback could
+    only ever be set by hand-editing config.json (the validated PATCH/CLI
+    paths reject unknown keys). Make the fallback real: present, typed, and
+    validated with the same options as the per-plugin field."""
+
+    def test_key_exists_with_a_null_default(self):
+        assert "comfy_float_type" in DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["comfy_float_type"] is None
+
+    def test_options_match_the_per_plugin_field(self):
+        by_key = {f.key: f for f in ss.CORE_FIELDS}
+        per_plugin = next(m for m in ss.MEDIA_PLUGIN_FIELDS
+                          if m.global_key == "comfy_float_type")
+        assert by_key["comfy_float_type"].options == per_plugin.options
+
+    def test_validates_like_the_per_plugin_options(self):
+        assert ss.validate_update({"comfy_float_type": "fp16"}) == {
+            "comfy_float_type": "fp16"}
+        assert ss.validate_update({"comfy_float_type": ""}) == {
+            "comfy_float_type": None}
+        with pytest.raises(ValueError):
+            ss.validate_update({"comfy_float_type": "not-a-dtype"})
+
+
 def test_fields_by_owner_partitions():
     """Every field's owner is 'core' or a known/plugin-name scope."""
     from localm import scopes
