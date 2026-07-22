@@ -28,6 +28,11 @@ class _SessionMixin:
         self._last_response_fp = ""
         self._repeat_response_count = 0
         self._last_run_ok = True
+        # Clearing the conversation also drops the evidence a failure lesson would
+        # be built from (history, error trace), so the session-level failure marker
+        # goes with it - otherwise /clear would leave a close-time reflection armed
+        # for a run whose context no longer exists.
+        self._had_any_failure = False
         self._unverified_writes.clear()
         self._review_task = ""
         self._error_trace.clear()
@@ -204,7 +209,15 @@ class _SessionMixin:
         #  - a USER-initiated stop: the user asked to leave, which is the worst
         #    moment to start a 1024-token inference, and their own Ctrl-C is not a
         #    lesson to learn.
-        had_failure = (not self._last_run_ok) and not self._user_stopped
+        # "Did ANY run this session fail", not just the last one: _last_run_ok is
+        # per-run (re-armed at the start of every _loop), so a session whose first
+        # turn failed and whose second turn succeeded would otherwise lose its
+        # lesson. _had_any_failure is _loop's session-level record; the second term
+        # keeps the answer right when _last_run_ok is set outside _loop, where a
+        # not-ok current state is itself the failure.
+        had_failure = (
+            (self._had_any_failure or not self._last_run_ok)
+            and not self._user_stopped)
         if not changed and not had_failure:
             return
         if self.on_event is not None:
@@ -229,6 +242,11 @@ class _SessionMixin:
             task = self._episode_task or next(
                 (m.get("content", "") for m in self._messages
                  if m.get("role") == "user"), "")
+            # The per-run flag is the right one HERE (unlike the trigger above):
+            # this records how the session ENDED, and the thin-episode fallback
+            # spells the distinction out - "did not complete" vs "completed with
+            # errors". A session that failed and then recovered completed; its
+            # failure is carried by what_failed, not by the outcome label.
             outcome = "ok" if self._last_run_ok else "incomplete"
             diff = diff_override if diff_override is not None else self.session_diff()
             # Real evidence of what went wrong, so the reflection can actually fill
