@@ -68,6 +68,40 @@ def _complete_model(ctx, param, incomplete):
         return []
 
 
+def _warn_unfinished_background(agent) -> None:
+    """Report background sub-agents this one-shot run is about to abandon.
+
+    The turn-boundary drain only fires at the START of a turn, so a child that is
+    still running (or that finished after the final turn) is never folded in, and
+    a one-shot process then exits and takes its daemon threads with it. Exiting
+    silently would drop work the user explicitly asked for. What survives is
+    stated exactly: a committed branch does, a running child does not.
+    """
+    try:
+        from ..background import get_registry
+        registry = get_registry()
+        running = [j for j in registry.list_status(kind="agent")
+                   if j["state"] == "running"]
+        pending = registry.drain_finished(kind="agent")
+    except Exception:
+        return
+
+    for st in pending:
+        branch = (st.get("result") or {}).get("branch")
+        where = (f" Its work is committed on branch '{branch}'."
+                 if branch else "")
+        print_warning(
+            f"background sub-agent '{st.get('label')}' ({st.get('id')}) finished "
+            f"after the last turn, so its result was not folded into this run."
+            f"{where}")
+    for st in running:
+        print_warning(
+            f"background sub-agent '{st.get('label')}' ({st.get('id')}) is STILL "
+            "RUNNING and will be killed when this one-shot run exits. Use an "
+            "interactive session for background delegation, or spawn_agent "
+            "(synchronous) for a one-shot.")
+
+
 @click.command("coder", context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("task", default="", required=False, metavar="[TASK]")
 @click.option("-m", "--model",      default=None,  envvar="LOCALCODER_MODEL",
@@ -342,6 +376,14 @@ def main(
             else:
                 response = agent.run_task(task)
                 success  = agent.last_run_ok
+
+            # A one-shot run has no NEXT turn, so a background sub-agent that is
+            # still going (or that finished after the last turn) never reaches the
+            # turn-boundary drain - and this process is about to exit, taking its
+            # daemon threads with it. Say so plainly instead of exiting quietly on
+            # work the user asked for: the committed branch survives, the running
+            # child does not.
+            _warn_unfinished_background(agent)
 
             if output_format == "json":
                 import json as _json
