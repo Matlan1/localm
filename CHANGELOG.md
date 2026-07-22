@@ -127,7 +127,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   only, matched exactly, with the closest-match hint on a miss and the post-write
   syntax check on each file. It honours an active `--scope`, is undoable, and is
   captured (not written to disk) in patch mode.
-
+- **The sidebar shows the GPU split your loaded model actually got.** With a
+  multi-GPU split configured, the model status now shows each card's share
+  and how it was decided - for example "Split: GPU 0 33% · GPU 1 67% (by
+  free VRAM)", or "(pinned)" for manual ratios and "(equal)" when free VRAM
+  could not be measured. Single-GPU setups see no change.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
@@ -275,15 +279,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and it no longer reads what it cannot use: files under noise directories
   (`.git`, `node_modules`, `__pycache__`, `.venv`, ...), binaries, and files
   above a size cap are skipped before being read. On a 4103-file / 50.6 MB test
-  repository a default search went from 5.95s to 0.47s and from 123 MB to 5.7 MB
-  of peak memory; a search that had to scan a 25 MB log went from 8.15s to
-  0.66s. Every skip is reported in the result, with the reason and the setting
-  that changes it, so a narrower search never looks like a complete one. The
-  matches-per-file cap (20), the output-line cap (300), and the new file-size cap
-  (4 MB) are now the `coder_grep_max_per_file`, `coder_grep_max_output_lines`,
-  and `coder_grep_max_file_bytes` settings, each overridable per search; 0 means
-  no cap. Line numbers now count line feeds only, matching what an editor shows,
-  so a file containing form feeds no longer reports shifted numbers.
+  repository a default search went from 6.90s to 0.56s and from 123 MB to 5.7 MB
+  of peak memory. Every skip is reported in the result, with the reason and the
+  setting that changes it, so a narrower search never looks like a complete one;
+  searching a skipped directory on purpose still works by naming it in `path=`
+  or `glob=`. The matches-per-file cap (20), the output-line cap (300), and the
+  new file-size cap (4 MB) are now the `coder_grep_max_per_file`,
+  `coder_grep_max_output_lines`, and `coder_grep_max_file_bytes` settings, each
+  overridable per search; 0 means no cap. Line numbers now count line feeds
+  only, matching what an editor shows, so a file containing form feeds no longer
+  reports shifted numbers - in such a file `^`/`$` anchors now also treat only
+  line feeds as line boundaries.
 - **NVIDIA on Windows now recommends CUDA.** The setup menu's default backend for
   an NVIDIA GPU on Windows is now `cuda` (peak performance) rather than Vulkan: it
   fetches a self-contained CUDA runtime (no CUDA Toolkit needed) and falls back to

@@ -62,9 +62,19 @@ class TestResultsUnchanged:
         assert "     0:" not in r.output
 
     def test_zero_context_shows_only_the_hit(self, project):
+        """A context=0 window is ONE line. The rolling-window matcher closes a
+        hit only when its trailing context arrives, so a hit needing zero
+        trailing lines has to be closed at creation or it picks up the next
+        line - silently doubling output and halving the reach of the line cap."""
         r = tool_grep(project, "def target", context=0)
         assert "→    3: def target(a):" in r.output
         assert "return a" not in r.output
+
+    def test_zero_context_with_several_hits_emits_one_line_each(self, project):
+        (project / "many.txt").write_text("a\nhit\nb\nhit\nc\n", encoding="utf-8")
+        r = tool_grep(project, "hit", path="many.txt", context=0)
+        body = [ln for ln in r.output.splitlines() if ln.strip() and not ln.startswith("##")]
+        assert body == ["→    2: hit", "→    4: hit"]
 
     def test_case_insensitive_and_regex_preserved(self, project):
         assert "2 match(es)" in tool_grep(project, r"DEF \w+\(").summary
@@ -123,9 +133,39 @@ class TestSkipsAreReported:
         nm.mkdir(parents=True)
         (nm / "index.js").write_text("target\n", encoding="utf-8")
         r = tool_grep(project, "target")
-        assert ".git" not in r.output.replace("[not searched", "")
-        assert "node_modules" not in r.output.replace("[not searched", "")
-        assert "under a noise dir" in r.output
+        assert "## .git" not in r.output
+        assert "## node_modules" not in r.output
+        assert "noise dir(s)" in r.output
+        assert ".git" in r.output and "node_modules" in r.output   # named, not "..."
+
+    def test_the_noise_note_counts_directories_not_entries(self, project):
+        """The note exists to state coverage accurately. Counting every entry
+        under node_modules reports thousands of 'files' when a handful were."""
+        nm = project / "node_modules" / "dep" / "lib"
+        nm.mkdir(parents=True)
+        for i in range(5):
+            (nm / f"f{i}.js").write_text("target\n", encoding="utf-8")
+        r = tool_grep(project, "target")
+        # One directory named, not "8 files" (5 files + 3 dir entries).
+        assert "noise dir(s) node_modules" in r.output
+        assert "8" not in r.output.split("[not searched")[1]
+
+    def test_a_noise_dir_named_in_the_glob_is_searched(self, project):
+        """glob="build/**/*.py" must not silently return nothing - the caller
+        named the directory, so it is not noise to them. _SKIP_DIRS contains
+        build/dist/target/venv, so this is not a corner case."""
+        b = project / "build"
+        b.mkdir()
+        (b / "gen.py").write_text("needle here\n", encoding="utf-8")
+        r = tool_grep(project, "needle", glob="build/**/*.py")
+        assert "1 match(es)" in r.summary
+        assert "gen.py" in r.output
+
+    def test_the_note_says_how_to_search_a_skipped_dir(self, project):
+        (project / "dist").mkdir()
+        (project / "dist" / "out.js").write_text("target\n", encoding="utf-8")
+        r = tool_grep(project, "target")
+        assert "path=" in r.output and "glob=" in r.output
 
     def test_pointing_path_at_a_noise_dir_still_searches_it(self, project):
         """Pruning is by name BELOW the search root, so an explicit

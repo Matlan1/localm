@@ -206,8 +206,12 @@ class _ExecutionMixin:
             chunk = self._patch_mode_intercept(call)
             if chunk is not None:
                 self._patch_chunks.append(chunk)
-                targets = dict.fromkeys(_call_target_paths(call.name, call.args))
-                label = ", ".join(targets) if targets else "?"
+                # Name the files the DIFF actually covers, not every path the
+                # call mentioned: a file whose edit produced no change is not
+                # "captured", and saying it was overstates what patch mode holds.
+                targets = list(dict.fromkeys(_call_target_paths(call.name, call.args)))
+                covered = [t for t in targets if f"b/{t}" in chunk] or targets
+                label = ", ".join(covered) if covered else "?"
                 result = ToolResult.success(
                     f"[patch-mode] diff captured for {label}",
                     summary=f"[patch-mode] {call.name}",
@@ -317,6 +321,11 @@ class _ExecutionMixin:
         # undo entry per file, or /undo would restore only the first of them.)
         snapshots: dict[str, bytes | None] = {}
         if call.name in _UNDOABLE_TOOLS:
+            # One id per CALL: a multi-file call pushes several entries, and
+            # undo() reverts them together (see persistence.undo) so /undo can
+            # never leave a batch half-restored.
+            self._undo_seq = getattr(self, "_undo_seq", 0) + 1
+            undo_call_id = self._undo_seq
             for path_arg in dict.fromkeys(_call_target_paths(call.name, call.args)):
                 abs_path = (self.cwd / path_arg).resolve()
                 try:
@@ -328,6 +337,7 @@ class _ExecutionMixin:
                     "path": abs_path,
                     "old_content": old_bytes,
                     "tool": call.name,
+                    "call_id": undo_call_id,
                 })
 
         # Episodic change-detection baseline: snapshot the git work-tree state

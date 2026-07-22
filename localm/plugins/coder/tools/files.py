@@ -799,8 +799,14 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
                 if cap <= 0 or len(hits) + len(pending) < cap:
                     window = list(before) + [line]
                     hit_offset = len(before)
-                    pending.append([lineno, window, hit_offset,
-                                    len(window) + context])
+                    wanted = len(window) + context
+                    if len(window) >= wanted:
+                        # Already complete (context=0: the hit line IS the whole
+                        # window). Closing it here rather than on the next line
+                        # is what keeps a context=0 hit a ONE-line window.
+                        hits.append((lineno, window, hit_offset))
+                    else:
+                        pending.append([lineno, window, hit_offset, wanted])
             if context > 0:
                 before.append(line)
     # Hits still short of their trailing context at EOF (the old whole-file
@@ -867,13 +873,26 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     cwd_prefix = _os_path.normcase(str(cwd.resolve()))
     cwd_prefix_sep = cwd_prefix + os.sep
     base_depth = len(base.parts)
+    # A noise directory the CALLER named in glob= is not noise - they asked for
+    # it. Without this, glob="build/**/*.py" returns nothing (build/, dist/,
+    # target/, venv/ are all in _SKIP_DIRS), which is a silent coverage loss
+    # dressed up as "no matches".
+    requested = {seg for seg in file_glob.replace("\\", "/").split("/")
+                 if seg in _SKIP_DIRS}
+    prune_dirs = _SKIP_DIRS - requested
     files: list[Path] = []
-    skipped_noise = skipped_binary = skipped_large = 0
+    skipped_noise: set = set()
+    skipped_binary = skipped_large = 0
     for fp in candidates:
         # Noise directories are pruned by NAME and only BELOW the search root,
         # so pointing path= AT one (grep inside node_modules) still works.
-        if any(part in _SKIP_DIRS for part in fp.parts[base_depth:-1]):
-            skipped_noise += 1
+        noise_dir = next((part for part in fp.parts[base_depth:-1]
+                          if part in prune_dirs), None)
+        if noise_dir is not None:
+            # Count the DIRECTORY, not each entry under it: glob yields
+            # directories as well as files, so counting entries reported
+            # thousands of "files" not searched when a handful were.
+            skipped_noise.add(noise_dir)
             continue
         try:
             st = fp.stat()
@@ -946,11 +965,18 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     skipped_note = ""
     reasons = []
     if skipped_noise:
-        reasons.append(f"{skipped_noise} under a noise dir (.git, node_modules, ...)")
+        # Name the ACTUAL directories skipped, and the way to search them
+        # anyway. "(.git, node_modules, ...)" told the caller neither which dir
+        # was dropped nor how to get it back.
+        named = ", ".join(sorted(skipped_noise)[:6])
+        if len(skipped_noise) > 6:
+            named += f", +{len(skipped_noise) - 6} more"
+        reasons.append(f"noise dir(s) {named} (search one anyway by naming it "
+                       "in path= or glob=)")
     if skipped_binary:
-        reasons.append(f"{skipped_binary} binary")
+        reasons.append(f"{skipped_binary} binary file(s)")
     if skipped_large:
-        reasons.append(f"{skipped_large} over the "
+        reasons.append(f"{skipped_large} file(s) over the "
                        f"{size_cap / (1024 * 1024):.1f} MB size cap "
                        "(raise with max_file_bytes=)")
     if reasons:

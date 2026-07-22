@@ -134,6 +134,69 @@ class TestUndoAndTracking:
         assert "edit_files" in _UNDOABLE_TOOLS
         assert "edit_files" in _MUTATING_TOOLS
 
+    def test_undo_reverts_the_WHOLE_batch_not_just_one_file(self, project):
+        """A multi-file call pushes one entry per file but is ONE operation.
+        Undoing a single entry would leave the other files edited while
+        reporting the operation undone - a half-undone state the caller was
+        told does not exist."""
+        agent = _make_agent(project)
+        before = {n: (project / n).read_bytes()
+                  for n in ("src/main.py", "secrets.txt")}
+        agent._execute_tool(
+            _call("edit_files", edits=[_swap("src/main.py"), _swap("secrets.txt")]),
+            interactive=False)
+        assert (project / "src" / "main.py").read_bytes() != before["src/main.py"]
+
+        msg = agent.undo()
+        for name, original in before.items():
+            assert (project / name).read_bytes() == original, \
+                f"{name} was not restored by a single /undo"
+        assert "2 of 2" in msg
+
+    def test_undo_of_a_single_file_tool_is_unchanged(self, project):
+        """Grouping must not change one-entry-per-call tools."""
+        agent = _make_agent(project)
+        before = (project / "src" / "main.py").read_bytes()
+        agent._execute_tool(
+            _call("edit_file", path="src/main.py", old="import old",
+                  new="import new"), interactive=False)
+        msg = agent.undo()
+        assert (project / "src" / "main.py").read_bytes() == before
+        assert msg.startswith("Undid edit_file: restored")
+
+    def test_two_batches_undo_one_batch_at_a_time(self, project):
+        agent = _make_agent(project)
+        agent._execute_tool(_call("edit_files", edits=[_swap("src/main.py")]),
+                            interactive=False)
+        agent._execute_tool(
+            _call("edit_files",
+                  edits=[{"path": "secrets.txt", "old": "import old",
+                          "new": "import other"}]), interactive=False)
+        agent.undo()          # undoes only the SECOND batch
+        assert (project / "secrets.txt").read_text(encoding="utf-8") == "import old\n"
+        assert (project / "src" / "main.py").read_text(encoding="utf-8") == "import new\n"
+        agent.undo()          # now the first
+        assert (project / "src" / "main.py").read_text(encoding="utf-8") == "import old\n"
+
+    def test_a_failed_undo_is_reported_not_claimed_complete(self, project,
+                                                            monkeypatch):
+        agent = _make_agent(project)
+        agent._execute_tool(
+            _call("edit_files", edits=[_swap("src/main.py"), _swap("secrets.txt")]),
+            interactive=False)
+
+        real = Path.write_bytes
+
+        def failing(self, data):
+            if self.name == "secrets.txt":
+                raise OSError("read-only filesystem")
+            return real(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", failing)
+        msg = agent.undo()
+        assert "did NOT fully succeed" in msg
+        assert "secrets.txt" in msg
+
 
 class TestPatchMode:
     def test_patch_mode_writes_nothing_to_disk(self, project):
@@ -174,3 +237,35 @@ class TestPatchMode:
         assert "+import new" in diff
         assert "import mid" not in diff      # the intermediate state never appears
         assert diff.count("--- a/src/main.py") == 1   # one hunk header per file
+
+    def test_diff_composes_across_equivalent_spellings_of_one_path(self, project):
+        """"a.py" and "./a.py" are the same file to the tool (it resolves), so
+        the preview must compose them, not emit two contradictory hunks."""
+        from localm.plugins.coder.diffutil import compute_multifile_diff
+        diff = compute_multifile_diff(project, [
+            {"path": "src/main.py", "old": "import old", "new": "import mid"},
+            {"path": "./src/main.py", "old": "import mid", "new": "import new"},
+        ])
+        assert diff.count("+import new") == 1
+        assert diff.count("--- a/") == 1
+
+    def test_a_batch_the_tool_would_reject_produces_no_diff(self, project):
+        """patch mode must not report success for a change edit_files refuses.
+        A partial diff would be a plan the real tool would never apply."""
+        from localm.plugins.coder.diffutil import compute_multifile_diff
+        assert compute_multifile_diff(project, [
+            {"path": "src/main.py", "old": "import old", "new": "import new"},
+            {"path": "secrets.txt", "old": "NOT IN THE FILE", "new": "x"},
+        ]) is None
+
+    def test_patch_mode_rejects_a_batch_with_a_miss_and_writes_nothing(self, project):
+        agent = _make_agent(project, patch_mode=True)
+        before = (project / "src" / "main.py").read_bytes()
+        result = agent._execute_tool(
+            _call("edit_files", edits=[_swap("src/main.py"),
+                                       {"path": "secrets.txt",
+                                        "old": "NOT IN THE FILE", "new": "x"}]),
+            interactive=False)
+        assert result.ok is False
+        assert (project / "src" / "main.py").read_bytes() == before
+        assert agent.flush_patch() == ""
