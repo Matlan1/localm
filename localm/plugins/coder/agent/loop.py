@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    console, print_assistant_response, print_info, print_tool_call,
-    print_tool_error, print_tool_result, print_turn_divider,
+    console, print_assistant_response, print_info, print_success,
+    print_tool_call, print_tool_error, print_tool_result, print_turn_divider,
 )
 from ..parser import looks_like_tool_attempt, split_response
 from ..tools import ToolResult
@@ -148,7 +148,16 @@ class _LoopMixin:
         # Per-task one-shot flags for the no-tool-calls handler (split out below):
         # self-verification + pre-done review fire once each; repair re-prompts are
         # capped. Held on a namespace so the helper can persist them across turns.
-        st = SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0)
+        # The verify_* fields drive the exit-code oracle gate (_run_verify_gate).
+        # verify_checked_at is the write count the check last passed at, seeded
+        # with the count on entry: the gate fires only when THIS task has written
+        # something since, so a follow-up question in a REPL session whose EARLIER
+        # turn edited files does not trigger the suite - and a fix made after a
+        # pass (the reviewer can prompt one) is re-checked rather than riding in
+        # on the earlier green.
+        st = SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0,
+                             verify_retries=0, verify_settled=False,
+                             verify_checked_at=self._write_total())
 
         try:
             while self._turns < self.max_turns:
@@ -336,14 +345,29 @@ class _LoopMixin:
     def _handle_no_tool_calls(self, response, interactive, st) -> "tuple[bool, str]":
         """Handle a turn that produced no tool calls (split out of _loop).
 
-        Runs, in order: the one-shot self-verification nudge, the tool-call repair
+        Runs, in order: the harness-run exit-code oracle (when a verify command is
+        configured), the one-shot self-verification nudge, the tool-call repair
         re-prompt (capped), the give-up surface for an unparseable attempt, the
         one-shot pre-done reviewer pass, and finally accepting the response as the
         final answer. ``st`` carries the per-task one-shot flags (verify_nudged,
-        repair_count, review_done) so they persist across turns.
+        repair_count, review_done, verify_retries/verify_settled) so they persist
+        across turns.
 
         Returns ``(should_break, final_response)``: ``(False, "")`` to continue the
         loop, ``(True, text)`` to end it with that final response."""
+        # The exit-code oracle goes FIRST among the finish gates: it is the only
+        # un-gameable one (the harness runs a command and reads its exit code, so
+        # the model cannot talk its way past it), and it costs no tokens. Running
+        # it before the self-graded nudge and the reviewer means a failing check
+        # goes straight back as a fix request instead of spending an LLM review
+        # pass on code that does not pass. Skipped for a response that only LOOKS
+        # like a broken tool call - that model is not finished, it is mid-call,
+        # and the repair turn below handles it.
+        if not looks_like_tool_attempt(response):
+            gated = self._run_verify_gate(response, interactive, st)
+            if gated is not None:
+                return gated
+
         # Self-verification: don't accept a final answer while code
         # changes sit unverified - nudge the agent to check its work.
         # Fires at most once per task to avoid infinite loops.
@@ -356,12 +380,20 @@ class _LoopMixin:
             st.verify_nudged = True
             files = ", ".join(sorted(self._unverified_writes))
             self._add_assistant(response)
+            # Name the project's REAL check when one is known, so "verify your
+            # work" means running it rather than re-reading the file it just
+            # wrote (which is the model grading its own homework from memory).
+            if self.verify_cmd is not None:
+                from ..verify import command_text
+                how = (f"run `{command_text(self.verify_cmd)}` (via run_shell, "
+                       "or run_tests if it is the project's test command)")
+            else:
+                how = ("run run_tests if this project has a test suite, "
+                       "otherwise re-read the changed files to check for mistakes")
             self._add_user(
                 f"[self-verification] You changed code files ({files}) "
                 "but have not verified them. Before giving your final "
-                "answer: run run_tests if this project has a test "
-                "suite, otherwise re-read the changed files to check "
-                "for mistakes. Then give your final answer."
+                f"answer: {how}. Then give your final answer."
             )
             if interactive:
                 print_info(
@@ -475,6 +507,98 @@ class _LoopMixin:
             self._emit("info", text=warning)
             self._audit.notice("review_failed", warning)
         return self._reviewer.feedback_for(result)
+    def _write_total(self) -> int:
+        """Total file writes recorded this session. Compared against a per-task
+        snapshot so the verify gate can tell "this task changed something" from
+        "an earlier turn in this REPL session did"."""
+        return sum(int(f.get("writes", 0)) for f in self._changed_files.values())
+
+    def _run_verify_gate(self, response, interactive, st):
+        """The harness-run exit-code oracle at the pre-done boundary.
+
+        This is the same un-gameable check goal mode runs (``cli/goal.py``'s
+        ``--until``), reaching the interactive REPL and the GUI, where the only
+        finish gates were otherwise self-graded (the verify nudge) or advisory
+        (the reviewer's diff opinion). The HARNESS runs the command and reads its
+        exit code; the model's own claim of success is not consulted, so it
+        cannot declare a premature one.
+
+        Returns None to fall through to the remaining gates, or the
+        ``(should_break, final_response)`` pair ``_handle_no_tool_calls`` returns.
+
+        Only the CLI's outer ``--until`` loop or an interactive/GUI session sets
+        ``verify_cmd``, and never both for the same run, so the command is never
+        executed twice per iteration."""
+        if self.verify_cmd is None or st.verify_settled:
+            return None
+        # Nothing written since the last passing check -> nothing to verify. A
+        # question in an ongoing REPL session must not trigger the project's test
+        # suite just because an earlier turn edited a file.
+        if self._write_total() <= st.verify_checked_at:
+            return None
+
+        from .. import verify as _verify
+        cmd = self.verify_cmd
+        label = _verify.command_text(cmd)
+        self._emit("info", text=f"verification: running `{label}`")
+        if interactive:
+            print_info(f"(verification: running `{label}`)")
+        code, output = _verify.run_verify(cmd, self.cwd)
+
+        if code == 0:
+            # Passing is not terminal: anything written AFTER this point (a fix
+            # the reviewer asks for) must be checked again rather than inheriting
+            # this green. Only the inconclusive and exhausted cases settle.
+            st.verify_checked_at = self._write_total()
+            # A REAL check just passed, so the self-verification nudge - a
+            # self-graded proxy for exactly this - has nothing left to ask for,
+            # and the writes it guards are genuinely verified.
+            st.verify_nudged = True
+            self._unverified_writes.clear()
+            self._emit("info", text=f"verification passed: `{label}` exited 0")
+            if interactive:
+                print_success(f"Verification passed: `{label}` exited 0.")
+            return None
+
+        if _verify.is_inconclusive(cmd, code):
+            # Not a pass and not a fixable failure: the check collected nothing.
+            # Retrying would burn every attempt on something no code change can
+            # affect, so stop - but say plainly that nothing was verified rather
+            # than letting an exit code the model never saw look like success.
+            st.verify_settled = True
+            msg = (f"verification inconclusive: `{label}` collected no tests "
+                   f"(exit {code}) - nothing was actually verified")
+            self._emit("info", text=msg)
+            _agent.print_warning(msg)
+            return None
+
+        if st.verify_retries < self.verify_max_retries and self._turns < self.max_turns:
+            st.verify_retries += 1
+            self._add_assistant(response)
+            self._add_user(_verify.verify_feedback(cmd, code, output))
+            msg = (f"verification failed (exit {code}); asking for a fix "
+                   f"({st.verify_retries}/{self.verify_max_retries})")
+            self._emit("info", text=msg)
+            if interactive:
+                _agent.print_warning(f"({msg})")
+            return (False, "")
+
+        # Retries exhausted and the check still fails. Report that honestly: the
+        # answer is surfaced (the work may still be useful) but it is marked
+        # not-ok and the failure is stated, never papered over as success.
+        st.verify_settled = True
+        self._last_run_ok = False
+        notice = (
+            f"\n\n[verification FAILED] `{label}` still exits {code} after "
+            f"{self.verify_max_retries} fix attempt(s). This task is NOT verified."
+        )
+        self._emit("info", text=(
+            f"verification FAILED: `{label}` still exits {code} after "
+            f"{self.verify_max_retries} fix attempt(s) - reporting failure, "
+            "not a false success"))
+        _agent.print_warning(notice.strip())
+        self._add_assistant(response)
+        return (True, response + notice)
 
     def _check_post_batch_breakers(self) -> "str | None":
         """After a tool batch, return a circuit-breaker message (and mark the run

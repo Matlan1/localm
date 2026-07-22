@@ -94,6 +94,14 @@ def _complete_model(ctx, param, incomplete):
               help="Sampling temperature.")
 @click.option("--max-tokens",       default=None,  type=int,
               help="Max tokens per LLM response [default: 2048, or from .localcoder/config.toml].")
+@click.option("--seed",             default=None,  type=int,
+              help="RNG seed for sampling: the same seed, model, prompt and "
+                   "settings reproduce the same output. Measured bit-for-bit on "
+                   "one AMD gfx1030 box with the bundled llama.cpp runtime "
+                   "(including across a model reload); other hardware, "
+                   "backends, llama.cpp builds and concurrent load were not "
+                   "measured, so treat it as repeatable-here, not guaranteed "
+                   "everywhere. Ignored by --anthropic (no such API param).")
 @click.option("--verbose",          is_flag=True,
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
@@ -182,14 +190,25 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--goal-max-iters", "goal_max_iters", default=5,
               type=click.IntRange(1, 50),
               help="Max fix iterations for --until before giving up [default: 5].")
+@click.option("--verify", "verify_cmd", default=None, metavar="COMMAND",
+              help="Interactive sessions: the command whose exit code decides "
+                   "whether a turn that changed files is done, run by the "
+                   "harness (not the model) before it may finish. Defaults to "
+                   "the project's detected check (pytest / npm test / cargo / "
+                   "go, or a 'verify' key in .localcoder/config.toml). "
+                   "Use --no-verify to turn it off. For a one-shot TASK, use "
+                   "--until instead.")
+@click.option("--no-verify", "no_verify", is_flag=True,
+              help="Do not run any exit-code check before an interactive turn "
+                   "finishes, even if the project has an obvious one.")
 def main(
     task, model, url, api_key, port, cwd,
-    no_server, force_new, max_turns, temperature, max_tokens,
+    no_server, force_new, max_turns, temperature, max_tokens, seed,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope, system_instructions,
     show_episodes, forget_episodes, forget_episode_id, show_archive,
     restore_episode_id, consolidate_episodes,
-    until_cmd, goal_max_iters,
+    until_cmd, goal_max_iters, verify_cmd, no_verify,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -239,8 +258,21 @@ def main(
     # _resolve_session_config).
     model, max_turns, yes, always_confirm, session_mode, gen_kw = (
         _resolve_session_config(
-            work_dir, model, max_turns, max_tokens, temperature, yes,
+            work_dir, model, max_turns, max_tokens, temperature, seed, yes,
             interactive_confirm, mode, ci, provider))
+
+    # The in-loop exit-code oracle is for INTERACTIVE sessions (this REPL and the
+    # GUI). A one-shot TASK keeps its own outer loop (--until, below), so the two
+    # never both run and the check is never executed twice per iteration.
+    session_verify = None
+    if not task and not no_verify:
+        session_verify = verify_cmd or _detect_verify(work_dir)
+    elif task and verify_cmd and not until_cmd:
+        # Do not accept a flag and quietly not use it: say which one runs a
+        # one-shot task's check.
+        print_warning(
+            "--verify applies to an interactive session; a one-shot TASK is "
+            f"verified with --until. Re-run with: --until '{verify_cmd}'")
 
     # Build the LLM backend.
     backend = _build_backend(
@@ -287,6 +319,7 @@ def main(
         mode=session_mode,
         scope=scope,
         custom_instructions=system_instructions,
+        verify_cmd=session_verify,
         **gen_kw,
     )
 
@@ -447,8 +480,29 @@ def _run_episode_consolidation(work_dir: Path, backend) -> None:
         print_warning(rep["warning"])
 
 
+def _detect_verify(work_dir: Path):
+    """The project's obvious check command for an interactive session, or None.
+
+    Best-effort: detection reads project files, and a failure to read them is a
+    reason to run no oracle, not to refuse the session. It is reported rather
+    than swallowed silently, because a check the user expected to run and that
+    quietly did not is exactly the kind of hidden problem that wastes their
+    time."""
+    try:
+        from ..verify import command_text, detect_verify_command
+        cmd = detect_verify_command(work_dir)
+    except Exception as exc:                                   # noqa: BLE001
+        print_warning(f"Could not detect a project check ({exc}); "
+                      "no exit-code verification will run this session.")
+        return None
+    if cmd is not None:
+        print_info(f"Verification: `{command_text(cmd)}` must exit 0 before a "
+                   "turn that changed files finishes (/verify off to disable).")
+    return cmd
+
+
 def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
-                            yes, interactive_confirm, mode, ci, provider):
+                            seed, yes, interactive_confirm, mode, ci, provider):
     """Resolve CI defaults, project config (.localcoder/config.toml, CLI flags
     override), the session mode + privacy setup, and the LLM gen kwargs. Returns
     (model, max_turns, yes, always_confirm, session_mode, gen_kw). Split out of
@@ -480,6 +534,15 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
             max_tokens = cli_max_tokens(model)
     if temperature is None and "temperature" in proj_cfg:
         temperature = float(proj_cfg["temperature"])
+    if seed is None and "seed" in proj_cfg:
+        seed = int(proj_cfg["seed"])
+    if seed is not None and provider == "anthropic":
+        # Say so instead of sending an unknown field to the Messages API and
+        # letting the run look reproducible when nothing pinned it.
+        print_warning(
+            "--seed is ignored with --anthropic: the Anthropic Messages API has "
+            "no seed parameter, so this run is not reproducible.")
+        seed = None
     # auto_approve: config applies only when --yes flag was NOT passed
     if not yes and proj_cfg.get("auto_approve"):
         yes = True
@@ -513,6 +576,7 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
     gen_kw   = {k: v for k, v in [
         ("temperature", temperature),
         ("max_tokens",  max_tokens),
+        ("seed",        seed),
     ] if v is not None}
     return model, max_turns, yes, always_confirm, session_mode, gen_kw
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
+from .verify import command_text as _verify_text
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
 # Overridable via the "coder_confirm_timeout" config key (seconds).
@@ -75,6 +76,8 @@ class CoderSession:
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
         custom_instructions: Optional[str] = None,
+        verify: Optional[str] = None,
+        auto_verify: bool = True,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -110,6 +113,18 @@ class CoderSession:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
 
+        # The exit-code oracle for this GUI session: an explicit command, else
+        # the project's detected check. A RESTRICTED session gets none - those
+        # sessions have no process execution at all (SAFE_RESTRICTED_TOOLS), and
+        # a verify command is process execution, so auto-enabling one would hand
+        # a scoped key exactly the capability the restriction removes. The Agent
+        # enforces this too (core.py), belt and braces.
+        verify_cmd = None
+        if not restricted:
+            verify_cmd = verify or (
+                self._detect_verify(cwd) if auto_verify else None)
+        self.verify_cmd = verify_cmd
+
         self.agent = Agent(
             backend,
             cwd=cwd,
@@ -125,8 +140,25 @@ class CoderSession:
             custom_instructions=custom_instructions,
             on_event=self._on_agent_event,
             confirm_handler=None if auto_approve else self._confirm,
+            verify_cmd=verify_cmd,
             **gen_kwargs,
         )
+
+    @staticmethod
+    def _detect_verify(cwd: Path):
+        """The project's obvious check, or None. Best-effort: a detection failure
+        means no oracle for this session, never a failed session - but it is
+        surfaced as an event-free warning in the log rather than swallowed, so a
+        check the user expected is not silently missing."""
+        try:
+            from .verify import detect_verify_command
+            return detect_verify_command(cwd)
+        except Exception:                                      # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(
+                "coder: could not detect a project check for %s; this session "
+                "runs without exit-code verification", cwd, exc_info=True)
+            return None
 
     # ------------------------------------------------------------------ #
     #  Event plumbing                                                     #
@@ -377,6 +409,10 @@ class CoderSession:
             "pending_confirm": bool(self._pending),
             "allowed_tools": sorted(self.allowed_tools),
             "changed_files": len(self.agent.changed_files()),
+            # What this session verifies with, so the GUI can show the real gate
+            # instead of leaving the user to guess whether one is running.
+            "verify": (_verify_text(self.agent.verify_cmd)
+                       if self.agent.verify_cmd is not None else None),
         }
 
     def answer_confirm(self, confirm_id: str, approved: bool,
