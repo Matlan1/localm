@@ -71,6 +71,30 @@ _MAX_SHELL_SCOPE_FLAGS = 3
 # missing nicety.
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
+# The background job-control tools. Useless without a way to start a job, so they
+# follow the shell-exec family wherever it is disabled.
+_SHELL_JOB_TOOLS: frozenset[str] = frozenset({"check_shell_job", "kill_shell_job"})
+
+
+def expand_shell_disable(disabled: frozenset) -> frozenset:
+    """Disabling any shell-execution tool disables the whole family.
+
+    A caller that passes ``{"run_shell"}`` means "this session must not execute
+    arbitrary commands" (that is exactly how the shareable-key path uses it).
+    Honouring that literally, tool-name by tool-name, would leave
+    ``run_shell_background`` - the same capability minus the wait - enabled, so
+    the safety choice would be silently defeated by a tool added after the
+    caller was written. Expand the intent instead.
+
+    Applied at BOTH boundaries that consume a disabled set: the Agent (which
+    hard-refuses at dispatch) and the prompt builders (which decide what the
+    model is told exists). Applying it in only one leaves the other advertising
+    or accepting a tool the caller meant to switch off.
+    """
+    if disabled & _SHELL_EXEC_TOOLS:
+        return frozenset(disabled) | _SHELL_EXEC_TOOLS | _SHELL_JOB_TOOLS
+    return frozenset(disabled)
+
 # For each scoped tool, the arg names holding a path/glob to enforce scope against.
 # Any present arg outside the scope rejects the call (order only sets which value is
 # reported first). Tools default to "path"; entries here add/replace the real target.

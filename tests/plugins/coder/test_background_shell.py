@@ -558,13 +558,40 @@ def test_privacy_mode_zeroes_shell_history_env(tmp_path, _py):
 
 def test_disabling_run_shell_also_disables_the_background_variant():
     """Otherwise a shareable, deliberately shell-less session keeps RCE."""
-    from localm.plugins.coder.agent.core import _expand_shell_disable
-    expanded = _expand_shell_disable(frozenset({"run_shell"}))
+    from localm.plugins.coder.agent.constants import expand_shell_disable
+    expanded = expand_shell_disable(frozenset({"run_shell"}))
     for name in ("run_shell", "run_shell_background",
                  "check_shell_job", "kill_shell_job"):
         assert name in expanded, f"{name} stayed enabled after run_shell was disabled"
     # Unrelated disables are untouched.
-    assert _expand_shell_disable(frozenset({"fetch_url"})) == frozenset({"fetch_url"})
+    assert expand_shell_disable(frozenset({"fetch_url"})) == frozenset({"fetch_url"})
+
+
+def test_disabling_the_shell_family_yields_a_clean_system_prompt(tmp_path):
+    """The prompt builders must honour the same intent as the Agent.
+
+    The expansion originally lived only in Agent.__init__, so a direct
+    build_system_prompt(disabled_tools={"run_shell"}) still advertised
+    run_shell_background - whose NAME contains 'run_shell'. Caught by the
+    existing safe-share/security tests.
+    """
+    from localm.plugins.coder.prompts import (
+        build_subagent_system_prompt, build_system_prompt,
+    )
+    # NB: this test's own NAME must not contain "run_shell". pytest derives
+    # tmp_path from it, and the sub-agent prompt embeds the absolute cwd, so a
+    # test named ..._run_shell_... fails on its own directory name rather than
+    # on any tool doc.
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    off = frozenset({"run_shell"})
+    for prompt in (build_system_prompt(cwd, model_name="generic",
+                                       disabled_tools=off),
+                   build_subagent_system_prompt(cwd, "helper",
+                                                disabled_tools=off)):
+        assert "run_shell" not in prompt
+        assert "check_shell_job" not in prompt
+        assert "kill_shell_job" not in prompt
 
 
 def test_background_tools_are_not_available_to_restricted_sessions():
