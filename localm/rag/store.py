@@ -42,6 +42,7 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
+from .collection_lock import collection_write_lock, lock_path_for
 from .chunk import chunk_text
 from .extract import (BLACKLISTED_SUFFIXES, SECRET_SUFFIXES,
                       UNINDEXABLE_SUFFIXES, ExtractError, classify_format,
@@ -452,12 +453,24 @@ def collection_names(base: Optional[Path] = None) -> list[str]:
 
 
 def delete_collection(name: str, base: Optional[Path] = None) -> bool:
+    """Delete a collection, waiting for any in-flight write to finish first.
+
+    Deleting IS a write, so it takes the same locks as one. Without them a
+    delete could land in the middle of another process's indexing run and leave
+    the collection half-rebuilt by that run's final _save() - a collection the
+    user believes they deleted, holding a subset of its documents. Raises
+    ``CollectionLockedError`` if that other run does not finish in time, rather
+    than deleting underneath it."""
     import shutil
     base = base or rag_dir()
     path = base / _check_name(name)
     if not (path / "meta.json").is_file():
         return False
-    shutil.rmtree(path)
+    with _collection_lock(name), collection_write_lock(
+            lock_path_for(path), collection=name, op="a delete"):
+        if not (path / "meta.json").is_file():
+            return False          # someone else deleted it while we waited
+        shutil.rmtree(path)
     return True
 
 
@@ -474,17 +487,12 @@ def delete_collection(name: str, base: Optional[Path] = None) -> bool:
 #
 # SCOPE, stated rather than implied: this lock is PER PROCESS. It serialises the
 # server's own concurrent writers (API adds, a scheduled re-sync job), which is
-# what CHK-RAG-LOCK was about. It does NOT serialise a `localm rag add|resync`
-# CLI invocation against a running server: the CLI opens the collection directly
-# in its own process, with its own registry, so the two can interleave their
-# read-modify-write cycles and lose one another's changes. Documented for users
-# in docs/rag.md and docs/jobs.md ("do not run manual rag writes while the server
-# re-syncs the same collection"). Deliberately NOT closed with
-# config._cross_process_lock: that lock reclaims any holder older than 30 s as
-# abandoned, which is right for a config read-modify-write and wrong for indexing
-# runs that routinely take minutes - a waiter would reclaim a LIVE holder's lock
-# and we would be back to interleaving while claiming to be safe. Doing it
-# properly needs a parameterised stale age plus a holder heartbeat.
+# what CHK-RAG-LOCK was about. It does NOT reach a `localm rag add|resync` CLI
+# invocation, which opens the collection directly in its own process with its own
+# registry. That second half is closed by collection_lock.collection_write_lock,
+# a lock FILE beside the collection directory, held INSIDE this one (see
+# Collection._write_lock for why that nesting order, and collection_lock's module
+# docstring for why config._cross_process_lock could not simply be reused).
 _COLLECTION_LOCKS = NamespaceLockRegistry()
 
 
@@ -530,6 +538,25 @@ class Collection:
 
     def exists(self) -> bool:
         return (self.dir / "meta.json").is_file()
+
+    def _write_lock(self, op: str, on_progress: Optional[ProgressFn] = None):
+        """The CROSS-PROCESS write lock for this collection.
+
+        Every read-modify-write entry point takes it INSIDE the per-process
+        ``_collection_lock``, never the other way round, for two reasons. It is
+        one consistent order everywhere, so the pair cannot deadlock; and it
+        means at most one thread of this process is ever at the lock file, so a
+        second thread of the same process waits on the in-process lock instead
+        of meeting its own process's lock file (which the file lock, like
+        config's, can only read as a nested call - a bug - since a file lock
+        cannot tell one thread from another).
+
+        The wait is reported through the caller's existing progress channel, so
+        a CLI or a job stream says why it is waiting instead of looking hung.
+        """
+        return collection_write_lock(
+            lock_path_for(self.dir), collection=self.name, op=op,
+            on_wait=on_progress)
 
     def create(self) -> "Collection":
         if self.exists():
@@ -900,8 +927,10 @@ class Collection:
         """
         # Serialise the whole read-modify-write per collection AND re-sync with the
         # latest committed state under the lock, so a concurrent add_paths() that
-        # finished first is not read-stale-then-overwritten (CHK-RAG-LOCK).
-        with _collection_lock(self.name):
+        # finished first is not read-stale-then-overwritten (CHK-RAG-LOCK). The
+        # _load() must happen INSIDE both locks: state read before the lock is
+        # exactly the stale copy that overwrites someone else's committed work.
+        with _collection_lock(self.name), self._write_lock("an index", on_progress):
             self._load()
             return self._add_paths_locked(
                 paths, embed_fn=embed_fn, classify_fn=classify_fn,
@@ -1119,7 +1148,7 @@ class Collection:
         None when it is fine), so the caller can report honestly what the run did
         and did NOT do, and over what state.
         """
-        with _collection_lock(self.name):
+        with _collection_lock(self.name), self._write_lock("a re-sync", on_progress):
             self._load()
             return self._resync_locked(
                 embed_fn=embed_fn, classify_fn=classify_fn,
@@ -1382,7 +1411,7 @@ class Collection:
         simply skips these keys (Path('upload:x') is not a file) - their chunks
         persist and are never lost, they just cannot be re-embedded from source.
         """
-        with _collection_lock(self.name):
+        with _collection_lock(self.name), self._write_lock("an upload", on_progress):
             self._load()
             return self._add_uploads_locked(
                 uploads, embed_fn=embed_fn, classify_fn=classify_fn,
@@ -1490,8 +1519,10 @@ class Collection:
 
     def remove_doc(self, source: str) -> bool:
         # Same per-collection lock + re-sync as add_paths so a concurrent add and
-        # remove on one collection cannot lose each other's write (CHK-RAG-LOCK).
-        with _collection_lock(self.name):
+        # remove on one collection cannot lose each other's write (CHK-RAG-LOCK),
+        # and the same cross-process lock: removing a document while another
+        # process re-indexes the collection would otherwise put it straight back.
+        with _collection_lock(self.name), self._write_lock("a document removal"):
             self._load()
             if source not in self._meta.get("docs", {}):
                 return False

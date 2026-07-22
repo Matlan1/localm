@@ -1,9 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import contextlib
 import sys
 
 import click
 
 from ._core import main
+
+
+@contextlib.contextmanager
+def _refuse_if_locked(console):
+    """Turn a cross-process write-lock refusal into a clear message and exit 1.
+
+    A `rag` write shares its collection with a running server (its scheduler, or
+    an add from the GUI). The store waits a bounded time for that other process
+    and then refuses rather than interleaving with it, so the CLI's job here is
+    to report WHO holds the collection - which the error already names - instead
+    of showing a traceback for what is a normal, recoverable situation."""
+    from ..rag import CollectionLockedError
+    try:
+        yield
+    except CollectionLockedError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
 
 
 @main.group("rag")
@@ -74,8 +92,10 @@ def rag_add(collection, paths, force, embed, url):
     coll = run_or_die(Collection, collection)
     coll.create()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
-    result = coll.add_paths(list(paths), force=force, embed_fn=embed_fn,
-                            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+    with _refuse_if_locked(console):
+        result = coll.add_paths(
+            list(paths), force=force, embed_fn=embed_fn,
+            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
                   f"{result['chunks']} chunks in '{collection}'")
@@ -163,8 +183,10 @@ def rag_repair(collection, embed, url, yes):
             if not proceed:
                 raise click.Abort()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
-    result = coll.add_paths(paths, force=True, embed_fn=embed_fn,
-                            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+    with _refuse_if_locked(console):
+        result = coll.add_paths(
+            paths, force=True, embed_fn=embed_fn,
+            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
                   f"{result['chunks']} chunks in '{collection}'")
@@ -226,9 +248,10 @@ def rag_resync(collection, embed, url, prune_missing):
     # hard floor still applies inside confine_index_path). The SCHEDULED job path
     # is different on purpose and passes indexing_policy() - it is not a local
     # operator and can be created through the API by a scoped key.
-    result = coll.resync(embed_fn=embed_fn, policy=None,
-                         prune_missing=prune_missing,
-                         on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+    with _refuse_if_locked(console):
+        result = coll.resync(
+            embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
+            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
                   f"{result['chunks']} chunks in '{collection}' over "
@@ -371,12 +394,13 @@ def rag_rm(collection, yes):
     if not yes:
         click.confirm(f"Delete collection '{collection}'? Original files are "
                       "kept; only the index is removed.", abort=True)
-    try:
-        if delete_collection(collection):
-            console.print(f"[green]Deleted '{collection}'.[/green]")
-        else:
-            console.print(f"[red]No such collection:[/red] {collection}")
+    with _refuse_if_locked(console):
+        try:
+            if delete_collection(collection):
+                console.print(f"[green]Deleted '{collection}'.[/green]")
+            else:
+                console.print(f"[red]No such collection:[/red] {collection}")
+                sys.exit(1)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
             sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)

@@ -40,6 +40,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   every dropped lesson restorable. Writes to one project are now serialised, and
   consolidation merges its result onto the current state rather than the snapshot
   it started from, so a lesson recorded while the model was thinking survives.
+- **A hand-run `localm rag` command and a scheduled re-sync can no longer lose
+  each other's work.** Writes to a knowledge collection were serialised only
+  within one localm process, so `localm rag add|resync|repair|rm` in a terminal
+  could overlap the server's own indexing of the *same* collection: both read the
+  index, both wrote it back, and one of the two updates vanished (with the
+  leftovers occasionally surfacing later as a degraded vector index). Collections
+  are now locked across processes as well. A second writer waits for the
+  collection, tells you it is waiting, and then stands down with a message naming
+  the process that holds it rather than writing anyway - a refused command has
+  changed nothing, a refused API call answers 409, and a scheduled job says so in
+  its output and picks the folder up on its next run. Holding a collection has no
+  time limit, so indexing a large folder for hours is safe; the holder reports in
+  while it works, and only a holder that stops reporting (a crash, a killed
+  process, a machine that lost power) has its lock reclaimed, about a minute
+  later. Nothing changes for the common case of a single writer.
 - **The text-to-speech voice you picked never reached the server.** The voice
   picker in the chat parameters saved your choice in the browser only, while
   the tts plugin's own settings (voice, speaking speed, voice model, compute
