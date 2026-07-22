@@ -99,54 +99,25 @@ _SHELL_COMMAND_ARGS: dict[str, tuple[str, ...]] = {
     "run_tests": ("path", "extra_args"),
 }
 
+# Which of the args above the tool's own schema DECLARES to be a path, as opposed
+# to a free-form command line. A declared path needs no path-likeness heuristic
+# at all (it IS a path by contract) and is checked whole rather than tokenised,
+# since a path may legitimately contain spaces. Everything else is a command line
+# whose tokens are ambiguous, and _shell_paths_outside_scope classifies those by
+# syntax alone - it may never ask the filesystem which of them exists.
+_SHELL_DECLARED_PATH_ARGS: dict[str, tuple[str, ...]] = {"run_tests": ("path",)}
+
 # How many out-of-scope paths one warning names before it says "and N more".
 _MAX_SHELL_SCOPE_FLAGS = 3
 
-# Tokens that end one command and start another, so the word after one is a
-# program name again ("cd src && make docs"). Only recognised when the shell
-# tokeniser leaves them standing alone, which needs surrounding whitespace.
-_SHELL_SEPARATORS: frozenset[str] = frozenset({"&&", "||", "|", ";", "&"})
-
-# Programs whose first word is a SUBCOMMAND, not a path ("npm test", "make
-# docs", "cargo build"). Used only to suppress a bogus out-of-scope warning when
-# a directory of the same name happens to exist; it never allows anything, and an
-# explicitly-written path is still flagged in that position.
-_SHELL_SUBCOMMAND_RUNNERS: frozenset[str] = frozenset({
-    "npm", "npx", "pnpm", "yarn", "bun", "deno", "nx", "turbo",
-    "make", "cmake", "ninja", "just", "task", "rake", "invoke",
-    "cargo", "rustup", "go", "dotnet", "msbuild", "mvn", "gradle", "gradlew",
-    "git", "hg", "svn", "jj",
-    "docker", "podman", "kubectl", "helm", "terraform", "vagrant",
-    "uv", "pip", "pip3", "pipx", "poetry", "pdm", "hatch", "conda", "tox", "nox",
-    "bundle", "gem", "composer",
-    "apt", "apt-get", "brew", "choco", "scoop", "winget", "systemctl",
-})
-
-# Subcommands of the runners above that dispatch to a FURTHER name rather than a
-# path, so that name is not a path either: "npm run build" (with a build/ dir),
-# "uv run pytest", "docker run alpine".
-_SHELL_NESTED_RUNNER_WORDS: frozenset[str] = frozenset({
-    "run", "run-script", "exec", "x", "dlx",
-})
-
-# Flags whose VALUE is a path, so the token after one is that path and not a
-# subcommand. Without this "git -C docs status" reads `docs` as git's subcommand
-# and never checks it, which is backwards: -C and --directory move the process's
-# working directory, the strongest out-of-scope signal there is. Case-sensitive:
-# `-C` (git/make/tar) changes directory, while `-c` (sh/python) takes code.
-_SHELL_PATH_VALUE_FLAGS: frozenset[str] = frozenset({
-    "-C", "--directory", "--cwd", "--chdir", "--prefix", "--manifest-path",
-    "--project-dir", "--workdir",
-})
-
-# Tokens that sit in front of the real program word without being it, so the
-# program slot survives them: an env assignment (handled by shape, see
-# _is_command_prefix) or one of these transparent wrappers. Without it
-# "CI=1 npm test" never recognises npm as the runner and keeps warning about a
-# test/ directory.
-_SHELL_TRANSPARENT_PREFIXES: frozenset[str] = frozenset({
-    "sudo", "doas", "env", "time", "nice", "nohup", "command", "exec",
-})
+# NOTE: the command-line grammar tables that used to live here
+# (_SHELL_SEPARATORS / _SHELL_SUBCOMMAND_RUNNERS / _SHELL_NESTED_RUNNER_WORDS /
+# _SHELL_PATH_VALUE_FLAGS / _SHELL_TRANSPARENT_PREFIXES) existed for one purpose:
+# to stop the exists-under-cwd filesystem probe in _shell_paths_outside_scope
+# from reading "npm test" or "make docs" as paths. That probe is gone (it stat-ed
+# whatever a model-supplied token named, anywhere on the machine), so tracking
+# the program word, runners, and path-valued flags no longer decides anything.
+# Removed rather than left dead.
 
 # Tools that execute an arbitrary user command, blocking or in the background.
 # They are the same capability (RCE) and so must be gated identically everywhere:

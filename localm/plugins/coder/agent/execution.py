@@ -6,6 +6,7 @@ confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agen
 
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 from typing import Optional
@@ -25,10 +26,8 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
-    _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_EXEC_TOOLS,
-    _SHELL_NESTED_RUNNER_WORDS, _SHELL_PATH_VALUE_FLAGS, _SHELL_SEPARATORS,
-    _SHELL_SUBCOMMAND_RUNNERS, _SHELL_TRANSPARENT_PREFIXES,
-    _SHELL_UNSCOPED_TOOLS,
+    _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
+    _SHELL_EXEC_TOOLS, _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
@@ -56,19 +55,18 @@ def _looks_like_drive_path(tok: str) -> bool:
     return len(tok) == 2 or tok[2] in "/\\"
 
 
-def _is_command_prefix(tok: str) -> bool:
-    """True for a token that precedes the real program word without being it.
+def _is_path_like(tok: str) -> bool:
+    """True when a shell token is a path by SYNTAX alone, with no filesystem look.
 
-    An environment assignment (``CI=1 npm test``) or a transparent wrapper
-    (``sudo``/``env``/``time``). Without this the prefix takes the program slot,
-    the real runner is never recognised, and ``CI=1 npm test`` goes on warning
-    about a ``test/`` directory - the very false positive this check exists to
-    stop.
+    Absolute, drive-qualified (``C:\\x``, bare ``E:``), explicitly relative
+    (``./``, ``../``, ``~/``), or carrying a ``/../`` segment. Everything else is
+    treated as not-a-path: see ``_shell_paths_outside_scope`` for why this may
+    never fall back to asking the filesystem, and what that costs.
     """
-    if tok.lower() in _SHELL_TRANSPARENT_PREFIXES:
-        return True
-    name, sep, _ = tok.partition("=")
-    return bool(sep) and name.isidentifier()
+    norm = tok.replace("\\", "/")
+    return (norm.startswith(("./", "../", "~/", "/"))
+            or "/../" in norm
+            or _looks_like_drive_path(tok))
 
 
 class _ExecutionMixin:
@@ -113,6 +111,48 @@ class _ExecutionMixin:
             return False
         return _scope_pattern(self.scope).match(rel) is not None
 
+    def _scope_rel_lexical(self, value: str) -> Optional[str]:
+        """Filesystem-free twin of :meth:`_scope_rel`, for the shell WARNING only.
+
+        Same contract (cwd-relative POSIX string, or None if it escapes cwd) with
+        one difference: it never touches the disk. ``_scope_rel`` falls back to
+        ``Path(raw).resolve()`` for an absolute path that is not lexically under
+        cwd, and ``resolve()`` stats the target. That is right where the path is a
+        real operation target being gated, and wrong here, where the input is a
+        token from a command the model has only PROPOSED.
+
+        ``os.path.abspath`` rather than ``resolve()`` for cwd as well: it
+        normalises and anchors without a symlink lookup, so no part of this call
+        stats anything. Cost: a path that reaches cwd only through a symlink reads
+        as outside. For a best-effort warning that is the safe direction (it can
+        over-report a link, never miss a real escape), and it is the only one that
+        keeps the check from touching what it is inspecting.
+        """
+        raw = str(value).replace("\\", "/")
+        p = Path(raw)
+        cwd = Path(os.path.abspath(self.cwd))
+        if p.is_absolute():
+            try:
+                return p.relative_to(cwd).as_posix()
+            except ValueError:
+                return None   # outside cwd, and NOT re-checked via resolve()
+        # Relative: collapse any leading ./ and reject cwd escapes (../).
+        rel_posix = (Path(".") / raw).as_posix()
+        if rel_posix.startswith("./"):
+            rel_posix = rel_posix[2:]
+        parts = [seg for seg in rel_posix.split("/") if seg not in ("", ".")]
+        if ".." in parts:
+            return None   # escapes cwd
+        return "/".join(parts)
+
+    def _scope_allows_lexical(self, value: str) -> bool:
+        """True if *value* is within the active scope, decided without any
+        filesystem access. See :meth:`_scope_rel_lexical`."""
+        rel = self._scope_rel_lexical(value)
+        if rel is None:
+            return False
+        return _scope_pattern(self.scope).match(rel) is not None
+
     def _scope_violation(self, call: ToolCall) -> Optional[str]:
         """
         Return the first in-scope-checked arg value that falls outside the
@@ -148,20 +188,33 @@ class _ExecutionMixin:
         active scope. Empty when nothing suspicious was found OR when the check
         simply could not tell - it is a heuristic, never a gate.
 
-        A token counts as path-like only when it is unambiguously one: absolute,
-        explicitly relative (``./``, ``../``, ``~/``), or an existing file/dir
-        under cwd. That deliberately misses things like ``sed s/a/b/`` (which is
-        not a path) at the cost of missing a path that does not exist yet - the
-        right trade for a warning the user must be able to trust.
+        PURELY LEXICAL, and that is the point: a model-supplied token is never
+        stat-ed, resolved, or ``.exists()``-ed. This runs over a command the model
+        has merely PROPOSED, before any confirmation and before anything executes,
+        so a filesystem probe here reaches out of the workspace on the model's say
+        so alone. ``(self.cwd / tok)`` drops cwd entirely for a drive-anchored
+        token, so the old exists-under-cwd guess stat-ed precisely whatever the
+        model named, anywhere on the machine. There is no safe stat at this point:
+        a legitimate probe, a command gone wrong, and a live injection attempt are
+        indistinguishable at the access point, so the check must not have the
+        capability at all rather than try to use it carefully.
 
-        For the same reason the exists-under-cwd guess is skipped in the two
-        positions of a command line that hold a verb rather than a path: the
-        program word, and the word after a known runner. Otherwise ``npm test``
-        in a repo with a ``test/`` directory, ``make docs``, and ``cargo build``
-        all warned, which are ordinary layouts and ordinary commands. A path
-        written out explicitly (``./build/run.sh``) is still flagged there, and
-        ``run_tests`` is unaffected because its ``path`` arg is a path, not a
-        command line.
+        A token therefore counts as path-like only by SYNTAX (``_is_path_like``).
+        An arg the tool's own schema DECLARES to be a path (run_tests' ``path``)
+        needs no heuristic and is checked whole, spaces and all.
+
+        Trade-off, accepted: a bare-relative path that merely exists
+        (``cat secrets.txt``, ``git -C docs``) is no longer flagged, because
+        telling it apart from ``npm test`` in a repo that has a ``test/`` folder
+        is exactly what the removed probe did. A separator rule is not a
+        replacement - it re-flags ``sed s/foo/bar/``, ``sed s:/usr/local:/opt:g``
+        and a quoted ``-m 'fix a/b handling'``, the false positives that cost this
+        check its credibility once already. What survives is the high-signal case
+        with no false positives: a command reaching OUT of the workspace. And the
+        trade weakens no boundary, because this was never one: it is a warning
+        that never blocked anything, while hard confinement (the disabled-tool
+        gate, and ``_scope_violation`` for file tools) is enforced elsewhere and
+        is unchanged by this.
         """
         flagged: list[str] = []
         for arg in _SHELL_COMMAND_ARGS.get(call.name, ()):
@@ -169,69 +222,32 @@ class _ExecutionMixin:
             if not raw:
                 continue
             text = str(raw)
-            try:
-                # posix=False keeps Windows backslashes intact; quotes survive as
-                # part of the token and are stripped below.
-                tokens = shlex.split(text, posix=False)
-            except ValueError:
-                # Unbalanced quotes: fall back to whitespace splitting rather than
-                # skipping the check entirely.
-                tokens = text.split()
-            # Only a real command line has a program word to skip. run_tests
-            # passes a target path in `path`, which must stay fully checked.
-            cmdline = call.name in _SHELL_EXEC_TOOLS and arg == "command"
-            at_program = True
-            after_runner = False
-            path_flag = False
-            for tok in tokens:
-                tok = tok.strip("'\"")
-                if not tok:
-                    continue
-                if cmdline and tok in _SHELL_SEPARATORS:
-                    at_program, after_runner, path_flag = True, False, False
-                    continue
-                if tok.startswith("-"):
-                    # A flag never takes the program/subcommand slot, but one that
-                    # takes a PATH value means the NEXT token is that path.
-                    path_flag = tok.split("=", 1)[0] in _SHELL_PATH_VALUE_FLAGS
-                    continue
-                if path_flag:
-                    # "git -C docs status": the value is a path to check, and the
-                    # subcommand slot is still waiting for `status`.
-                    path_flag = False
-                    command_word = False
-                elif cmdline and at_program and _is_command_prefix(tok):
-                    continue    # "CI=1 npm test": the real program is still to come
-                else:
-                    command_word = cmdline and (at_program or after_runner)
-                    if at_program:
-                        prog = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
-                        after_runner = prog in _SHELL_SUBCOMMAND_RUNNERS
-                        at_program = False
-                    else:
-                        # "npm run build": a dispatch subcommand hands off to one
-                        # more name, which is a script, not a path.
-                        after_runner = (after_runner
-                                        and tok.lower() in _SHELL_NESTED_RUNNER_WORDS)
-                if tok in flagged:
-                    continue
-                norm = tok.replace("\\", "/")
-                explicit = (norm.startswith(("./", "../", "~/", "/"))
-                            or "/../" in norm
-                            or _looks_like_drive_path(tok))
-                if not explicit:
-                    # A command word is a bare VERB. A token carrying a path
-                    # separator never is, even in the program slot, so it stays
-                    # checked ("build/run.sh", "uv run tools/gen.py").
-                    if command_word and "/" not in norm:
-                        continue   # a verb ("npm test"), not a path
-                    try:
-                        if not (self.cwd / tok).exists():
-                            continue
-                    except OSError:
-                        continue   # not a usable path (too long, bad chars)
+            declared = arg in _SHELL_DECLARED_PATH_ARGS.get(call.name, ())
+            if declared:
+                # A path by contract: no path-likeness question to answer, and no
+                # tokenising either, since a path may legitimately hold spaces.
+                tokens = [text]
+            else:
                 try:
-                    if not self._scope_allows(tok):
+                    # posix=False keeps Windows backslashes intact; quotes survive
+                    # as part of the token and are stripped below.
+                    tokens = shlex.split(text, posix=False)
+                except ValueError:
+                    # Unbalanced quotes: fall back to whitespace splitting rather
+                    # than skipping the check entirely.
+                    tokens = text.split()
+            for tok in tokens:
+                if not declared:
+                    tok = tok.strip("'\"")
+                if not tok or tok in flagged:
+                    continue
+                if not declared:
+                    if tok.startswith("-"):
+                        continue       # a flag, never a path
+                    if not _is_path_like(tok):
+                        continue       # not a path by syntax, and we do not ask disk
+                try:
+                    if not self._scope_allows_lexical(tok):
                         flagged.append(tok)
                 except Exception:
                     continue       # best-effort: an unparseable token is not a finding

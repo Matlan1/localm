@@ -12,6 +12,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The coder no longer touches a file just because a model named it.** With a
+  `--scope` set, the coder warns you when a shell command it is about to run
+  mentions a path outside that scope. Deciding which words in the command were
+  paths involved asking the disk whether each one existed, and for a path written
+  with a drive letter or from the filesystem root, that question was asked about
+  that exact file, anywhere on the machine. So a model that merely proposed a
+  command naming one of your files, or a system file, made the coder look that
+  file up - before you had confirmed anything and before the command ran. The
+  check now reads only the text of the command and touches nothing at all. It
+  still names any path reaching outside your working directory, which is what the
+  warning is for; the cost is that a plain relative name that happens to exist
+  (`cat notes.txt`) is no longer flagged, because separating those from ordinary
+  command words (`npm test` in a project with a `test` folder) is exactly what
+  needed the lookup. Nothing that was refused before is allowed now: this has
+  always been a warning that never blocked anything, and the scope confinement on
+  the file tools is unchanged.
 - **The coder's forgotten-lessons archive no longer reports "nothing here" when
   it simply could not be read.** `localm coder --episodes-archive` printed "No
   dropped episodes archived for this project", and `--restore-episode ID` printed
