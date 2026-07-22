@@ -127,11 +127,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   only, matched exactly, with the closest-match hint on a miss and the post-write
   syntax check on each file. It honours an active `--scope`, is undoable, and is
   captured (not written to disk) in patch mode.
-- **The sidebar shows the GPU split your loaded model actually got.** With a
-  multi-GPU split configured, the model status now shows each card's share
-  and how it was decided - for example "Split: GPU 0 33% · GPU 1 67% (by
-  free VRAM)", or "(pinned)" for manual ratios and "(equal)" when free VRAM
-  could not be measured. Single-GPU setups see no change.
 - **Multi-GPU split: each card's share is now sized automatically from its
   free VRAM.** With "Split across GPUs" enabled and no manual
   `gpu_split_ratios` pinned, localm no longer divides the model equally: at
