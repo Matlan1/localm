@@ -6,6 +6,9 @@
 
 - [ ] `python scripts/check_hygiene.py` passes (no em/en dashes, no personal
       disclosure, no machine-absolute paths in code) - see AGENTS.md
+- [ ] Its `[Unreleased]` draft-drop WARNINGS, if any, are all lines you meant to
+      remove or reword: after a rebase, a listed line can be a sibling PR's
+      changelog bullet that git silently ate (AGENTS.md)
 - [ ] `pytest -m "not integration"` passes
 - [ ] `ruff check .` reviewed (no new lint regressions)
 - [ ] Defaults are project-relative or user-config; no absolute or
