@@ -566,10 +566,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # below still distinguishes cannot-measure from inconclusive.
                 over_cap = residency.exceeds_resident_cap(
                     _engines_lru, name, resident_cap)
-                if not over_cap and residency.fits_alongside_residents(
-                        free_vram=free_vram, vram_required=vram_required,
-                        probe_ok=probe_ok, headroom=headroom,
-                        shortfall=shortfall):
+                vram_ok = residency.fits_alongside_residents(
+                    free_vram=free_vram, vram_required=vram_required,
+                    probe_ok=probe_ok, headroom=headroom, shortfall=shortfall)
+                if vram_ok and not over_cap:
                     break
 
                 # Make room. Measurable VRAM: evict idle models until the new one
@@ -589,6 +589,25 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # enough to rule out a concurrent double free.
                 evict_name = residency.pick_eviction_victim(
                     _engines_lru, _engines, requested=name, pinned=pinned)
+
+                if evict_name is None and vram_ok:
+                    # ONLY the resident cap wanted room, and nothing could be
+                    # freed (every peer is pinned or serving). VRAM already
+                    # fits, so this is a user PREFERENCE going unmet, not a
+                    # safety constraint. Load, and say the cap was missed.
+                    # Falling through to the exhaustion path below would answer
+                    # a preference with a 503 - and, worse, would first ask a
+                    # SIBLING localm instance to dump its models to free VRAM
+                    # that was never short. Being one model over a soft cap is
+                    # strictly better than either.
+                    from localm.debuglog import logger as _dbg
+                    _dbg.warning(
+                        "max_resident_models=%s wanted room for %s but no "
+                        "resident model could be evicted (resident=%s, "
+                        "pinned=%s); free VRAM is sufficient, so loading it "
+                        "anyway over the cap",
+                        resident_cap, name, list(_engines_lru), sorted(pinned))
+                    break
 
                 if evict_name is None:
                     # Nothing idle among the chat engines. The shared embedder is a

@@ -181,6 +181,75 @@ def test_measurable_vram_allows_coexistence(monkeypatch):
         f"ample VRAM must keep multi-model coexistence; loaded={loaded}")
 
 
+def _knobs(monkeypatch, **over):
+    """Override just the residency knobs, keeping the rest of the real config."""
+    from localm.config import load_config as _real
+    base = _real()
+
+    def fake():
+        cfg = dict(base)
+        cfg.update(over)
+        return cfg
+
+    monkeypatch.setattr("localm.config.load_config", fake)
+
+
+def test_resident_cap_bounds_coexistence(monkeypatch):
+    """max_resident_models caps how many models stay loaded even when there is
+    ample VRAM for all of them (test_measurable_vram_allows_coexistence is the
+    same scenario with no cap, and keeps all three)."""
+    _install_fakes(monkeypatch, free=10 * 1024 ** 3)
+    _knobs(monkeypatch, max_resident_models=2)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    for m in ("model-a", "model-b", "model-c"):
+        assert _chat(client, m).status_code == 200
+
+    loaded = sorted(n for n, e in hs._engines.items() if e.loaded)
+    assert loaded == ["model-b", "model-c"], (
+        f"cap of 2 must keep only the 2 most recent; loaded={loaded}")
+
+
+def test_pinned_model_survives_an_over_cap_load(monkeypatch):
+    _install_fakes(monkeypatch, free=10 * 1024 ** 3)
+    _knobs(monkeypatch, max_resident_models=1, pinned_models=["model-a"])
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    assert _chat(client, "model-a").status_code == 200
+    assert _chat(client, "model-b").status_code == 200
+
+    loaded = sorted(n for n, e in hs._engines.items() if e.loaded)
+    assert loaded == ["model-a", "model-b"], (
+        f"a pinned model must never be the victim; loaded={loaded}")
+
+
+def test_unmet_cap_never_yanks_a_sibling_instance(monkeypatch):
+    """A cap is a user PREFERENCE; free VRAM is the safety constraint.
+
+    With the cap exceeded but every peer pinned, there is nothing local to
+    evict. That must NOT fall through to the VRAM-exhaustion handling, which
+    asks a SIBLING localm instance to dump ITS models - destroying another
+    instance's work to satisfy a local preference, over VRAM that was never
+    short - and then logs the miss as a whole-model VRAM shortfall, a reason
+    the readings do not support (AGENTS.md rule 5).
+    """
+    _install_fakes(monkeypatch, free=10 * 1024 ** 3)
+    _knobs(monkeypatch, max_resident_models=1, pinned_models=["model-a"])
+    asked = []
+    monkeypatch.setattr(hs, "_attempt_cooperative_unload",
+                        lambda **kw: asked.append(kw) or False)
+    app = hs.create_app(None)
+    client = TestClient(app)
+
+    assert _chat(client, "model-a").status_code == 200
+    assert _chat(client, "model-b").status_code == 200
+    assert asked == [], (
+        "an unmeetable resident cap asked a sibling instance to unload, even "
+        f"though free VRAM was sufficient: {asked}")
+
+
 def test_busy_chat_peer_not_evicted_but_new_load_still_succeeds(monkeypatch):
     """Mirrors test_busy_embedder_not_evicted_for_chat_load's proof, for a
     busy CHAT peer instead of the shared embedder: with a resident engine

@@ -303,21 +303,35 @@ class EngineCache:
         required = self._model_required_bytes(name)
         while self._lru:
             over_cap = residency.exceeds_resident_cap(self._lru, name, cap)
-            if not over_cap and self._fits_alongside(name, required):
-                return
+            # Only probe when the cap is satisfied: a GPU probe can wait out a
+            # cold driver init, and being over cap already means we need room
+            # regardless of what VRAM says. vram_ok stays None to record that
+            # we did NOT measure this pass - which the message below relies on,
+            # so it never reports a shortfall nobody observed (rule 5).
+            vram_ok = None
+            if not over_cap:
+                vram_ok = self._fits_alongside(name, required)
+                if vram_ok:
+                    return
             victim = residency.pick_eviction_victim(
                 self._lru, self._engines, requested=name, pinned=pinned)
             if victim is None:
-                # Nothing evictable (all pinned, or all busy). Unlike the HTTP
-                # server, which can answer 503, a stdio tool call has no useful
-                # "try later" - refusing would turn a working setup into a dead
-                # one. So load anyway, best-effort, and SAY that the policy was
-                # missed instead of pretending it held.
-                reason = ("the resident cap" if over_cap
-                          else "the free-VRAM check")
-                _log(f"warning: {reason} wanted room for {name} but no resident "
-                     f"model could be evicted (resident={self._lru}, "
-                     f"pinned={sorted(pinned)}) - loading it anyway")
+                # Nothing evictable (all pinned, or all busy). Load anyway and
+                # SAY the policy was missed, rather than pretending it held.
+                # Refusing is not the better option here: a stdio tool call has
+                # no useful "try later", and for the CAP case the HTTP server
+                # makes the same call for the same reason - a cap is a user
+                # preference, not a safety constraint, so it must never cost a
+                # load (or a sibling instance's models) when VRAM is fine.
+                reasons = []
+                if over_cap:
+                    reasons.append("the resident cap")
+                if vram_ok is False:
+                    reasons.append("the free-VRAM check")
+                _log(f"warning: {' and '.join(reasons)} wanted room for {name} "
+                     f"but no resident model could be evicted "
+                     f"(resident={self._lru}, pinned={sorted(pinned)}) - "
+                     f"loading it anyway")
                 return
             self._evict(victim, loading=name)
 
