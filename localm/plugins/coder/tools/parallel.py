@@ -205,6 +205,7 @@ class _ChildOutcome:
         self.diff = ""
         self.turns = 0
         self.cleanup_warning = ""
+        self.model = ""          # the model this child ACTUALLY ran on
 
 
 def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
@@ -238,6 +239,8 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
                               "ran on the parent's model instead")
             backend = parent.backend
 
+    outcome.model = getattr(backend, "model_id", "") or ""
+
     child = Agent(
         backend=backend,
         cwd=child_cwd,
@@ -255,9 +258,23 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         mode=getattr(parent, "mode", _SessionMode.PRIVACY),
         restricted=getattr(parent, "restricted", False),
         disabled_tools=getattr(parent, "disabled_tools", frozenset()),
-        # cwd is what actually confines the file tools (every one of them resolves
-        # through _confine). scope is inherited as an ADDITIONAL narrowing when the
-        # parent had one; it is not the isolation mechanism here.
+        # DELIBERATE: inherit the parent's scope rather than overwriting it with the
+        # worktree path. Two reasons, and this is a choice, not an oversight.
+        #
+        # 1. cwd is what actually confines the file tools - every one of them
+        #    resolves through _confine(cwd, path) - so the worktree isolation is
+        #    already enforced without touching scope. Setting scope to the worktree
+        #    would add nothing and would DISCARD a narrowing the parent had.
+        # 2. A scope is a glob relative to the agent's own cwd. Because the child is
+        #    placed at the SAME relative position inside its worktree as the parent
+        #    occupies in the repo, an inherited glob like "src/**" still designates
+        #    the corresponding files. That equivalence is exactly why the mirroring
+        #    above matters; without it an inherited scope would silently point
+        #    somewhere else.
+        #
+        # Note this OVERRIDES an inherited value rather than filling an empty one:
+        # spawn_agent also passes the parent's scope down, so the attribute is
+        # normally already set. Passing it explicitly keeps the two paths agreeing.
         scope=getattr(parent, "scope", None),
     )
     # Make the child's location introspectable: a caller that reports on a finished
@@ -299,6 +316,15 @@ def tool_dispatch_parallel(
     timeout_s:
         Per-child wall-clock budget (default 600). A child that exceeds it is
         abandoned and reported, never left to hang the dispatch.
+
+    Notes
+    -----
+    This tool is registered ``destructive=True``, which has two consequences worth
+    knowing rather than discovering: under ``--dry-run`` the whole dispatch is
+    skipped (no worktrees, no child turns burned), and an unattended parent with
+    ``auto_approve=False`` and no confirm handler FAILS CLOSED on it instead of
+    dispatching unconfirmed. Both are intended - dispatching two children that
+    write files is exactly the kind of action that should need a human.
     """
     if _parent_agent is None:
         return ToolResult.error("dispatch_parallel requires a running parent agent")
@@ -349,6 +375,32 @@ def tool_dispatch_parallel(
             f"NOTE: only {len(tokens)} of {len(specs)} child slots were free "
             f"({prior_holders}), so the tasks ran with reduced "
             "parallelism rather than being rejected. Results are unaffected.\n\n"
+        )
+
+    # Two DISTINCT models only run genuinely side by side when the server can hold
+    # both resident: it loads alongside with no eviction when free VRAM is measured
+    # and fits, and otherwise evicts the idle LRU peer (http_server.py). Requesting
+    # two models that do not both fit therefore means the two children take turns
+    # evicting each other rather than running in parallel.
+    #
+    # We do NOT predict that here. Deciding it needs the per-model VRAM sizing the
+    # server already does, and re-deriving it in a coder tool would be duplicated,
+    # brittle, and a second place to get wrong; probing GPUs from a hot path is also
+    # what once hung the server. Nor do we silently rewrite the caller's explicit
+    # model choice. So the server stays the authority, the SAFE case is the default
+    # (omit `model` and both children share the parent's already-resident engine),
+    # and when two distinct models ARE asked for we say what the condition is and
+    # report which model each child actually ran on.
+    requested = {s.get("model") for s in specs if s.get("model")}
+    residency_note = ""
+    if len(requested) > 1:
+        residency_note = (
+            "NOTE: two different models were requested. They run truly "
+            "concurrently only if the server can hold both resident; if VRAM does "
+            "not allow it, it will evict one to load the other and the children "
+            "take turns instead of running in parallel. Each child's actual model "
+            "is reported below. Omit 'model' to run both on the already-resident "
+            "one.\n\n"
         )
 
     outcomes = [_ChildOutcome(s["name"]) for s in specs]
@@ -475,7 +527,7 @@ def tool_dispatch_parallel(
 
     return ToolResult(
         ok=any(o.status == "ok" for o in outcomes),
-        output=degraded + _render_report(outcomes, repo),
+        output=degraded + residency_note + _render_report(outcomes, repo),
         summary=_render_summary(outcomes),
     )
 
@@ -498,6 +550,8 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
             lines.append(f"branch:   {o.branch}")
         if o.worktree:
             lines.append(f"worktree: {o.worktree}")
+        if o.model:
+            lines.append(f"model:    {o.model}")
         if o.turns:
             lines.append(f"turns:    {o.turns}")
         if o.detail:

@@ -440,6 +440,36 @@ def test_task_objects_and_bare_strings_are_both_accepted(repo):
     assert "coder/refactor-auth-" in res.output
 
 
+def test_two_distinct_models_surface_the_residency_condition(repo, monkeypatch):
+    """Two models only run side by side if both fit in VRAM; say so rather than
+    letting the user assume parallelism they may not be getting."""
+    def fake_backend(model, port=8642):
+        return type("B", (), {"model_id": model, "_base_url": ""})()
+
+    import localm.plugins.coder.backends.http as http_mod
+    monkeypatch.setattr(http_mod, "make_localm_backend", fake_backend)
+
+    parent = DummyParent(repo)
+    res = par.tool_dispatch_parallel(
+        repo,
+        tasks=[{"task": "a", "name": "c1", "model": "model-a"},
+               {"task": "b", "name": "c2", "model": "model-b"}],
+        _parent_agent=parent,
+    )
+    assert "two different models were requested" in res.output
+    # And each child reports the model it ACTUALLY ran on, so an eviction-driven
+    # fallback is visible instead of silent.
+    assert "model:    model-a" in res.output
+    assert "model:    model-b" in res.output
+
+
+def test_single_model_dispatch_does_not_nag_about_residency(repo):
+    """The safe default (both children on the resident model) says nothing."""
+    parent = DummyParent(repo)
+    res = par.tool_dispatch_parallel(repo, tasks=["a", "b"], _parent_agent=parent)
+    assert "two different models were requested" not in res.output
+
+
 def test_child_does_not_get_wider_reach_than_its_parent(repo):
     """A parent working in repo/sub must not spawn a child at the worktree ROOT.
 
