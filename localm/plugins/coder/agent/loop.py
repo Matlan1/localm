@@ -64,17 +64,55 @@ class _LoopMixin:
 
     def _with_episodes(self, task: str) -> str:
         """Prepend relevant past lessons (episodic memory) to *task*, if any.
-        Best-effort: a retrieval failure just returns the task unchanged."""
+        Best-effort: a retrieval failure just returns the task unchanged.
+
+        Also RECORDS which lessons were injected (id + text), on the agent, on the
+        event stream, and in the audit trail. Retrieval used to render the lessons
+        and throw the Episode objects away, so a lesson that steered a run badly
+        was invisible after the fact and there was no handle to forget it by."""
         if not self._episodic or self._episode_store is None:
             return task
         try:
             from ..episodes import render_for_prompt
-            block = render_for_prompt(self._episode_store.search(task))
-        except Exception:
+            episodes = self._episode_store.search(task)
+            block = render_for_prompt(episodes)
+        except Exception as e:
+            # Rule 5: a failed recall is a real event, not a no-op. It stays
+            # best-effort (the task still runs), but it leaves a trace.
+            self._record_episodes_used([], reason="recall failed: %s" % e)
             return task
         if not block:
+            self._record_episodes_used([], reason="no relevant past lesson")
             return task
+        self._record_episodes_used(episodes)
         return block + "\n\n## Task\n" + task
+
+    def _record_episodes_used(self, episodes: list, reason: str = "") -> None:
+        """Stash + surface the recalled lessons for this run.
+
+        Mirrors the chat plugin's ``_stash_memory_used``: metadata plus the lesson
+        text that was ALREADY injected into the prompt, so this adds no disclosure
+        beyond what the prompt itself carries (and the audit log already records
+        the prompt). Best-effort and side-effect free - a surfacing failure must
+        never break the run."""
+        try:
+            used = [{"id": e.id, "outcome": e.outcome,
+                     "lesson": (e.lesson or e.summary or "")[:200]}
+                    for e in episodes]
+            self._episodes_used = used
+            self._episodes_degrade_reason = reason
+            from localm.debuglog import logger
+            logger.debug("episodic recall: injected %d lesson(s)%s", len(used),
+                         (" (%s)" % reason) if reason else "")
+            if used:
+                # Privacy/restricted sessions never reach here (recall is off), and
+                # in privacy-recall opt-in the audit log is a NullAuditLog, so the
+                # trail stays fail-safe by construction.
+                self._audit.episodes_recalled(used)
+                self._emit("episodes_recalled", episodes=used)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("episodic recall surfacing skipped: %s", e)
 
     def _loop(self, interactive: bool) -> str:
         """

@@ -9,12 +9,15 @@ tmp dir, never the user's real data.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from localm.audit import SessionMode
 from localm.plugins.coder.episodes import (
     Episode,
     EpisodeStore,
+    consolidate,
     reflect_and_store,
     render_for_prompt,
 )
@@ -84,14 +87,209 @@ def test_store_is_per_project(home, tmp_path):
     assert EpisodeStore(a).path != EpisodeStore(b).path
 
 
-def test_store_caps_to_newest(home, tmp_path, monkeypatch):
+def test_store_evicts_by_value_not_arrival_order(home, tmp_path, monkeypatch):
+    """At the cap the LEAST VALUABLE episode goes, not simply the oldest.
+
+    Replaces the old FIFO pin (`test_store_caps_to_newest`). Under that behavior
+    the rich failure lesson below - added FIRST - was always the first thing
+    discarded, however much it had to teach; that is finding 39 in one line.
+    Ages are staggered so plain recency cannot be what saves it."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 3)
     store = ep_mod.EpisodeStore(tmp_path)
-    for i in range(5):
-        store.add(ep_mod.Episode(task="task %d" % i, lesson="lesson %d" % i))
-    tasks = [e.task for e in store.all()]
-    assert tasks == ["task 2", "task 3", "task 4"]      # oldest two dropped
+    now = time.time()
+
+    # Added first and the OLDEST, but it carries a full failure lesson.
+    store.add(ep_mod.Episode(
+        task="migrate the users table", outcome="incomplete",
+        summary="tried to run the migration", what_worked="alembic downgrade -1",
+        what_failed="alembic upgrade head deadlocked against the open session",
+        lesson="close the psql session before running alembic upgrade",
+        ts=now - 2 * 86400))
+    # Three thin, newer records: a bare one-line lesson each. Subjects are kept
+    # unrelated so the dedup pass has nothing to collapse and eviction is what is
+    # actually under test here.
+    thin = [("rename the config loader", "config lives in one place"),
+            ("bump the pillow dependency", "pin the minor version"),
+            ("delete the unused sprite sheet", "check references first")]
+    for i, (t, lsn) in enumerate(thin):
+        store.add(ep_mod.Episode(task=t, lesson=lsn, ts=now - (2 - i)))
+
+    kept = [e.task for e in store.all()]
+    assert len(kept) == 3
+    assert "migrate the users table" in kept          # value beat arrival order
+    assert "rename the config loader" not in kept     # the weakest went instead
+    assert [e.task for e in store.last_evicted] == ["rename the config loader"]
+
+
+def test_dedup_collapses_near_identical_without_losing_a_distinct_one(home, tmp_path):
+    """A restatement of a lesson MERGES into it; a genuinely different lesson is
+    untouched. The negative half is the point: an over-eager dedup that also ate
+    the distinct episode would be memory loss dressed up as tidying."""
+    store = EpisodeStore(tmp_path)
+    a = store.add(Episode(task="fix the flaky upload integration test",
+                          lesson="raise the upload timeout to 30 seconds",
+                          files=["tests/test_upload.py"]))
+    b = store.add(Episode(task="add database migrations with alembic",
+                          lesson="use alembic revision autogenerate",
+                          files=["migrations/env.py"]))
+    a2 = store.add(Episode(task="fix the flaky upload integration tests",
+                           lesson="raise the upload timeout to 30 sec",
+                           files=["tests/conftest.py"]))
+
+    eps = store.all()
+    assert len(eps) == 2, [e.task for e in eps]
+    lessons = {e.lesson for e in eps}
+    # The distinct lesson survives untouched...
+    assert "use alembic revision autogenerate" in lessons
+    assert any(e.id == b.id for e in eps)
+    # ...and the two near-identical ones are now ONE record, keeping the newer
+    # wording, both file lists, and a merge count.
+    merged = next(e for e in eps if e.id == a2.id)
+    assert merged.lesson == "raise the upload timeout to 30 sec"
+    assert merged.merged == 1
+    assert set(merged.files) == {"tests/conftest.py", "tests/test_upload.py"}
+    # The collapsed original is archived, not destroyed.
+    arch = store.forgotten()
+    assert [r["id"] for r in arch] == [a.id]
+    assert arch[0]["reason"] == "merged"
+
+
+def test_dedup_does_not_collapse_a_shared_generic_lesson(home, tmp_path):
+    """Two DIFFERENT tasks that happen to yield the same generic advice stay two
+    episodes: the dedup signature is task+lesson, not the lesson alone."""
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="wire up the billing webhook receiver",
+                      lesson="write the test first"))
+    store.add(Episode(task="port the image thumbnailer to pillow",
+                      lesson="write the test first"))
+    assert len(store.all()) == 2
+
+
+def test_evicted_episode_is_recoverable_from_the_archive(home, tmp_path, monkeypatch):
+    """Archive-before-drop: what the cap evicts is still on disk and restorable.
+    Negative half first - it really is gone from live recall."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
+    store = ep_mod.EpisodeStore(tmp_path)
+    now = time.time()
+    doomed = store.add(ep_mod.Episode(task="the oldest thin task",
+                                      lesson="thin lesson", ts=now - 3))
+    store.add(ep_mod.Episode(task="second task", lesson="second lesson", ts=now - 2))
+    store.add(ep_mod.Episode(task="third task", lesson="third lesson", ts=now - 1))
+
+    # Gone from recall...
+    assert doomed.id not in {e.id for e in store.all()}
+    # ...but archived with the reason, and restorable.
+    arch = store.forgotten()
+    assert [r["id"] for r in arch] == [doomed.id]
+    assert arch[0]["reason"] == "cap" and arch[0]["lesson"] == "thin lesson"
+
+    back = store.restore(doomed.id)
+    assert back is not None and back.id == doomed.id
+    assert doomed.id in {e.id for e in store.all()}
+    assert back.lesson == "thin lesson"
+    # Live again means no longer listed as forgotten.
+    assert [r["id"] for r in store.forgotten()] == []
+    # And a restore of something that was never archived says so, rather than
+    # inventing an episode.
+    assert store.restore("nope-not-here") is None
+
+
+def test_restore_survives_the_decay_that_evicted_it(home, tmp_path, monkeypatch):
+    """A restored episode is re-stamped to now, so the very age that got it
+    evicted cannot immediately evict it again - which would make restore a silent
+    no-op. Its id is preserved so an old citation still resolves."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
+    store = ep_mod.EpisodeStore(tmp_path)
+    now = time.time()
+    old = store.add(ep_mod.Episode(task="ancient task", lesson="ancient lesson",
+                                   ts=now - 400 * 86400))
+    store.add(ep_mod.Episode(task="second task", lesson="second lesson", ts=now))
+    store.add(ep_mod.Episode(task="third task", lesson="third lesson", ts=now))
+    assert old.id not in {e.id for e in store.all()}
+
+    back = store.restore(old.id)
+    assert back is not None
+    live = {e.id for e in store.all()}
+    assert old.id in live                       # it stuck
+    assert back.ts > now - 60                   # re-stamped, not left ancient
+
+
+def test_forget_one_episode_by_id(home, tmp_path):
+    """Targeted forget: the whole point of stable ids. Archived, so an accidental
+    forget is recoverable; unknown ids report failure instead of silently doing
+    nothing."""
+    store = EpisodeStore(tmp_path)
+    keep = store.add(Episode(task="keep this one", lesson="keep"))
+    drop = store.add(Episode(task="a totally different subject", lesson="drop"))
+
+    assert store.forget(drop.id) is True
+    assert [e.id for e in store.all()] == [keep.id]
+    assert [r["reason"] for r in store.forgotten()] == ["forget"]
+    assert store.forget("no-such-id") is False
+    assert store.restore(drop.id) is not None    # recoverable
+
+
+def test_clear_removes_the_archive_too(home, tmp_path, monkeypatch):
+    """"Cleared episodic memory" has to be true. Leaving the lesson text sitting
+    in the sidecar would be a privacy claim that did not hold."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
+    store = ep_mod.EpisodeStore(tmp_path)
+    store.add(ep_mod.Episode(task="first secret task", lesson="secret one"))
+    store.add(ep_mod.Episode(task="a wholly different second task", lesson="two"))
+    assert store.archive_path.is_file()          # the evicted one landed there
+
+    store.clear()
+    assert not store.path.is_file()
+    assert not store.archive_path.is_file()
+    assert store.all() == [] and store.forgotten() == []
+
+
+def test_archive_is_capped(home, tmp_path, monkeypatch):
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
+    monkeypatch.setattr(ep_mod, "_ARCHIVE_MAX", 3)
+    store = ep_mod.EpisodeStore(tmp_path)
+    # Unrelated subjects, so each add EVICTS its predecessor at the cap rather
+    # than merging into it - the archive cap is what is under test.
+    for t, lsn in [("rename the config loader", "config lives in one place"),
+                   ("bump the pillow dependency", "pin the minor version"),
+                   ("delete the unused sprite sheet", "check references first"),
+                   ("wire up the billing webhook", "verify the signature"),
+                   ("port the thumbnailer to pillow", "write the test first"),
+                   ("shard the analytics table", "backfill in batches")]:
+        store.add(ep_mod.Episode(task=t, lesson=lsn))
+    assert [r["reason"] for r in store.forgotten()] == ["cap"] * 3   # bounded
+
+
+def test_failed_archive_is_reported_not_swallowed(home, tmp_path, monkeypatch, caplog):
+    """Rule 5: dropping an episode without a recovery copy is a real failure. It
+    stays best-effort (the write still lands - refusing it would break a working
+    setup over a sidecar), but it must leave a WARNING, not vanish."""
+    import logging
+
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
+    store = ep_mod.EpisodeStore(tmp_path)
+    store.add(ep_mod.Episode(task="first task about widgets", lesson="one"))
+
+    def boom(self, *a, **kw):
+        raise OSError(28, "No space left on device")
+
+    from pathlib import Path
+    monkeypatch.setattr(Path, "write_text", boom)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        # write_text is broken for the main log too, so the add itself raises;
+        # what matters is that the archive failure was reported first.
+        try:
+            store.add(ep_mod.Episode(task="a second unrelated task", lesson="two"))
+        except OSError:
+            pass
+    assert any("could not archive" in r.getMessage() for r in caplog.records)
+    assert store.last_archive_ok is False
 
 
 def test_clear_removes_the_log(home, tmp_path):
@@ -428,6 +626,46 @@ def test_reflect_no_thin_episode_without_error_evidence(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+#  Ids                                                                        #
+# --------------------------------------------------------------------------- #
+
+def test_add_assigns_a_stable_id_that_survives_a_round_trip(home, tmp_path):
+    store = EpisodeStore(tmp_path)
+    ep = store.add(Episode(task="t", lesson="L"))
+    assert ep.id
+    assert [e.id for e in store.all()] == [ep.id]
+    assert [e.id for e in EpisodeStore(tmp_path).all()] == [ep.id]   # reopened
+
+
+def test_legacy_record_without_an_id_gets_a_stable_derived_one(home, tmp_path):
+    """A record written before ids existed still has to be citable and
+    forgettable, without a migration write: the id derives from its own content,
+    so it is the same on every read."""
+    store = EpisodeStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        '{"task": "old task", "lesson": "old lesson", "ts": 1700000000.0}\n',
+        encoding="utf-8")
+    first = store.all()[0]
+    assert first.id
+    assert EpisodeStore(tmp_path).all()[0].id == first.id           # stable
+    assert store.forget(first.id) is True                           # and usable
+
+
+def test_identical_episodes_still_get_distinct_ids(home, tmp_path):
+    """Two records with the same content AND timestamp derive the same id; the
+    store disambiguates rather than letting one shadow the other."""
+    store = EpisodeStore(tmp_path)
+    a = store.add(Episode(task="alpha subject", lesson="one", ts=1.0))
+    b = store.add(Episode(task="beta subject entirely", lesson="two", ts=1.0))
+    # Force the collision path: a third record whose derived id equals a's.
+    c = store.add(Episode(task="alpha subject", lesson="one", ts=1.0), dedup=False)
+    ids = [e.id for e in store.all()]
+    assert len(ids) == len(set(ids)) == 3
+    assert a.id != c.id and b.id not in (a.id, c.id)
+
+
+# --------------------------------------------------------------------------- #
 #  Rendering                                                                  #
 # --------------------------------------------------------------------------- #
 
@@ -437,6 +675,108 @@ def test_render_for_prompt():
     assert "Past lessons" in block
     assert "lesson: do X" in block
     assert "avoid: thing Y" in block
+
+
+def test_what_worked_is_load_bearing(home, tmp_path):
+    """It used to be written and then never read by anything - not searched, not
+    rendered, not weighed (audit finding 39, "what_worked is a dead field"). All
+    three now consume it."""
+    import localm.plugins.coder.episodes as em
+
+    # 1. rendered on recall
+    block = render_for_prompt([Episode(task="t", lesson="do X",
+                                       what_worked="ran pytest -x first")])
+    assert "worked: ran pytest -x first" in block
+
+    # 2. searchable: a task matching ONLY the what_worked text still recalls it
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="unrelated wording here", lesson="unrelated wording too",
+                      what_worked="regenerate the protobuf stubs with grpcio-tools"))
+    assert store.search("regenerate the protobuf stubs")
+
+    # 3. weighed at eviction: same age, the one carrying it is worth more
+    now = time.time()
+    with_it = Episode(task="a", lesson="L", what_worked="W", ts=now)
+    without = Episode(task="b", lesson="L", ts=now)
+    assert em._episode_value(with_it, now) > em._episode_value(without, now)
+
+
+# --------------------------------------------------------------------------- #
+#  Opt-in LLM consolidation                                                   #
+# --------------------------------------------------------------------------- #
+
+_MERGE_REPLY = ('{"summary": "two takes on the same retry work", '
+                '"what_worked": "exponential backoff", '
+                '"what_failed": "a fixed 1s sleep", '
+                '"lesson": "back off exponentially and cap at 30s"}')
+
+
+def test_consolidate_merges_related_lessons_and_archives_the_originals(home, tmp_path):
+    store = EpisodeStore(tmp_path)
+    a = store.add(Episode(task="add retry logic to the http client",
+                          lesson="use exponential backoff", ts=1000.0))
+    b = store.add(Episode(task="add retry logic to the http uploader",
+                          lesson="cap the backoff at 30s", ts=2000.0))
+    far = store.add(Episode(task="restyle the settings page navbar",
+                            lesson="use flexbox gap", ts=3000.0))
+
+    rep = consolidate(store, complete=lambda p: _MERGE_REPLY)
+    assert rep["groups"] == 1 and rep["merged"] == 1 and rep["replaced"] == 2
+    assert rep["archived"] == 2 and rep["skipped"] == 0
+
+    eps = store.all()
+    assert len(eps) == 2
+    assert far.id in {e.id for e in eps}                     # unrelated untouched
+    merged = next(e for e in eps if e.id != far.id)
+    assert merged.lesson == "back off exponentially and cap at 30s"
+    # Reversible: both inputs are in the archive and can come back.
+    arch_ids = {r["id"] for r in store.forgotten()}
+    assert {a.id, b.id} == arch_ids
+    assert all(r["reason"] == "consolidated" for r in store.forgotten())
+    assert store.restore(a.id) is not None
+
+
+def test_consolidate_leaves_a_group_alone_when_the_merge_is_unusable(home, tmp_path):
+    """A weak model that returns nothing usable must not cost the user their
+    lessons - destroying real memory is worse than not consolidating."""
+    store = EpisodeStore(tmp_path)
+    a = store.add(Episode(task="add retry logic to the http client",
+                          lesson="use exponential backoff", ts=1000.0))
+    b = store.add(Episode(task="add retry logic to the http uploader",
+                          lesson="cap the backoff at 30s", ts=2000.0))
+    rep = consolidate(store, complete=lambda p: "hmm, I am not sure")
+    assert rep["groups"] == 1 and rep["merged"] == 0 and rep["skipped"] == 1
+    assert {e.id for e in store.all()} == {a.id, b.id}       # untouched
+    assert store.forgotten() == []
+
+
+def test_consolidate_survives_a_model_error(home, tmp_path):
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="add retry logic to the http client", lesson="backoff"))
+    store.add(Episode(task="add retry logic to the http uploader", lesson="cap it"))
+
+    def boom(prompt):
+        raise RuntimeError("model down")
+
+    rep = consolidate(store, complete=boom)
+    assert rep["skipped"] == 1 and rep["merged"] == 0
+    assert len(store.all()) == 2
+
+
+def test_consolidate_is_never_automatic(home, tmp_path):
+    """It must not fire on close(): a local model rewriting stored memory is
+    where one bad merge poisons every later run, so it stays user-triggered."""
+    from localm.audit import SessionMode
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="add retry logic to the http client", lesson="backoff"))
+    store.add(Episode(task="add retry logic to the http uploader", lesson="cap it"))
+    agent = _agent(tmp_path, backend=_ChatBackend(_REPLY), mode=SessionMode.LOG)
+    agent._changed_files = {"foo.py": {"original": None, "writes": 1,
+                                       "last_tool": "write_file"}}
+    agent._episode_task = "add retry"
+    agent.close()
+    # close() reflects (a third episode) but consolidates nothing.
+    assert EpisodeStore(tmp_path).forgotten() == []
 
 
 # --------------------------------------------------------------------------- #
@@ -523,6 +863,86 @@ def test_with_episodes_noop_when_no_relevant_history(home, tmp_path):
     agent = _agent(tmp_path, mode=SessionMode.LOG)
     assert agent._with_episodes("quantum chromodynamics solver") == \
         "quantum chromodynamics solver"
+
+
+def test_recalled_lesson_ids_are_recorded_for_the_run(home, tmp_path):
+    """Retrieval used to render the lessons and throw the Episode objects away, so
+    a lesson that steered a run badly was invisible afterwards and there was no
+    handle to forget it by. The run now records id + text, emits it, and audits
+    it - and the id it reports is the one targeted forget takes."""
+    seeded = EpisodeStore(tmp_path).add(Episode(
+        task="add retry logic to the http client",
+        lesson="exponential backoff capped at 30s"))
+    events: list = []
+    agent = _agent(tmp_path, mode=SessionMode.LOG, on_event=events.append)
+    audited: list = []
+    agent._audit.episodes_recalled = audited.append
+
+    out = agent._with_episodes("add retry logic to the http client uploader")
+    assert "exponential backoff" in out                    # it really was injected
+
+    assert [u["id"] for u in agent._episodes_used] == [seeded.id]
+    assert agent._episodes_used[0]["lesson"] == "exponential backoff capped at 30s"
+    assert agent._episodes_used[0]["outcome"] == "ok"
+    assert agent._episodes_degrade_reason == ""
+    # surfaced on the event stream (GUI/SSE)...
+    recalled = [e for e in events if e["type"] == "episodes_recalled"]
+    assert len(recalled) == 1
+    assert [e["id"] for e in recalled[0]["episodes"]] == [seeded.id]
+    # ...and in the audit trail.
+    assert audited == [agent._episodes_used]
+    # The reported id is the one that forgets it.
+    assert EpisodeStore(tmp_path).forget(seeded.id) is True
+
+
+def test_silent_recall_records_the_reason_and_emits_nothing(home, tmp_path):
+    """Nothing relevant is a legitimate outcome, but it must be distinguishable
+    from a BROKEN recall - so it is recorded, while the noisy surfaces stay quiet
+    (silence-when-irrelevant is the contract)."""
+    EpisodeStore(tmp_path).add(Episode(task="totally unrelated css work",
+                                       lesson="use grid"))
+    events: list = []
+    agent = _agent(tmp_path, mode=SessionMode.LOG, on_event=events.append)
+    agent._with_episodes("quantum chromodynamics solver")
+    assert agent._episodes_used == []
+    assert agent._episodes_degrade_reason == "no relevant past lesson"
+    assert [e for e in events if e["type"] == "episodes_recalled"] == []
+
+
+def test_failed_recall_is_recorded_not_swallowed(home, tmp_path):
+    """Rule 5: a recall that BLEW UP is not the same as one that found nothing.
+    The run still proceeds (best-effort), but the failure leaves a trace."""
+    agent = _agent(tmp_path, mode=SessionMode.LOG)
+
+    def boom(task, k=3):
+        raise RuntimeError("store unreadable")
+
+    agent._episode_store.search = boom
+    assert agent._with_episodes("do the thing") == "do the thing"   # run continues
+    assert agent._episodes_used == []
+    assert "recall failed" in agent._episodes_degrade_reason
+    assert "store unreadable" in agent._episodes_degrade_reason
+
+
+def test_privacy_recall_opt_in_writes_no_audit_entry(home, tmp_path, monkeypatch):
+    """The new citation surface must not create a trace privacy mode forbids: in
+    a privacy session the audit log is a NullAuditLog, so recording what was
+    recalled writes nothing to disk."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "load_config", lambda: {
+        "coder_episodic_memory": True,
+        "memory_recall_in_privacy": True,
+        "memory_recall_in_privacy_coder": True})
+    EpisodeStore(tmp_path).add(Episode(
+        task="add retry logic to the http client",
+        lesson="exponential backoff capped at 30s"))
+    agent = _agent(tmp_path, mode=SessionMode.PRIVACY)
+    from localm.audit import NullAuditLog
+    assert isinstance(agent._audit, NullAuditLog)
+    out = agent._with_episodes("add retry logic to the uploader")
+    assert "exponential backoff" in out              # recalled read-only
+    assert agent._episodes_used                      # tracked in memory for the run
+    assert agent._audit.path is None                 # but nothing on disk
 
 
 def test_close_writes_episode_on_changes(home, tmp_path):
