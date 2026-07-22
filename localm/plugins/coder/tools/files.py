@@ -393,11 +393,15 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
             p.write_text(current[p], encoding="utf-8")
             written.append(p)
         except Exception as e:
-            rollback_errors = _restore_snapshots(snapshots, written)
+            # The FAILING file is restored too, not just the ones before it:
+            # write_text opens with "w", which truncates before writing, so a
+            # failure partway through leaves that file empty or half-written.
+            # Restoring it is a no-op when the write never started.
+            rollback_errors = _restore_snapshots(snapshots, written + [p])
             failed_rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
             msg = (f"Failed to write {failed_rel}: {e}\n"
-                   f"Rolled back {len(written)} already-written file(s) - no "
-                   "file was left partially edited.")
+                   f"Rolled back {len(written) + 1} file(s) - no file was left "
+                   "partially edited.")
             if rollback_errors:
                 # RULE 5: a rollback that itself failed must NEVER be reported as
                 # a clean all-or-nothing. Say exactly which files are now suspect.

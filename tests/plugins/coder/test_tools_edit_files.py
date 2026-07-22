@@ -105,7 +105,27 @@ class TestAllOrNothing:
         assert (project / "a.py").read_bytes() == before_a, \
             "a.py was written and must be restored to its ORIGINAL bytes"
         assert (project / "b.py").read_bytes() == before_b
-        assert "Rolled back 1" in r.output
+        assert "Rolled back" in r.output
+
+    def test_a_half_written_file_is_restored_too(self, project):
+        """write_text opens with "w", so a failure PARTWAY through a write leaves
+        that file truncated. It is not in the already-written list, so it has to
+        be restored explicitly or the 'nothing was left partial' claim is false."""
+        before_b = (project / "b.py").read_bytes()
+        real_write = type(project).write_text
+
+        def truncate_then_fail(self, *args, **kwargs):
+            if self.name == "b.py":
+                real_write(self, "", encoding="utf-8")   # truncated, as "w" does
+                raise OSError("disk full mid-write")
+            return real_write(self, *args, **kwargs)
+
+        with patch.object(type(project), "write_text", truncate_then_fail):
+            r = tool_edit_files(project, [_swap("a.py"), _swap("b.py")])
+
+        assert r.ok is False
+        assert (project / "b.py").read_bytes() == before_b, \
+            "the half-written file must be restored, not left truncated"
 
     def test_rollback_restores_all_earlier_files(self, project):
         originals = {n: (project / n).read_bytes() for n in ("a.py", "b.py", "c.py")}
