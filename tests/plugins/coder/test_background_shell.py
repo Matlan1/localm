@@ -438,30 +438,43 @@ def test_drain_can_filter_by_kind(tmp_path, make_registry):
 
 
 def test_pruning_evicts_drained_jobs_before_undrained_ones(make_registry):
-    """A completion nobody has collected must outlive one already handed over."""
+    """A completion nobody has collected must outlive one already handed over.
+
+    The drained job is deliberately NOT the oldest. If it were, "evict drained
+    first" and plain "evict oldest first" would pick the same victim and this
+    test would pass either way - proving nothing about the ordering it names.
+    """
     reg = make_registry(kind_caps={"agent": 50}, keep_finished=2)
 
-    old = reg.submit(_FakeAgentJob, kind="agent")
-    old.finish_now("collected")
-    assert _wait_for(lambda: old.state == "done")
-    assert [j["id"] for j in reg.drain_finished()] == [old.id]   # now drained
+    # oldest, and left RUNNING so the drain below cannot collect it
+    oldest = reg.submit(_FakeAgentJob, kind="agent")
 
-    fresh = []
-    for i in range(2):
-        job = reg.submit(_FakeAgentJob, kind="agent")
-        job.finish_now(f"r{i}")
-        assert _wait_for(lambda j=job: j.state == "done")
-        fresh.append(job)
+    collected = reg.submit(_FakeAgentJob, kind="agent")
+    collected.finish_now("collected")
+    assert _wait_for(lambda: collected.state == "done")
+    assert [j["id"] for j in reg.drain_finished()] == [collected.id]
+
+    # now let the oldest finish, still uncollected
+    oldest.finish_now("never collected")
+    assert _wait_for(lambda: oldest.state == "done")
+
+    newest = reg.submit(_FakeAgentJob, kind="agent")
+    newest.finish_now("also uncollected")
+    assert _wait_for(lambda: newest.state == "done")
 
     # The table only GROWS on submit, so that is where pruning runs. Trigger one
-    # so the eviction ORDER is actually exercised.
+    # so the eviction ORDER is actually exercised. 3 finished, keep 2 -> 1 goes.
     reg.submit(_FakeAgentJob, kind="agent")
 
     surviving = {j["id"] for j in reg.list_status()}
-    assert old.id not in surviving, "the drained job should have been evicted first"
-    assert {j.id for j in fresh} <= surviving, "undrained completions were evicted"
+    assert collected.id not in surviving, (
+        "the DRAINED job should have been evicted, even though it is not the oldest")
+    assert oldest.id in surviving, (
+        "the oldest job was evicted despite nobody having collected it - "
+        "pruning is ordering by age, not by whether the result was handed over")
+    assert newest.id in surviving
     assert reg.dropped_undrained == 0
-    assert {j["id"] for j in reg.drain_finished()} == {j.id for j in fresh}
+    assert {j["id"] for j in reg.drain_finished()} == {oldest.id, newest.id}
 
 
 def test_dropping_an_uncollected_completion_is_counted_not_hidden(make_registry):
