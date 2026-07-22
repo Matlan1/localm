@@ -136,6 +136,11 @@ def test_every_registry_tool_receives_its_hidden_args_through_the_real_dispatche
     should do. Everything up to and including the call is the real code path.
     """
     agent = _agent(tmp_path, mode=SessionMode.PRIVACY)
+    # Take the network POLICY out of the picture. It is a separate gate that
+    # returns before the tool function when net_mode is "off", so leaving it to
+    # the ambient config would make this test's result depend on the machine it
+    # runs on. Nothing reaches the network regardless: every fn is a recorder.
+    monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
 
     missing: list[str] = []
     never_called: list[str] = []
