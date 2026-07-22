@@ -591,13 +591,17 @@ def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
                                  lesson="config lives in one place"))
     store.add(ep_mod.Episode(task="bump the pillow dependency",
                              lesson="pin the minor version"))
-    b = store.add(ep_mod.Episode(task="delete the unused sprite sheet",
-                                 lesson="check references first"))
+    store.add(ep_mod.Episode(task="delete the unused sprite sheet",
+                             lesson="check references first"))
     archived_before = {r["id"] for r in store.forgotten()}
     assert len(archived_before) == 2                    # two recovery copies exist
 
-    # Fail ONLY the post-add re-read: let the first read (which finds the record to
-    # restore) and add()'s own reads through, then lock the archive.
+    # Let the FIRST archive read through (that is the one that finds the record to
+    # restore), then make every later one fail. Note this also faults the read
+    # inside add()'s own _archive - that path is already best-effort and covered by
+    # test_failed_archive_is_reported_not_swallowed, so this test asserts only on
+    # what the re-read guard itself owns: the file must not be REWRITTEN from a
+    # read that failed.
     real_read_text = Path.read_text
     seen = {"n": 0}
 
@@ -618,7 +622,6 @@ def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
     survived = {r["id"] for r in store.forgotten()}
     assert archived_before <= survived, (
         "the unreadable re-read wiped recovery copies it could not even see")
-    assert b.id in {e.id for e in store.all()} or b.id in survived
     assert any("unreadable" in r.getMessage() for r in caplog.records), \
         [r.getMessage() for r in caplog.records]
 
@@ -676,9 +679,27 @@ def test_cli_still_says_empty_when_the_archive_really_is_empty(home, tmp_path,
 # The pre-existing concurrency test covers reader-vs-replace only.
 
 
+@pytest.fixture
+def no_dedup(monkeypatch):
+    """Make the near-duplicate MERGE unreachable for the concurrency tests.
+
+    This is load-bearing, not tidiness. A merge is a LEGITIMATE, archived drop, so
+    a merged-away episode still satisfies "live or archived" and the clobber
+    assertion can never fire. Programmatically generated task text is exactly what
+    trips the merge: measured, "alpha unrelated subject number 0" vs "... number 1"
+    scores 0.957 against the 0.90 _DEDUP_RATIO, so an earlier version of these
+    tests collapsed nearly every episode into one and passed vacuously - it would
+    have gone green against the UNLOCKED code too. Raising the ratio above 1.0
+    leaves the real dedup code path running (it is still compared against every
+    episode) but makes a match impossible, so every episode that goes missing is a
+    genuine lost update rather than a merge."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_DEDUP_RATIO", 1.01)
+
+
 def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
-        home, tmp_path):
-    """Two threads add() DISTINCT episodes to the same project concurrently. Every
+        home, tmp_path, no_dedup):
+    """Two threads add() distinct episodes to the same project concurrently. Every
     episode either survives in the live log or has a recovery copy in the archive -
     silently vanishing from both is the clobber this lock exists to prevent.
 
@@ -698,9 +719,6 @@ def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
         try:
             start.wait(5)
             for i in range(n_each):
-                # Distinct subjects so nothing is a near-duplicate: a MERGE is a
-                # legitimate, archived drop, and this test is about the silent
-                # loss, so keeping them unmergeable keeps the assertion sharp.
                 ep = store.add(Episode(task=f"{tag} unrelated subject number {i}",
                                        lesson=f"{tag} lesson {i}"))
                 mine.append(ep.id)
@@ -719,15 +737,24 @@ def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
     written = {i for got in ids.values() for i in got}
     assert len(written) == 2 * n_each, "both writers should have added their own"
 
-    live = {e.id for e in EpisodeStore(tmp_path).all()}
-    archived = {r.get("id") for r in EpisodeStore(tmp_path).forgotten()}
+    final = EpisodeStore(tmp_path)
+    live_eps = final.all()
+    live = {e.id for e in live_eps}
+    archived = {r.get("id") for r in final.forgotten()}
+    # Precondition guard for the assertion below: with dedup unreachable and 50
+    # episodes against the 200 cap, NOTHING should have been legitimately dropped.
+    # If this ever fails, the real assertion has stopped measuring a clobber.
+    assert not any(e.merged for e in live_eps), "dedup was reachable; test is void"
+    assert not archived, "nothing should have been legitimately dropped here"
+
     vanished = written - live - archived
     assert not vanished, (
         f"{len(vanished)} episode(s) were clobbered by a concurrent writer and "
         f"never reached the archive, so they are unrecoverable: {sorted(vanished)}")
 
 
-def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path):
+def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path,
+                                                               no_dedup):
     """The other writer-vs-writer shape from the finding: a --forget-episode CLI
     run racing a session-close reflection add(). The forgotten episode must stay
     forgotten (not resurrected by a stale snapshot write) and the concurrently
@@ -738,6 +765,7 @@ def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path):
     victims = [seed_store.add(Episode(task=f"seeded distinct subject {i}",
                                       lesson=f"seed lesson {i}")).id
                for i in range(20)]
+    assert len(set(victims)) == 20, "each victim must be its own episode"
 
     errors: list = []
     added: list = []
@@ -780,6 +808,121 @@ def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path):
     # And the concurrent additions were not clobbered by the forgetter's writes.
     lost = set(added) - live - archived
     assert not lost, f"{len(lost)} concurrently added episode(s) were clobbered: {sorted(lost)}"
+
+
+def test_consolidate_does_not_clobber_an_episode_added_while_the_model_ran(
+        home, tmp_path, no_dedup):
+    """consolidate() makes slow model calls OFF the lock against a SNAPSHOT, then
+    commits. If it wrote that stale snapshot back wholesale, an episode recorded by
+    a session closing during the model call would be clobbered - and, never having
+    gone through a drop path, would have no recovery copy. The commit must merge
+    onto freshly re-read state instead (the shape memory/consolidate.py uses).
+
+    The concurrent add is driven from inside the injected model call, so the race
+    is deterministic rather than timing-dependent."""
+    import localm.plugins.coder.episodes as ep_mod
+
+    store = ep_mod.EpisodeStore(tmp_path)
+    # Two RELATED lessons so consolidate() has a group to merge.
+    store.add(ep_mod.Episode(task="fix the flaky upload retry",
+                             lesson="retry with exponential backoff"))
+    store.add(ep_mod.Episode(task="fix the flaky upload retries",
+                             lesson="retry using exponential backoff"))
+
+    landed: dict = {}
+
+    def fake_complete(prompt):
+        # A different session closes and records an episode WHILE the model runs.
+        other = ep_mod.EpisodeStore(tmp_path)
+        landed["id"] = other.add(ep_mod.Episode(
+            task="a totally separate subject about billing webhooks",
+            lesson="verify the signature")).id
+        return ('{"summary": "merged upload retry lessons", '
+                '"what_worked": "exponential backoff", "what_failed": "", '
+                '"lesson": "retry with capped exponential backoff"}')
+
+    report = ep_mod.consolidate(store, complete=fake_complete)
+    assert report["merged"] >= 1, report          # the merge actually happened
+
+    final = ep_mod.EpisodeStore(tmp_path)
+    live = {e.id for e in final.all()}
+    archived = {r.get("id") for r in final.forgotten()}
+    assert landed["id"] in live, (
+        "an episode recorded while the model was running was clobbered by the "
+        "consolidation's stale-snapshot write")
+    assert landed["id"] not in archived, "it was not dropped, so it is not archived"
+
+
+def test_restore_keeps_a_recovery_copy_when_the_cap_evicts_it_again(
+        home, tmp_path, monkeypatch):
+    """Restoring into a FULL store can push the restored record straight back out
+    at the cap. add() writes it a fresh recovery copy when that happens, and the
+    archive rewrite must not delete that copy along with the entry it supersedes -
+    otherwise the episode is in NEITHER the live log nor the archive, permanently
+    lost, while restore() reports success."""
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
+    store = ep_mod.EpisodeStore(tmp_path)
+
+    # A THIN record (no lesson/what_failed) scores lowest in _episode_value, so it
+    # is the one the cap evicts - both now and again after it is restored.
+    thin = store.add(ep_mod.Episode(task="a thin throwaway note", summary="thin"))
+    for task, lesson in [("rename the config loader", "config lives in one place"),
+                         ("bump the pillow dependency", "pin the minor version")]:
+        store.add(ep_mod.Episode(task=task, lesson=lesson, what_worked="w",
+                                 what_failed="f", summary="s"))
+    assert thin.id not in {e.id for e in store.all()}          # evicted at the cap
+    assert thin.id in {r["id"] for r in store.forgotten()}     # and recoverable
+
+    back = store.restore(thin.id)
+    assert back is not None                                    # reported success
+
+    live = {e.id for e in store.all()}
+    archived = {r.get("id") for r in store.forgotten()}
+    assert thin.id in live or thin.id in archived, (
+        "the restored episode was evicted again at the cap and its fresh recovery "
+        "copy was deleted by the archive rewrite - it is now unrecoverable")
+
+
+def test_retrying_a_restore_after_an_unreadable_archive_does_not_duplicate(
+        home, tmp_path, monkeypatch):
+    """When restore() cannot reconcile the archive it leaves the episode live AND
+    still listed as forgotten. Retrying must then RECONCILE, not append a second
+    live copy under a mangled id - the store would otherwise carry the same lesson
+    twice and dilute recall."""
+    from pathlib import Path
+
+    import localm.plugins.coder.episodes as ep_mod
+    monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
+    store = ep_mod.EpisodeStore(tmp_path)
+    a = store.add(ep_mod.Episode(task="rename the config loader",
+                                 lesson="config lives in one place"))
+    store.add(ep_mod.Episode(task="bump the pillow dependency",
+                             lesson="pin the minor version"))
+    assert a.id in {r["id"] for r in store.forgotten()}
+
+    # First restore: the post-add re-read fails, so the archive keeps listing it.
+    real_read_text = Path.read_text
+    seen = {"n": 0}
+
+    def flaky(self, *args, **kw):
+        if self == store.archive_path:
+            seen["n"] += 1
+            if seen["n"] >= 2:
+                raise PermissionError(13, "simulated transient lock")
+        return real_read_text(self, *args, **kw)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert store.restore(a.id) is not None
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    assert store.last_restore_archive_ok is False        # the caveat was recorded
+
+    # Retry now that the archive reads fine: exactly ONE live copy of the lesson.
+    store.restore(a.id)
+    live_ids = [e.id for e in store.all()]
+    assert live_ids.count(a.id) <= 1, "the retry appended a duplicate live copy"
+    assert not [i for i in live_ids if i.startswith(a.id[:10] + "-")], \
+        f"the retry created a mangled-id duplicate: {live_ids}"
 
 
 # --------------------------------------------------------------------------- #
