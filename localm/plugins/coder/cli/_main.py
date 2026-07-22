@@ -468,12 +468,49 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
         ep = store.restore(restore_episode_id)
         if ep is not None:
             click.echo(f"Restored episode {ep.id}: {ep.lesson or ep.summary}")
+            if not store.last_restore_archive_ok:
+                # The lesson IS live again, so this is a caveat and not a failure -
+                # but staying quiet would hide that the archive still lists it.
+                click.echo(
+                    "Note: the archive could not be updated, so this lesson is "
+                    "also still listed by --episodes-archive. Re-run this command "
+                    "once the archive is writable to tidy that up.", err=True)
+            if any(e.id == ep.id for e in store.last_evicted):
+                # It came back and went straight out again at the cap: saying only
+                # "Restored" would be a claim the next read contradicts.
+                click.echo(
+                    "Note: the store is at its episode cap and this lesson ranked "
+                    "lowest, so it was dropped again immediately (a recovery copy "
+                    "was kept). Forget a lesson you no longer need first, with "
+                    "--forget-episode.", err=True)
+        elif not store.last_forgotten_ok:
+            # The archive EXISTS but could not be read, so "no such id" would be a
+            # claim we cannot make: the episode may well be sitting in there,
+            # recoverable, and a retry once the file is readable would find it.
+            # Rule 5 - do not report a clean negative for a step that failed.
+            click.echo(
+                f"Could not read the episode archive for {work_dir}, so episode "
+                f"{restore_episode_id} could not be looked up. The archive file "
+                f"exists ({store.archive_path.name}); it may be locked by another "
+                f"process. Nothing was changed - try again.", err=True)
+            # Non-zero: the lookup did not happen. Exiting 0 would tell a script
+            # the same thing a genuine "no such episode" does, which is the very
+            # collapse this branch exists to undo.
+            sys.exit(1)
         else:
             click.echo(f"No archived episode with id {restore_episode_id}.", err=True)
         return True
 
     if show_archive:
         rows = store.forgotten()
+        if not rows and not store.last_forgotten_ok:
+            # Same distinction as above: an unreadable archive is not an empty one.
+            click.echo(
+                f"Could not read the episode archive for {work_dir}. The archive "
+                f"file exists ({store.archive_path.name}) but could not be read, "
+                f"so this list would be INCOMPLETE - it may be locked by another "
+                f"process. Try again.", err=True)
+            sys.exit(1)          # not the same outcome as an empty archive
         if not rows:
             click.echo("No dropped episodes archived for this project.")
             return True

@@ -12,6 +12,34 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The coder's forgotten-lessons archive no longer reports "nothing here" when
+  it simply could not be read.** `localm coder --episodes-archive` printed "No
+  dropped episodes archived for this project", and `--restore-episode ID` printed
+  "No archived episode with id ID", in two very different situations: nothing was
+  ever archived, or the archive exists and could not be opened (another process
+  holding the file). The second now says plainly that the archive could not be
+  read and the answer would be incomplete, so a recoverable lesson is never
+  written off as absent. Restoring a lesson while the archive is unreadable also
+  no longer rewrites that archive from the failed read, which would have thrown
+  away every remaining recovery copy.
+- **Restoring a coder lesson into a full store no longer destroys it.** When
+  episodic memory was at its cap, `localm coder --restore-episode ID` could bring
+  a lesson back, immediately drop it again because it still ranked lowest, and
+  then delete the fresh recovery copy along with the old one - leaving the lesson
+  in neither the stored list nor the recoverable archive, gone for good, while the
+  command reported "Restored episode ID". The recovery copy is now kept, so the
+  lesson stays restorable, and the command says plainly when the store is full and
+  the lesson was dropped again rather than claiming an unqualified success.
+- **Two coder sessions finishing at once can no longer lose a lesson outright.**
+  Recording, forgetting, restoring and consolidating episodic memory each read the
+  whole per-project log, changed it, and wrote it back with nothing serialising
+  them, so two writers on the same project (two sessions closing together, or a
+  `--forget-episode` / `--consolidate-episodes` run alongside a session closing)
+  could overwrite each other. A lesson lost that way was gone for good: it never
+  passed through the step that files a recovery copy, which is what normally makes
+  every dropped lesson restorable. Writes to one project are now serialised, and
+  consolidation merges its result onto the current state rather than the snapshot
+  it started from, so a lesson recorded while the model was thinking survives.
 - **The text-to-speech voice you picked never reached the server.** The voice
   picker in the chat parameters saved your choice in the browser only, while
   the tts plugin's own settings (voice, speaking speed, voice model, compute

@@ -45,12 +45,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Optional
+
+from localm.storekit import NamespaceLockRegistry
 
 from .provenance import neutralise
 
@@ -290,6 +294,46 @@ def _key_for(cwd: Path) -> str:
     return hashlib.sha1(str(Path(cwd).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
+# Per-project-file locks (mirrors CHK-RAG-LOCK / CHK-MEM-LOCK in rag/store.py and
+# memory/store.py). add()/forget()/restore()/consolidate() each do all() -> mutate
+# -> _write_all(): two EpisodeStore instances for the SAME project each read the
+# log, mutate their own in-memory copy, and write the whole file back - without a
+# lock this is last-writer-wins, and whatever the loser's write drops never went
+# through add()'s own merge/evict/archive logic, so it is CLOBBERED outright, not
+# merely dropped-but-recoverable. Keyed by the resolved log file path so two stores
+# pointing at the same file (even a test's custom root=) share one lock; an RLock
+# so restore()'s own call into add() (same key, same thread) does not deadlock.
+#
+# WHAT THIS DOES AND DOES NOT COVER, precisely (a threading.RLock is per-process):
+# IN-PROCESS, now serialised - two sessions closing near-simultaneously inside one
+# server process, and the GUI/API paths that construct their own store per request.
+# CROSS-PROCESS, still best-effort - a `localm coder --forget-episode` CLI
+# invocation racing a running server's session-close reflection is two OS
+# processes, so they do not see each other's lock. That gap is accepted rather
+# than closed, for the same reason both precedents accept it (a single-user tool
+# where two localm processes writing ONE project's episodes at the same instant is
+# rare), and because config.py's _cross_process_lock is a materially larger piece
+# of machinery built around one always-live target file, not a drop-in for this
+# store's log-plus-archive shape. The residual risk is a lost update, NOT a
+# corrupt file: every write is temp+replace under a per-(pid, thread) unique temp
+# name (see _tmp_for), so two processes cannot interleave into a half-written log.
+_STORE_LOCKS = NamespaceLockRegistry()
+
+
+def _store_lock(file_path: Path):
+    return _STORE_LOCKS.get(str(file_path))
+
+
+def _tmp_for(path: Path) -> Path:
+    """A temp-file name unique to this (process, thread), like
+    storekit.atomic_write's. The per-store lock above serialises writers INSIDE one
+    process, but two localm processes touching the same project would otherwise
+    both write and rename the same fixed ``<name>.tmp``, so one could replace the
+    target with the other's half-written body - corrupting the very log the lock
+    exists to protect. A unique name makes that impossible even unserialised."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+
+
 class EpisodeStore:
     """Per-project JSONL store of episodes, confined under the episodes data dir."""
 
@@ -303,6 +347,15 @@ class EpisodeStore:
         self.last_evicted: list = []
         self.last_merged: list = []
         self.last_archive_ok: bool = True
+        # Set by forgotten(): False when the archive sidecar EXISTS but could not be
+        # read, so a caller (the CLI) can tell that apart from a genuinely empty
+        # archive instead of both collapsing to the same "nothing here" message.
+        self.last_forgotten_ok: bool = True
+        # Set by restore(): False when the episode came back but the archive could
+        # not be reconciled afterwards, so it is live AND still listed as forgotten.
+        # The restore itself SUCCEEDED, so this is a caveat on an otherwise good
+        # outcome, not a failure - but reporting a clean success would hide it.
+        self.last_restore_archive_ok: bool = True
 
     @property
     def path(self) -> Path:
@@ -350,7 +403,7 @@ class EpisodeStore:
         destination open can momentarily deny the rename."""
         self._file.parent.mkdir(parents=True, exist_ok=True)
         body = "\n".join(json.dumps(e.to_dict(), ensure_ascii=False) for e in eps)
-        tmp = self._file.with_name(self._file.name + ".tmp")
+        tmp = _tmp_for(self._file)
         tmp.write_text(body + "\n", encoding="utf-8")
         for delay in (*_PERMISSION_RETRY_DELAYS, None):
             try:
@@ -385,7 +438,7 @@ class EpisodeStore:
                    for e in episodes]
             lines = (prior + new)[-_ARCHIVE_MAX:]
             af.parent.mkdir(parents=True, exist_ok=True)
-            tmp = af.with_name(af.name + ".tmp")
+            tmp = _tmp_for(af)
             tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
             for delay in (*_PERMISSION_RETRY_DELAYS, None):
                 try:
@@ -407,8 +460,14 @@ class EpisodeStore:
     def forgotten(self) -> list:
         """Everything this store has dropped, oldest first, as raw dicts carrying
         their ``forgotten_at`` and ``reason``. Malformed lines are skipped, exactly
-        like all(): a partial write must not break recovery either."""
+        like all(): a partial write must not break recovery either.
+
+        Sets ``last_forgotten_ok`` to False when the archive EXISTS but could not
+        be read (as opposed to genuinely absent/empty), so a caller like the CLI
+        can tell an unreadable archive apart from "nothing was ever forgotten"
+        instead of both printing the same reassuring-but-wrong message."""
         af = self.archive_path
+        self.last_forgotten_ok = True
         if not af.is_file():
             return []
         try:
@@ -422,6 +481,7 @@ class EpisodeStore:
             from localm.debuglog import logger
             logger.warning("episodic memory: archive exists but could not be read "
                            "(%s); recovery list is INCOMPLETE", e)
+            self.last_forgotten_ok = False
             return []
         out: list = []
         for line in text.splitlines():
@@ -444,75 +504,86 @@ class EpisodeStore:
         What the write did is left on ``last_merged`` / ``last_evicted`` /
         ``last_archive_ok`` and logged, so an eviction is reportable rather than
         invisible. *dedup* is False only for restore(), where collapsing the record
-        back into the one that superseded it would silently undo the restore."""
-        eps = self.all()
-        now = time.time()
-        ep.files = list(ep.files or [])
-        if not ep.ts:
-            ep.ts = now
+        back into the one that superseded it would silently undo the restore.
 
-        merged: list = []
-        if dedup:
-            sig = _dedup_signature(ep)          # hoisted: compared against every episode
-            kept = []
-            for e in eps:
-                if _similarity(_dedup_signature(e), sig) >= _DEDUP_RATIO:
-                    merged.append(e)
-                else:
-                    kept.append(e)
-            if merged:
-                _absorb(ep, merged)
-            eps = kept
+        The whole read-mutate-write sequence runs under this project's lock (see
+        _store_lock): unlocked, a concurrent add() elsewhere reading the same
+        pre-write state would have its own addition silently clobbered by whichever
+        write lands second (LM-DA-checkup finding, episode-lifecycle round 2)."""
+        with _store_lock(self._file):
+            eps = self.all()
+            now = time.time()
+            ep.files = list(ep.files or [])
+            if not ep.ts:
+                ep.ts = now
 
-        if not ep.id:
-            ep.id = _derive_id(ep)
-        taken = {e.id for e in eps if e.id}
-        if ep.id in taken:                      # same content AND timestamp; keep ids unique
-            base, n = ep.id[:10], 1
-            while ep.id in taken:
-                ep.id = "%s-%d" % (base, n)
-                n += 1
+            merged: list = []
+            if dedup:
+                sig = _dedup_signature(ep)          # hoisted: compared against every episode
+                kept = []
+                for e in eps:
+                    if _similarity(_dedup_signature(e), sig) >= _DEDUP_RATIO:
+                        merged.append(e)
+                    else:
+                        kept.append(e)
+                if merged:
+                    _absorb(ep, merged)
+                eps = kept
 
-        eps.append(ep)
-        evicted: list = []
-        if len(eps) > _MAX_EPISODES:
-            # Rank by value, newest-first on a tie, and keep the top N. The
-            # survivors are written back in their original CHRONOLOGICAL order so
-            # the log stays a timeline.
-            order = sorted(range(len(eps)),
-                           key=lambda i: (-_episode_value(eps[i], now), -i))
-            keep = set(order[:_MAX_EPISODES])
-            evicted = [e for i, e in enumerate(eps) if i not in keep]
-            eps = [e for i, e in enumerate(eps) if i in keep]
+            if not ep.id:
+                ep.id = _derive_id(ep)
+            taken = {e.id for e in eps if e.id}
+            if ep.id in taken:                      # same content AND timestamp; keep ids unique
+                base, n = ep.id[:10], 1
+                while ep.id in taken:
+                    ep.id = "%s-%d" % (base, n)
+                    n += 1
 
-        # Archive BEFORE the live log loses them: a crash between the two leaves a
-        # recoverable copy, the opposite order would lose the record outright.
-        # Archived per reason so the sidecar says WHY each one went.
-        ok_m = self._archive(merged, "merged")
-        ok_e = self._archive(evicted, "cap")
-        self.last_archive_ok = ok_m and ok_e
-        self.last_merged, self.last_evicted = merged, evicted
-        self._write_all(eps)
-        if merged or evicted:
-            from localm.debuglog import logger
-            logger.debug(
-                "episodic memory: %d merged as restatements, %d evicted at the "
-                "%d cap%s", len(merged), len(evicted), _MAX_EPISODES,
-                "" if self.last_archive_ok else " (ARCHIVE FAILED - not recoverable)")
-        return ep
+            eps.append(ep)
+            evicted: list = []
+            if len(eps) > _MAX_EPISODES:
+                # Rank by value, newest-first on a tie, and keep the top N. The
+                # survivors are written back in their original CHRONOLOGICAL order so
+                # the log stays a timeline.
+                order = sorted(range(len(eps)),
+                               key=lambda i: (-_episode_value(eps[i], now), -i))
+                keep = set(order[:_MAX_EPISODES])
+                evicted = [e for i, e in enumerate(eps) if i not in keep]
+                eps = [e for i, e in enumerate(eps) if i in keep]
+
+            # Archive BEFORE the live log loses them: a crash between the two leaves a
+            # recoverable copy, the opposite order would lose the record outright.
+            # Archived per reason so the sidecar says WHY each one went.
+            ok_m = self._archive(merged, "merged")
+            ok_e = self._archive(evicted, "cap")
+            self.last_archive_ok = ok_m and ok_e
+            self.last_merged, self.last_evicted = merged, evicted
+            self._write_all(eps)
+            if merged or evicted:
+                from localm.debuglog import logger
+                logger.debug(
+                    "episodic memory: %d merged as restatements, %d evicted at the "
+                    "%d cap%s", len(merged), len(evicted), _MAX_EPISODES,
+                    "" if self.last_archive_ok else " (ARCHIVE FAILED - not recoverable)")
+            return ep
 
     def forget(self, episode_id: str) -> bool:
         """Drop ONE episode by id - what stable ids are for. Returns False when no
         episode has that id. The removed record is archived like any other drop so
         an accidental forget is recoverable; clear() is the erase-everything path
-        and takes the archive with it."""
-        eps = self.all()
-        gone = [e for e in eps if e.id == episode_id]
-        if not gone:
-            return False
-        self.last_archive_ok = self._archive(gone, "forget")
-        self._write_all([e for e in eps if e.id != episode_id])
-        return True
+        and takes the archive with it.
+
+        Locked like add() (see _store_lock): a concurrent add()/restore() on the
+        same project cannot read a stale pre-forget snapshot and write it back,
+        which would silently resurrect the very episode this just dropped."""
+        with _store_lock(self._file):
+            eps = self.all()
+            gone = [e for e in eps if e.id == episode_id]
+            if not gone:
+                return False
+            self.last_archive_ok = self._archive(gone, "forget")
+            self._write_all([e for e in eps if e.id != episode_id])
+            return True
 
     def restore(self, episode_id: str) -> Optional[Episode]:
         """Put an archived episode back into the live log, or None when the archive
@@ -523,34 +594,89 @@ class EpisodeStore:
         the original age on it would let the very decay that evicted it evict it
         again on the next write, making restore a silent no-op. Dedup is skipped
         for the same reason - a record superseded by a restatement must not be
-        folded straight back into it."""
-        rows = self.forgotten()
-        hit = next((r for r in reversed(rows) if r.get("id") == episode_id), None)
-        if hit is None:
-            return None
-        data = {k: v for k, v in hit.items() if k not in ("forgotten_at", "reason")}
-        ep = Episode.from_dict(data)
-        ep.ts = time.time()
-        self.add(ep, dedup=False)
-        # It is live again, so it is no longer "forgotten": drop it from the
-        # archive rather than listing it in both places. Re-read the archive
-        # first - putting this record back can push the store over the cap, and
-        # add() archives whatever it evicted; rewriting from the pre-add snapshot
-        # would throw those brand-new recovery copies away.
-        keep = [r for r in self.forgotten() if r.get("id") != episode_id]
-        try:
-            # temp + replace, like every other write here: a half-written archive
-            # would cost the user the rest of their recovery copies.
-            af = self.archive_path
-            tmp = af.with_name(af.name + ".tmp")
-            tmp.write_text(
-                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep),
-                encoding="utf-8")
-            tmp.replace(af)
-        except OSError as e:
-            from localm.debuglog import logger
-            logger.debug("episodic memory: archive rewrite after restore failed: %s", e)
-        return ep
+        folded straight back into it.
+
+        Locked across the WHOLE method (see _store_lock), not just the add() it
+        calls: this does its own read-modify-write of the archive on top of that
+        add (re-entering the same RLock harmlessly), and a writer interleaved
+        anywhere in that span could resurrect what was just forgotten or discard
+        the recovery copies add() had only just written for what it evicted."""
+        with _store_lock(self._file):
+            self.last_restore_archive_ok = True
+            rows = self.forgotten()
+            hit = next((r for r in reversed(rows) if r.get("id") == episode_id), None)
+            if hit is None:
+                return None
+            # EXACTLY which archive entries this restore supersedes, pinned by
+            # (id, forgotten_at) rather than by id alone. add() below can evict the
+            # restored record straight back out at the cap and write a BRAND-NEW
+            # recovery copy under the same id; stripping by id would delete that
+            # copy too, leaving the episode in neither the live log nor the archive
+            # while restore() still reported success. Pinning the pre-add entries
+            # means a fresh copy survives, so the record stays recoverable.
+            superseded = {(r.get("id"), r.get("forgotten_at")) for r in rows
+                          if r.get("id") == episode_id}
+            live = {e.id for e in self.all()}
+            if episode_id in live:
+                # Already live: a previous restore put it back but could not clean
+                # the archive (an unreadable re-read, see the guard below), so this
+                # is a RETRY. Re-adding would append a second copy under a mangled
+                # id (add() uniquifies a taken id), silently duplicating the lesson.
+                # Skip the add and just reconcile the archive.
+                ep = next(e for e in self.all() if e.id == episode_id)
+            else:
+                data = {k: v for k, v in hit.items()
+                        if k not in ("forgotten_at", "reason")}
+                ep = Episode.from_dict(data)
+                ep.ts = time.time()
+                self.add(ep, dedup=False)
+            # It is live again, so it is no longer "forgotten": drop it from the
+            # archive rather than listing it in both places. Re-read the archive
+            # first - putting this record back can push the store over the cap, and
+            # add() archives whatever it evicted; rewriting from the pre-add snapshot
+            # would throw those brand-new recovery copies away.
+            rows_after = self.forgotten()
+            if not self.last_forgotten_ok:
+                # The re-read FAILED (present but unreadable), so rows_after is an
+                # empty stand-in, not an empty archive. Rewriting from it would
+                # write an EMPTY file over every remaining recovery copy - turning
+                # a transient read error into permanent data loss (the same trap
+                # memory/store.py's propose_corrections guards). Skip the rewrite:
+                # the restored episode is live either way, and the only cost is
+                # that it also stays listed as forgotten until the next successful
+                # restore/write reconciles it. Warned, not silent (rule 5).
+                from localm.debuglog import logger
+                logger.warning(
+                    "episodic memory: archive unreadable after restoring %s; "
+                    "leaving the archive untouched rather than rewriting it from "
+                    "an empty read (%s stays listed as forgotten until a later "
+                    "restore of the same id reconciles it)", episode_id, episode_id)
+                self.last_restore_archive_ok = False
+                return ep
+            # Drop only the entries this restore supersedes (see *superseded*), NOT
+            # every row sharing the id: a recovery copy add() wrote moments ago for
+            # a re-eviction of this same record has to survive.
+            keep = [r for r in rows_after
+                    if (r.get("id"), r.get("forgotten_at")) not in superseded]
+            try:
+                # temp + replace, like every other write here: a half-written archive
+                # would cost the user the rest of their recovery copies.
+                af = self.archive_path
+                tmp = _tmp_for(af)
+                tmp.write_text(
+                    "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep),
+                    encoding="utf-8")
+                tmp.replace(af)
+            except OSError as e:
+                # The episode IS live, so the restore succeeded; the archive just
+                # still lists it. Flag it so the caller can say so rather than
+                # reporting an unqualified success (rule 5).
+                self.last_restore_archive_ok = False
+                from localm.debuglog import logger
+                logger.warning("episodic memory: archive rewrite after restoring %s "
+                               "failed (%s); it is live but still listed as "
+                               "forgotten", episode_id, e)
+            return ep
 
     def _vectors(self, texts: list, ef) -> Optional[list]:
         """Embeddings for the episode search-texts, cached in a ``.vec.json``
@@ -573,7 +699,7 @@ class EpisodeStore:
         if not vecs or len(vecs) != len(texts):
             return None
         try:
-            tmp = vf.with_name(vf.name + ".tmp")
+            tmp = _tmp_for(vf)
             tmp.write_text(json.dumps({"hash": h, "vectors": vecs}), encoding="utf-8")
             tmp.replace(vf)
         except OSError:
@@ -802,22 +928,36 @@ def consolidate(store: "EpisodeStore", *, complete: Callable[[str], str],
 
     if not produced:
         return out
-    archived = [eps[i] for i in sorted(consumed)]
-    ok = store._archive(archived, "consolidated")
-    out["archived"] = len(archived) if ok else 0
-    survivors = [e for i, e in enumerate(eps) if i not in consumed]
-    taken = {e.id for e in survivors if e.id}
-    for m in produced:
-        m.id = _derive_id(m)
-        if m.id in taken:
-            base, n = m.id[:10], 1
-            while m.id in taken:
-                m.id = "%s-%d" % (base, n)
-                n += 1
-        taken.add(m.id)
-    survivors.extend(produced)
-    survivors.sort(key=lambda e: e.ts or 0.0)      # keep the log a timeline
-    store._write_all(survivors)
+    # APPLY UNDER THE LOCK, RECONCILED BY ID (mirrors memory/consolidate.py's
+    # REG-520 shape). The model calls above are slow (seconds to minutes locally)
+    # and deliberately ran OFF the lock, so the *eps* snapshot they decided against
+    # may be stale by now: a session-close reflection can have added an episode
+    # meanwhile. Writing this snapshot's survivors back wholesale would clobber
+    # that addition, and a clobbered episode never reaches the archive - the exact
+    # loss the archive exists to make impossible. So re-read fresh here and drop
+    # the consumed records BY ID rather than by their index into the old snapshot.
+    consumed_ids = {eps[i].id for i in consumed if eps[i].id}
+    with _store_lock(store._file):
+        current = store.all()
+        # Archive only what is actually still live: a record already evicted during
+        # the model window is gone from the log and was archived by whoever dropped
+        # it, so re-archiving it here would just duplicate a recovery copy.
+        archived = [e for e in current if e.id in consumed_ids]
+        ok = store._archive(archived, "consolidated")
+        out["archived"] = len(archived) if ok else 0
+        survivors = [e for e in current if e.id not in consumed_ids]
+        taken = {e.id for e in survivors if e.id}
+        for m in produced:
+            m.id = _derive_id(m)
+            if m.id in taken:
+                base, n = m.id[:10], 1
+                while m.id in taken:
+                    m.id = "%s-%d" % (base, n)
+                    n += 1
+            taken.add(m.id)
+        survivors.extend(produced)
+        survivors.sort(key=lambda e: e.ts or 0.0)      # keep the log a timeline
+        store._write_all(survivors)
     if not ok:
         out["warning"] = ("%d lesson(s) were merged but could NOT be archived; "
                           "that merge is not reversible" % len(archived))
