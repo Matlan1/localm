@@ -13,6 +13,7 @@ from typing import Callable
 
 from .files import (
     tool_edit_file,
+    tool_edit_files,
     tool_edit_notebook_cell,
     tool_grep,
     tool_list_dir,
@@ -68,9 +69,15 @@ class ToolDef:
 # and edit this project, but cannot execute anything; you review and run.
 SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_dir", "tree", "grep", "search_files",
-    "write_file", "edit_file", "patch_file", "search_replace", "edit_notebook_cell",
+    "write_file", "edit_file", "edit_files", "patch_file", "search_replace",
+    "edit_notebook_cell",
     "git_status", "git_diff", "git_log",
 })
+# edit_files is on the list deliberately: it is edit_file's exact-string
+# replacement applied to N files in one call, each path put through the same
+# _confine() check, and a restricted session can already call edit_file N times.
+# So it grants no capability the allowlist did not already grant - it only makes
+# the same edit atomic.
 
 
 def _spawn_role_help() -> str:
@@ -116,6 +123,40 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "path": {"type": "string", "description": "File path",            "required": True},
             "old":  {"type": "string", "description": "Exact text to replace","required": True},
             "new":  {"type": "string", "description": "Replacement text",     "required": True},
+        },
+        destructive=True,
+    ),
+    "edit_files": ToolDef(
+        name="edit_files",
+        fn=tool_edit_files,
+        description=(
+            "Apply the SAME exact-string edit_file replacement to several files "
+            "in one call, all-or-nothing: if any edit fails, every file is rolled "
+            "back and nothing changes. Use for a snippet that must change "
+            "identically across files; use search_replace instead when you want a "
+            "regex."
+        ),
+        params={
+            "edits": {
+                "type": "array",
+                "description": (
+                    "List of {path, old, new} objects. Each replaces the first "
+                    "occurrence of `old` with `new` in `path`, matched exactly."
+                ),
+                "required": True,
+                # The native tool schema (agent/tooldefs.py) reads this: without it
+                # an array is described as an array of STRINGS, and a native
+                # tool-calling backend would be told the wrong shape.
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path (relative to cwd)"},
+                        "old":  {"type": "string", "description": "Exact text to replace"},
+                        "new":  {"type": "string", "description": "Replacement text"},
+                    },
+                    "required": ["path", "old", "new"],
+                },
+            },
         },
         destructive=True,
     ),
@@ -223,12 +264,20 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
     "grep": ToolDef(
         name="grep",
         fn=tool_grep,
-        description="Search file contents with a regex pattern.",
+        description=(
+            "Search file contents with a regex pattern. Skips noise directories "
+            "(.git, node_modules, ...), binaries, and oversized files, and says "
+            "so. Raise max_per_file/max_output_lines when a result says it was "
+            "capped."
+        ),
         params={
             "pattern": {"type": "string", "description": "Regex pattern",                "required": True},
             "path":    {"type": "string", "description": "File or directory to search",   "required": False},
             "glob":    {"type": "string", "description": "File filter, e.g. **/*.py",     "required": False},
             "context": {"type": "int",    "description": "Lines of context (default 2)",  "required": False},
+            "max_per_file":     {"type": "int", "description": "Matches shown per file (0 = all; default 20)",       "required": False},
+            "max_output_lines": {"type": "int", "description": "Output lines before stopping (0 = no cap; default 300)", "required": False},
+            "max_file_bytes":   {"type": "int", "description": "Skip files larger than this (0 = no cap; default 4 MB)",  "required": False},
         },
     ),
     "git_status": ToolDef(
