@@ -628,6 +628,11 @@ class JobRegistry:
         return [j.status() for j in jobs]
 
     def _prune_locked(self) -> None:
+        """Trim retained completions. Called from submit, which is the only path
+        that GROWS the table - so the table stays bounded even though a job
+        finishing does not itself prune (between submits the count can sit at
+        keep_finished plus whatever finished since, itself bounded by the caps).
+        """
         finished = [j for j in self._jobs.values() if j.state != "running"]
         excess = len(finished) - self.keep_finished
         if excess <= 0:

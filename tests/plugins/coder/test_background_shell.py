@@ -275,7 +275,7 @@ def test_concurrency_cap_rejects_with_a_clear_error(tmp_path, _py):
 
 
 def test_finished_jobs_do_not_occupy_a_slot(tmp_path, make_registry):
-    reg = make_registry(max_concurrent=1)
+    reg = make_registry(kind_caps={"shell": 1})
     job = reg.submit(lambda: ShellJob(
         _argv("print('done')"), tmp_path, label="quick"), kind="shell")
     assert _wait_for(lambda: job.state == "done")
@@ -453,6 +453,10 @@ def test_pruning_evicts_drained_jobs_before_undrained_ones(make_registry):
         assert _wait_for(lambda j=job: j.state == "done")
         fresh.append(job)
 
+    # The table only GROWS on submit, so that is where pruning runs. Trigger one
+    # so the eviction ORDER is actually exercised.
+    reg.submit(_FakeAgentJob, kind="agent")
+
     surviving = {j["id"] for j in reg.list_status()}
     assert old.id not in surviving, "the drained job should have been evicted first"
     assert {j.id for j in fresh} <= surviving, "undrained completions were evicted"
@@ -605,7 +609,7 @@ def test_chatty_process_output_stays_bounded_and_reports_the_drop(tmp_path, make
     reg = make_registry()
     job = reg.submit(lambda: ShellJob(
         _argv("[print('y' * 200) for _ in range(2000)]"),
-        tmp_path, label="chatty", max_chars=5_000))
+        tmp_path, label="chatty", max_chars=5_000), kind="shell")
     assert _wait_for(lambda: job.state == "done", timeout=60)
 
     out, _err, dropped = job.output()
