@@ -12,8 +12,12 @@ this with their own ``monkeypatch.setenv`` (which runs after this autouse
 fixture).
 """
 
+import builtins
+import io
 import os
+import re
 import stat as _stat
+import sys
 import tempfile
 import shutil
 
@@ -36,9 +40,203 @@ os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
 
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_test_home_dir, ignore_errors=True)
+    _report_system_path_touches(session)
 
 
 import pytest
+
+
+# --------------------------------------------------------------------------- #
+#  No test may touch a real system path                                         #
+#                                                                              #
+#  A test's business is the code under test and its own tmp_path. When a test   #
+#  reads, stats, or lists a REAL system location it stops being a test of our   #
+#  code: it depends on the machine it runs on, it differs per contributor and   #
+#  per CI image, and - the reason this is enforced rather than asked for - it   #
+#  is the same shape as the production defect it is usually written to cover.   #
+#  The coder's scope gate used to resolve() a model-supplied absolute path in   #
+#  order to REFUSE it, so refusing reached out and stat-ed whatever the model   #
+#  named, anywhere on the machine (#802 for the shell warning path, and the     #
+#  enforcement path after it). Tests that name a real system file teach that    #
+#  the touch is normal, and four confinement test files had to be purged of     #
+#  exactly that. A guard makes the next one fail instead of merging.            #
+#                                                                              #
+#  Syscall patching, not sys.addaudithook: MEASURED on 3.12.13, exists(),       #
+#  resolve() and os.stat() emit NO audit event at all (only open and            #
+#  os.listdir do), so an audit hook is blind to precisely the calls that        #
+#  matter. Both `builtins.open` AND `io.open` are patched: they are the same    #
+#  function object but two separate module attributes, and (measured) bare      #
+#  open() goes through the first while Path.read_text()/Path.open() go through  #
+#  the second, so patching either one alone leaves a hole.                      #
+#                                                                              #
+#  Marker roots are DERIVED, never a hardcoded drive literal: the Windows       #
+#  system root comes from %SystemRoot%/%windir% at runtime. The guard only ever #
+#  compares STRINGS - it never opens, stats, or reads any system path itself.   #
+#                                                                              #
+#  Deliberately NOT marked: /proc, /sys, /dev and /usr. Those are runtime       #
+#  interfaces with legitimate library traffic (psutil reads /proc constantly),  #
+#  so marking them would make the guard cry wolf until someone silenced it.     #
+#  The markers are config/credential roots, which is where the defect lives.    #
+# --------------------------------------------------------------------------- #
+
+_SYSPATH_EXTRA_ENV = "LOCALM_TEST_SYSPATH_EXTRA_MARKERS"
+
+# (kind, path, origin frame) -> count. Module-level so a per-test fixture can
+# diff it and the session report can summarise it.
+_SYSPATH_HITS: dict = {}
+_SYSPATH_ARMED = False
+_GUARD_FILE = __file__.replace("\\", "/")
+
+
+def _syspath_marker_roots() -> list:
+    """The path prefixes that count as a real system location, lowercased and
+    slash-normalised.
+
+    ``_SYSPATH_EXTRA_ENV`` ADDS roots and can never remove one, so the fires-
+    control (which points it at a benign directory inside the test's own
+    tmp_path) can prove the machinery works without weakening the guard and
+    without any test going near a real system path."""
+    roots = []
+    for var in ("SystemRoot", "windir"):
+        value = os.environ.get(var)
+        if value:
+            roots.append(value)
+    if os.name != "nt":
+        # FHS config/credential roots. See the section comment for why the
+        # runtime interfaces (/proc, /sys, /dev) are deliberately absent.
+        roots += ["/etc", "/boot", "/root"]
+    roots += [p for p in os.environ.get(_SYSPATH_EXTRA_ENV, "").split(os.pathsep)
+              if p.strip()]
+    out, seen = [], set()
+    for raw in roots:
+        norm = raw.replace("\\", "/").rstrip("/").lower()
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def _syspath_regex(roots):
+    """Anchored alternation over *roots*, or None when there is nothing to match.
+
+    The trailing ``(?:/|$)`` makes the match land on a path SEGMENT boundary, so
+    a marker of ``/etc`` flags ``/etc`` and ``/etc/x`` but not ``/etcetera``."""
+    if not roots:
+        return None
+    return re.compile("(?:" + "|".join(re.escape(r) for r in roots) + r")(?:/|$)")
+
+
+def _syspath_matches(rx, raw) -> bool:
+    """True when *raw* names a marked system location. Pure string work: this
+    never touches the filesystem, and tolerates anything os.stat accepts
+    (str, bytes, PathLike, or an int fd, which is not a path at all)."""
+    if rx is None:
+        return False
+    try:
+        s = os.fspath(raw)
+    except TypeError:
+        return False                      # an int fd or similar: not a path
+    if isinstance(s, bytes):
+        s = s.decode("utf-8", "replace")
+    elif not isinstance(s, str):
+        return False
+    return rx.match(s.replace("\\", "/").lower()) is not None
+
+
+def _syspath_origin() -> str:
+    """The nearest tests/ or localm/ frame, so the report names the code that
+    reached out rather than the stdlib helper that happened to do the syscall."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        filename = frame.f_code.co_filename.replace("\\", "/")
+        if filename != _GUARD_FILE and ("/tests/" in filename
+                                        or "/localm/" in filename):
+            return f"{filename}:{frame.f_lineno}"
+        frame = frame.f_back
+    return "<no tests/ or localm/ frame>"
+
+
+def _arm_system_path_guard() -> bool:
+    """Wrap the filesystem entry points. Returns True when the guard is live.
+
+    The hot path is a single anchored regex match against a normalised string;
+    the expensive part (walking the stack for the originating frame) runs ONLY
+    after a marker has already matched, which on a healthy suite is never."""
+    global _SYSPATH_ARMED
+    if _SYSPATH_ARMED:
+        return True
+    rx = _syspath_regex(_syspath_marker_roots())
+    if rx is None:
+        return False
+
+    def _wrap(kind, func):
+        def guarded(path, *args, **kwargs):
+            if _syspath_matches(rx, path):
+                key = (kind, str(path), _syspath_origin())
+                _SYSPATH_HITS[key] = _SYSPATH_HITS.get(key, 0) + 1
+            return func(path, *args, **kwargs)
+        return guarded
+
+    os.stat = _wrap("os.stat", os.stat)
+    os.lstat = _wrap("os.lstat", os.lstat)
+    os.scandir = _wrap("os.scandir", os.scandir)
+    os.listdir = _wrap("os.listdir", os.listdir)
+    os.path.realpath = _wrap("os.path.realpath", os.path.realpath)
+    builtins.open = _wrap("open", builtins.open)
+    io.open = _wrap("io.open", io.open)
+    _SYSPATH_ARMED = True
+    return True
+
+
+_arm_system_path_guard()
+
+
+def _format_syspath_hits(hits) -> str:
+    return "\n".join(
+        f"    {kind}({path})\n        from {origin}   x{count}"
+        for (kind, path, origin), count in sorted(hits.items()))
+
+
+_SYSPATH_ADVICE = (
+    "  A test must not read, stat, or list a real system location. Create a real\n"
+    "  but DISPOSABLE file or directory inside the test's own tmp_path and point\n"
+    "  the code under test at that instead - it exercises the same path handling\n"
+    "  without depending on the machine, and without teaching that reaching out is\n"
+    "  normal. If a code path genuinely reached out on its own, that is the bug the\n"
+    "  guard just found: fix the code, do not exempt the test.")
+
+
+@pytest.fixture(autouse=True)
+def _no_system_path_touches(request):
+    """Fail the test that touched a real system path.
+
+    Enforced per-test rather than only at session end because that is what works
+    under ``-n auto``: a worker's session exitstatus does not become the run's,
+    but a failed test does. It also names the culprit directly instead of leaving
+    a pile of hits to attribute by hand. The session report below still runs, for
+    anything recorded outside a test (import or collection time)."""
+    before = dict(_SYSPATH_HITS)
+    yield
+    new = {k: v - before.get(k, 0) for k, v in _SYSPATH_HITS.items()
+           if v > before.get(k, 0)}
+    if new:
+        pytest.fail("this test touched a real system path:\n"
+                    + _format_syspath_hits(new) + "\n" + _SYSPATH_ADVICE)
+
+
+def _report_system_path_touches(session):
+    """Session-level backstop: report touches and fail the run.
+
+    Covers what the per-test fixture cannot see - a touch at import or collection
+    time, before any test started. Under xdist the controller records nothing of
+    its own (the workers do the work and fail their own tests), so this is a
+    no-op there rather than a second, conflicting verdict."""
+    if not _SYSPATH_HITS:
+        return
+    print("\nSYSTEM PATH TOUCHES DETECTED (tests must stay inside tmp_path):\n"
+          + _format_syspath_hits(_SYSPATH_HITS) + "\n" + _SYSPATH_ADVICE)
+    if getattr(session, "exitstatus", 0) == 0:
+        session.exitstatus = 1
 
 
 # --------------------------------------------------------------------------- #

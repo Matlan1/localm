@@ -81,20 +81,51 @@ class _ExecutionMixin:
         scope must pass - BUG-6). Glob metacharacters in *value* (e.g.
         ``**/*.py`` for grep/search_replace) survive resolution: they are kept
         verbatim in the relative string and matched against the scope as-is.
+
+        The VALUE is never touched on disk, not even to refuse it. This gate ran
+        ``Path(raw).resolve()`` on an absolute path that was not lexically under
+        cwd, so a ``--scope`` session where the model emitted an absolute path
+        anywhere on the machine stat-ed precisely that path (realpath + stat,
+        measured) in order to decide it was out of scope. A stat is an access:
+        at the access point a legitimate gate-check, a command gone wrong and a
+        live injection attempt are indistinguishable, so the gate must not have
+        the capability rather than try to use it carefully. Same defect class the
+        shell WARNING path was cleared of (see :meth:`_scope_rel_lexical`), which
+        deliberately left this one; this closes it.
+
+        The cwd ANCHOR still resolves, and that is a different thing: it is not a
+        model-supplied value but the owner's own working directory, which this
+        process is already running in. It is kept exactly as it was so this change
+        has one behavioural delta and one only.
+
+        That delta is strictly in the fail-CLOSED direction, which a confinement
+        gate requires. With R = ``self.cwd.resolve()``, a path was allowed when R
+        prefixed it OR R prefixed its resolved form; it is now allowed only when R
+        prefixes it. The new set is a strict subset of the old one, so refusal can
+        only widen, never narrow. Nor can dropping the fallback open an escape:
+        the escape direction (a path lexically INSIDE cwd that symlinks OUT)
+        satisfies the FIRST ``relative_to`` and never reached the fallback at all.
+        Real escapes are caught by ``tools/base.py::_confine``, which resolves at
+        actual execution time (where the tool is about to open the file anyway,
+        so the stat is inherent) and is untouched.
+
+        Cost, accepted: an absolute path that is lexically OUTSIDE cwd but reaches
+        INSIDE through a symlink now reads as outside. The fallback was added
+        speculatively ("for symlinks etc.") rather than for a reported case, no
+        scope or confinement test covers it, and the variant where cwd ITSELF is
+        symlinked cannot arise - every Agent construction site passes an
+        already-resolved cwd.
         """
         raw = str(value).replace("\\", "/")
         p = Path(raw)
         cwd = self.cwd.resolve()
         if p.is_absolute():
             try:
-                # No resolve(): the path may contain glob chars or not exist.
+                # No resolve(): the path may contain glob chars or not exist, and
+                # resolving it would STAT what this gate exists to refuse.
                 rel = Path(raw).relative_to(cwd)
             except ValueError:
-                # Try once more against the resolved abs form for symlinks etc.
-                try:
-                    rel = Path(raw).resolve().relative_to(cwd)
-                except ValueError:
-                    return None   # outside cwd
+                return None   # outside cwd, and NOT re-checked via resolve()
             return rel.as_posix()
         # Relative: collapse any leading ./ and reject cwd escapes (../).
         rel_posix = (Path(".") / raw).as_posix()
@@ -115,19 +146,26 @@ class _ExecutionMixin:
     def _scope_rel_lexical(self, value: str) -> Optional[str]:
         """Filesystem-free twin of :meth:`_scope_rel`, for the shell WARNING only.
 
-        Same contract (cwd-relative POSIX string, or None if it escapes cwd) with
-        one difference: it never touches the disk. ``_scope_rel`` falls back to
-        ``Path(raw).resolve()`` for an absolute path that is not lexically under
-        cwd, and ``resolve()`` stats the target. That is right where the path is a
-        real operation target being gated, and wrong here, where the input is a
-        token from a command the model has only PROPOSED.
+        Same contract (cwd-relative POSIX string, or None if it escapes cwd). The
+        two no longer differ in how they treat the model-supplied VALUE: neither
+        resolves it, because neither may stat what it is deciding about. What is
+        left is the cwd ANCHOR, and that difference is deliberate.
 
-        ``os.path.abspath`` rather than ``resolve()`` for cwd as well: it
-        normalises and anchors without a symlink lookup, so no part of this call
-        stats anything. Cost: a path that reaches cwd only through a symlink reads
-        as outside. For a best-effort warning that is the safe direction (it can
-        over-report a link, never miss a real escape), and it is the only one that
-        keeps the check from touching what it is inspecting.
+        ``os.path.abspath`` rather than ``resolve()`` for cwd here: it normalises
+        and anchors without a symlink lookup, so no part of this call stats
+        ANYTHING at all. That total property is what a warning needs, because it
+        runs over a command the model has merely PROPOSED, before any confirmation
+        and before anything executes. :meth:`_scope_rel` keeps ``resolve()`` for
+        its anchor instead, because it is a hard gate whose refusal set must not
+        widen or narrow by accident, and swapping the anchor would change which
+        paths match (in the cwd-is-symlinked case, in the more permissive
+        direction). Statting the owner's own working directory is not the exposure
+        this rule is about; statting a value the model named is.
+
+        Cost, shared with the enforcement twin: a path that reaches cwd only
+        through a symlink reads as outside. For a best-effort warning that is the
+        safe direction (it can over-report a link, never miss a real escape), and
+        it is the only one that keeps the check from touching what it inspects.
         """
         raw = str(value).replace("\\", "/")
         p = Path(raw)
