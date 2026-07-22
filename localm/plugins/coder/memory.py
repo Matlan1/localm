@@ -7,7 +7,12 @@ Looks for memory files in cwd (in priority order):
   2. .localcoder/memory.md
 
 Both files use free-form markdown. The content is injected into the system
-prompt under a "## Project Memory" heading so the LLM always sees it.
+prompt under a "## Project Memory" heading so the LLM always sees it, capped at
+_MAX_MEMORY_CHARS so it cannot crowd out the repo map and the conversation.
+
+The file is USER-managed, not agent-managed: it changes only when the user runs
+/remember or /forget (or edits it by hand). The agent has no tool that writes it,
+and close-time reflection writes episodes to the localm home data dir, not here.
 
 REPL commands:
   /remember <text>     append a bullet to the memory file
@@ -24,6 +29,85 @@ from typing import Optional
 _CANDIDATES = ["LOCALCODER.md", ".localcoder/memory.md"]
 
 
+# Injection budgets, in characters.
+#
+# Everything under these headings is paid on EVERY turn, and it competes with the
+# repo map (capped at _MAX_MAP_CHARS = 3000, indexer.py) and the conversation
+# itself. Measured 2026-07-22: the base coder system prompt is already ~7650
+# chars, so with a full repo map roughly two thirds of the default 4096-token
+# window (~16400 chars) is spoken for before a single memory bullet.
+#
+# An oversized system prompt is also UNRECOVERABLE at runtime: _compact_history
+# (agent/context.py) only rewrites the message list, never the system prompt,
+# while context_chars() counts the system prompt in the fill ratio. So a runaway
+# memory file leaves the agent permanently past its auto-compact threshold,
+# shredding real conversation history every turn without ever getting back under
+# budget. The /remember append path (below) makes that growth easy to reach.
+#
+# These are runaway guards, not routine trimmers: real-world files measured on
+# disk are a few hundred bytes, so they should never fire in normal use. When one
+# does fire the drop is surfaced both to the model (an in-band notice) and to the
+# user (see memory_warning / custom_instructions_warning), never hidden
+# (AGENTS.md rule 5).
+_MAX_MEMORY_CHARS = 3_000
+_MAX_CUSTOM_INSTRUCTIONS_CHARS = 3_000
+
+
+def _split_for_injection(text: str, limit: int) -> tuple:
+    """
+    Split *text* into ``(kept, omitted_chars)`` at the injection budget.
+
+    Returns ``(text, 0)`` when it already fits. Otherwise the kept part is cut
+    back to a line boundary (unless that would cost more than half the budget),
+    because slicing mid-line can invert a bullet's meaning: "- never force-push
+    to master" truncated at "- never force-push" reads as the opposite advice.
+
+    Both the in-band notice and the user-facing warning derive their numbers from
+    this one function, so they can never disagree about how much was dropped.
+    """
+    if len(text) <= limit:
+        return text, 0
+
+    head = text[:limit]
+    cut = head.rfind("\n")
+    if cut > limit // 2:      # whole lines, but not at the cost of most of the budget
+        head = head[:cut]
+    head = head.rstrip()
+    return head, len(text) - len(head)
+
+
+def _cap_for_injection(text: str, limit: int, what: str, remedy: str) -> str:
+    """
+    Trim *text* to the injection budget, leaving a notice the MODEL can see.
+
+    Returns *text* unchanged when it fits, so the common case is byte-identical
+    to no capping at all. When it does not fit, a bracketed notice naming the
+    omitted character count is appended, so the model reads a file it knows is
+    partial instead of silently trusting a truncated one.
+    """
+    kept, omitted = _split_for_injection(text, limit)
+    if not omitted:
+        return kept
+    return (
+        f"{kept}\n\n[... {omitted} characters of {what} omitted: the file is over "
+        f"the {limit}-character injection budget. {remedy} ...]"
+    )
+
+
+def _overflow_warning(path: Optional[Path], raw: str, limit: int,
+                      what: str, remedy: str) -> str:
+    """User-facing warning when *raw* does not fit *limit*, else an empty string."""
+    if path is None:
+        return ""
+    kept, omitted = _split_for_injection(raw, limit)
+    if not omitted:
+        return ""
+    return (
+        f"{what} {path.name} is {len(raw)} characters; only the first {len(kept)} "
+        f"are injected into the system prompt ({omitted} omitted). {remedy}"
+    )
+
+
 def find_memory_file(cwd: Path) -> Optional[Path]:
     """Return the first memory file that exists under cwd, or None."""
     for name in _CANDIDATES:
@@ -38,24 +122,66 @@ def default_memory_file(cwd: Path) -> Path:
     return cwd / "LOCALCODER.md"
 
 
-def load_memory(cwd: Path) -> str:
-    """Return memory file content, stripped, or empty string if none exists."""
-    p = find_memory_file(cwd)
+def _read_injectable(p: Optional[Path]) -> tuple:
+    """
+    Read *p* for injection. Returns ``(stripped_text, unreadable)``.
+
+    ``unreadable`` distinguishes the two cases the old bare ``except OSError:
+    return ""`` collapsed into one: a file that is simply ABSENT (normal, nothing
+    to say) versus one that EXISTS but could not be read (a locked, corrupt, or
+    permission-denied file). The second silently dropped the user's whole memory
+    out of the system prompt while reporting nothing, so it is surfaced by the
+    *_warning helpers below rather than swallowed (AGENTS.md rule 5). The empty
+    return itself is kept, so an unreadable file degrades to "no memory" instead
+    of killing the session.
+    """
     if p is None:
-        return ""
+        return "", False
     try:
-        return p.read_text(encoding="utf-8").strip()
+        return p.read_text(encoding="utf-8").strip(), False
     except OSError:
-        return ""
+        return "", True
+
+
+_MEMORY_REMEDY = "Trim it, or use /forget <pattern> to drop stale entries."
+
+
+def load_memory(cwd: Path) -> str:
+    """Return memory file content, stripped and capped for injection, or empty
+    string if none exists.
+
+    Capped at _MAX_MEMORY_CHARS: content over the budget is cut back with a
+    visible notice rather than dropped silently. Use :func:`memory_warning` to
+    tell the user when that happened.
+    """
+    text, _ = _read_injectable(find_memory_file(cwd))
+    return _cap_for_injection(text, _MAX_MEMORY_CHARS, "project memory", _MEMORY_REMEDY)
+
+
+def memory_warning(cwd: Path) -> str:
+    """
+    A user-facing warning about the project-memory file, or "" when all is well.
+
+    Covers both ways the injected memory can differ from what is on disk: the
+    file is over the injection budget, or it exists but could not be read.
+    """
+    p = find_memory_file(cwd)
+    raw, unreadable = _read_injectable(p)
+    if unreadable:
+        return (f"Project memory {p} could not be read; the agent is running "
+                "without it.")
+    return _overflow_warning(p, raw, _MAX_MEMORY_CHARS, "Project memory", _MEMORY_REMEDY)
 
 
 # User-authored custom instructions (rec#584). This is distinct from the project
-# MEMORY above: memory is auto-managed facts (the agent appends to it via
-# /remember and episodic reflection), whereas system.md is hand-written guidance
-# the user wants the agent to follow (conventions, style, constraints). It is
-# injected into the system prompt under "## User Instructions". A single, obvious
-# location keeps it discoverable and out of the auto-managed memory file.
+# MEMORY above: memory is a running list of project FACTS, added by the user with
+# /remember, whereas system.md is hand-written guidance the user wants the agent
+# to follow (conventions, style, constraints). It is injected into the system
+# prompt under "## User Instructions". A single, obvious location keeps it
+# discoverable and out of the memory file.
 CUSTOM_INSTRUCTIONS_FILE = ".localcoder/system.md"
+
+_INSTRUCTIONS_REMEDY = "Shorten it so the whole file is followed."
 
 
 def custom_instructions_file(cwd: Path) -> Path:
@@ -63,16 +189,60 @@ def custom_instructions_file(cwd: Path) -> Path:
     return cwd / CUSTOM_INSTRUCTIONS_FILE
 
 
-def load_custom_instructions(cwd: Path) -> str:
-    """Return the contents of ``.localcoder/system.md`` (stripped), or empty
-    string when the file does not exist or cannot be read."""
+def _existing_instructions_file(cwd: Path) -> Optional[Path]:
     p = custom_instructions_file(cwd)
-    if not p.is_file():
-        return ""
-    try:
-        return p.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    return p if p.is_file() else None
+
+
+def load_custom_instructions(cwd: Path) -> str:
+    """Return the contents of ``.localcoder/system.md`` (stripped and capped for
+    injection), or empty string when the file does not exist or cannot be read.
+
+    Capped at _MAX_CUSTOM_INSTRUCTIONS_CHARS. These are the user's own explicit
+    directives, so the cap is deliberately loud rather than quiet: the model sees
+    a notice that the file was cut, and :func:`custom_instructions_warning` tells
+    the user which of their instructions are not being followed.
+    """
+    text, _ = _read_injectable(_existing_instructions_file(cwd))
+    return _cap_for_injection(text, _MAX_CUSTOM_INSTRUCTIONS_CHARS,
+                              "user instructions", _INSTRUCTIONS_REMEDY)
+
+
+def cap_user_instructions(text: str) -> str:
+    """Cap an explicit ``--system`` string to the same budget as system.md.
+
+    The flag bypasses :func:`load_custom_instructions` entirely, so without this
+    the documented way to set user instructions would still be uncapped and the
+    "## User Instructions" section would stay unbounded.
+    """
+    return _cap_for_injection(text.strip(), _MAX_CUSTOM_INSTRUCTIONS_CHARS,
+                              "user instructions", _INSTRUCTIONS_REMEDY)
+
+
+def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> str:
+    """A user-facing warning about the user instructions, or "" when fine.
+
+    When *override* is given (the ``--system`` flag) it is what actually gets
+    injected, so the file on disk is not consulted.
+    """
+    if override is not None:
+        raw = override.strip()
+        kept, omitted = _split_for_injection(raw, _MAX_CUSTOM_INSTRUCTIONS_CHARS)
+        if not omitted:
+            return ""
+        return (
+            f"The --system instructions are {len(raw)} characters; only the first "
+            f"{len(kept)} are injected into the system prompt ({omitted} omitted). "
+            f"{_INSTRUCTIONS_REMEDY}"
+        )
+
+    p = _existing_instructions_file(cwd)
+    raw, unreadable = _read_injectable(p)
+    if unreadable:
+        return (f"User instructions {p} could not be read; the agent is running "
+                "without them.")
+    return _overflow_warning(p, raw, _MAX_CUSTOM_INSTRUCTIONS_CHARS,
+                             "User instructions", _INSTRUCTIONS_REMEDY)
 
 
 def remember(cwd: Path, text: str) -> Path:

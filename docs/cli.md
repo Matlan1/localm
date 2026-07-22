@@ -360,7 +360,9 @@ localm coder --system "always run pytest before finishing"   # custom instructio
 
 The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
 
-Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, which is auto-managed project memory (facts the agent appends via `/remember` and its own reflection).
+Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, the project-memory file, which holds facts **you** add with `/remember` and drop with `/forget`; the agent does not write it itself (its own close-time reflection is stored in the localm data dir, not in your repo).
+
+Both files are injected into every system prompt, so both are capped at 3000 characters each to leave room for the repo map and the conversation. Going over is not silent: the agent prints which file was over budget and by how much, and the prompt itself carries a note saying the file was cut. Normal-sized files are injected verbatim.
 
 ---
 
