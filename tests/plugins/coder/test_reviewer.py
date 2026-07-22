@@ -108,6 +108,37 @@ def test_reviewer_fails_open_on_backend_error():
     res = rv.review("diff")
     assert res.approved is True and res.ok is False
     assert rv.review_feedback("diff") == ""       # never blocks
+    # ...but a crash is NOT an approval. The empty feedback above is the whole
+    # reason ok=False needs its own visible channel: it reads exactly like the
+    # approved case (see test_reviewer_no_feedback_when_approved), which is how a
+    # verification step that FAILED came to report as success.
+    warning = rv.failure_warning(res)
+    assert warning, "a failed review must produce a visible warning, not silence"
+    assert "backend down" in warning        # says WHY, not just that something broke
+    assert "not an approval" in warning.lower()
+
+
+def test_reviewer_failure_warning_is_empty_for_a_real_approval():
+    """The control: a genuine approval must stay silent, or the warning is noise
+    rather than signal."""
+    rv = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    assert rv.failure_warning(rv.review("a diff")) == ""
+
+
+def test_reviewer_failure_warning_on_unparseable_reply():
+    """The other ok=False path: the backend answered, but with garbage."""
+    rv = Reviewer(_backend_returning("I think it looks fine, honestly"))
+    res = rv.review("a diff")
+    assert res.ok is False and res.approved is True      # still fail-open
+    warning = rv.failure_warning(res)
+    assert "parseable" in warning and "not an approval" in warning.lower()
+
+
+def test_reviewer_failure_warning_names_a_heterogeneous_reviewer():
+    b = MagicMock()
+    b.chat.side_effect = RuntimeError("connection refused")
+    rv = Reviewer(b, heterogeneous=True)
+    assert "separate reviewer model" in rv.failure_warning(rv.review("diff"))
 
 
 # --------------------------------------------------------------------------- #
@@ -193,10 +224,14 @@ def _make_agent(tmp_path: Path, **kwargs):
 
 def test_review_gate_feeds_blocking_issues_back(tmp_path):
     agent = _make_agent(tmp_path)
-    # Reviewer flags an issue the first time, approves the second.
-    fake_reviewer = MagicMock()
-    fake_reviewer.review_feedback.side_effect = ["[review feedback] fix the leak", ""]
-    agent._reviewer = fake_reviewer
+    # Reviewer flags an issue the first time, approves the second. A REAL Reviewer
+    # over a scripted backend, so the gate exercises review()/failure_warning()/
+    # feedback_for() exactly as production does.
+    agent._reviewer = Reviewer(_backend_returning(""))
+    agent._reviewer.backend.chat.side_effect = [
+        '{"approved": false, "blocking": ["fix the leak"]}',
+        '{"approved": true, "blocking": []}',
+    ]
     responses = iter(["All done!", "Fixed it, done."])
     with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(responses)), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
@@ -226,3 +261,67 @@ def test_review_gate_absent_when_no_reviewer(tmp_path):
     with patch.object(agent, "_call_llm", return_value="done"), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
         assert agent.run_task("x") == "done"
+
+
+# --------------------------------------------------------------------------- #
+#  A crashed review must not read as a clean approval (AGENTS.md rule 5)       #
+# --------------------------------------------------------------------------- #
+
+def _run_with_crashing_reviewer(tmp_path):
+    """Drive a full run_task whose reviewer backend raises, and return
+    (result, warnings, events, audit)."""
+    events: list = []
+    agent = _make_agent(tmp_path, on_event=events.append)
+    agent._reviewer = Reviewer(MagicMock())
+    agent._reviewer.backend.chat.side_effect = RuntimeError("backend down")
+    agent._audit = MagicMock()
+    with patch("localm.plugins.coder.agent.print_warning") as warn, \
+         patch.object(agent, "_call_llm", return_value="All done!"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
+         patch.object(agent, "session_diff", return_value="some diff"):
+        result = agent.run_task("change code")
+    warnings = [str(c.args[0]) for c in warn.call_args_list]
+    return result, warnings, events, agent._audit
+
+
+def test_crashed_review_is_surfaced_as_a_warning(tmp_path):
+    _, warnings, _, _ = _run_with_crashing_reviewer(tmp_path)
+    hits = [w for w in warnings if "self-review did NOT run" in w]
+    assert hits, f"crashed review produced no warning; got {warnings}"
+    assert "backend down" in hits[0]
+    assert "not an approval" in hits[0].lower()
+
+
+def test_crashed_review_is_recorded_in_the_audit_trail(tmp_path):
+    _, _, _, audit = _run_with_crashing_reviewer(tmp_path)
+    kinds = [c.args[0] for c in audit.notice.call_args_list]
+    assert "review_failed" in kinds
+
+
+def test_crashed_review_reaches_a_gui_session_over_on_event(tmp_path):
+    """A GUI/web session has no terminal, so the warning must also ride the event
+    stream or it is invisible there."""
+    _, _, events, _ = _run_with_crashing_reviewer(tmp_path)
+    texts = [str(e.get("text", "")) for e in events if e.get("type") == "info"]
+    assert any("self-review did NOT run" in t for t in texts), texts
+
+
+def test_crashed_review_still_does_not_block_the_answer(tmp_path):
+    """Fail-open is unchanged: visibility only. A flaky reviewer must never cost
+    the user their answer."""
+    result, _, _, _ = _run_with_crashing_reviewer(tmp_path)
+    assert result == "All done!"
+
+
+def test_successful_approval_emits_no_failure_warning(tmp_path):
+    """Control: the honest path stays quiet, so the warning above means something."""
+    agent = _make_agent(tmp_path)
+    agent._reviewer = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
+    agent._audit = MagicMock()
+    with patch("localm.plugins.coder.agent.print_warning") as warn, \
+         patch.object(agent, "_call_llm", return_value="All done!"), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
+         patch.object(agent, "session_diff", return_value="some diff"):
+        assert agent.run_task("change code") == "All done!"
+    assert not [c for c in warn.call_args_list if "self-review" in str(c)]
+    assert not agent._audit.notice.call_args_list

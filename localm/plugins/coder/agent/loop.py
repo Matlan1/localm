@@ -371,7 +371,7 @@ class _LoopMixin:
         # reviewer model check the cumulative diff and feed any blocking
         # issues back for one more fix pass. Fires at most once per loop,
         # only when there is a real diff and turns remain. Fail-open: a
-        # reviewer error never blocks the answer (review_feedback="").
+        # reviewer error never blocks the answer (see _run_pre_done_review).
         if (
             self._reviewer is not None
             and not st.review_done
@@ -380,8 +380,7 @@ class _LoopMixin:
             st.review_done = True
             diff = self.session_diff()
             if diff.strip():
-                feedback = self._reviewer.review_feedback(
-                    diff, self._review_task)
+                feedback = self._run_pre_done_review(diff)
                 if feedback:
                     self._add_assistant(response)
                     self._add_user(feedback)
@@ -399,6 +398,28 @@ class _LoopMixin:
             print_assistant_response(response, name=self.name)
         self._add_assistant(response)
         return (True, response)
+
+    def _run_pre_done_review(self, diff: str) -> str:
+        """Run the pre-done review over *diff* and return the feedback to feed
+        back (``""`` when the answer stands).
+
+        Fail-OPEN is kept exactly as it was: a reviewer that crashes or emits
+        garbage never blocks the agent. What changes is that such a review is no
+        longer SILENT. ReviewResult.ok=False used to have zero readers anywhere,
+        so ``review_feedback()`` handed back the same "" for "approved" and for
+        "the reviewer threw an exception" - a verification step that failed
+        reported as success (AGENTS.md rule 5). It is now surfaced as a warning +
+        an audit entry, distinct from an approval, so the user knows the diff went
+        out unchecked. Visibility only: control flow is unchanged.
+        """
+        print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
+        result = self._reviewer.review(diff, self._review_task)
+        warning = self._reviewer.failure_warning(result)
+        if warning:
+            print_warning(warning)
+            self._emit("info", text=warning)
+            self._audit.notice("review_failed", warning)
+        return self._reviewer.feedback_for(result)
 
     def _check_post_batch_breakers(self) -> "str | None":
         """After a tool batch, return a circuit-breaker message (and mark the run

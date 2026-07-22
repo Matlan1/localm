@@ -104,6 +104,26 @@ class TestCoderSession:
         assert "## User Instructions" in prompt
         assert "Always use guard clauses." in prompt
 
+    def test_scoped_session_tells_the_gui_the_shell_is_unconfined(self, tmp_path):
+        """The scope-does-not-confine-the-shell notice fires during Agent
+        construction, so it only reaches a GUI user if the session's event queue
+        and replay history already exist by then. Pin that on the real
+        CoderSession rather than trusting the ordering in __init__: a browser that
+        connects after session creation rebuilds its feed from `history`, so a
+        notice missing there is invisible to every GUI user."""
+        session = CoderSession(tmp_path, ScriptedBackend(["ok"]),
+                               auto_approve=True, scope="src/**")
+        replayed = [str(e.get("text", "")) for e in session.history
+                    if e.get("type") == "info"]
+        assert any("confines the file tools only" in t for t in replayed), replayed
+        assert not session.events.empty()      # and a live listener gets it too
+
+    def test_unscoped_session_gets_no_such_notice(self, tmp_path):
+        session = CoderSession(tmp_path, ScriptedBackend(["ok"]), auto_approve=True)
+        replayed = [str(e.get("text", "")) for e in session.history
+                    if e.get("type") == "info"]
+        assert not [t for t in replayed if "confines the file tools only" in t]
+
     def test_no_custom_instructions_falls_back_to_file(self, tmp_path):
         """No field -> Agent reads .localcoder/system.md; empty here means no
         User Instructions section (unchanged behaviour)."""

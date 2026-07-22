@@ -18,16 +18,21 @@ from localm.plugins.coder.agent import Agent, _SCOPED_TOOLS
 #  Helpers
 # ---------------------------------------------------------------------------
 
-def _make_agent(tmp_path: Path, scope: str | None = None) -> Agent:
-    """Return an Agent with a mock backend and optional scope."""
+def _make_agent_with(tmp_path: Path, **kwargs) -> Agent:
+    """Return an Agent with a mock backend and any extra constructor kwargs."""
     backend = MagicMock()
     backend.model_id = "test-model"
     with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
          patch("localm.plugins.coder.agent.make_audit_log"), \
          patch("localm.plugins.coder.agent.load_memory", return_value=""):
         MockPM.build.return_value.file_count.return_value = 0
-        agent = Agent(backend=backend, cwd=tmp_path, scope=scope)
+        agent = Agent(backend=backend, cwd=tmp_path, **kwargs)
     return agent
+
+
+def _make_agent(tmp_path: Path, scope: str | None = None) -> Agent:
+    """Return an Agent with a mock backend and optional scope."""
+    return _make_agent_with(tmp_path, scope=scope)
 
 
 def _make_tool_call(name: str, **args):
@@ -164,6 +169,143 @@ class TestScopeEnforcement:
 # ---------------------------------------------------------------------------
 #  _SCOPED_TOOLS registry contents
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+#  A scope that does not confine the shell must SAY so (work item A3)
+# ---------------------------------------------------------------------------
+
+class TestScopeShellNotice:
+    """run_shell / run_tests are deliberately left out of _SCOPED_TOOLS: they
+    execute a process, and no path-arg check can confine arbitrary code. That
+    trade-off is correct and stays. What was wrong is that it was documented ONLY
+    in a source comment, so a user who set --scope got no runtime signal at all
+    and could reasonably believe the session was confined. These tests pin the
+    signal, not a sandbox."""
+
+    def _warnings(self, tmp_path, scope, **kwargs):
+        with patch("localm.plugins.coder.agent.print_warning") as warn:
+            agent = _make_agent_with(tmp_path, scope=scope, **kwargs)
+        return agent, [str(c.args[0]) for c in warn.call_args_list]
+
+    def test_notice_fires_once_for_a_scoped_session_with_shell(self, tmp_path):
+        _, warnings = self._warnings(tmp_path, "src/**")
+        hits = [w for w in warnings if "confines the file tools only" in w]
+        assert len(hits) == 1, f"expected exactly one notice, got {warnings}"
+        assert "run_shell" in hits[0] and "run_tests" in hits[0]
+
+    def test_no_notice_without_a_scope(self, tmp_path):
+        """Control: an unscoped session has no false belief to correct."""
+        _, warnings = self._warnings(tmp_path, None)
+        assert not [w for w in warnings if "confines the file tools only" in w]
+
+    def test_no_notice_when_the_shell_tools_are_disabled(self, tmp_path):
+        """Nothing to warn about: with the shell gone the scope really is the
+        boundary."""
+        _, warnings = self._warnings(
+            tmp_path, "src/**",
+            disabled_tools=frozenset({"run_shell", "run_tests"}))
+        assert not [w for w in warnings if "confines the file tools only" in w]
+
+    def test_a_sub_agent_does_not_repeat_the_notice(self, tmp_path):
+        """A spawned child is a new Agent but not a new session: the user already
+        saw the notice from the parent, and a delegation-heavy run would otherwise
+        repeat it once per spawn until it reads as noise."""
+        parent = _make_agent_with(tmp_path, scope="src/**")
+        with patch("localm.plugins.coder.agent.print_warning") as warn:
+            _make_agent_with(tmp_path, scope="src/**", parent=parent)
+        warnings = [str(c.args[0]) for c in warn.call_args_list]
+        assert not [w for w in warnings if "confines the file tools only" in w]
+
+    def test_notice_reaches_a_gui_session_over_on_event(self, tmp_path):
+        events: list = []
+        with patch("localm.plugins.coder.agent.print_warning"):
+            _make_agent_with(tmp_path, scope="src/**", on_event=events.append)
+        texts = [str(e.get("text", "")) for e in events if e.get("type") == "info"]
+        assert any("confines the file tools only" in t for t in texts), texts
+
+
+class TestShellArgvScopeCheck:
+    """Best-effort argv check: flag a shell command that references paths outside
+    the scope. A WARNING, never a block - the command still runs."""
+
+    def _run_shell(self, tmp_path, scope, command):
+        agent = _make_agent_with(tmp_path, scope=scope)
+        agent._audit = MagicMock()
+        call = _make_tool_call("run_shell", command=command)
+        with patch("localm.plugins.coder.agent.print_warning") as warn:
+            result = agent._execute_tool(call, interactive=False)
+        return result, [str(c.args[0]) for c in warn.call_args_list], agent._audit
+
+    def test_out_of_scope_path_is_flagged(self, tmp_path):
+        (tmp_path / "secrets.txt").write_text("token\n")
+        _, warnings, audit = self._run_shell(
+            tmp_path, "src/**", "cat secrets.txt")
+        hits = [w for w in warnings if "outside the active scope" in w]
+        assert hits, f"no warning for an out-of-scope path; got {warnings}"
+        assert "secrets.txt" in hits[0]
+        assert "not" in hits[0].lower() and "confined" in hits[0].lower()
+        assert "scope_shell_path" in [c.args[0] for c in audit.notice.call_args_list]
+
+    def test_the_command_still_runs(self, tmp_path):
+        """Warn, do not block: escalating a legitimate command into a hard failure
+        would break working setups for a heuristic's benefit."""
+        (tmp_path / "secrets.txt").write_text("token\n")
+        result, warnings, _ = self._run_shell(
+            tmp_path, "src/**", "cat secrets.txt")
+        assert [w for w in warnings if "outside the active scope" in w]
+        assert result.ok, result.output           # it executed
+        assert "token" in result.output           # and really did read the file
+
+    def test_absolute_path_outside_cwd_is_flagged(self, tmp_path):
+        _, warnings, _ = self._run_shell(
+            tmp_path, "src/**", "cat /etc/passwd")
+        assert [w for w in warnings if "/etc/passwd" in w], warnings
+
+    def test_parent_traversal_is_flagged_even_if_absent(self, tmp_path):
+        _, warnings, _ = self._run_shell(
+            tmp_path, "src/**", "cat ../../elsewhere.txt")
+        assert [w for w in warnings if "outside the active scope" in w], warnings
+
+    def test_in_scope_path_is_not_flagged(self, tmp_path):
+        """Control: the check must be quiet when the command stays in scope, or it
+        is noise the user learns to ignore."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("pass\n")
+        _, warnings, _ = self._run_shell(
+            tmp_path, "src/**", "cat src/main.py")
+        assert not [w for w in warnings if "outside the active scope" in w], warnings
+
+    def test_no_check_without_a_scope(self, tmp_path):
+        (tmp_path / "secrets.txt").write_text("token\n")
+        _, warnings, _ = self._run_shell(tmp_path, None, "cat secrets.txt")
+        assert not [w for w in warnings if "outside the active scope" in w]
+
+    def test_flags_and_non_path_tokens_are_not_mistaken_for_paths(self, tmp_path):
+        """A regex, a flag, and a quoted message all contain slashes but none is a
+        path; flagging them would drown the real signal."""
+        _, warnings, _ = self._run_shell(
+            tmp_path, "src/**",
+            "git commit --allow-empty -m 'fix a/b handling' && sed s/foo/bar/")
+        assert not [w for w in warnings if "outside the active scope" in w], warnings
+
+    def test_run_tests_path_arg_is_checked_too(self, tmp_path):
+        """run_shell is not the only unscoped executor; run_tests takes a target
+        path that can point anywhere too."""
+        from localm.plugins.coder import agent as _agent
+        from localm.plugins.coder.tools import ToolResult
+        (tmp_path / "tests").mkdir()
+        agent = _make_agent_with(tmp_path, scope="src/**")
+        agent._audit = MagicMock()
+        call = _make_tool_call("run_tests", path="tests")
+        stub = MagicMock(destructive=False,
+                         fn=lambda cwd, **kw: ToolResult.success("0 passed"))
+        with patch("localm.plugins.coder.agent.print_warning") as warn, \
+             patch.dict(_agent.TOOL_REGISTRY, {"run_tests": stub}, clear=False):
+            result = agent._execute_tool(call, interactive=False)
+        warnings = [str(c.args[0]) for c in warn.call_args_list]
+        assert [w for w in warnings if "outside the active scope" in w], warnings
+        assert result.ok                # still ran; the check only warns
+
 
 class TestScopedToolsSet:
     @pytest.mark.parametrize(

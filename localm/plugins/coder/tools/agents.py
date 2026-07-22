@@ -129,13 +129,20 @@ def tool_spawn_agent(
         confirm_handler=_inherited_confirm_handler(_parent_agent),
         parent=_parent_agent,
         mode=inherited_mode,
-        # A child must be no MORE capable than its parent: inherit the restriction
-        # and disabled tools so a restricted session cannot spawn a child that
-        # re-enables run_shell etc. - that would be an RCE escape from a shareable
-        # key. (spawn_agent is itself disabled for a restricted session, so this is
-        # belt-and-suspenders.)
+        # A child must be no MORE capable than its parent, along BOTH axes the
+        # parent is confined on:
+        #  - restricted / disabled_tools: a restricted session cannot spawn a child
+        #    that re-enables run_shell etc., which would be an RCE escape from a
+        #    shareable key. (spawn_agent is itself disabled for a restricted
+        #    session, so that half is belt-and-suspenders.)
+        #  - scope: this half was NOT covered until now. scope and restricted are
+        #    independent request fields, and spawn_agent is only disabled for a
+        #    RESTRICTED session, so a scoped, non-restricted session (the owner
+        #    working under --scope) spawned a child with no path confinement at
+        #    all - the child could read and write anywhere under cwd.
         restricted=getattr(_parent_agent, "restricted", False),
         disabled_tools=getattr(_parent_agent, "disabled_tools", frozenset()),
+        scope=getattr(_parent_agent, "scope", None),
     )
     result_text = child.run_task(full_task)
     turns_used  = child.turns

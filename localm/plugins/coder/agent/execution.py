@@ -6,6 +6,7 @@ confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agen
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Optional
 
@@ -18,9 +19,10 @@ from ..parser import ToolCall
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
-    _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS,
-    _NETWORK_TOOLS, _SCOPE_PATH_ARGS, _SCOPED_TOOLS, _TEST_COMMAND_MARKERS,
-    _UNDOABLE_TOOLS,
+    _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
+    _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _SCOPE_PATH_ARGS,
+    _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_UNSCOPED_TOOLS,
+    _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS,
 )
 from .scope import _scope_pattern
 
@@ -91,6 +93,73 @@ class _ExecutionMixin:
                     return str(value)
         return None
 
+    def _shell_paths_outside_scope(self, call: ToolCall) -> list[str]:
+        """Best-effort: the path-like tokens of a shell call that fall outside the
+        active scope. Empty when nothing suspicious was found OR when the check
+        simply could not tell - it is a heuristic, never a gate.
+
+        A token counts as path-like only when it is unambiguously one: absolute,
+        explicitly relative (``./``, ``../``, ``~/``), or an existing file/dir
+        under cwd. That deliberately misses things like ``sed s/a/b/`` (which is
+        not a path) at the cost of missing a path that does not exist yet - the
+        right trade for a warning the user must be able to trust.
+        """
+        flagged: list[str] = []
+        for arg in _SHELL_COMMAND_ARGS.get(call.name, ()):
+            raw = call.args.get(arg)
+            if not raw:
+                continue
+            text = str(raw)
+            try:
+                # posix=False keeps Windows backslashes intact; quotes survive as
+                # part of the token and are stripped below.
+                tokens = shlex.split(text, posix=False)
+            except ValueError:
+                # Unbalanced quotes: fall back to whitespace splitting rather than
+                # skipping the check entirely.
+                tokens = text.split()
+            for tok in tokens:
+                tok = tok.strip("'\"")
+                if not tok or tok.startswith("-") or tok in flagged:
+                    continue
+                norm = tok.replace("\\", "/")
+                explicit = (norm.startswith(("./", "../", "~/", "/"))
+                            or "/../" in norm
+                            or (len(tok) > 1 and tok[1] == ":"))   # C:\... etc
+                if not explicit:
+                    try:
+                        if not (self.cwd / tok).exists():
+                            continue
+                    except OSError:
+                        continue   # not a usable path (too long, bad chars)
+                try:
+                    if not self._scope_allows(tok):
+                        flagged.append(tok)
+                except Exception:
+                    continue       # best-effort: an unparseable token is not a finding
+        return flagged
+
+    def _warn_shell_outside_scope(self, call: ToolCall) -> None:
+        """Warn (never block) when a shell command references paths outside the
+        active scope. The scope glob cannot confine a process, so this is the only
+        signal the user gets that the command they are about to see run is not
+        bounded by the scope they set."""
+        print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
+        flagged = self._shell_paths_outside_scope(call)
+        if not flagged:
+            return
+        shown = flagged[:_MAX_SHELL_SCOPE_FLAGS]
+        more = len(flagged) - len(shown)
+        tail = f" (and {more} more)" if more > 0 else ""
+        msg = (
+            f"{call.name}: this command references {', '.join(shown)}{tail}, "
+            f"outside the active scope '{self.scope}'. Shell execution is NOT "
+            "confined by the scope, so it will run anyway. Best-effort check."
+        )
+        print_warning(msg)
+        self._emit("info", text=msg)
+        self._audit.notice("scope_shell_path", msg)
+
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # Hard gate: a tool disabled for this session (e.g. run_shell for a
@@ -159,6 +228,14 @@ class _ExecutionMixin:
                 if interactive:
                     print_tool_error(call.name, result.output)
                 return result
+
+        # The shell tools are deliberately NOT in _SCOPED_TOOLS: a path-arg check
+        # cannot confine a process, so pretending otherwise would be worse than
+        # honest. But that trade-off used to be invisible at runtime, leaving a
+        # user who set --scope believing the session was confined when it was not.
+        # Flag it instead of hiding it - a warning, never a block.
+        if self.scope and call.name in _SHELL_UNSCOPED_TOOLS:
+            self._warn_shell_outside_scope(call)
 
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:
