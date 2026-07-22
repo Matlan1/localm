@@ -462,13 +462,16 @@ class TestShellArgvScopeCheck:
         # Bash and redded under PowerShell on the same machine. `type` is the
         # cmd equivalent and needs nothing installed.
         #
-        # Written explicitly-relative and UNQUOTED. Explicitly-relative so the
-        # lexical check sees a path at all; unquoted because _shell_argv splits
-        # with posix=False on Windows, which KEEPS the quotes in the token, and a
-        # quoted path then goes through `cmd /C` with quotes cmd strips wrongly.
-        # The other tests here never execute, so only this one is exposed to it.
-        read_file = (r"type .\outside\secrets.txt" if sys.platform == "win32"
-                     else "cat ./outside/secrets.txt")
+        # Written explicitly-relative so the lexical check sees a path at all,
+        # and QUOTED, which is how a path is normally written. Quoting used to
+        # break execution on Windows, which is why this said UNQUOTED before:
+        # _shell_argv kept the quote characters in the token, and the shell
+        # route handed cmd an argv list that list2cmdline re-escaped into
+        # MSVCRT syntax cmd.exe misreads. Both are fixed, so the natural form is
+        # used again here (tests/plugins/coder/test_shell_quoting.py covers the
+        # fix itself, including paths that contain spaces).
+        read_file = (r'type ".\outside\secrets.txt"' if sys.platform == "win32"
+                     else 'cat "./outside/secrets.txt"')
         result, warnings, _ = self._run_shell(tmp_path, "src/**", read_file)
         assert [w for w in warnings if "outside the active scope" in w]
         assert result.ok, result.output           # it executed

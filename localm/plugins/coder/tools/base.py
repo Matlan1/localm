@@ -120,6 +120,33 @@ class SubprocessResult:
     error: Optional[str] = None
 
 
+def platform_shell(command: str) -> Union[list, str]:
+    """The launchable form of *command* run through the platform shell.
+
+    Returns a STRING on Windows and an argument LIST on POSIX, because that is
+    what each platform needs to receive the command line UNCHANGED - and this is
+    the one definition of that, so no caller has to rediscover it.
+
+    On POSIX an argv list is handed to ``execv`` verbatim, so ``/bin/sh -c`` plus
+    the command as one element already arrives intact.
+
+    On Windows it must NOT be ``["cmd", "/C", command]``. ``subprocess`` renders
+    an argv list with :func:`subprocess.list2cmdline`, which escapes every
+    embedded quote MSVCRT-style as ``\\"`` - syntax ``cmd.exe`` does not speak.
+    So a quoted path, the normal way to pass a path containing spaces, reached
+    cmd mangled and could not be opened (measured: ``type "<dir with spaces>"``
+    returned "The filename, directory name, or volume label syntax is
+    incorrect"). Pre-compensating is not possible: list2cmdline turns EVERY
+    quote into ``\\"``, so no list element can put a bare quote on the command
+    line. A command STRING is passed to ``CreateProcess`` verbatim instead, so
+    cmd applies its own quoting rules to exactly what was written - which is
+    what routing to a shell means in the first place.
+    """
+    if sys.platform == "win32":
+        return "cmd /C " + command
+    return ["/bin/sh", "-c", command]
+
+
 def run_subprocess(
     argv_or_cmd: Union[list, str],
     cwd: Path,
@@ -133,8 +160,10 @@ def run_subprocess(
 
     *argv_or_cmd* is an argument list, run directly, unless *shell_wrap* is
     true - then it must be a command STRING, routed through the platform
-    shell (``cmd /C`` on Windows, ``/bin/sh -c`` elsewhere) so shell operators
-    (pipes, redirects, ``&&``) work.
+    shell by :func:`platform_shell` so shell operators (pipes, redirects,
+    ``&&``) work. An already-routed caller (``tools/shell.py:_shell_argv``) may
+    also pass the string that function returns for the Windows shell route; a
+    bare string is a raw Windows command line, never a POSIX one.
 
     On a timeout, the process's captured stdout/stderr up to the kill is
     preserved on the result, not dropped - format it for display with
@@ -144,13 +173,7 @@ def run_subprocess(
     sequence, with only shell.py's own callers getting partial-output-on-timeout
     and git.py/goal.py silently dropping it.
     """
-    if shell_wrap:
-        if sys.platform == "win32":
-            argv = ["cmd", "/C", argv_or_cmd]
-        else:
-            argv = ["/bin/sh", "-c", argv_or_cmd]
-    else:
-        argv = argv_or_cmd
+    argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
 
     try:
         proc = subprocess.run(
