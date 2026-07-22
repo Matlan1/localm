@@ -33,7 +33,9 @@ def test_changeset_without_a_branch_is_not_advertised():
 
 def test_footer_names_branch_file_count_and_view_command():
     out = d.render_footer([_cs()])
-    assert "Delegated changes (not in this tree)" in out
+    # The heading is the one fixed by the joint decision, verbatim: the user must
+    # be told these changes are NOT in their tree, or they may assume they are.
+    assert "Delegated work (NOT in your working tree)" in out
     assert "child1" in out
     assert "3 file(s)" in out
     assert "coder/child1-ab12ef34" in out
@@ -85,9 +87,9 @@ def test_footer_is_never_wired_into_a_model_facing_site():
 def test_recording_delegated_work_does_not_change_what_the_reviewer_would_see():
     """The reviewer is handed session_diff()'s return. Recording delegated work
     must leave that byte-identical."""
-    from localm.plugins.coder.agent.persistence import PersistenceMixin
+    from localm.plugins.coder.agent.persistence import _PersistenceMixin
 
-    class Agent(PersistenceMixin):
+    class Agent(_PersistenceMixin):
         def __init__(self):
             self.cwd = __import__("pathlib").Path(".")
             self._changed_files = {}

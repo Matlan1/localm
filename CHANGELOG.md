@@ -43,6 +43,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   config.json.
 
 ### Added
+- **The coder can run two sub-tasks at once, each in its own checkout.** A new
+  `dispatch_parallel` tool gives every child agent its own git worktree on its
+  own branch, so two children can work on the same files without interfering and
+  your working tree is never touched. Each child's work is committed to its
+  branch and its diff comes back for you to review; nothing is ever merged
+  automatically, because a local model resolving a merge conflict unsupervised is
+  not something to do behind your back. `/diff` and `/changes` gain a clearly
+  labelled "Delegated work (NOT in your working tree)" section naming the branch
+  that holds each change. Capped at two children at a time, shared across every
+  way the coder spawns them, matching what one GPU can actually keep resident.
+  Note the isolation is real for file tools but best-effort for shell: a child
+  can still run a command that reaches outside its worktree.
 - **The sidebar shows the GPU split your loaded model actually got.** With a
   multi-GPU split configured, the model status now shows each card's share
   and how it was decided - for example "Split: GPU 0 33% · GPU 1 67% (by
