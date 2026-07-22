@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import child_limit
+from .. import delegated as _delegated
 from .base import ToolResult, _truncate
 from .git import (
     WORKTREE_PREFIX,
@@ -206,6 +207,7 @@ class _ChildOutcome:
         self.turns = 0
         self.cleanup_warning = ""
         self.model = ""          # the model this child ACTUALLY ran on
+        self.file_count = 0      # files this child changed, for the /diff footer
 
 
 def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
@@ -499,8 +501,30 @@ def tool_dispatch_parallel(
                              timeout=30)
             if dok:
                 outcome.diff, _ = _truncate(diff)
+                names, nok = _git(worktree, "diff", "--name-only", base_sha, "HEAD",
+                                  timeout=30)
+                outcome.file_count = (
+                    len([ln for ln in names.splitlines() if ln.strip()])
+                    if nok and names != "(no output)" else 0
+                )
             else:
                 outcome.cleanup_warning = f"could not read the child's diff: {diff}"
+
+        # Record each change-set on the parent so /diff and /changes can POINT at
+        # it. Deliberately a pointer, never merged into the parent's own diff:
+        # session_diff() feeds the self-reviewer and episodic memory, so foreign
+        # content there would corrupt two model-facing loops, not just a view.
+        for _wt, branch, outcome in created:
+            if not branch:
+                continue
+            _delegated.record(_parent_agent, _delegated.DelegatedChangeSet(
+                label=outcome.name,
+                branch=branch,
+                file_count=outcome.file_count,
+                source="parallel",
+                status=outcome.status,
+                base=base_sha,
+            ))
 
     finally:
         # 4. Tear down every worktree we created, on success AND on failure, and
