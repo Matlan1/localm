@@ -230,7 +230,7 @@ class TestDetectVerifyCommand:
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
         assert verify.detect_verify_command(tmp_path) == [
-            _FAKE_BIN % "npm", "test", "--passWithNoTests"]
+            _FAKE_BIN % "npm", "test", "--", "--passWithNoTests"]
 
     def test_yarn_lock_selects_yarn(self, tmp_path, runners_installed):
         (tmp_path / "package.json").write_text(
@@ -342,7 +342,7 @@ class TestDetectionConfirmsTheRunnerCanRun:
         self._fake_which(monkeypatch, {"npm": r"C:\Program Files\nodejs\npm.CMD"})
         cmd = verify.detect_verify_command(tmp_path)
         assert cmd == [r"C:\Program Files\nodejs\npm.CMD", "test",
-                       "--passWithNoTests"]
+                       "--", "--passWithNoTests"]
 
     def test_yarn_project_gates_on_yarn_not_npm(self, tmp_path, monkeypatch):
         """The lockfile picks the runner, so the availability check has to follow
