@@ -19,6 +19,7 @@ Phase 0 ships the schema + the core fields. The renderer (GUI) lands in Phase 5.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -1175,4 +1176,258 @@ def validate_media_block(name: str, updates: dict) -> dict:
         for p in f.block_path[:-1]:
             cur = cur.setdefault(p, {})
         cur[f.block_path[-1]] = coerced
+    return merge
+
+
+# --------------------------------------------------------------------------- #
+#  The tts plugin's own config block (config["plugins"]["tts"]).               #
+#                                                                              #
+#  Same idea as the media blocks above, one plugin instead of three: the       #
+#  shipped defaults live in the plugin's tracked tts.example.json template and #
+#  the user's overrides win over them (see the plugin's plug.py). Until the    #
+#  2026-07-22 settings-exposure audit these keys had NO write surface at all - #
+#  the GUI voice picker wrote browser localStorage, a different store, so      #
+#  picking a voice never moved the server-side one. GET/POST /v1/tts/config    #
+#  (localm/inference/routes/config.py) is that write surface.                  #
+#                                                                              #
+#  The block is FLAT (no nesting), so a validated update is merged key by key. #
+# --------------------------------------------------------------------------- #
+
+TTS_PLUGIN = "tts"
+
+# The engines the plugin actually implements. tts.js speaks Kokoro only, so a
+# one-option dropdown would be dead UI (hence gui=False below) - but the key is
+# stored, so it still gets a validated write path instead of silently accepting
+# an engine that does not exist. Adding an engine is a one-line change here.
+TTS_ENGINES = ("kokoro",)
+TTS_DEVICES = ("auto", "webgpu", "wasm")
+# Only the dtypes the template documents as tried: fp32 is the clean default,
+# q8/fp16 are smaller/faster but lower quality (q8 produced audible cracks on
+# the WASM path - see the template's _dtype_note and tts-util.js R06).
+TTS_DTYPES = ("auto", "fp32", "fp16", "q8")
+TTS_SPEED_MIN, TTS_SPEED_MAX = 0.5, 2.0
+
+# A Hugging Face repo id ("owner/name"), which is what the BROWSER downloads the
+# voice model from. Anything else (a URL, a path, a bare name) is not a repo id
+# and would fail opaquely inside transformers.js at load time.
+_HF_REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+@dataclass
+class TtsField:
+    key: str                        # API field name == the config block key
+    widget: str
+    label: str
+    help: str = ""
+    options: Optional[list] = None  # static choices (voice's are loaded live)
+    min: Optional[float] = None
+    max: Optional[float] = None
+    step: Optional[float] = None
+    gui: bool = True                # rendered in the GUI settings section
+    advanced: bool = False          # secondary ("Advanced") box in the GUI
+    admin_only: bool = False        # requires an owner (ADMIN) principal to set
+
+
+# Order = display order in the GUI section.
+TTS_FIELDS: list = [
+    TtsField("voice", Widget.SELECT, "Default voice",
+             "The voice new browsers read replies in. Each browser can pick its "
+             "own in chat, which overrides this for that browser."),
+    TtsField("speed", Widget.NUMBER, "Speaking speed",
+             "Playback rate for the generated voice. 1.0 is normal.",
+             min=TTS_SPEED_MIN, max=TTS_SPEED_MAX, step=0.05),
+    TtsField("model", Widget.TEXT, "Voice model",
+             "Hugging Face repo id of the Kokoro model the browser downloads "
+             "once and then caches. Blank uses the shipped default."),
+    TtsField("device", Widget.SELECT, "Compute device",
+             "auto uses the GPU (WebGPU) when the browser has one and falls "
+             "back to WASM. Force wasm if the GPU path misbehaves.",
+             options=list(TTS_DEVICES), advanced=True),
+    TtsField("dtype", Widget.SELECT, "Model precision",
+             "auto picks fp32 (clean audio). q8/fp16 download less but sound "
+             "worse; q8 produced audible cracks on the WASM path.",
+             options=list(TTS_DTYPES), advanced=True),
+    # Not in the GUI: exactly one engine is implemented (see TTS_ENGINES).
+    TtsField("engine", Widget.SELECT, "Engine",
+             "Speech engine the plugin uses.",
+             options=list(TTS_ENGINES), gui=False),
+    # SEC: these two become a SCRIPT url and a WASM base url that every browser
+    # client loads from, so setting them is code injection into every user's
+    # page. Admin-only (mirrors REC-MEDIA-CMD for launch_cmd/api_url), confined
+    # to the plugin's own asset folder by the validator, and not rendered in the
+    # GUI - they are an install-level escape hatch, not a user setting.
+    TtsField("library", Widget.TEXT, "Kokoro library path",
+             "Path to the vendored kokoro-js bundle, relative to the tts "
+             "plugin's static folder.",
+             gui=False, admin_only=True),
+    TtsField("wasm_paths", Widget.TEXT, "ONNX runtime WASM path",
+             "Path to the onnxruntime WASM files, relative to the tts plugin's "
+             "static folder. Blank uses the bundle's own default.",
+             gui=False, admin_only=True),
+]
+
+
+def tts_defaults() -> dict:
+    """The tts plugin's shipped template defaults (documentation keys stripped).
+
+    Read through the plugin's own settings module so the template has exactly
+    one reader, shared with the plugin's /api/tts/config.
+    """
+    from localm.plugins.builtin.tts.settings import defaults
+    return defaults()
+
+
+def known_tts_voices() -> list:
+    """The shipped voice ids, or [] when the vendored list cannot be read."""
+    from localm.plugins.builtin.tts.settings import voice_ids
+    return voice_ids()
+
+
+def tts_admin_only_fields() -> set:
+    """Block keys a non-owner ``config:write`` key must not set."""
+    return {f.key for f in TTS_FIELDS if f.admin_only}
+
+
+def _tts_options(f: "TtsField") -> Optional[list]:
+    """The choices for *f*: static, except voice's, which come from the shipped
+    voice list (empty list -> None, so the validator falls back to a shape
+    check rather than rejecting every voice)."""
+    if f.key == "voice":
+        return known_tts_voices() or None
+    return f.options
+
+
+def tts_schema_json(block: Optional[dict]) -> list:
+    """Serialize the tts block's editable fields with their RESOLVED values.
+
+    ``value`` is the block value when the user set one, else the shipped
+    template default, so the GUI shows what is actually in effect;
+    ``is_override`` says which. ``gui``/``advanced``/``admin_only`` tell the GUI
+    what to render and where.
+    """
+    block = block if isinstance(block, dict) else {}
+    defaults = tts_defaults()
+    out = []
+    for f in TTS_FIELDS:
+        own = block.get(f.key)
+        has_own = own not in (None, "")
+        d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
+             "value": own if has_own else defaults.get(f.key),
+             "is_override": has_own, "default": defaults.get(f.key),
+             "gui": f.gui, "advanced": f.advanced, "admin_only": f.admin_only}
+        options = _tts_options(f)
+        if options:
+            d["options"] = options
+            if f.key == "voice":
+                from localm.plugins.builtin.tts.settings import voices
+                d["option_labels"] = [v["label"] for v in voices()]
+        for attr in ("min", "max", "step"):
+            if getattr(f, attr) is not None:
+                d[attr] = getattr(f, attr)
+        out.append(d)
+    return out
+
+
+def _tts_relative_asset(key: str, value: str) -> str:
+    """Validate a library/wasm_paths value: a real path INSIDE the tts plugin's
+    static folder, expressed relatively.
+
+    The browser resolves these against /plugins/tts/, so an absolute, remote, or
+    traversing value would make every client load code from somewhere else. The
+    existence check is deliberate too: a typo here silently breaks text-to-speech
+    for everyone, and a 400 at set time beats a mystery failure later.
+    """
+    if ":" in value:
+        raise ValueError(
+            f"{key}: must be a path relative to the tts plugin's static folder "
+            f"(no URL, scheme, or drive letter), got {value!r}")
+    if value.startswith("/") or value.startswith("\\") or "\\" in value:
+        raise ValueError(
+            f"{key}: must be a relative path using forward slashes, got {value!r}")
+    parts = value.split("/")
+    if ".." in parts:
+        raise ValueError(f"{key}: must not step outside the plugin folder, got {value!r}")
+    if any(p == "" for p in parts[:-1]):        # a trailing "/" is fine, "a//b" is not
+        raise ValueError(f"{key}: has an empty path segment, got {value!r}")
+    from localm.plugins.builtin.tts.settings import asset_root
+    root = asset_root().resolve()
+    target = (root / value).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError(f"{key}: resolves outside the tts plugin's static folder")
+    if not target.exists():
+        raise ValueError(
+            f"{key}: no such file or folder under the tts plugin's static folder "
+            f"({value!r}); text-to-speech would fail to load for every browser")
+    if key == "library" and not target.is_file():
+        raise ValueError(f"{key}: must point at a file, not a folder ({value!r})")
+    # The browser requests this path over HTTP, where it is case-SENSITIVE, but
+    # Windows and macOS filesystems are not - so an existing-but-differently-spelled
+    # path passes the check above and then 404s for every client. Path.resolve()
+    # yields the on-disk spelling on those platforms, so comparing tells the user
+    # the exact string to use instead of letting text-to-speech quietly break.
+    canonical = "." if target == root else target.relative_to(root).as_posix()
+    if canonical != value.rstrip("/"):
+        raise ValueError(
+            f"{key}: write it exactly as it is on disk, {canonical!r} (the browser "
+            f"loads this over HTTP, where the path is case-sensitive)")
+    return value
+
+
+def _coerce_tts_value(f: "TtsField", val):
+    """Coerce + check one tts field value. Blank/None clears the override (the
+    plugin falls back to the shipped template default)."""
+    if val is None:
+        return None
+    if f.widget == Widget.NUMBER:
+        if isinstance(val, str) and not val.strip():
+            return None
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"{f.key}: {val!r} is not a number")
+        if f.min is not None and num < f.min:
+            raise ValueError(f"{f.key}: must be at least {f.min}, got {num}")
+        if f.max is not None and num > f.max:
+            raise ValueError(f"{f.key}: must be at most {f.max}, got {num}")
+        return num
+    s = str(val).strip()
+    if not s:
+        return None
+    options = _tts_options(f)
+    if f.widget == Widget.SELECT:
+        if options and s not in options:
+            shown = ", ".join(options[:12]) + ("..." if len(options) > 12 else "")
+            raise ValueError(f"{f.key}: {val!r} is not one of: {shown}")
+        if not options:
+            # Only reachable for `voice` when the vendored list is unreadable
+            # (already logged): fall back to the id SHAPE so the setting stays
+            # usable instead of silently accepting anything.
+            if not re.fullmatch(r"[a-z]{2}_[a-z0-9]+", s):
+                raise ValueError(f"{f.key}: {val!r} is not a Kokoro voice id")
+        return s
+    if f.key == "model":
+        if not _HF_REPO_ID.match(s):
+            raise ValueError(
+                f"model: must be a Hugging Face repo id like "
+                f"'onnx-community/Kokoro-82M-v1.0-ONNX', got {val!r}")
+        return s
+    if f.key in ("library", "wasm_paths"):
+        return _tts_relative_asset(f.key, s)
+    return s
+
+
+def validate_tts_block(updates: dict) -> dict:
+    """Coerce + validate a tts settings update into a flat block-merge dict.
+
+    Raises ValueError on an unknown field or a bad value. A field set to ""
+    (blank) is written as None, clearing the override so the plugin falls back
+    to the shipped template default.
+    """
+    by_key = {f.key: f for f in TTS_FIELDS}
+    merge: dict = {}
+    for key, val in (updates or {}).items():
+        f = by_key.get(key)
+        if f is None:
+            raise ValueError(f"unknown tts setting: {key!r}")
+        merge[key] = _coerce_tts_value(f, val)
     return merge

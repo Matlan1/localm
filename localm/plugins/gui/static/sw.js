@@ -83,7 +83,12 @@
 // silently ignore the event and show nothing.
 // v76: coder.js changed (set_todos tool cards show plan progress on the head
 // line) - bump so an already-installed PWA picks up the new bytes.
-const CACHE = "localm-shell-v76";
+// v77: the tts plugin's server-side settings got a real write surface - a new
+// Text-to-speech settings section (pages/settings.js), the per-browser voice
+// override is now named and clearable (app/settings-perf.js), and the chat
+// picker label says which store it writes (index.html). A stale-cached client
+// would keep the old picker that silently diverged from the server default.
+const CACHE = "localm-shell-v77";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

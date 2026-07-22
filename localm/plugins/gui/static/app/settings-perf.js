@@ -658,6 +658,67 @@ export function speak(text, opts = {}) {
   }
 }
 
+// The chat voice picker is a PER-BROWSER choice, stored here. The tts plugin's
+// server-side `voice` setting (Settings > Text-to-speech) is the DEFAULT for
+// browsers that have not picked one - a different store, which is exactly why
+// picking a voice in chat never moved the server value (2026-07-22
+// settings-exposure audit). Keeping them separate is deliberate (one server,
+// many browsers, one shared account); what was missing is that the split was
+// invisible, so the Settings section names the override and offers to clear it.
+export const TTS_VOICE_KEY = "localm.ttsVoice";
+
+/** The raw stored value, whether or not it is still usable ("" if unreadable). */
+function storedVoice() {
+  try { return localStorage.getItem(TTS_VOICE_KEY) || ""; }
+  catch (e) { return ""; }        // storage blocked: no override is readable
+}
+
+/** This browser's own voice override, or "" when it follows the server default.
+ *
+ *  A stored voice the active provider does not offer is NOT an override: the
+ *  picker ignores it (see populateVoicePicker), so nothing else may claim it is
+ *  in effect - Settings would otherwise say "this browser plays X" about a voice
+ *  nothing plays. An EMPTY voice list means the provider has not loaded its
+ *  voices yet (or the list failed to fetch), which is not evidence against the
+ *  stored value, so it stays an override there. */
+export function browserVoiceOverride() {
+  const stored = storedVoice();
+  if (!stored || !ttsProvider) return stored;
+  const offered = ttsProvider.voices();
+  if (!offered.length) return stored;
+  return offered.some((v) => v.id === stored) ? stored : "";
+}
+
+/** Drop this browser's override so the server-side default applies again, and
+ *  re-point the live provider at *serverVoice* straight away (no reload).
+ *  Returns false if the stored value could NOT be removed: the caller must not
+ *  report success, because the override is still in force (rule 5). */
+export function clearBrowserVoiceOverride(serverVoice) {
+  try { localStorage.removeItem(TTS_VOICE_KEY); }
+  catch (e) {
+    // Not the benign "nothing was stored" case: this is only reachable because a
+    // getItem just RETURNED a value, so a failure here leaves the override live.
+    console.error("[tts] could not clear the stored voice override:", e);
+    return false;
+  }
+  if (ttsProvider && serverVoice) ttsProvider.setVoice(serverVoice);
+  populateVoicePicker();
+  return true;
+}
+
+/** Apply a just-saved server-side tts config to the RUNNING provider, so a
+ *  Settings save takes effect now instead of on the next reload. The voice is
+ *  only applied when this browser has no override of its own - never silently
+ *  overwrite the user's explicit per-browser pick. Returns true if the live
+ *  voice changed. */
+export function applyServerTtsConfig({ voice, speed } = {}) {
+  if (!ttsProvider || typeof ttsProvider.applyConfig !== "function") return false;
+  const takeVoice = voice && !browserVoiceOverride();
+  ttsProvider.applyConfig({ voice: takeVoice ? voice : undefined, speed });
+  if (takeVoice) populateVoicePicker();
+  return !!takeVoice;
+}
+
 /** Fill the voice picker from the active provider (or, with no provider, the
  *  browser's LOCAL voices) and remember the choice. Hidden when there is
  *  nothing to choose. */
@@ -669,7 +730,18 @@ export function populateVoicePicker() {
   let current = "";
   if (ttsProvider) {
     opts = ttsProvider.voices();
-    current = localStorage.getItem("localm.ttsVoice") || ttsProvider.getVoice();
+    // A stored override that the provider no longer offers (voice list changed,
+    // or a different install shares this origin) is IGNORED rather than pushed
+    // into the provider: setting an unknown id made synthesis fail at speak
+    // time while the picker showed something else entirely. browserVoiceOverride
+    // applies exactly the same rule, so Settings never claims a voice is in
+    // effect that this picker just discarded.
+    const override = browserVoiceOverride();
+    current = override || ttsProvider.getVoice();
+    const stored = storedVoice();
+    if (stored && !override) {
+      console.debug(`[tts] stored voice ${stored} is not offered; using ${current}`);
+    }
     if (current) ttsProvider.setVoice(current);
   } else if (window.speechSynthesis) {
     // getVoices() is async-populated; filter to localService so we never offer
@@ -695,14 +767,18 @@ export function populateVoicePicker() {
   if (current) sel.value = current;
 }
 
-/** Persist the picked voice and apply it to the active provider. */
+/** Persist the picked voice and apply it to the active provider. This is a
+ *  THIS-BROWSER choice (see TTS_VOICE_KEY): it overrides the server-side
+ *  default voice here without changing it for anyone else. */
 export function onVoicePick() {
   const id = $("p-voice").value;
   if (ttsProvider) {
     ttsProvider.setVoice(id);
-    localStorage.setItem("localm.ttsVoice", id);
+    try { localStorage.setItem(TTS_VOICE_KEY, id); }
+    catch (e) { toast("This browser blocked storage, so the voice resets on reload", true); }
   } else {
-    localStorage.setItem("localm.ttsVoiceBrowser", id);
+    try { localStorage.setItem("localm.ttsVoiceBrowser", id); }
+    catch (e) { toast("This browser blocked storage, so the voice resets on reload", true); }
   }
 }
 
