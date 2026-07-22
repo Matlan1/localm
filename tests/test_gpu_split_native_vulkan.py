@@ -30,8 +30,9 @@ ORDERING CAVEAT - run this file in ISOLATION, not mixed into a full suite run:
   the native Vulkan loader only reads VK_ADD_DRIVER_FILES once, when the ggml
   backend is first registered inside this process (triggered by the FIRST
   load_lib()/LlamaCpp() call). If an earlier test in the same pytest session
-  already loaded the native runtime (e.g. any real_gguf-marked test, whose
-  resource-gate check itself calls load_lib() at collection time), the env var
+  already loaded the native runtime (e.g. any real_gguf-marked test that RAN
+  earlier - its lazy resource gate, or the test itself, calls load_lib() at
+  that test's setup), the env var
   would already be too late for THIS process. The fixture below guards this: it
   refuses (skips, with a clear reason) rather than silently running against
   whatever device set happened to already be registered - a false pass here
