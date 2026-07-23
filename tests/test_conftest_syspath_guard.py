@@ -164,10 +164,33 @@ class TestTheMatcher:
         usable to switch the guard off."""
         conftest = _real_conftest_module()
         baseline = conftest._syspath_marker_roots()
-        monkeypatch.setenv("LOCALM_TEST_SYSPATH_EXTRA_MARKERS", "d:/somewhere/else")
+        # The var is os.pathsep-SEPARATED, so the value itself must not contain
+        # the separator. A Windows drive path survives where pathsep is ";" and
+        # splits into "d" + "/somewhere/else" where it is ":" - which is why the
+        # hardcoded "d:/somewhere/else" passed on Windows and failed on Linux.
+        # Drive paths do not exist on POSIX anyway, so the parser is correct and
+        # the fixture value is what has to be platform-appropriate.
+        extra = "d:/somewhere/else" if os.name == "nt" else "/somewhere/else"
+        assert os.pathsep not in extra, "the marker value must survive the split"
+        monkeypatch.setenv("LOCALM_TEST_SYSPATH_EXTRA_MARKERS", extra)
         widened = conftest._syspath_marker_roots()
         assert set(baseline) <= set(widened), "markers were removed, not added"
-        assert "d:/somewhere/else" in widened
+        assert extra in widened
+
+    def test_extra_markers_split_on_the_platform_separator(self, monkeypatch):
+        """Two markers in one value must arrive as two roots, not one.
+
+        The bug above hid inside a single-marker case, where a wrong split still
+        left something plausible in the list. Pinning the multi-marker shape
+        makes the separator itself the thing under test.
+        """
+        conftest = _real_conftest_module()
+        one = "/alpha/one" if os.name != "nt" else "y:/alpha/one"
+        two = "/beta/two" if os.name != "nt" else "z:/beta/two"
+        monkeypatch.setenv("LOCALM_TEST_SYSPATH_EXTRA_MARKERS",
+                           one + os.pathsep + two)
+        widened = conftest._syspath_marker_roots()
+        assert one in widened and two in widened
 
 
 class TestTheRecordingMachineryFires:

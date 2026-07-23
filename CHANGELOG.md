@@ -11,7 +11,290 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-23
+
+### Added
+- **The coder can hand a sub-task off and keep working instead of waiting.**
+  `spawn_agent` runs its sub-agent to completion before the coder does anything
+  else, so delegating a ten-turn job to a local model costs you all of that time
+  staring at a spinner. The new `spawn_agent_background` starts the sub-agent and
+  hands back a job id straight away; you keep working, and `check_agent_job` tells
+  you how it went. A finished sub-agent's result is also folded into the
+  conversation on its own at the start of a later turn, so you do not have to
+  remember to ask. Background sub-agents get the same isolation as parallel
+  dispatch - each works in its own git worktree on its own branch, its changes are
+  committed there and never merged into your working tree, and `/diff` points at
+  the branch rather than pretending the work is in your files. Two can run at
+  once (the same shared ceiling parallel dispatch uses); a third is refused with a
+  clear message naming the two already running, rather than quietly queued. The
+  new `/bg` command lists this session's background work, both shell commands and
+  sub-agents. Starting one asks for confirmation exactly like `spawn_agent` does,
+  and that one approval covers everything the sub-agent then does, because a
+  background sub-agent cannot come back and ask you mid-run - so in a session that
+  confirms at the terminal, localm refuses to start one rather than approving on
+  your behalf. A one-shot `localcoder "task"` run now warns you if it is about to
+  exit while a background sub-agent is still going, instead of dropping it
+  silently.
+- **The coder can run two sub-tasks at once, each in its own checkout.** A new
+  `dispatch_parallel` tool gives every child agent its own git worktree on its
+  own branch, so two children can work on the same files without interfering and
+  your working tree is never touched. Each child's work is committed to its
+  branch and its diff comes back for you to review; nothing is ever merged
+  automatically, because a local model resolving a merge conflict unsupervised is
+  not something to do behind your back. `/diff` and `/changes` gain a clearly
+  labelled "Delegated work (NOT in your working tree)" section naming the branch
+  that holds each change. Capped at two children at a time, shared across every
+  way the coder spawns them, matching what one GPU can actually keep resident.
+  When a child needs your approval to run something, the request queues up behind
+  any other child's and says WHICH child is asking - on the approval card in the
+  browser as well as at the terminal - so two children's requests can never be
+  mistaken for each other.
+  Note the isolation is real for file tools but best-effort for shell: a child
+  can still run a command that reaches outside its worktree.
+- **The sidebar shows the GPU split your loaded model actually got.** With a
+  multi-GPU split configured, the model status now shows each card's share
+  and how it was decided - for example "Split: GPU 0 33% · GPU 1 67% (by
+  free VRAM)", or "(pinned)" for manual ratios and "(equal)" when free VRAM
+  could not be measured. Single-GPU setups see no change.
+- **Scheduled knowledge re-sync: an indexed folder can now stay current on its
+  own.** Indexing a folder into a collection records the folder itself, not
+  just the files it happened to hold, so localm can re-walk it later.
+  `localm rag resync NAME` does that by hand, and a new `rag` job kind puts it
+  on a schedule -
+  `localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"`, or the
+  Jobs tab's new "rag" task. A run re-indexes incrementally (new files added,
+  changed files re-indexed, unchanged files skipped by content hash) and loads
+  no chat model. A document whose file has vanished is FLAGGED, not deleted:
+  its chunks stay searchable, the flag clears by itself if the file comes back,
+  and only `--prune-missing` actually removes it - so a moved file, an
+  unplugged drive, or a half-finished cloud sync can never silently delete part
+  of an index. A folder that is unreachable at run time is reported and skipped
+  whole, with nothing under it indexed, flagged, or pruned. Scheduled runs
+  apply the same allowed/denied folder policy as an interactive add, so a
+  folder that has since fallen outside it is skipped and reported rather than
+  indexed. There is still no filesystem watcher, deliberately: a watcher daemon
+  would break the self-contained design.
+- **Search the Settings page.** A box above the section nav filters every
+  group at once, matching a setting's label, its config key, or its help
+  text, so a setting can be found without knowing which of the seven
+  sections holds it. Matches keep their section heading, so it is still
+  clear what a setting belongs to, and the rows that have no config key
+  behind them (Main GPU, Split across GPUs, the logo style picker, the key
+  presets) are searchable by their own text. A control that is not
+  currently offered - the multi-GPU rows on a single-GPU machine, the keys
+  card for a non-owner key - is deliberately not findable. Clearing the box
+  restores the normal grouped view.
+- **The coder can run shell commands in the background.** `run_shell` waits for
+  the command to finish, so the agent could not start a dev server and then talk
+  to it, or run a long build while doing anything else. Three new tools fix
+  that: `run_shell_background` starts a command and returns a job id
+  immediately, `check_shell_job` reports whether it is still running (plus its
+  exit code and captured output once done), and `kill_shell_job` stops it. So
+  the coder can now start a server, curl it, and shut it down in one session.
+  Output is captured into a capped buffer, so a chatty process cannot grow
+  memory without limit; anything dropped is reported rather than presented as
+  the whole output. Stopping a job kills its entire process tree, so a build
+  that spawned children does not leave them running, and any job still running
+  is stopped when localm exits rather than being orphaned. Up to four
+  background commands run at once; asking for a fifth is refused with a clear
+  message instead of quietly queueing. Starting a background command is
+  arbitrary code execution and stopping one tears down a process tree, so both
+  ask for confirmation exactly like `run_shell` does and get the same privacy
+  handling; checking on a job only reads its status and output, so it does not
+  prompt (otherwise every poll of a long build would need approval). All three
+  are unavailable to shareable (restricted) coder sessions, and turning
+  `run_shell` off turns them off too.
+- **The coder's past lessons no longer expire by age alone, and nothing it
+  forgets is gone for good.** Episodic memory used to be a plain queue: at 200
+  stored lessons the oldest was discarded, however useful it was, with no
+  notice and no way back. Now a new lesson that merely restates one you already
+  have is merged into it (keeping both file lists and the better wording)
+  instead of being stored twice, and when the store is full the LEAST USEFUL
+  lesson goes rather than the oldest, so a hard-won "this is what went wrong
+  and why" survives a run of throwaway one-liners. Everything dropped is
+  archived first: `localcoder --episodes-archive` lists it and
+  `localcoder --restore-episode ID` puts it back. `localcoder --episodes` now
+  shows each lesson's id, and `--forget-episode ID` removes just that one
+  instead of wiping the project's whole history (`--forget-episodes` still
+  erases everything, archive included).
+- **You can see which past lessons the coder is acting on.** When a session
+  recalls lessons from earlier work, the GUI now says which ones it pulled in
+  and shows the id for each, and the same list is written to the session audit
+  log. A lesson that sends a run down the wrong path used to be invisible after
+  the fact; now you can see it and remove it by id.
+- **Optional: let the model merge related lessons into one**
+  (`localcoder --consolidate-episodes`). Strictly opt-in and manual - it never
+  runs on a timer or at session close - and it reports exactly what it merged.
+  The originals are archived, so any merge you dislike is reversible with
+  `--restore-episode`, and a group the model cannot summarize usefully is left
+  untouched rather than lost.
+- **Coder sub-agents can now be given a role, which narrows what they can
+  do.** `spawn_agent` takes an optional `role`: `reviewer` (read the code and
+  inspect git, change nothing), `researcher` (read-only investigation of the
+  project, no writes and no network), or `test-writer` (read, write tests, and
+  run them, but no shell and no commit or push). The role gives the sub-agent a
+  focused brief and, more importantly, actually takes the other tools away, so a
+  helper spawned to review a diff can no longer overwrite files, run shell
+  commands, or push. A role can only ever REMOVE capability: it is applied on
+  top of whatever the parent session already forbids, so it can never hand back
+  a tool you disabled, and it never lets a shared, restricted session regain
+  execution. Tools registered by MCP servers, plugins, and skills are excluded
+  from a role by default rather than inherited. Omitting `role` keeps the
+  previous behavior (the sub-agent gets the parent's full toolset).
+- **Coder: `edit_files` applies one exact-string edit across several files at
+  once, all-or-nothing.** The coder could already replace an exact snippet in a
+  single file (`edit_file`) or run a regex substitution across many
+  (`search_replace`), but not the common middle case: change this exact text in
+  these five files. `edit_files` takes a list of `{path, old, new}` edits, checks
+  every one before writing anything, and if any edit fails - a path outside the
+  project, a missing file, text that does not match - it reports which one and
+  why and leaves every file exactly as it was. If a write fails partway through,
+  the files already written are restored from snapshots taken before the batch;
+  should that restore itself fail, the result says so rather than claiming a
+  clean rollback. Edits keep `edit_file`'s behaviour otherwise: first occurrence
+  only, matched exactly, with the closest-match hint on a miss and the post-write
+  syntax check on each file. It honours an active `--scope`, is undoable, and is
+  captured (not written to disk) in patch mode.
+- **The MCP server keeps several models loaded at once, like the HTTP server
+  already did.** `localm mcp` used to hold exactly one model: asking it for a
+  second unloaded the first, so alternating between two models reloaded them
+  every time. It now keeps both resident when a live free-VRAM reading shows
+  the second one fits (its estimated need plus a 1 GB headroom, and enough
+  room on every split device when a GPU split is configured), and only evicts
+  when it genuinely does not fit - least-recently-used first, never a model
+  that is currently generating. On a machine where free VRAM cannot be
+  measured, or where the reading is inconclusive, it stays single-resident
+  exactly as before rather than stacking models until the graphics driver runs
+  out. The HTTP server and the MCP server now share one implementation of this
+  decision, so they cannot drift apart. Shutting the server down frees every
+  model it still has loaded, and says so if one fails to free.
+- **Two optional knobs to decide model residency yourself**, for when you would
+  rather say "keep these loaded" than rely on free-VRAM arithmetic:
+  `localm config max_resident_models 2` caps how many models stay loaded at
+  once (1 restores strict single-resident), and
+  `localm config pinned_models a,b` protects named models from being evicted to
+  make room for another. Both are off by default, so nothing changes unless you
+  set them, and clearing either (`localm config max_resident_models ""`) goes
+  back to the automatic behavior.
+- **The coder can now keep a task list that outlives its own memory.** Two new
+  tools, `set_todos` and `read_todos`, let the model write down the plan for a
+  multi-step job ("[x] done", "[>] working on it", "[ ] not started"). The list
+  is kept outside the conversation, so it is not lost when a long session
+  compacts its history, and it is saved with the session so a paused job
+  resumes with its plan intact instead of starting over. In the GUI the tool
+  card shows progress and the current step at a glance. Privacy mode keeps the
+  list in memory only, like everything else about the session.
+- **The coder verifies its work by exit code in interactive sessions too, and
+  finds the check itself.** Judging a change by running a command and reading
+  its exit code - the harness runs it, not the model, so the model cannot talk
+  its way to "done" - used to happen only for a one-shot task with `--until`.
+  The REPL and the GUI coder now run the same check at the point the agent
+  would otherwise finish a turn that changed files. The command no longer has
+  to be typed: localm detects the project's obvious one (`cargo test`,
+  `go test ./...`, `npm test` when package.json actually defines a test script,
+  or pytest when the project has a pytest setup) and runs without one in a
+  project where no check can be found, rather than guessing. Override it with
+  `--verify COMMAND`, a `verify = "..."` key in `.localcoder/config.toml`, or
+  `/verify` mid-session; `--no-verify` / `/verify off` disables it. A failing
+  check is fed back for a fix (with the standing instruction not to edit the
+  check to force a pass); when the attempts run out the turn is reported as NOT
+  verified instead of as finished. Because a real check now runs, the older
+  "verify your work" nudge names that command instead of asking the model to
+  re-read its own edits. Sessions opened with a shared, scoped key never run a
+  verify command: they have no process execution at all, by design.
+- **`localm coder --seed N` for reproducible runs.** Pins the sampler's RNG so
+  the same seed, model, prompt and settings reproduce the same output, which is
+  what makes it possible to compare two harness or prompt changes without the
+  model's own randomness in the way. Measured bit-for-bit on one AMD gfx1030
+  box (bundled llama.cpp, Qwen2.5-Coder-7B Q6_K): 5/5
+  identical responses with a fixed seed at temperature 0.8, 5/5 different
+  without one, and identical again after a full model reload. Different
+  hardware, backends, llama.cpp builds and concurrent load were not measured,
+  so this is a measurement, not a cross-machine guarantee; `--anthropic`
+  ignores the flag and says so, because that API has no seed parameter. A
+  `seed = N` key in `.localcoder/config.toml` sets it per project.
+- **Multi-GPU split: each card's share is now sized automatically from its
+  free VRAM.** With "Split across GPUs" enabled and no manual
+  `gpu_split_ratios` pinned, localm no longer divides the model equally: at
+  load time it reads every split device's free VRAM and distributes the
+  model proportionally, so a card already half-occupied (another model,
+  another app) gets a half-sized share instead of an equal one that would
+  not fit. Loads that used to be refused with "Not enough VRAM on the
+  configured split device(s)" - because one busy card could not hold an
+  equal share even though the model fit the cards' combined free space -
+  now load with an adapted split; when even the combined space is short,
+  the load falls back to partial offload (some layers on CPU) instead of
+  refusing, matching single-GPU behavior. On the Vulkan runtime the
+  readings come from the runtime's own device registry, so the automatic
+  distribution works there too. Explicit `gpu_split_ratios` values are
+  honored exactly as before (pinning ratios opts out of the automatic
+  distribution), and when per-device free VRAM cannot be measured the
+  split falls back to the previous equal shares; the chosen distribution
+  is logged either way.
+
+### Changed
+- **Coder: `grep` is much faster on real repositories, and its limits are now
+  settings.** It streams files line by line instead of reading each one whole,
+  and it no longer reads what it cannot use: files under noise directories
+  (`.git`, `node_modules`, `__pycache__`, `.venv`, ...), binaries, and files
+  above a size cap are skipped before being read. On a 4103-file / 50.6 MB test
+  repository a default search went from 6.90s to 0.56s and from 123 MB to 5.7 MB
+  of peak memory. Every skip is reported in the result, with the reason and the
+  setting that changes it, so a narrower search never looks like a complete one;
+  searching a skipped directory on purpose still works by naming it in `path=`
+  or `glob=`. The matches-per-file cap (20), the output-line cap (300), and the
+  new file-size cap (4 MB) are now the `coder_grep_max_per_file`,
+  `coder_grep_max_output_lines`, and `coder_grep_max_file_bytes` settings, each
+  overridable per search; 0 means no cap. Line numbers now count line feeds
+  only, matching what an editor shows, so a file containing form feeds no longer
+  reports shifted numbers - in such a file `^`/`$` anchors now also treat only
+  line feeds as line boundaries.
+- **NVIDIA on Windows now recommends CUDA.** The setup menu's default backend for
+  an NVIDIA GPU on Windows is now `cuda` (peak performance) rather than Vulkan: it
+  fetches a self-contained CUDA runtime (no CUDA Toolkit needed) and falls back to
+  Vulkan automatically if your driver is too old. Vulkan is still one keypress
+  away in the menu, and stays the default for Intel GPUs and for NVIDIA/AMD on
+  Linux (where the CUDA build needs a system CUDA runtime).
+- **The coder's project memory and user instructions are now bounded.**
+  `LOCALCODER.md` (project memory) and `.localcoder/system.md` (user
+  instructions) are injected into the coder's system prompt on every turn, and
+  both were previously injected whole with no limit, so a file that grew over
+  time could crowd out the repo map and the conversation itself. Each is now
+  capped at 3000 characters, the same budget the repo map already uses. Normal
+  files are unaffected and injected verbatim. Going over is never silent: the
+  agent tells you which file was over budget and by how many characters, and the
+  prompt itself carries a note so the model knows it is reading a partial file.
+  The same cap applies to a `--system` string. A memory file that exists but
+  cannot be read is now also reported instead of silently ignored.
+- **Corrected the docs on who writes `LOCALCODER.md`.** The CLI docs described it
+  as auto-managed project memory that the agent appends to via `/remember` and
+  its own reflection. The agent has no tool that writes it: the file changes only
+  when you run `/remember` or `/forget` (or edit it yourself), and the agent's
+  close-time reflection is stored in the localm data directory, not in your repo.
+- **Loading a model could print a scary crash trace even though nothing was
+  wrong.** On some Windows + AMD setups, the VRAM check that runs right after a
+  model loads could collide with a native library already in memory and print a
+  full "Windows fatal exception" stack dump to the console. The load itself
+  always succeeded and this was already being caught safely, so nothing was
+  actually broken - but the trace looked like a crash. That check now recognizes
+  the setup ahead of time and skips it instead of triggering and catching it, so
+  the trace no longer appears.
+
 ### Fixed
+- **`localm doctor` no longer reports an installed-but-broken package as
+  simply "not installed", and no longer goes quiet about the breakage.**
+  Doctor shows each key dependency with its version, reading that version from
+  the installed package's metadata and falling back to the package's own
+  `__version__` when no metadata is present. For a package that resolves its
+  attributes lazily (transformers does), asking for `__version__` can itself
+  raise a missing-module error, and that error was indistinguishable from the
+  package failing to import at all. So a transformers that imported perfectly
+  well but was internally broken got listed as "not installed" - and because
+  the deeper "is the HF backend actually usable" check only runs when both
+  transformers and torch are present, it then skipped silently, saying nothing
+  about the fault it exists to report. A version that cannot be read is now
+  just a missing version number: the package is still reported as present, and
+  the usability check still runs and still names the real root cause.
 - **Picking CUDA on a machine `setup-llama` already knows is AMD (or another
   non-NVIDIA vendor) no longer offers only a generic "no NVIDIA driver
   detected" message with Vulkan as the sole fallback.** The vendor mismatch
@@ -349,226 +632,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for yourself. yarn is again deliberately left alone, and pytest, cargo and go
   were never affected.
 
-### Added
-- **The coder can hand a sub-task off and keep working instead of waiting.**
-  `spawn_agent` runs its sub-agent to completion before the coder does anything
-  else, so delegating a ten-turn job to a local model costs you all of that time
-  staring at a spinner. The new `spawn_agent_background` starts the sub-agent and
-  hands back a job id straight away; you keep working, and `check_agent_job` tells
-  you how it went. A finished sub-agent's result is also folded into the
-  conversation on its own at the start of a later turn, so you do not have to
-  remember to ask. Background sub-agents get the same isolation as parallel
-  dispatch - each works in its own git worktree on its own branch, its changes are
-  committed there and never merged into your working tree, and `/diff` points at
-  the branch rather than pretending the work is in your files. Two can run at
-  once (the same shared ceiling parallel dispatch uses); a third is refused with a
-  clear message naming the two already running, rather than quietly queued. The
-  new `/bg` command lists this session's background work, both shell commands and
-  sub-agents. Starting one asks for confirmation exactly like `spawn_agent` does,
-  and that one approval covers everything the sub-agent then does, because a
-  background sub-agent cannot come back and ask you mid-run - so in a session that
-  confirms at the terminal, localm refuses to start one rather than approving on
-  your behalf. A one-shot `localcoder "task"` run now warns you if it is about to
-  exit while a background sub-agent is still going, instead of dropping it
-  silently.
-- **The coder can run two sub-tasks at once, each in its own checkout.** A new
-  `dispatch_parallel` tool gives every child agent its own git worktree on its
-  own branch, so two children can work on the same files without interfering and
-  your working tree is never touched. Each child's work is committed to its
-  branch and its diff comes back for you to review; nothing is ever merged
-  automatically, because a local model resolving a merge conflict unsupervised is
-  not something to do behind your back. `/diff` and `/changes` gain a clearly
-  labelled "Delegated work (NOT in your working tree)" section naming the branch
-  that holds each change. Capped at two children at a time, shared across every
-  way the coder spawns them, matching what one GPU can actually keep resident.
-  When a child needs your approval to run something, the request queues up behind
-  any other child's and says WHICH child is asking - on the approval card in the
-  browser as well as at the terminal - so two children's requests can never be
-  mistaken for each other.
-  Note the isolation is real for file tools but best-effort for shell: a child
-  can still run a command that reaches outside its worktree.
-- **The sidebar shows the GPU split your loaded model actually got.** With a
-  multi-GPU split configured, the model status now shows each card's share
-  and how it was decided - for example "Split: GPU 0 33% · GPU 1 67% (by
-  free VRAM)", or "(pinned)" for manual ratios and "(equal)" when free VRAM
-  could not be measured. Single-GPU setups see no change.
-- **Scheduled knowledge re-sync: an indexed folder can now stay current on its
-  own.** Indexing a folder into a collection records the folder itself, not
-  just the files it happened to hold, so localm can re-walk it later.
-  `localm rag resync NAME` does that by hand, and a new `rag` job kind puts it
-  on a schedule -
-  `localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"`, or the
-  Jobs tab's new "rag" task. A run re-indexes incrementally (new files added,
-  changed files re-indexed, unchanged files skipped by content hash) and loads
-  no chat model. A document whose file has vanished is FLAGGED, not deleted:
-  its chunks stay searchable, the flag clears by itself if the file comes back,
-  and only `--prune-missing` actually removes it - so a moved file, an
-  unplugged drive, or a half-finished cloud sync can never silently delete part
-  of an index. A folder that is unreachable at run time is reported and skipped
-  whole, with nothing under it indexed, flagged, or pruned. Scheduled runs
-  apply the same allowed/denied folder policy as an interactive add, so a
-  folder that has since fallen outside it is skipped and reported rather than
-  indexed. There is still no filesystem watcher, deliberately: a watcher daemon
-  would break the self-contained design.
-- **Search the Settings page.** A box above the section nav filters every
-  group at once, matching a setting's label, its config key, or its help
-  text, so a setting can be found without knowing which of the seven
-  sections holds it. Matches keep their section heading, so it is still
-  clear what a setting belongs to, and the rows that have no config key
-  behind them (Main GPU, Split across GPUs, the logo style picker, the key
-  presets) are searchable by their own text. A control that is not
-  currently offered - the multi-GPU rows on a single-GPU machine, the keys
-  card for a non-owner key - is deliberately not findable. Clearing the box
-  restores the normal grouped view.
-- **The coder can run shell commands in the background.** `run_shell` waits for
-  the command to finish, so the agent could not start a dev server and then talk
-  to it, or run a long build while doing anything else. Three new tools fix
-  that: `run_shell_background` starts a command and returns a job id
-  immediately, `check_shell_job` reports whether it is still running (plus its
-  exit code and captured output once done), and `kill_shell_job` stops it. So
-  the coder can now start a server, curl it, and shut it down in one session.
-  Output is captured into a capped buffer, so a chatty process cannot grow
-  memory without limit; anything dropped is reported rather than presented as
-  the whole output. Stopping a job kills its entire process tree, so a build
-  that spawned children does not leave them running, and any job still running
-  is stopped when localm exits rather than being orphaned. Up to four
-  background commands run at once; asking for a fifth is refused with a clear
-  message instead of quietly queueing. Starting a background command is
-  arbitrary code execution and stopping one tears down a process tree, so both
-  ask for confirmation exactly like `run_shell` does and get the same privacy
-  handling; checking on a job only reads its status and output, so it does not
-  prompt (otherwise every poll of a long build would need approval). All three
-  are unavailable to shareable (restricted) coder sessions, and turning
-  `run_shell` off turns them off too.
-- **The coder's past lessons no longer expire by age alone, and nothing it
-  forgets is gone for good.** Episodic memory used to be a plain queue: at 200
-  stored lessons the oldest was discarded, however useful it was, with no
-  notice and no way back. Now a new lesson that merely restates one you already
-  have is merged into it (keeping both file lists and the better wording)
-  instead of being stored twice, and when the store is full the LEAST USEFUL
-  lesson goes rather than the oldest, so a hard-won "this is what went wrong
-  and why" survives a run of throwaway one-liners. Everything dropped is
-  archived first: `localcoder --episodes-archive` lists it and
-  `localcoder --restore-episode ID` puts it back. `localcoder --episodes` now
-  shows each lesson's id, and `--forget-episode ID` removes just that one
-  instead of wiping the project's whole history (`--forget-episodes` still
-  erases everything, archive included).
-- **You can see which past lessons the coder is acting on.** When a session
-  recalls lessons from earlier work, the GUI now says which ones it pulled in
-  and shows the id for each, and the same list is written to the session audit
-  log. A lesson that sends a run down the wrong path used to be invisible after
-  the fact; now you can see it and remove it by id.
-- **Optional: let the model merge related lessons into one**
-  (`localcoder --consolidate-episodes`). Strictly opt-in and manual - it never
-  runs on a timer or at session close - and it reports exactly what it merged.
-  The originals are archived, so any merge you dislike is reversible with
-  `--restore-episode`, and a group the model cannot summarize usefully is left
-  untouched rather than lost.
-- **Coder sub-agents can now be given a role, which narrows what they can
-  do.** `spawn_agent` takes an optional `role`: `reviewer` (read the code and
-  inspect git, change nothing), `researcher` (read-only investigation of the
-  project, no writes and no network), or `test-writer` (read, write tests, and
-  run them, but no shell and no commit or push). The role gives the sub-agent a
-  focused brief and, more importantly, actually takes the other tools away, so a
-  helper spawned to review a diff can no longer overwrite files, run shell
-  commands, or push. A role can only ever REMOVE capability: it is applied on
-  top of whatever the parent session already forbids, so it can never hand back
-  a tool you disabled, and it never lets a shared, restricted session regain
-  execution. Tools registered by MCP servers, plugins, and skills are excluded
-  from a role by default rather than inherited. Omitting `role` keeps the
-  previous behavior (the sub-agent gets the parent's full toolset).
-- **Coder: `edit_files` applies one exact-string edit across several files at
-  once, all-or-nothing.** The coder could already replace an exact snippet in a
-  single file (`edit_file`) or run a regex substitution across many
-  (`search_replace`), but not the common middle case: change this exact text in
-  these five files. `edit_files` takes a list of `{path, old, new}` edits, checks
-  every one before writing anything, and if any edit fails - a path outside the
-  project, a missing file, text that does not match - it reports which one and
-  why and leaves every file exactly as it was. If a write fails partway through,
-  the files already written are restored from snapshots taken before the batch;
-  should that restore itself fail, the result says so rather than claiming a
-  clean rollback. Edits keep `edit_file`'s behaviour otherwise: first occurrence
-  only, matched exactly, with the closest-match hint on a miss and the post-write
-  syntax check on each file. It honours an active `--scope`, is undoable, and is
-  captured (not written to disk) in patch mode.
-- **The MCP server keeps several models loaded at once, like the HTTP server
-  already did.** `localm mcp` used to hold exactly one model: asking it for a
-  second unloaded the first, so alternating between two models reloaded them
-  every time. It now keeps both resident when a live free-VRAM reading shows
-  the second one fits (its estimated need plus a 1 GB headroom, and enough
-  room on every split device when a GPU split is configured), and only evicts
-  when it genuinely does not fit - least-recently-used first, never a model
-  that is currently generating. On a machine where free VRAM cannot be
-  measured, or where the reading is inconclusive, it stays single-resident
-  exactly as before rather than stacking models until the graphics driver runs
-  out. The HTTP server and the MCP server now share one implementation of this
-  decision, so they cannot drift apart. Shutting the server down frees every
-  model it still has loaded, and says so if one fails to free.
-- **Two optional knobs to decide model residency yourself**, for when you would
-  rather say "keep these loaded" than rely on free-VRAM arithmetic:
-  `localm config max_resident_models 2` caps how many models stay loaded at
-  once (1 restores strict single-resident), and
-  `localm config pinned_models a,b` protects named models from being evicted to
-  make room for another. Both are off by default, so nothing changes unless you
-  set them, and clearing either (`localm config max_resident_models ""`) goes
-  back to the automatic behavior.
-- **The coder can now keep a task list that outlives its own memory.** Two new
-  tools, `set_todos` and `read_todos`, let the model write down the plan for a
-  multi-step job ("[x] done", "[>] working on it", "[ ] not started"). The list
-  is kept outside the conversation, so it is not lost when a long session
-  compacts its history, and it is saved with the session so a paused job
-  resumes with its plan intact instead of starting over. In the GUI the tool
-  card shows progress and the current step at a glance. Privacy mode keeps the
-  list in memory only, like everything else about the session.
-- **The coder verifies its work by exit code in interactive sessions too, and
-  finds the check itself.** Judging a change by running a command and reading
-  its exit code - the harness runs it, not the model, so the model cannot talk
-  its way to "done" - used to happen only for a one-shot task with `--until`.
-  The REPL and the GUI coder now run the same check at the point the agent
-  would otherwise finish a turn that changed files. The command no longer has
-  to be typed: localm detects the project's obvious one (`cargo test`,
-  `go test ./...`, `npm test` when package.json actually defines a test script,
-  or pytest when the project has a pytest setup) and runs without one in a
-  project where no check can be found, rather than guessing. Override it with
-  `--verify COMMAND`, a `verify = "..."` key in `.localcoder/config.toml`, or
-  `/verify` mid-session; `--no-verify` / `/verify off` disables it. A failing
-  check is fed back for a fix (with the standing instruction not to edit the
-  check to force a pass); when the attempts run out the turn is reported as NOT
-  verified instead of as finished. Because a real check now runs, the older
-  "verify your work" nudge names that command instead of asking the model to
-  re-read its own edits. Sessions opened with a shared, scoped key never run a
-  verify command: they have no process execution at all, by design.
-- **`localm coder --seed N` for reproducible runs.** Pins the sampler's RNG so
-  the same seed, model, prompt and settings reproduce the same output, which is
-  what makes it possible to compare two harness or prompt changes without the
-  model's own randomness in the way. Measured bit-for-bit on one AMD gfx1030
-  box (bundled llama.cpp, Qwen2.5-Coder-7B Q6_K): 5/5
-  identical responses with a fixed seed at temperature 0.8, 5/5 different
-  without one, and identical again after a full model reload. Different
-  hardware, backends, llama.cpp builds and concurrent load were not measured,
-  so this is a measurement, not a cross-machine guarantee; `--anthropic`
-  ignores the flag and says so, because that API has no seed parameter. A
-  `seed = N` key in `.localcoder/config.toml` sets it per project.
-- **Multi-GPU split: each card's share is now sized automatically from its
-  free VRAM.** With "Split across GPUs" enabled and no manual
-  `gpu_split_ratios` pinned, localm no longer divides the model equally: at
-  load time it reads every split device's free VRAM and distributes the
-  model proportionally, so a card already half-occupied (another model,
-  another app) gets a half-sized share instead of an equal one that would
-  not fit. Loads that used to be refused with "Not enough VRAM on the
-  configured split device(s)" - because one busy card could not hold an
-  equal share even though the model fit the cards' combined free space -
-  now load with an adapted split; when even the combined space is short,
-  the load falls back to partial offload (some layers on CPU) instead of
-  refusing, matching single-GPU behavior. On the Vulkan runtime the
-  readings come from the runtime's own device registry, so the automatic
-  distribution works there too. Explicit `gpu_split_ratios` values are
-  honored exactly as before (pinning ratios opts out of the automatic
-  distribution), and when per-device free VRAM cannot be measured the
-  split falls back to the previous equal shares; the chosen distribution
-  is logged either way.
-
-### Fixed
 - **The MCP server's `run_coder_task` and `run_doctor` now always act on the
   server's own install and data.** Their helper processes re-resolved the
   localm data directory (and even which localm code to run) from the working
@@ -730,54 +793,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   does. No plugin reads `window.modelCache` yet, so this had no visible symptom
   before now, but the fix covers every export with this pattern, not just this
   one.
-
-### Changed
-- **Coder: `grep` is much faster on real repositories, and its limits are now
-  settings.** It streams files line by line instead of reading each one whole,
-  and it no longer reads what it cannot use: files under noise directories
-  (`.git`, `node_modules`, `__pycache__`, `.venv`, ...), binaries, and files
-  above a size cap are skipped before being read. On a 4103-file / 50.6 MB test
-  repository a default search went from 6.90s to 0.56s and from 123 MB to 5.7 MB
-  of peak memory. Every skip is reported in the result, with the reason and the
-  setting that changes it, so a narrower search never looks like a complete one;
-  searching a skipped directory on purpose still works by naming it in `path=`
-  or `glob=`. The matches-per-file cap (20), the output-line cap (300), and the
-  new file-size cap (4 MB) are now the `coder_grep_max_per_file`,
-  `coder_grep_max_output_lines`, and `coder_grep_max_file_bytes` settings, each
-  overridable per search; 0 means no cap. Line numbers now count line feeds
-  only, matching what an editor shows, so a file containing form feeds no longer
-  reports shifted numbers - in such a file `^`/`$` anchors now also treat only
-  line feeds as line boundaries.
-- **NVIDIA on Windows now recommends CUDA.** The setup menu's default backend for
-  an NVIDIA GPU on Windows is now `cuda` (peak performance) rather than Vulkan: it
-  fetches a self-contained CUDA runtime (no CUDA Toolkit needed) and falls back to
-  Vulkan automatically if your driver is too old. Vulkan is still one keypress
-  away in the menu, and stays the default for Intel GPUs and for NVIDIA/AMD on
-  Linux (where the CUDA build needs a system CUDA runtime).
-- **The coder's project memory and user instructions are now bounded.**
-  `LOCALCODER.md` (project memory) and `.localcoder/system.md` (user
-  instructions) are injected into the coder's system prompt on every turn, and
-  both were previously injected whole with no limit, so a file that grew over
-  time could crowd out the repo map and the conversation itself. Each is now
-  capped at 3000 characters, the same budget the repo map already uses. Normal
-  files are unaffected and injected verbatim. Going over is never silent: the
-  agent tells you which file was over budget and by how many characters, and the
-  prompt itself carries a note so the model knows it is reading a partial file.
-  The same cap applies to a `--system` string. A memory file that exists but
-  cannot be read is now also reported instead of silently ignored.
-- **Corrected the docs on who writes `LOCALCODER.md`.** The CLI docs described it
-  as auto-managed project memory that the agent appends to via `/remember` and
-  its own reflection. The agent has no tool that writes it: the file changes only
-  when you run `/remember` or `/forget` (or edit it yourself), and the agent's
-  close-time reflection is stored in the localm data directory, not in your repo.
-- **Loading a model could print a scary crash trace even though nothing was
-  wrong.** On some Windows + AMD setups, the VRAM check that runs right after a
-  model loads could collide with a native library already in memory and print a
-  full "Windows fatal exception" stack dump to the console. The load itself
-  always succeeded and this was already being caught safely, so nothing was
-  actually broken - but the trace looked like a crash. That check now recognizes
-  the setup ahead of time and skips it instead of triggering and catching it, so
-  the trace no longer appears.
 
 ### Security
 - **A scoped "settings" key can no longer change plugin settings the plugin's own
@@ -2141,7 +2156,8 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Matlan1/localm/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Matlan1/localm/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Matlan1/localm/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Matlan1/localm/releases/tag/v0.1.0
