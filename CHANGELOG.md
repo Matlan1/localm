@@ -12,6 +12,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **A blocked or corrupted `setup-llama` download now says specifically what
+  went wrong, instead of naming every possible cause at once.** A downloaded
+  runtime archive that turns out too small or not a valid archive used to get
+  one generic hedge ("almost certainly an error page or a truncated
+  transfer") regardless of which of those it actually was. Confirmed live: a
+  corporate network's content filter substituted a small HTML page for a real
+  32 MB archive, and there was no way to tell that apart from a merely flaky
+  connection from the message alone. The downloaded bytes are now inspected
+  directly (does it look like a webpage, a JSON/XML error response, or a real
+  archive that was simply cut short?) together with the response's actual
+  Content-Type, Content-Length, and final URL after redirects, and the error
+  names the specific, evidence-backed cause - or says plainly that the cause
+  is not clear, rather than guessing. `setup-llama` also now suggests the
+  existing `--from`/`--url` escape hatches when an explicitly-chosen vulkan or
+  cpu backend fails to provision, which it previously did not mention at all.
 - **The coder's file edits no longer fail just because a snippet's whitespace
   differs from the file.** The `edit_file` and `edit_files` tools matched the
   text to replace byte for byte, so when the model reconstructed a snippet with
