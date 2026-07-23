@@ -26,6 +26,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Each running server now gets its own marker, and a marker is only ever
   treated as evidence of a crash once the process id it recorded is confirmed
   to no longer be running.
+- **A chat send that fails before any reply text arrives no longer vanishes
+  without a trace.** When the very first request of a send failed - a 400
+  because no model was selected, a dropped connection, anything before the
+  first streamed token - the error was rendered into the chat, but a guard
+  written for a narrower case (a vision-only model rejecting an attached
+  image) treated any reply with no content as that same case and immediately
+  redrew the chat pane from saved history, which had never seen the failed
+  turn. The rendered error was wiped a moment later, leaving only a toast that
+  disappears after a few seconds - so a real failure could look like the
+  message went nowhere. The error now stays on screen; the vision-reject
+  recovery (drop the image, keep chatting) is unchanged. Separately, the chat
+  request now falls back to the model actually loaded if the model dropdown is
+  ever empty or out of sync, instead of sending a blank model name and letting
+  the server reject it.
 - **A sub-task the coder gave up on can no longer report back that it succeeded.**
   When `dispatch_parallel` runs sub-tasks side by side and one of them overruns the
   time budget, that sub-task is abandoned - it cannot be stopped, only left to run
