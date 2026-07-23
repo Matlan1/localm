@@ -234,6 +234,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a runner that does not know the option can stop outright rather than ignore it
   (`node --test` exits with "bad option"). On Windows none of this was visible
   until the previous fix, because the command could not start at all.
+- **Extra arguments you give the coder's test tool now reach an npm project's
+  runner too.** Asking it to run the tests with an option of your own - a
+  `--watch`, a `--reporter`, a `-t` filter - appended that option to `npm test`,
+  where npm read it as one of its own settings and dropped it before your `test`
+  script ran. The coder then ran a plain, unfiltered suite and reported it as the
+  run that was asked for, with nothing to say the option had been discarded. Such
+  arguments now go through the same `--` separator, so they arrive. This is the
+  npm behaviour behind the fix above, on the other path into the tool: that one
+  covered the flag the coder adds for you, this one covers the arguments you ask
+  for yourself. yarn is again deliberately left alone, and pytest, cargo and go
+  were never affected.
 
 ### Added
 - **The coder can hand a sub-task off and keep working instead of waiting.**
