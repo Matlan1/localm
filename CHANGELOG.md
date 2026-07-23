@@ -699,6 +699,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   one that sent it. The grammar is now checked in Python first, before any of it
   reaches the native parser, and an oversized or pathologically nested grammar is
   now rejected with an ordinary 400 error instead of being able to crash anything.
+- **A scoped "settings" key can no longer widen which browser origins may call
+  the API.** The CORS-origins setting was treated as an ordinary setting, like
+  chat temperature, so a key you had created with settings-write but
+  deliberately WITHOUT owner rights could set it to allow any origin. That
+  mattered beyond CORS itself: allowing every origin also opts two
+  unauthenticated diagnostic endpoints, /whoami and /debug/stacks, out of their
+  own cross-origin refusal, and /whoami's root_dir field is an absolute path
+  that names the account localm runs under. The CORS-origins setting is now
+  owner-only to change, the same treatment the folder-indexing,
+  private-network, and bug-report settings already had. A default install was
+  not exposed: this needed a key you had minted yourself with settings-write
+  but not owner rights, and no key preset localm ships grants that
+  combination.
 
 ## [0.1.2] - 2026-07-18
 

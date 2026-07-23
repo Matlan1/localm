@@ -258,10 +258,17 @@ CORE_FIELDS: list = [
                  "Port the API/GUI server binds to (default 8642); auto-bumps to "
                  "the next free port if busy.",
                  group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
+    # admin_only: this names WHICH BROWSER ORIGINS may call the authenticated
+    # API - it widens a trust boundary exactly like net_allow_private (network
+    # reach) and the rag_* keys (filesystem reach) do. "*" additionally opts the
+    # sensitive unauthenticated GETs in _CROSS_ORIGIN_GET_REFUSED (/whoami,
+    # /debug/stacks - see http_server.py) out of their cross-origin refusal, so a
+    # non-owner config:write key setting this could disclose root_dir (the OS
+    # username) to any website. See routes/config.py admin_only gate.
     SettingField("cors_origins", Widget.TEXT, "CORS origins",
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
-                 group="Server", applies=Applies.RESTART),
+                 group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("mdns_name", Widget.TEXT, "Network name (mDNS)",
                  "The name other devices use to reach this server on your LAN. "
                  "Sets <name>.local (e.g. localm -> https://localm.local:PORT), so "
