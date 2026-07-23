@@ -413,7 +413,36 @@ class VramSizingMixin:
         Driver-level numbers (mem_get_info), NOT torch allocator counters:
         llama.dll allocates through HIP/CUDA directly, so
         torch.cuda.memory_allocated() reads zero for GGUF loads no matter
-        how much VRAM the model actually occupies."""
+        how much VRAM the model actually occupies.
+
+        Skips the torch attempt entirely once ``_loader.native_lib_loaded()``
+        is True - the SAME precondition and SAME blanket guard
+        ``_free_total_vram_bytes`` above uses for the identical DLL-identity
+        conflict (see its docstring for the full root cause): once llama.cpp's
+        own native runtime is loaded in this process, a later ``import torch``
+        on this project's Windows + AMD ROCm build reliably hits
+        STATUS_ENTRYPOINT_NOT_FOUND, and Python evicts the faulted module on
+        every attempt, so an unguarded caller re-triggers - and re-prints a
+        "Windows fatal exception" faulthandler trace to stderr - on every
+        single call (reproduced live via a real_gguf-marked test that loads a
+        native GGUF backend before a later call reaches this method in the
+        same process, e.g. test_grammar_sampling.py). This return value has no
+        lossless fallback of its own to protect (the caller only uses it for a
+        cosmetic before/after log line - see gguf.py's ``_load_native``), so a
+        blanket skip on the same proven precondition costs nothing - exactly
+        the trade-off ``_free_total_vram_bytes`` already made. Contrast
+        ``discover._torch_gpu_probe_known_doomed``'s narrower combo, needed
+        THERE because its fallback (nvidia-smi) cannot see AMD devices."""
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            from localm.debuglog import logger as _dbg
+            _dbg.debug(
+                "_vram_levels: skipping the torch VRAM read - llama.cpp's "
+                "native runtime is already loaded in this process, so `import "
+                "torch` here is the known-doomed DLL-identity conflict (see "
+                "VramSizingMixin._free_total_vram_bytes's docstring); "
+                "returning [] (display-only, no load decision reads this)")
+            return []
         try:
             import torch
             if torch.cuda.is_available():
