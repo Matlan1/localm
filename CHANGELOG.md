@@ -281,6 +281,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the trace no longer appears.
 
 ### Fixed
+- **The live VRAM meter in the status bar now shows used/total on a GGUF-only
+  install, instead of only the card's total.** On a build without the optional
+  torch backend, nothing could enumerate the GPU for the status readout (torch
+  is absent, and the `nvidia-smi` fallback sees only NVIDIA cards), so the meter
+  fell back to the display driver's registry entry, which reports total VRAM but
+  no live usage, and showed a bare "VRAM 16.0 GB". It now recovers a
+  whole-board free figure from the GPU's own usage counter (AMD's ADL, with the
+  operating system's per-adapter WDDM counter as a vendor-neutral fallback), so
+  the meter shows live "VRAM X / 16.0 GB". The recovery only applies when the
+  pairing is unambiguous (a single AMD adapter for an AMD card, or a single
+  reporting adapter instance); a multi-GPU or unrecognised box keeps the
+  total-only reading rather than risk attributing the wrong adapter's usage, and
+  a probe that is still warming up or has timed out is left untouched so a
+  pre-load fit check never acts on a number the driver had not settled.
 - **`localm doctor` no longer reports an installed-but-broken package as
   simply "not installed", and no longer goes quiet about the breakage.**
   Doctor shows each key dependency with its version, reading that version from

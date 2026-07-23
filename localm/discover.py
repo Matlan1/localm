@@ -1689,6 +1689,7 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
         try:
             import winreg
             best = 0
+            best_desc = ""
             base = (r"SYSTEM\CurrentControlSet\Control\Class"
                     r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as root:
@@ -1707,6 +1708,15 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
                                 key, "HardwareInformation.qwMemorySize")
                             if isinstance(val, int) and val > best:
                                 best = val   # largest adapter wins (skip iGPU)
+                                # The adapter's human name lives in the SAME key; it
+                                # is what lets the device-global lookup below authorise
+                                # an AMD single-adapter pairing by vendor (see
+                                # gpu_usage._gpu_is_amd). Absent on odd drivers -> "".
+                                try:
+                                    desc, _dt = winreg.QueryValueEx(key, "DriverDesc")
+                                    best_desc = str(desc or "")
+                                except OSError:
+                                    best_desc = ""
                     except OSError as e:
                         # Unexpected (vs the EnumKey end-of-list break above):
                         # access denied or a removed key. Surface under --debug
@@ -1716,7 +1726,42 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
                                      sub, e)
                         continue
             if best:
-                return _ret({"total": int(best)})
+                out = {"total": int(best)}
+                # The registry gives total but NO free. Torch-less builds land here
+                # for EVERY VRAM query (list_gpus() is empty - no torch to enumerate,
+                # and nvidia-smi is NVIDIA-only), so without this the meter and every
+                # fit/admission gate see total-only forever on a GGUF-only install.
+                # Recover a DEVICE-GLOBAL free from the ADL/PDH usage source, which
+                # works torch-less and in-process (ADL for AMD, PDH's WDDM counter as
+                # the vendor-neutral fallback - the same source _apply_device_global_free
+                # uses). It maps ONLY when unambiguous (exactly one AMD adapter for an
+                # AMD-named GPU, or exactly one WDDM instance); a non-AMD or multi-
+                # adapter box declines and we keep total-only rather than guess a
+                # pairing. The synthetic index 0 never feeds GPU SELECTION (this tier
+                # is single-adapter by design, see the docstring) - it only carries the
+                # name so the AMD pairing can be authorised.
+                #
+                # ONLY when the probe COMPLETED empty (torch-less: it returns [] fast,
+                # status OK) - never when it TIMED OUT or was BUSY. A timeout means the
+                # driver is wedged/cold and the box is unmeasurable; the pre-load gate
+                # deliberately treats that as "skip the VRAM check", and surfacing an
+                # independent ADL number there would silently turn a skipped gate into
+                # an enforcing one (and could act on a reading taken while the driver
+                # is in a bad state). status is None only when the caller did not ask
+                # for it (return_status=False fit-badges), which never gate on timeout.
+                if status not in (GPU_PROBE_TIMEOUT, GPU_PROBE_BUSY):
+                    try:
+                        from localm import gpu_usage
+                        entry = {"index": 0, "name": best_desc, "total": int(best)}
+                        u = gpu_usage.device_global_used_bytes([entry]).get(0)
+                        if u is not None:
+                            out["free"] = max(0, min(int(best), int(best) - int(u)))
+                            out["free_scope"] = FREE_SCOPE_DEVICE
+                    except Exception as e:
+                        # Best-effort enrichment: total-only is the honest fallback, so
+                        # a failed lookup degrades to it rather than losing the total.
+                        logger.debug("vram_info: device-global free lookup failed: %s", e)
+                return _ret(out)
         except Exception:
             pass
     return _ret({})
