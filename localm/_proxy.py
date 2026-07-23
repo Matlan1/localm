@@ -21,14 +21,12 @@ def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
     import urllib.error
     import urllib.request
 
-    from localm.http_ssl import client_ssl_context
+    from localm.http_ssl import verified_urlopen
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        # Verify against certifi, not the OS cert store: a fresh Windows box whose
-        # ROOT store has not cached the proxy/CDN CA chain otherwise fails every
-        # call with CERTIFICATE_VERIFY_FAILED (see localm/http_ssl.py).
-        with urllib.request.urlopen(req, timeout=timeout,
-                                    context=client_ssl_context()) as resp:
+        # verified_urlopen (see localm/http_ssl.py) - native cert store first,
+        # certifi as fallback.
+        with verified_urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         detail = b""

@@ -57,7 +57,7 @@ from rich.console import Console
 
 from localm import config
 from localm.debuglog import logger
-from localm.http_ssl import client_ssl_context
+from localm.http_ssl import verified_urlopen
 
 console = Console(highlight=False)
 
@@ -341,7 +341,7 @@ def _latest_tag() -> str:
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
-        with urllib.request.urlopen(req, timeout=10, context=client_ssl_context()) as r:
+        with verified_urlopen(req, timeout=10) as r:
             releases = json.loads(r.read().decode("utf-8"))
         for rel in releases:
             if rel.get("draft") or rel.get("prerelease"):
@@ -455,14 +455,12 @@ def _download(url: str, dest: Path) -> None:
     prev_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(_DOWNLOAD_STALL_TIMEOUT)
     try:
-        # certifi-verified so the download does not depend on the machine's OS
-        # cert store (see localm/http_ssl.py). urlopen follows the GitHub -> release-CDN
-        # 302 over HTTPS and the context applies to that hop too. Stream in chunks
-        # so a multi-hundred-MB archive is never held in memory; the default
-        # socket timeout is the between-reads stall deadline (not a total cap).
+        # verified_urlopen (see localm/http_ssl.py) follows the GitHub -> release-CDN
+        # 302 over HTTPS and verifies both hops. Stream in chunks so a multi-hundred-MB
+        # archive is never held in memory; the default socket timeout is the
+        # between-reads stall deadline (not a total cap).
         req = urllib.request.Request(url, headers={"User-Agent": "localm-setup-llama"})
-        with urllib.request.urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT,
-                                    context=client_ssl_context()) as r, open(dest, "wb") as f:
+        with verified_urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT) as r, open(dest, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
             nread = 0
             while True:
@@ -797,7 +795,7 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
-        with urllib.request.urlopen(req, timeout=10, context=client_ssl_context()) as r:
+        with verified_urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
             return data.get("assets", [])
     except Exception as e:
