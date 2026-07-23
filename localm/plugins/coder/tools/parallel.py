@@ -239,7 +239,31 @@ def _safe_label(raw: str) -> str:
 
 
 class _ChildOutcome:
-    """What happened to one dispatched child, for the review report."""
+    """What happened to one dispatched child, for the review report.
+
+    SHARED BETWEEN TWO THREADS, so the writes are synchronised rather than left to
+    luck. A child that outlives the batch deadline is ABANDONED, not stopped - a
+    Python thread cannot be killed - so its worker is still running, and still
+    holds a reference to this object, while the parent reports on it and tears the
+    batch down. Two rules make that safe:
+
+    * The PARENT's terminal verdict is authoritative and one-way. ``seal()``
+      records it and locks the object; no later worker write can move the status
+      off it. Without this a child abandoned at the deadline could write
+      ``status = "ok"`` a moment later and the parent would then read its own
+      timeout back as a success - rendering ``[ok]``, returning ``ok=True``,
+      recording an ``ok`` change-set, and committing and removing a worktree a live
+      thread is still writing into.
+    * A WORKER publishes through ``publish()`` only, which writes every field under
+      one lock acquisition. Atomic on purpose: the fields are read together, so a
+      parent must never see ``status="ok"`` next to the ``turns=0`` of a child that
+      had not finished.
+
+    A refused publish is a real event and is REPORTED (``late_note``), never
+    silently dropped: the child did finish, just too late to be used, and the
+    files it wrote are sitting uncommitted in a worktree we deliberately left in
+    place. Saying so is what lets the operator find them.
+    """
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -258,6 +282,49 @@ class _ChildOutcome:
         self.cleanup_warning = ""
         self.model = ""          # the model this child ACTUALLY ran on
         self.file_count = 0      # files this child changed, for the /diff footer
+        # What an abandoned worker tried to report after the parent had already
+        # given up on it. Rendered in the report; see the class docstring.
+        self.late_note = ""
+        self._lock = threading.Lock()
+        self._sealed = False
+        self._sealed_at = 0.0
+
+    def seal(self, status: str, detail: str) -> None:
+        """Record the PARENT's terminal verdict and lock out later worker writes.
+
+        Parent thread only. After this the status is final: a worker that finishes
+        afterwards can no longer change what was reported.
+        """
+        with self._lock:
+            self._sealed = True
+            self._sealed_at = time.monotonic()
+            self.status = status
+            self.detail = detail
+
+    def publish(self, **fields) -> bool:
+        """Publish a WORKER's fields atomically. Worker thread only.
+
+        Returns False - having written NOTHING - when the parent has already
+        sealed a verdict for this child, and records the refusal for the report.
+        """
+        with self._lock:
+            if self._sealed:
+                self.late_note = self._describe_late_locked(fields)
+                return False
+            for key, value in fields.items():
+                setattr(self, key, value)
+            return True
+
+    def _describe_late_locked(self, fields: dict) -> str:
+        """Word a refused publish. Caller holds the lock."""
+        late = time.monotonic() - self._sealed_at
+        verdict = fields.get("status") or "a result"
+        return (
+            f"this child kept running and finished {late:.1f}s AFTER the batch was "
+            f"given up on, reporting '{verdict}'. That result arrived too late to "
+            f"be used, so the '{self.status}' above stands. Anything it wrote is "
+            "uncommitted in its worktree; re-run the task if you need the result."
+        )
 
 
 def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
@@ -268,10 +335,18 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     the repo and so may be a subdirectory of the worktree root rather than the root
     itself. ``outcome.worktree`` remains the root, which is what gets committed,
     diffed, and removed.
+
+    Runs on a pool worker, so every write to *outcome* goes through
+    ``publish()`` - never a bare attribute assignment. This thread can outlive the
+    parent's wait (an abandoned child cannot be killed, only left), and a bare
+    assignment from here would overwrite the parent's own verdict. ``detail`` is
+    accumulated in a LOCAL string rather than read back off the shared object, so
+    there is no read-modify-write across the two threads either.
     """
     from ..agent import Agent
     from .agents import inherited_child_kwargs
 
+    detail = ""
     backend = parent.backend
     model = spec.get("model")
     if model and model != getattr(backend, "model_id", None):
@@ -287,11 +362,14 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         try:
             backend = make_localm_backend(model, port=port)
         except Exception as exc:
-            outcome.detail = (f"requested model '{model}' unavailable ({exc}); "
-                              "ran on the parent's model instead")
+            detail = (f"requested model '{model}' unavailable ({exc}); "
+                      "ran on the parent's model instead")
             backend = parent.backend
 
-    outcome.model = getattr(backend, "model_id", "") or ""
+    # Published before the run so an abandoned child still reports which model it
+    # was on. The deadline cannot realistically have passed this early, and if it
+    # somehow has, publish() refuses rather than writing over the verdict.
+    outcome.publish(model=getattr(backend, "model_id", "") or "", detail=detail)
 
     # One shared constructor for every child agent, so this path and spawn_agent
     # cannot drift apart on a safety property. scope is INHERITED, not set to the
@@ -316,7 +394,10 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     child.worktree_branch = branch
 
     result_text = child.run_task(spec["task"])
-    outcome.turns = getattr(child, "turns", 0)
+    if result_text:
+        from ..provenance import neutralise
+        summary = neutralise(str(result_text))
+        detail = (detail + "\n" if detail else "") + summary
     # ASK THE CHILD whether it succeeded. run_task RETURNS its failure message
     # rather than raising (a child that hit max_turns or tripped the circuit
     # breaker comes back normally), so "we got here without an exception" is not
@@ -324,17 +405,22 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     # every machine consumer: the report, the ToolResult, the /diff delegated
     # footer, the parent's own last_run_ok, the --ci exit code and the episodic
     # outcome, so no failure lesson was ever stored.
-    outcome.status = "ok" if getattr(child, "last_run_ok", True) else "error"
-    # The child's error trace is worth keeping even though its CHANGED FILES are
-    # not: errors carry no path, so they stay valid in the parent, while file keys
-    # would resolve against the parent's cwd and fabricate or lose a diff. Same
-    # split the background path makes. Stashed here, folded in on the parent's own
-    # thread once the wait is over, so a worker never mutates parent state.
-    outcome.errors = list(getattr(child, "_error_trace", None) or [])
-    if result_text:
-        from ..provenance import neutralise
-        summary = neutralise(str(result_text))
-        outcome.detail = (outcome.detail + "\n" if outcome.detail else "") + summary
+    #
+    # ONE publish for the whole verdict, so the parent can never read a status
+    # next to the turns/errors/detail of a child that had not finished yet. It is
+    # refused outright if the parent already gave up on this child - see
+    # _ChildOutcome. The child's error trace is worth keeping even though its
+    # CHANGED FILES are not: errors carry no path, so they stay valid in the
+    # parent, while file keys would resolve against the parent's cwd and fabricate
+    # or lose a diff. Same split the background path makes. Stashed here, folded
+    # in on the parent's own thread once the wait is over, so a worker never
+    # mutates parent state.
+    outcome.publish(
+        turns=getattr(child, "turns", 0),
+        status="ok" if getattr(child, "last_run_ok", True) else "error",
+        errors=list(getattr(child, "_error_trace", None) or []),
+        detail=detail,
+    )
 
 
 def tool_dispatch_parallel(
@@ -495,8 +581,13 @@ def tool_dispatch_parallel(
             branch = f"coder/{label}-{run_id}"
             out, ok = git_worktree_add(repo, worktree, branch, base_sha)
             if not ok:
-                outcome.status = "error"
-                outcome.detail = f"could not create an isolated worktree: {out}"
+                # Sealed like every other parent verdict. No worker exists for this
+                # child (it is dropped from `runnable` below and never submitted),
+                # so there is nothing to lock out today; sealing uniformly is what
+                # keeps "the parent's verdict is final" true of the whole class
+                # rather than of three call sites somebody has to remember.
+                outcome.seal("error",
+                             f"could not create an isolated worktree: {out}")
                 continue
             outcome.branch = branch
             outcome.worktree = str(worktree)
@@ -543,27 +634,34 @@ def tool_dispatch_parallel(
                     # skip a worktree that nothing was holding, leaking it and its
                     # branch to disk with no reaper.
                     if fut.cancel():
-                        outcome.status = "not_started"
-                        outcome.detail = (
+                        outcome.seal("not_started", (
                             f"never started: the batch's {timeout_s}s budget was "
                             "already spent by the other child(ren) before a slot "
                             "freed up. It ran no turns and changed nothing. Re-run "
                             "it on its own, or raise timeout_s."
-                        )
+                        ))
                     else:
                         # Running, and a thread cannot be killed, only abandoned. It
                         # writes into its OWN worktree, so an abandoned child
                         # corrupts only its own checkout - what the isolation buys.
-                        outcome.status = "timeout"
-                        outcome.detail = (
+                        #
+                        # SEALED, not assigned: cancel() returning False is positive
+                        # proof that worker is still alive and still holding this
+                        # object, so a bare assignment here is exactly the write it
+                        # can overwrite a moment later - handing the model a
+                        # delegated job that reads [ok] after the parent gave up on
+                        # it, and sending the teardown to commit and remove a
+                        # worktree that thread is still writing into.
+                        outcome.seal("timeout", (
                             f"exceeded the {timeout_s}s batch budget and was "
                             "abandoned. Its worktree is still held by the running "
                             "thread, so it was left in place rather than "
                             "force-removed."
-                        )
+                        ))
                 except Exception as exc:
-                    outcome.status = "error"
-                    outcome.detail = f"{type(exc).__name__}: {exc}"
+                    # The future raised, so its worker has stopped - but seal for
+                    # the same reason: the parent's verdict is the one reported.
+                    outcome.seal("error", f"{type(exc).__name__}: {exc}")
         finally:
             pool.shutdown(wait=False)
 
@@ -737,6 +835,11 @@ def _render_report(outcomes: list[_ChildOutcome], repo: Path) -> str:
             lines.append(o.detail.strip())
         if o.cleanup_warning:
             lines.append(f"WARNING: {o.cleanup_warning}")
+        # A worker that finished after the parent gave up. Its result was refused
+        # (the sealed verdict above is what stands), but refusing it silently would
+        # hide both that the work exists and where it is.
+        if o.late_note:
+            lines.append(f"NOTE: {o.late_note}")
         if o.diff:
             lines.append("")
             lines.append(o.diff.strip())

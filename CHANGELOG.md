@@ -12,6 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **A sub-task the coder gave up on can no longer report back that it succeeded.**
+  When `dispatch_parallel` runs sub-tasks side by side and one of them overruns the
+  time budget, that sub-task is abandoned - it cannot be stopped, only left to run
+  on. It was still able to write its own result afterwards, on top of the verdict
+  already recorded for it, so a sub-task that had been given up on could be listed
+  as `[ok]` moments later: counted as finished, offered for you to merge, and
+  reported as a success to the model that delegated it. The overrun verdict is now
+  final, and a late result is refused rather than applied. Nothing is hidden by
+  that refusal - the report says the sub-task did eventually finish, how long after
+  the deadline, and that whatever it wrote is sitting uncommitted in the working
+  copy left behind for it, so you can still go and look. A sub-task that finishes
+  within its budget is unaffected and still reports normally.
 - **The coder no longer looks a file up in order to refuse it.** With a `--scope`
   set, the check that confines the file tools had the same habit as the shell
   warning below. When a model asked to read or write an absolute path that was
