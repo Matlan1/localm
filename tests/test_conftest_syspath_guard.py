@@ -133,16 +133,16 @@ class TestTheMatcher:
     @pytest.fixture
     def rx(self):
         return _real_conftest_module()._syspath_regex(
-            ["c:/pretend", "/etc", "/boot"])
+            ["z:/pretend", "/etc", "/boot"])
 
     @pytest.mark.parametrize("path,expected", [
-        ("c:/pretend", True),
-        ("c:/pretend/sub/x.cfg", True),
-        ("C:\\Pretend\\sub", True),          # backslashes normalise
-        ("C:/PRETEND/x", True),              # and case folds
+        ("z:/pretend", True),
+        ("z:/pretend/sub/x.cfg", True),
+        ("Z:\\Pretend\\sub", True),          # backslashes normalise
+        ("Z:/PRETEND/x", True),              # and case folds
         ("/etc", True),
         ("/etc/sub/x.conf", True),
-        ("c:/pretendtoo/x", False),          # segment boundary, not raw prefix
+        ("z:/pretendtoo/x", False),          # segment boundary, not raw prefix
         ("/etcetera/x", False),
         ("etc/x", False),                    # relative lookalike
         ("d:/projects/localm/x.py", False),

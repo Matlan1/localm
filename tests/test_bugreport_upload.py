@@ -95,7 +95,7 @@ def test_upload_report_scrubs_home_path_in_title():
         return 201, '{"url": "https://github.com/x/localm/issues/1"}'
 
     bugreport.upload_report(
-        r"froze at C:\Users\bob\localm\gui", "## body\nno secrets here",
+        r"froze at Z:\Users\bob\localm\gui", "## body\nno secrets here",
         url="https://proxy.example/file", token="tok", opener=opener)
     assert "bob" not in seen["payload"]["title"]
     assert "<redacted>" in seen["payload"]["title"]
@@ -334,7 +334,7 @@ def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     # The home path is on the FIRST line so it also flows into the derived title.
-    desc = (r"Upload broke when I ran C:\Users\bob\localm\gui\index.html"
+    desc = (r"Upload broke when I ran Z:\Users\bob\localm\gui\index.html"
             "\nClicked send five times, nothing happened.")
     r = _post(create_app(_engine()), {"description": desc, "upload": True})
     assert r.status_code == 200, r.text

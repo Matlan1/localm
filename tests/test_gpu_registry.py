@@ -325,12 +325,12 @@ def _make_unfittable_engine(name):
 @pytest.fixture
 def multi_model_registry(monkeypatch):
     fake_registry = {
-        "model-a": {"path": "C:/models/model-a.gguf", "source": "local"},
-        "model-b": {"path": "C:/models/model-b.gguf", "source": "local"},
+        "model-a": {"path": "Z:/models/model-a.gguf", "source": "local"},
+        "model-b": {"path": "Z:/models/model-b.gguf", "source": "local"},
     }
     monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
     monkeypatch.setattr("localm.model_manager.get_model_info",
-                        lambda name: (f"C:/models/{name}.gguf", "hint"))
+                        lambda name: (f"Z:/models/{name}.gguf", "hint"))
     hs._engines.clear()
     hs._engines_lru.clear()
     hs._inference_sems.clear()

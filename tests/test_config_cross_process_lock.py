@@ -111,7 +111,7 @@ def test_update_registry_survives_a_real_concurrent_process(home):
     """Two SEPARATE OS processes both calling update_registry() concurrently
     (e.g. two `localm pull` invocations, or a pull racing the GUI) must not
     lose either process's registered model entry."""
-    cfg.save_registry({"seed": {"path": "C:/seed.gguf"}})
+    cfg.save_registry({"seed": {"path": "Z:/seed.gguf"}})
     _spawn_two_writers(cfg.HOME_DIR, "update_registry", "model-a", "model-b")
     final = json.loads(cfg.REGISTRY_FILE.read_text(encoding="utf-8"))
     assert final.get("model-a") == "writer-a"

@@ -82,7 +82,7 @@ def test_detect_win_vendor_priority_order(monkeypatch):
 
 def test_detect_win_nvidia_smi_on_path_counts(monkeypatch):
     # No GPU name, but nvidia-smi present -> nvidia detected.
-    _win(monkeypatch, "", which=lambda n: "C:/x/nvidia-smi.exe" if n == "nvidia-smi" else None)
+    _win(monkeypatch, "", which=lambda n: "Z:/x/nvidia-smi.exe" if n == "nvidia-smi" else None)
     assert hwdetect.detect().vendors == ["nvidia"]
 
 

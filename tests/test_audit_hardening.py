@@ -87,7 +87,7 @@ def test_traversal_member_is_refused(tmp_path, evil_name):
 
 def test_drive_letter_member_is_refused(tmp_path):
     tar = tmp_path / "evil.tar"
-    _write_tar(tar, files=[("C:\\windows\\evil.dll", b"pwn")])
+    _write_tar(tar, files=[("Z:\\windows\\evil.dll", b"pwn")])
     dest = tmp_path / "out"
     dest.mkdir()
     with pytest.raises(ArtifactError):

@@ -86,7 +86,7 @@ test("upload parses the file and POSTs the workflow JSON", async () => {
   const wf = { "3": { class_type: "KSampler", inputs: {} } };
   const fakeInput = {
     files: [{ name: "my.json", text: async () => JSON.stringify(wf) }],
-    value: "C:/fake/my.json",
+    value: "Z:/fake/my.json",
   };
   await win._uploadWorkflow("image", fakeInput);
   await drain();

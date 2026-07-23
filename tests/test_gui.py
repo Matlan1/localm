@@ -407,8 +407,8 @@ def gui_app(tmp_path):
 
 
 _FAKE_REGISTRY = {
-    "model-a": {"path": "C:/nonexistent/a.gguf", "source": "local"},
-    "model-b": {"path": "C:/nonexistent/b.gguf", "source": "hf"},
+    "model-a": {"path": "Z:/nonexistent/a.gguf", "source": "local"},
+    "model-b": {"path": "Z:/nonexistent/b.gguf", "source": "hf"},
 }
 
 
@@ -424,7 +424,7 @@ def test_set_model_type_endpoint(gui_app, monkeypatch):
     out-of-vocab type. On master the route does not exist (404)."""
     from localm import model_manager as mm
     app, _ = gui_app
-    store = {"m1": {"path": "C:/x/m1.gguf", "source": "local", "model_type": "unknown"}}
+    store = {"m1": {"path": "Z:/x/m1.gguf", "source": "local", "model_type": "unknown"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: dict(store))
     monkeypatch.setattr(mm, "load_registry", lambda: dict(store))
 
@@ -492,7 +492,7 @@ class TestLogExportEndpoint:
         with TestClient(app) as client:
             assert client.post("/api/logs/export", json={"dest": ""}).status_code == 400
             assert client.post("/api/logs/export",
-                               json={"dest": "C:/nonexistent-xyz-123"}).status_code == 400
+                               json={"dest": "Z:/nonexistent-xyz-123"}).status_code == 400
 
     def test_export_empty_is_honest_and_ok(self, gui_app, tmp_path, monkeypatch):
         # http-2: genuinely no *.log files -> honest empty message, 200.
@@ -631,7 +631,7 @@ class TestVramEstimate:
 
     def test_estimate_endpoint_shape_and_fit(self, gui_app):
         app, _ = gui_app
-        reg = {"m": {"path": "C:/nonexistent/m.gguf", "source": "local"}}
+        reg = {"m": {"path": "Z:/nonexistent/m.gguf", "source": "local"}}
         with patch("localm.config.load_registry", return_value=reg), \
              patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
@@ -1020,9 +1020,9 @@ class TestModelEndpoints:
         # filter actually works, so a re-broken annotation is caught here.
         app, _ = gui_app
         registry = {
-            "chat-model": {"path": "C:/nonexistent/chat.gguf", "source": "local",
+            "chat-model": {"path": "Z:/nonexistent/chat.gguf", "source": "local",
                            "model_type": "llm"},
-            "vision-proj": {"path": "C:/nonexistent/mmproj.gguf", "source": "local",
+            "vision-proj": {"path": "Z:/nonexistent/mmproj.gguf", "source": "local",
                             "model_type": "mmproj"},
         }
         with patch("localm.config.load_registry", return_value=registry):

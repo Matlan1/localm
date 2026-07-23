@@ -298,7 +298,7 @@ class TestPolicyEnforcement:
 
     def test_windows_file_scheme_rejected(self):
         with patch("requests.get") as m:
-            r = _call("file:///C:/Users/me/.ssh/id_rsa")
+            r = _call("file:///Z:/Users/me/.ssh/id_rsa")
         assert not r.ok
         m.assert_not_called()
 

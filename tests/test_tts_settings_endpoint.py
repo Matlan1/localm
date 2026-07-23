@@ -130,7 +130,7 @@ def test_validate_confines_library_and_wasm_paths_to_the_plugin_assets():
     # or absolute one would be code injection into every user's page, so only a
     # relative in-plugin path is accepted.
     for bad in ("https://evil.example/x.js", "//evil.example/x.js",
-                "/etc/passwd", "C:/windows/x.js", "..\\..\\x.js",
+                "/etc/passwd", "Z:/windows/x.js", "..\\..\\x.js",
                 "../../../secret.js", "vendor\\kokoro.min.js",
                 "javascript:alert(1)", "data:text/javascript,alert(1)"):
         with pytest.raises(ValueError):

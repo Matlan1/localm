@@ -53,11 +53,11 @@ def test_amd_rocm_launch_env_prepends_rocm_bin(monkeypatch, tmp_path):
     rocm_bin.mkdir()
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("HIP_PATH", str(tmp_path))
-    monkeypatch.setenv("PATH", r"C:\Windows\System32")
+    monkeypatch.setenv("PATH", r"Z:\Windows\System32")
     env = comfy._amd_rocm_launch_env()
     assert env is not None
     assert env["PATH"].split(os.pathsep)[0] == str(rocm_bin)
-    assert r"C:\Windows\System32" in env["PATH"]
+    assert r"Z:\Windows\System32" in env["PATH"]
 
 
 def test_amd_rocm_launch_env_noop_when_already_on_path(monkeypatch, tmp_path):
@@ -65,7 +65,7 @@ def test_amd_rocm_launch_env_noop_when_already_on_path(monkeypatch, tmp_path):
     rocm_bin.mkdir()
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("HIP_PATH", str(tmp_path))
-    monkeypatch.setenv("PATH", str(rocm_bin) + os.pathsep + r"C:\Windows\System32")
+    monkeypatch.setenv("PATH", str(rocm_bin) + os.pathsep + r"Z:\Windows\System32")
     assert comfy._amd_rocm_launch_env() is None
 
 
@@ -73,7 +73,7 @@ def test_amd_rocm_launch_env_none_when_bin_missing(monkeypatch, tmp_path):
     # HIP_PATH set but no bin subdir under it -> nothing to add.
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("HIP_PATH", str(tmp_path))
-    monkeypatch.setenv("PATH", r"C:\Windows\System32")
+    monkeypatch.setenv("PATH", r"Z:\Windows\System32")
     assert comfy._amd_rocm_launch_env() is None
 
 
@@ -411,7 +411,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     
     # We want to check how argv is calculated inside comfy_client.py
     # Since we can mock subprocess.Popen, let's call _spawn_launcher and check spawned argv
-    cfg = {"comfy_launch_cmd": 'C:\\path\\python.exe main.py --port 8188',
+    cfg = {"comfy_launch_cmd": 'Z:\\path\\python.exe main.py --port 8188',
            "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
            "comfy_disable_auto_launch": True}
     
@@ -431,7 +431,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
         comfy.ensure_comfy("http://127.0.0.1:8188")
         
     assert len(spawned) == 1
-    assert spawned[0] == ['C:\\path\\python.exe', 'main.py', '--port', '8188', '--disable-auto-launch']
+    assert spawned[0] == ['Z:\\path\\python.exe', 'main.py', '--port', '8188', '--disable-auto-launch']
 
     # On Windows, comfy.bat (batch file) should prepend cmd /d /c. A second,
     # independent ensure_comfy() attempt at the same URL - clear the
@@ -439,7 +439,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     # before ever reaching subprocess.Popen (see the note on _spawn_with_cfg
     # above for the same isolation concern).
     comfy_client._confirmed_alive.clear()
-    cfg_bat = {"comfy_launch_cmd": 'C:\\path\\comfy.bat --port 8188',
+    cfg_bat = {"comfy_launch_cmd": 'Z:\\path\\comfy.bat --port 8188',
                "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
                "comfy_disable_auto_launch": True}
     spawned.clear()
@@ -450,5 +450,5 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
         comfy.ensure_comfy("http://127.0.0.1:8188")
         
     assert len(spawned) == 1
-    assert spawned[0] == ['cmd', '/d', '/c', 'C:\\path\\comfy.bat', '--port', '8188', '--disable-auto-launch']
+    assert spawned[0] == ['cmd', '/d', '/c', 'Z:\\path\\comfy.bat', '--port', '8188', '--disable-auto-launch']
 

@@ -339,9 +339,9 @@ class TestDetectionConfirmsTheRunnerCanRun:
         does. So detection must carry the path, not the name."""
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
-        self._fake_which(monkeypatch, {"npm": r"C:\Program Files\nodejs\npm.CMD"})
+        self._fake_which(monkeypatch, {"npm": r"Z:\Program Files\nodejs\npm.CMD"})
         cmd = verify.detect_verify_command(tmp_path)
-        assert cmd == [r"C:\Program Files\nodejs\npm.CMD", "test",
+        assert cmd == [r"Z:\Program Files\nodejs\npm.CMD", "test",
                        "--", "--passWithNoTests"]
 
     def test_yarn_project_gates_on_yarn_not_npm(self, tmp_path, monkeypatch):

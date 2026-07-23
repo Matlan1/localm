@@ -13,7 +13,7 @@ class FakeEngine:
         self._loaded = False
         self.active_requests = 0
         self.supports_images = False
-        self.model_path = f"C:/models/{display_name}.gguf"
+        self.model_path = f"Z:/models/{display_name}.gguf"
 
     @property
     def loaded(self):
@@ -48,12 +48,12 @@ class FakeEngine:
 def setup_multi_model(monkeypatch):
     # Mock registry
     fake_registry = {
-        "model-a": {"path": "C:/models/model-a.gguf", "source": "local"},
-        "model-b": {"path": "C:/models/model-b.gguf", "source": "local"},
-        "model-c": {"path": "C:/models/model-c.gguf", "source": "local"},
+        "model-a": {"path": "Z:/models/model-a.gguf", "source": "local"},
+        "model-b": {"path": "Z:/models/model-b.gguf", "source": "local"},
+        "model-c": {"path": "Z:/models/model-c.gguf", "source": "local"},
     }
     monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
-    monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: (f"C:/models/{name}.gguf", "hint"))
+    monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: (f"Z:/models/{name}.gguf", "hint"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
     
     # Setup VRAM to have plenty of space initially (10 GB free)

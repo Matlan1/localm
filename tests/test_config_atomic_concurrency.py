@@ -87,7 +87,7 @@ def test_atomic_write_reraises_persistent_permission_error(home, monkeypatch):
 def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsys):
     """A transient PermissionError on read must be retried, not treated as a
     corrupt file - the live data is returned and no scary warning is printed."""
-    cfg.REGISTRY_FILE.write_text(json.dumps({"m": {"path": "C:/x.gguf"}}), encoding="utf-8")
+    cfg.REGISTRY_FILE.write_text(json.dumps({"m": {"path": "Z:/x.gguf"}}), encoding="utf-8")
     real_open = cfg.open if hasattr(cfg, "open") else open
     import builtins
     real_open = builtins.open
@@ -108,7 +108,7 @@ def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsy
 
     monkeypatch.setattr(builtins, "open", flaky_open)
     reg = cfg._read_json(cfg.REGISTRY_FILE, {})
-    assert reg == {"m": {"path": "C:/x.gguf"}}, "should return the live data after retry"
+    assert reg == {"m": {"path": "Z:/x.gguf"}}, "should return the live data after retry"
     assert state["n"] == 2
     err = capsys.readouterr().err.lower()
     assert "unreadable" not in err, "a transient, recovered blip must not warn"

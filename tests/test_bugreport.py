@@ -96,8 +96,8 @@ def test_build_report_scrubs_home_path_in_summary_and_reason():
     body (and, via the derived title, a PUBLIC issue). They are scrubbed at the
     build_report choke point, so every caller is covered."""
     text = bugreport.build_report(
-        r"crash running C:\Users\bob\localm\app.py",
-        reason=r"see backup at C:\Users\bob\localm-backups\b1")
+        r"crash running Z:\Users\bob\localm\app.py",
+        reason=r"see backup at Z:\Users\bob\localm-backups\b1")
     assert "bob" not in text
     assert "<redacted>" in text
     # The scrubbed summary still lands in the title header (nothing is dropped).
@@ -159,7 +159,7 @@ def test_save_user_report_scrubs_home_path_in_description(tmp_path, monkeypatch)
     full description must be redacted."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     path = bugreport.save_user_report(
-        "It broke when I ran it from C:\\Users\\bob\\localm and clicked send.")
+        "It broke when I ran it from Z:\\Users\\bob\\localm and clicked send.")
     assert path is not None and path.exists()
     text = path.read_text(encoding="utf-8")
     assert "bob" not in text

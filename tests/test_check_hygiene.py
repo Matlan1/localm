@@ -94,7 +94,7 @@ def test_yaml_absolute_path_is_detected(tmp_path, monkeypatch):
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "workflow.yml"
-    p.write_text('path: "C:\\\\Users\\\\someone\\\\build"\n', encoding="utf-8")
+    p.write_text('path: "Z:\\\\Users\\\\someone\\\\build"\n', encoding="utf-8")
     problems = ch._scan(p)
     assert any("absolute/machine path" in x for x in problems), problems
 

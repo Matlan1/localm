@@ -40,12 +40,12 @@ def test_legacy_workdir_defeats_managed_routing_without_the_fix(backend_mod, mon
     """Pin the BROKEN (pre-fix) behavior directly against legacy_comfy_value()
     in isolation, proving the bug this fix closes was real: honouring the
     legacy global value unconditionally reproduces the exact failure."""
-    full_config = {"comfy_target": "own", "comfy_workdir": "C:\\Users\\test\\MyOwnComfyUI"}
+    full_config = {"comfy_target": "own", "comfy_workdir": "Z:\\Users\\test\\MyOwnComfyUI"}
     _mock_managed_active(monkeypatch, True)
     # The OLD behavior every backend.py used to have, inlined here to prove the
     # new legacy_comfy_value() genuinely changes the outcome for this exact input.
     old_behavior = full_config.get("comfy_workdir", "") or ""
-    assert old_behavior == "C:\\Users\\test\\MyOwnComfyUI"
+    assert old_behavior == "Z:\\Users\\test\\MyOwnComfyUI"
     # The FIX: suppressed to "" while managed routing is active.
     assert mc.legacy_comfy_value("comfy_workdir", full_config) == ""
 
@@ -60,8 +60,8 @@ def test_settings_suppresses_legacy_workdir_when_managed_active(backend_mod, mon
     _mock_managed_active(monkeypatch, True)
     full_config = {
         "comfy_target": "own",
-        "comfy_workdir": "C:\\Users\\test\\MyOwnComfyUI",
-        "comfy_launch_cmd": "C:\\Users\\test\\MyOwnComfyUI\\launch.bat",
+        "comfy_workdir": "Z:\\Users\\test\\MyOwnComfyUI",
+        "comfy_launch_cmd": "Z:\\Users\\test\\MyOwnComfyUI\\launch.bat",
     }
     s = backend_mod.settings(full_config)
     assert s["workdir"] == "", "the stale legacy workdir must not leak through"
@@ -76,12 +76,12 @@ def test_settings_still_honours_legacy_workdir_when_managed_inactive(backend_mod
     _mock_managed_active(monkeypatch, False)
     full_config = {
         "comfy_target": "user",
-        "comfy_workdir": "C:\\Users\\test\\MyOwnComfyUI",
-        "comfy_launch_cmd": "C:\\Users\\test\\MyOwnComfyUI\\launch.bat",
+        "comfy_workdir": "Z:\\Users\\test\\MyOwnComfyUI",
+        "comfy_launch_cmd": "Z:\\Users\\test\\MyOwnComfyUI\\launch.bat",
     }
     s = backend_mod.settings(full_config)
-    assert s["workdir"] == "C:\\Users\\test\\MyOwnComfyUI"
-    assert s["launch_cmd"] == "C:\\Users\\test\\MyOwnComfyUI\\launch.bat"
+    assert s["workdir"] == "Z:\\Users\\test\\MyOwnComfyUI"
+    assert s["launch_cmd"] == "Z:\\Users\\test\\MyOwnComfyUI\\launch.bat"
 
 
 @pytest.mark.parametrize("backend_mod", BACKENDS)
@@ -95,11 +95,11 @@ def test_settings_per_plugin_override_still_wins_even_when_managed_active(backen
     }[backend_mod]
     full_config = {
         "comfy_target": "own",
-        "comfy_workdir": "C:\\Users\\test\\StaleGlobal",
-        "plugins": {plugin_name: {"comfy": {"workdir": "C:\\Users\\test\\DeliberatePerPluginChoice"}}},
+        "comfy_workdir": "Z:\\Users\\test\\StaleGlobal",
+        "plugins": {plugin_name: {"comfy": {"workdir": "Z:\\Users\\test\\DeliberatePerPluginChoice"}}},
     }
     s = backend_mod.settings(full_config)
-    assert s["workdir"] == "C:\\Users\\test\\DeliberatePerPluginChoice"
+    assert s["workdir"] == "Z:\\Users\\test\\DeliberatePerPluginChoice"
 
 
 @pytest.mark.parametrize("backend_mod", BACKENDS)
