@@ -143,6 +143,31 @@ def test_net_allow_private_value_hidden_from_scoped_key(app_env):
     assert "net_allow_private" not in scoped_cfg
 
 
+def test_cors_origins_is_owner_only(app_env):
+    """cors_origins widens trust reach exactly like net_allow_private and the
+    bugreport_upload_* / update_* keys do: it names which browser origins may
+    call the authenticated API, and "*" opts every unauthenticated-in-every-mode
+    sensitive GET (/whoami, /debug/stacks - see _CROSS_ORIGIN_GET_REFUSED in
+    http_server.py) out of the cross-origin refusal too. A non-owner
+    config:write key must not be able to set it, or it could widen the origin
+    trust boundary itself and then read /whoami cross-origin to disclose
+    root_dir (the OS username). Regression for the security-checkup finding
+    2026-07-23 (cors_origins was config:write, not admin_only, unlike every
+    other trust-widening key)."""
+    c, scoped, _ = app_env
+    denied = c.patch("/v1/config", headers=_scoped(scoped),
+                     json={"cors_origins": "*"})
+    assert denied.status_code == 403, denied.text
+    assert "owner" in denied.text.lower()
+    scoped_schema = {f["key"] for f in
+                     c.get("/v1/config/schema", headers=_scoped(scoped)).json()["fields"]}
+    assert "cors_origins" not in scoped_schema, \
+        "the origin-widening control must not be offered to a non-owner key"
+    ok = c.patch("/v1/config", headers=_owner(), json={"cors_origins": "*"})
+    assert ok.status_code == 200, ok.text
+    assert c.get("/v1/config", headers=_owner()).json().get("cors_origins") == "*"
+
+
 def test_owner_widening_reaches_the_indexer_policy(app_env):
     """The whole point: the owner's API write flows into the RAG indexer's policy,
     so a folder the owner adds becomes indexable. (A folder genuinely outside the

@@ -82,10 +82,14 @@ def register(app: FastAPI, ctx) -> None:
         # REC-OWNER-SETTINGS: an admin_only key widens a trust boundary, so a
         # non-owner config:write key must not set it. Today that is the rag_*
         # indexing settings (which host folders the indexer may read),
-        # net_allow_private (which DISABLES the SSRF guard, widening network reach)
-        # and the bugreport_upload_* / update_* endpoints (WHERE collected
-        # diagnostics are sent and where updates are fetched from) - a filesystem
-        # boundary and three network ones. Mirrors the media
+        # net_allow_private (which DISABLES the SSRF guard, widening network reach),
+        # the bugreport_upload_* / update_* endpoints (WHERE collected
+        # diagnostics are sent and where updates are fetched from), and
+        # cors_origins (WHICH BROWSER ORIGINS may call the authenticated API,
+        # and "*" also opts the sensitive unauthenticated GETs in
+        # _CROSS_ORIGIN_GET_REFUSED out of their cross-origin refusal) - a
+        # filesystem boundary, three network ones, and a browser-origin one.
+        # Mirrors the media
         # launch_cmd/api_url guard: require an ADMIN principal; open mode (the
         # trusted local owner) has caller_scopes None and passes. Checked on the
         # RAW body before validation, so an unauthorized caller is refused up front
@@ -97,7 +101,8 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
                     "owner (admin) key: it widens a trust boundary (which host "
-                    "folders the server may read, or its network reach).")
+                    "folders the server may read, its network reach, or which "
+                    "browser origins may call it).")
         # X8: `plugins` / `plugins_enabled` are plugin STATE, not settings, and
         # validate_update has no schema for their contents - it stores them
         # verbatim. Their real write surfaces enforce STRONGER gates
