@@ -5,7 +5,7 @@ The RAG indexing settings (rag_indexing_mode / rag_allowed_roots /
 rag_denied_roots) are flagged ``admin_only`` because they define a filesystem-READ
 boundary: which host folders the RAG indexer may open. Hiding the control in the
 GUI is therefore not enough - a non-owner ``config:write`` key must be refused at
-the API, or it could add ``C:\\`` and then index-and-exfil arbitrary files. These
+the API, or it could add ``Z:\\`` and then index-and-exfil arbitrary files. These
 tests prove all three surfaces enforce it server-side:
 
   - GET /v1/config/schema OMITS the field for a non-owner (no control shipped),

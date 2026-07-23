@@ -38,7 +38,7 @@ ORDERING CAVEAT - run this file in ISOLATION, not mixed into a full suite run:
   whatever device set happened to already be registered - a false pass here
   would be worse than a skip (AGENTS.md rule 5). Invoke it as its own run:
 
-      $env:LOCALM_TEST_LAVAPIPE_ICD = "C:\path\to\lvp_icd.x86_64.json"
+      $env:LOCALM_TEST_LAVAPIPE_ICD = "Z:\path\to\lvp_icd.x86_64.json"
       pytest -m real_vulkan_split tests/test_gpu_split_native_vulkan.py -v -s
 
 Also optionally set LOCALM_TEST_VULKAN_SPLIT_INDICES (default "0,1") if the

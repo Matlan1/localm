@@ -58,13 +58,13 @@ def test_split_and_same_dir():
     assert gc._split_path("a" + os.pathsep + os.pathsep + "b") == ["a", "b"]
     assert not gc._same_dir("/a/b", "/a/c")
     if sys.platform == "win32":
-        assert gc._same_dir("C:\\Foo\\", "C:/foo")   # case + slash + trailing sep
+        assert gc._same_dir("Z:\\Foo\\", "Z:/foo")   # case + slash + trailing sep
 
 
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="Windows registry PATH semantics (; separator, case-insensitive)")
 def test_win_path_add_is_idempotent(fake_path):
-    d = r"C:\clone\bin"
+    d = r"Z:\clone\bin"
     assert gc._win_path_add(d) is True          # first add changes PATH
     assert d in fake_path.value
     assert gc._win_path_add(d) is False         # second add is a no-op
@@ -74,12 +74,12 @@ def test_win_path_add_is_idempotent(fake_path):
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="Windows registry PATH semantics (; separator, case-insensitive)")
 def test_win_path_remove_only_ours(fake_path):
-    fake_path.value = os.pathsep.join([r"C:\keep\me", r"C:\clone\bin", r"C:\also\keep"])
-    assert gc._win_path_remove(r"C:\clone\bin") is True
-    assert r"C:\keep\me" in fake_path.value      # every OTHER entry preserved
-    assert r"C:\also\keep" in fake_path.value
-    assert r"C:\clone\bin" not in fake_path.value
-    assert gc._win_path_remove(r"C:\clone\bin") is False   # already gone -> no-op
+    fake_path.value = os.pathsep.join([r"Z:\keep\me", r"Z:\clone\bin", r"Z:\also\keep"])
+    assert gc._win_path_remove(r"Z:\clone\bin") is True
+    assert r"Z:\keep\me" in fake_path.value      # every OTHER entry preserved
+    assert r"Z:\also\keep" in fake_path.value
+    assert r"Z:\clone\bin" not in fake_path.value
+    assert gc._win_path_remove(r"Z:\clone\bin") is False   # already gone -> no-op
 
 
 def test_existing_localm_ignores_our_own_shim(monkeypatch, tmp_path):

@@ -10,8 +10,13 @@ their actual conversations/images while the suite runs.
 pinning it here isolates every test. Tests that need a specific home override
 this with their own ``monkeypatch.setenv`` (which runs after this autouse
 fixture).
+
+That import-time directory is removed at PROCESS EXIT, not only at the end of a
+pytest session, because this file is also loaded outside one - see the temp-root
+section below for why the removal is conditional rather than unconditional.
 """
 
+import atexit
 import builtins
 import io
 import os
@@ -39,11 +44,215 @@ os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
 
 
 def pytest_sessionfinish(session, exitstatus):
-    shutil.rmtree(_test_home_dir, ignore_errors=True)
+    _cleanup_test_home()
     _report_system_path_touches(session)
+    _report_wrong_temp_root(session)
 
 
 import pytest
+
+
+# --------------------------------------------------------------------------- #
+#  The import-time temp home is cleaned up at PROCESS EXIT - except when it     #
+#  landed on the wrong temp root, which is the one case worth keeping           #
+#                                                                              #
+#  The mkdtemp above runs at IMPORT time (deliberately: see the module          #
+#  docstring), so it runs once per PROCESS - including every process that loads #
+#  this file WITHOUT finishing a pytest session. tests/test_conftest_disk_guard #
+#  and tests/test_conftest_syspath_guard both exec it by path under their own   #
+#  module name, and a plain script that unit-checks one of those guards does    #
+#  the same. Cleaning up only in pytest_sessionfinish therefore leaked one      #
+#  directory per such process, permanently: 426 of them had piled up in one     #
+#  developer's temp dir by 2026-07-22. atexit closes that.                     #
+#                                                                              #
+#  An UNCONDITIONAL atexit would have closed it by breaking something else. A   #
+#  test run redirects the temp root to a scratch drive by setting               #
+#  TMPDIR/TEMP/TMP, and an xdist WORKER can end up not using it (a tempfile     #
+#  module that already cached its answer, an env block that did not arrive).    #
+#  Because the mkdtemp is per process, a worker that missed the redirect        #
+#  necessarily left its directory on the WRONG root, so counting leftovers      #
+#  there answered "did the redirect reach every worker?" - and removing every   #
+#  directory on exit would make that count read zero whether or not one missed  #
+#  it. Silently always-green is worse than no check at all: it is the same      #
+#  failure shape as a guard that never arms.                                   #
+#                                                                              #
+#  So the cleanup is CONDITIONAL on landing where the run intended:             #
+#    landed right -> removed, so nothing leaks and a leftover count reads zero; #
+#    landed wrong -> KEPT, and the run goes red naming the directory.           #
+#  A leftover count keeps its exact old meaning (zero == every process used the #
+#  intended root) while the healthy case stops littering, and the anomaly is    #
+#  now loud at the time it happens instead of a forensic exercise afterwards.   #
+#                                                                              #
+#  The intent reaches a worker over execnet's workerinput channel, NOT the      #
+#  environment. That is the whole point: the environment is the thing under     #
+#  suspicion, so a worker that lost it would lose an env-carried expectation    #
+#  too and go quiet, which is the always-green failure again. xdist calls       #
+#  pytest_configure_node on the controller and sends the (mutated) workerinput  #
+#  over its own channel, so the expectation arrives even when the env did not.  #
+# --------------------------------------------------------------------------- #
+
+_EXPECTED_TEMP_ROOT_KEY = "localm_expected_temp_root"
+_EXPECTED_TEMP_ROOT_ENV = "LOCALM_TEST_EXPECTED_TEMP_ROOT"
+
+# Where this process's temp root actually resolved. Read off the directory
+# mkdtemp just made rather than by calling gettempdir() again: gettempdir()
+# caches its first answer, and what matters here is where the bytes really went,
+# not what a later call would say.
+_actual_temp_root = os.path.dirname(_test_home_dir)
+
+_expected_temp_root = None      # the root the run intended; None = none declared
+_wrong_temp_root = None         # the complaint, once a mismatch is established
+_wrong_temp_root_reported = False
+
+_WRONG_TEMP_ROOT_ADVICE = (
+    "  The directory named above was LEFT on disk on purpose: it is the evidence,\n"
+    "  and counting leftovers is how a run proves every one of its processes used\n"
+    "  the intended temp root. Export TMPDIR/TEMP/TMP BEFORE starting pytest -\n"
+    "  setting them afterwards is too late, because tempfile caches the first\n"
+    "  answer it resolves - then delete that one directory, by name.")
+
+
+def _same_dir(a, b) -> bool:
+    """True when two paths name the same directory.
+
+    Normalised strings first, which is the entire answer whenever both sides
+    were resolved from the same TEMP value. Only when THAT disagrees is realpath
+    consulted, so a mere difference in spelling (an 8.3 short name, a junction)
+    is not reported as a misplaced run. The realpath call touches the filesystem,
+    which is why it is the second question and not the first: in a healthy run it
+    never happens."""
+    def norm(p):
+        return os.path.normcase(os.path.abspath(p)).replace("\\", "/").rstrip("/")
+    if norm(a) == norm(b):
+        return True
+    try:
+        return norm(os.path.realpath(a)) == norm(os.path.realpath(b))
+    except OSError:
+        return False
+
+
+def pytest_configure(config):
+    """Work out which temp root this run intended, and judge where we landed."""
+    global _expected_temp_root, _wrong_temp_root
+    workerinput = getattr(config, "workerinput", None)
+    # An env-declared root can only ADD a check to a run that had none: a value
+    # stamped by the controller always wins, so this seam (which the guard's own
+    # fires-controls use) can never relax or redirect the xdist check. Same
+    # add-only contract as LOCALM_TEST_SYSPATH_EXTRA_MARKERS, for the same reason.
+    from_env = os.environ.get(_EXPECTED_TEMP_ROOT_ENV) or None
+    if workerinput is not None:
+        _expected_temp_root = workerinput.get(_EXPECTED_TEMP_ROOT_KEY) or from_env
+        if _expected_temp_root is None:
+            # We are a worker and nobody told us what the run intended, so the
+            # check below cannot arm. Say so instead of quietly cleaning up: an
+            # oracle that silently does not run is the exact failure this whole
+            # section exists to prevent, and this is the only way it can happen.
+            _wrong_temp_root = (
+                "this xdist worker was never told which temp root the run "
+                "intended, so the temp-root check is NOT ARMED and a worker that "
+                "missed the redirect would go unnoticed. The controller did not "
+                "load tests/conftest.py, which is where pytest_configure_node "
+                f"stamps {_EXPECTED_TEMP_ROOT_KEY!r}. Invoke pytest so that tests/ "
+                "is among its arguments (testpaths does this already), or set "
+                f"{_EXPECTED_TEMP_ROOT_ENV} to the intended temp root.")
+            return
+    else:
+        _expected_temp_root = from_env
+    if _expected_temp_root and not _same_dir(_actual_temp_root, _expected_temp_root):
+        _wrong_temp_root = (
+            f"this process resolved its temp root to {_actual_temp_root} but the "
+            f"run intended {_expected_temp_root}, so everything it wrote through "
+            "tempfile went to the wrong place, including "
+            f"{_test_home_dir}")
+
+
+try:
+    import xdist                                        # noqa: F401
+except ImportError:                                     # xdist is optional
+    pass
+else:
+    def pytest_configure_node(node):
+        """Hand each worker the temp root the run intended, over execnet's own
+        channel rather than the environment (see the section comment).
+
+        The controller's OWN resolved root is the fallback expectation: with
+        nothing declared, "the root the controller used" is exactly what a worker
+        has to match, which is the question the leftover count used to answer.
+        When a root WAS declared, that wins, so a controller which itself missed
+        the redirect does not quietly become the standard its workers are held
+        to - it gets reported on its own account instead."""
+        node.workerinput[_EXPECTED_TEMP_ROOT_KEY] = (
+            _expected_temp_root or _actual_temp_root)
+
+
+def _cleanup_test_home():
+    """Remove the import-time LOCALM_HOME, unless it is evidence.
+
+    Idempotent: pytest_sessionfinish calls it at the end of a session and atexit
+    catches every other way a process can end (including having no session at
+    all, which is the leak this exists to close)."""
+    if _wrong_temp_root:
+        return                  # KEEP it - this directory IS the evidence
+    try:
+        shutil.rmtree(_test_home_dir)
+    except FileNotFoundError:
+        pass                    # already gone: sessionfinish ran, then atexit
+    except OSError as exc:
+        # Not silenced. A directory we could not remove is precisely the leak
+        # this function exists to stop, and swallowing the failure would rebuild
+        # that pile one run at a time with nothing to show for it.
+        #
+        # Written to the ORIGINAL stderr, and guarded, because this also runs
+        # from atexit: by then pytest's capture replacement can be torn down, and
+        # a print that raises there is reported as "Error in
+        # atexit._run_exitfuncs" with a traceback that buries the actual message.
+        # If even that stream is gone there is nowhere left to report to, which
+        # is the one case where nothing is the honest outcome.
+        try:
+            print(f"WARNING: could not remove the test LOCALM_HOME "
+                  f"{_test_home_dir}: {exc}",
+                  file=sys.__stderr__ or sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
+atexit.register(_cleanup_test_home)
+
+
+@pytest.fixture(autouse=True)
+def _temp_root_is_the_one_the_run_intended():
+    """Fail once, in the process that got its temp root wrong.
+
+    Once per PROCESS rather than once per test on purpose: under -n auto every
+    test in a misplaced worker would otherwise fail, and those tests are not
+    wrong - they exercised the code correctly, they just wrote their bytes to the
+    wrong drive. One named failure is unmissable without burying the run's real
+    results under a few thousand identical ones.
+
+    A fixture rather than only pytest_sessionfinish because a worker's exitstatus
+    does not become the run's under -n auto - the same reason the system-path
+    guard is enforced per test - but a failed test does."""
+    global _wrong_temp_root_reported
+    if _wrong_temp_root and not _wrong_temp_root_reported:
+        _wrong_temp_root_reported = True
+        pytest.fail(_wrong_temp_root + "\n" + _WRONG_TEMP_ROOT_ADVICE)
+
+
+def _report_wrong_temp_root(session):
+    """Session-level backstop for the process the fixture cannot reach.
+
+    Under -n auto the CONTROLLER runs no tests at all, so a controller that
+    itself missed the redirect would leave its directory behind with nothing to
+    say why. The controller's exitstatus IS the run's, so failing here covers
+    exactly the case the per-test fixture cannot - the mirror image of
+    _report_system_path_touches, which is a no-op on the controller for the
+    opposite reason."""
+    if not _wrong_temp_root:
+        return
+    print("\nWRONG TEMP ROOT:\n  " + _wrong_temp_root + "\n"
+          + _WRONG_TEMP_ROOT_ADVICE)
+    if getattr(session, "exitstatus", 0) == 0:
+        session.exitstatus = 1
 
 
 # --------------------------------------------------------------------------- #
@@ -447,7 +656,7 @@ def _no_giant_tmp_files(tmp_path, request):
     truth.
 
     Drive-agnostic on purpose: it looks only at file SIZE, never at a path prefix,
-    so it behaves identically wherever tmp_path lives (C:, D:, /tmp, CI).
+    so it behaves identically wherever tmp_path lives (any drive, /tmp, CI).
 
     Never descends a link/junction, and never revisits a real directory. That is
     not paranoia: tests/test_rag_robustness_sweep.py deliberately builds BRANCHING

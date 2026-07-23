@@ -693,7 +693,7 @@ def test_spawn_probe_daemon_uses_localm_capable_interpreter(monkeypatch):
     import localm._mp_spawn as mp_spawn
     from localm.inference.backends.llamacpp import _loader
 
-    sentinel = r"C:\resolved\venv\python.exe"
+    sentinel = r"Z:\resolved\venv\python.exe"
     monkeypatch.setattr(mp_spawn, "interpreter_for_localm_children",
                         lambda: sentinel)
     captured = {}

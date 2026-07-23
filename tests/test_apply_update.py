@@ -318,7 +318,7 @@ def test_unsafe_member_detection():
     assert au._unsafe_member("../evil") is True
     assert au._unsafe_member("a/../../evil") is True
     assert au._unsafe_member("/etc/passwd") is True
-    assert au._unsafe_member("C:/windows") is True
+    assert au._unsafe_member("Z:/windows") is True
     assert au._unsafe_member("localm/foo.py") is False
     assert au._unsafe_member("VERSION") is False
     assert au._unsafe_member("a..b/c") is False   # '..' only as a path component counts

@@ -26,7 +26,7 @@ class FakeEngine:
         self._loaded = False
         self.active_requests = 0
         self.supports_images = False
-        self.model_path = f"C:/models/{display_name}.gguf"
+        self.model_path = f"Z:/models/{display_name}.gguf"
 
     @property
     def loaded(self):
@@ -60,12 +60,12 @@ class FakeEngine:
 @pytest.fixture
 def setup_multi_model(monkeypatch):
     fake_registry = {
-        "model-a": {"path": "C:/models/model-a.gguf", "source": "local"},
-        "model-b": {"path": "C:/models/model-b.gguf", "source": "local"},
+        "model-a": {"path": "Z:/models/model-a.gguf", "source": "local"},
+        "model-b": {"path": "Z:/models/model-b.gguf", "source": "local"},
     }
     monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
     monkeypatch.setattr("localm.model_manager.get_model_info",
-                        lambda name: (f"C:/models/{name}.gguf", "hint"))
+                        lambda name: (f"Z:/models/{name}.gguf", "hint"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
     # Plenty of (static, not usage-aware) free VRAM so loading a second model
     # never triggers eviction of the first - both stay resident.
@@ -206,8 +206,8 @@ def test_gui_unload_route_targeted(gui_app_with_engines):
     load("model-a")
     load("model-b")
     with patch("localm.config.load_registry", return_value={
-        "model-a": {"path": "C:/models/model-a.gguf"},
-        "model-b": {"path": "C:/models/model-b.gguf"},
+        "model-a": {"path": "Z:/models/model-a.gguf"},
+        "model-b": {"path": "Z:/models/model-b.gguf"},
     }):
         with TestClient(app) as client:
             r = client.post("/api/models/unload", json={"model": "model-a"})
@@ -239,8 +239,8 @@ def test_gui_models_list_exposes_loaded_independent_of_active(gui_app_with_engin
     load("model-a")
     load("model-b")  # active is now model-b; model-a stays loaded
     with patch("localm.config.load_registry", return_value={
-        "model-a": {"path": "C:/models/model-a.gguf"},
-        "model-b": {"path": "C:/models/model-b.gguf"},
+        "model-a": {"path": "Z:/models/model-a.gguf"},
+        "model-b": {"path": "Z:/models/model-b.gguf"},
     }):
         with TestClient(app) as client:
             r = client.get("/api/models")
@@ -326,7 +326,7 @@ def test_unload_one_model_releases_matching_embedder(setup_multi_model, monkeypa
     app = hs.create_app(None)
     client = _authed_client(app)
 
-    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/model-a.gguf")
+    monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/model-a.gguf")
     calls = []
     monkeypatch.setattr(emb, "reset_embedder", lambda force=True: (calls.append(1), True)[1])
 
@@ -346,7 +346,7 @@ def test_unload_one_model_leaves_non_matching_registered_model_alone(setup_multi
     app = hs.create_app(None)
     client = _authed_client(app)
 
-    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/some-other-embedder.gguf")
+    monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/some-other-embedder.gguf")
     calls = []
     monkeypatch.setattr(emb, "reset_embedder", lambda force=True: (calls.append(1), True)[1])
 
@@ -361,10 +361,10 @@ def test_gui_models_list_reports_embedder_loaded_via_path_match(gui_app_with_eng
     _engines) must show loaded:true on the Models page - and only that one,
     not a differently-pathed registered model."""
     app, _load_direct = gui_app_with_engines
-    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/model-a.gguf")
+    monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/model-a.gguf")
     with patch("localm.config.load_registry", return_value={
-        "model-a": {"path": "C:/models/model-a.gguf"},
-        "model-b": {"path": "C:/models/model-b.gguf"},
+        "model-a": {"path": "Z:/models/model-a.gguf"},
+        "model-b": {"path": "Z:/models/model-b.gguf"},
     }):
         with TestClient(app) as client:
             r = client.get("/api/models")
