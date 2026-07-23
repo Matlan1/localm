@@ -145,7 +145,25 @@ fi
 # automatic (like the one-click install.sh); interactively it asks first (default
 # Yes) since it runs a script fetched from the network. A bootstrap failure is
 # surfaced, not hidden (rule 5): we re-check that uv is callable and exit if not.
-if ! command -v uv >/dev/null 2>&1; then
+#
+# Portable (CONTAINED=1) must not settle for whatever uv happens to already be on
+# PATH - that could be a Shared install, a package manager, or a different clone
+# entirely, and reusing it silently would break the "uv itself ... inside this
+# folder" promise the user just picked two prompts ago. So Portable checks ONLY
+# for its own confined copy at ./.uv; anything else on PATH is irrelevant to it and
+# falls through to the same bootstrap a genuinely-missing uv would trigger. Shared
+# keeps the original behaviour: any uv already on PATH is fine to reuse.
+uv_present=0
+if [ "$CONTAINED" = 1 ]; then
+  if [ -x "./.uv/uv" ]; then
+    export PATH="$(pwd)/.uv:$PATH"
+    UVDIR="$(pwd)/.uv"
+    uv_present=1
+  fi
+elif command -v uv >/dev/null 2>&1; then
+  uv_present=1
+fi
+if [ "$uv_present" != 1 ]; then
   say "  [!] uv (the Python package manager localm builds on) is not installed."
   getuv="$(ask "  Install it now with Astral's official installer? [Y/n]: " Y)"
   case "$getuv" in

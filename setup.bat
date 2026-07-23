@@ -71,9 +71,26 @@ rem  THIS process. The installer updates the persistent USER PATH, but not the P
 rem  of a shell that was already running, so we prepend its install dir here. We do
 rem  not hide a bootstrap failure (AGENTS.md rule 5): we re-check that uv is actually
 rem  callable and, if it is not, say so and show the manual options.
+rem  Portable (CONTAINED=1) must not settle for whatever uv happens to already be
+rem  on PATH - that could be a Shared install, winget, or a different clone
+rem  entirely, and reusing it silently would break the "uv itself ... inside this
+rem  folder" promise the user just picked two prompts ago. So Portable checks ONLY
+rem  for ITS OWN confined copy at .\.uv; anything else on PATH is irrelevant to it
+rem  and falls through to the same bootstrap a genuinely-missing uv would trigger.
+rem  Shared keeps the original behaviour: any uv already on PATH is fine to reuse.
+if "%CONTAINED%"=="1" goto uv_check_portable
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
+goto uv_missing
 
+:uv_check_portable
+if exist ".uv\uv.exe" (
+    set "PATH=%CD%\.uv;%PATH%"
+    set "UVDIR=%CD%\.uv"
+    goto uv_ready
+)
+
+:uv_missing
 echo  [!] uv (the Python package manager localm builds on) is not installed.
 set "GETUV="
 call :flush
