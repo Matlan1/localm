@@ -369,6 +369,21 @@ def _last_command_of(script: str) -> str:
     return re.split(r"&&|\|\||[;|&]", script)[-1]
 
 
+def _runner_basename(token: str) -> str:
+    """*token*'s program name: directory dropped, launcher suffix stripped,
+    lowercased.
+
+    So a package script's ``node_modules/.bin/jest.cmd`` reads as ``jest``, and
+    the absolute ``...\\nodejs\\npm.CMD`` that :func:`resolve_runner` hands back
+    reads as ``npm``. Both callers need the same answer, so there is one rule.
+    """
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for suffix in _SCRIPT_BIN_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def _script_runner_takes_no_tests_flag(cwd: Path) -> bool:
     """True when this package's ``test`` script ends in a runner that has a
     ``--passWithNoTests`` flag (see :data:`_NO_TESTS_OK_RUNNERS`)."""
@@ -381,15 +396,8 @@ def _script_runner_takes_no_tests_flag(cwd: Path) -> bool:
     script = scripts.get("test") if isinstance(scripts, dict) else None
     if not isinstance(script, str):
         return False
-    for token in _last_command_of(script).split():
-        name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        for suffix in _SCRIPT_BIN_SUFFIXES:
-            if name.endswith(suffix):
-                name = name[: -len(suffix)]
-                break
-        if name in _NO_TESTS_OK_RUNNERS:
-            return True
-    return False
+    return any(_runner_basename(token) in _NO_TESTS_OK_RUNNERS
+               for token in _last_command_of(script).split())
 
 
 def _js_test_command(cwd: Path, package_manager: str) -> list[str]:
@@ -439,6 +447,46 @@ def _js_test_command(cwd: Path, package_manager: str) -> list[str]:
     return cmd
 
 
+def _append_caller_args(cmd: list[str], args: list[str]) -> list[str]:
+    """*cmd* with the caller's *args* appended so the RUNNER receives them.
+
+    npm needs its ``--`` separator or anything flag-shaped never leaves npm: it
+    reads an unrecognised option as one of its own configs, warns "Unknown cli
+    config", and forwards only nopt's POSITIONAL remainder to the package script
+    (``npm/lib/npm.js``: ``this.argv = [...parsedArgv.remain]``). Measured on npm
+    11.13.0: ``npm test --watch`` hands the script ``ARGV=[]``, while ``npm test
+    -- --watch`` hands it ``["--watch"]``. So ``run_tests(runner="npm",
+    extra_args="--watch")`` used to run a plain suite and report it as the run
+    that was asked for. Same root cause as the ``--passWithNoTests`` bug, one
+    code path over.
+
+    The separator also fronts the POSITIONAL ``path``, which needs none of its
+    own. That is measurably free (``npm test -- somepath`` and ``npm test
+    somepath`` both deliver ``["somepath"]``), and a call that passes ``path``
+    AND a flag has to put both on the runner's side of the separator anyway.
+
+    npm only:
+
+    * yarn is the opposite. yarn classic forwards a bare flag correctly and warns
+      that a future yarn "will forward any explicit -- as-is to the scripts",
+      which would hand the runner a literal ``--`` and demote the flag to a
+      positional argument. Measured (yarn 1.22.22): a separator would break a
+      case that works today.
+    * pytest, cargo and go parse their own argv, so their flags already arrive.
+
+    One separator, never two: ``npm test -- -- --watch`` delivers a literal
+    ``["--", "--watch"]`` to the script (measured). A command that already
+    carries one keeps it (the ``--passWithNoTests`` form, where everything
+    appended lands after it anyway), and a caller who wrote their own leading
+    ``--`` gets theirs honoured rather than doubled.
+    """
+    if not args:
+        return cmd
+    if _runner_basename(cmd[0]) == "npm" and "--" not in cmd and args[0] != "--":
+        return cmd + ["--"] + args
+    return cmd + args
+
+
 def _detect_test_runner(cwd: Path) -> list[str]:
     """Return the command list for the most appropriate test runner in *cwd*.
 
@@ -479,7 +527,8 @@ def tool_run_tests(
     path:
         Subdirectory or file to limit the test run (default: whole project).
     extra_args:
-        Additional arguments appended verbatim to the test command.
+        Additional arguments appended verbatim to the test command (for npm,
+        past its ``--`` separator, or npm would swallow anything flag-shaped).
     """
     if runner == "auto":
         cmd = _detect_test_runner(cwd)
@@ -499,10 +548,14 @@ def tool_run_tests(
             f"Unknown runner '{runner}'. Use: auto, pytest, cargo, go, npm, yarn"
         )
 
+    caller_args: list[str] = []
     if path and path != ".":
-        cmd.append(path)
+        caller_args.append(path)
     if extra_args:
-        cmd.extend(extra_args.split())
+        caller_args += extra_args.split()
+    # Appended through one place, because npm drops flag-shaped arguments that
+    # do not follow its `--` separator (see _append_caller_args).
+    cmd = _append_caller_args(cmd, caller_args)
 
     result = run_subprocess(cmd, cwd, timeout=120)
 
