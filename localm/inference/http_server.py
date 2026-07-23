@@ -2704,7 +2704,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     app = FastAPI(
         title="localm inference server",
-        version="0.1.2",
+        version="0.1.3",
         lifespan=lifespan,
     )
 

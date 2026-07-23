@@ -74,7 +74,7 @@ def _no_filesystem():
 
 
 @contextlib.contextmanager
-def _records_touches_outside(root: Path):
+def _records_touches_outside(root: Path, value=None):
     """Record filesystem calls made against paths NOT under *root*.
 
     The recording twin of :func:`_no_filesystem`, and the enforcement path needs
@@ -84,9 +84,35 @@ def _records_touches_outside(root: Path):
     model-supplied VALUE. Scoping the record to paths outside cwd separates them,
     and counting rather than raising means the assertion can be an exact number
     (0) instead of "did not blow up".
+
+    "Outside cwd" alone does NOT separate them, though, and that made this whole
+    class pass on Windows while failing on Linux. Resolving the anchor walks it:
+    on POSIX ``Path.resolve()`` lstats EVERY component, so resolving a cwd of
+    ``/tmp/pytest-of-x/pytest-0/popen-gw0`` records ``/tmp``,
+    ``/tmp/pytest-of-x`` and so on - real touches, none of them under cwd, all of
+    them the anchor. Windows resolve() is a single ``_getfinalpathname`` call
+    with no per-component stat to observe, which is the only reason the plain
+    filter ever looked correct. So the anchor's own ancestor chain is excluded
+    too.
+
+    That exclusion cannot hide a stat OF the value, which is the property under
+    test: pass *value* and any touch of it (or of anything beneath it) is
+    recorded unconditionally, ahead of both filters. That also covers the one
+    case an ancestor-exclusion alone would miss - a value that happens to BE an
+    ancestor of cwd.
     """
     touches: list = []
     root_s = str(root).replace("\\", "/").lower()
+
+    def _norm(p) -> str:
+        return str(p).replace("\\", "/").lower()
+
+    # Both the raw and the resolved anchor, plus every ancestor of each: the
+    # code resolves cwd, and the temp root itself may be a link (/tmp is
+    # /private/tmp on macOS), so the walk can traverse either chain.
+    _raw, _res = Path(root), Path(root).resolve()
+    anchor = {_norm(p) for p in (_raw, _res, *_raw.parents, *_res.parents)}
+    value_s = _norm(value) if value is not None else None
     targets = [(os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
                (os, "listdir"), (os.path, "realpath")]
 
@@ -96,7 +122,9 @@ def _records_touches_outside(root: Path):
                 s = str(path).replace("\\", "/").lower()
             except Exception:
                 s = ""
-            if s and not s.startswith(root_s):
+            if s and value_s is not None and s.startswith(value_s):
+                touches.append(f"{label}({path!r})")      # the thing under test
+            elif s and not s.startswith(root_s) and s not in anchor:
                 touches.append(f"{label}({path!r})")
             return original(path, *a, **kw)
         return _spy
@@ -316,7 +344,7 @@ class TestScopeEnforcementNeverStatsTheValue:
         target.write_text("disposable\n", encoding="utf-8")
         agent = _make_agent(tmp_path, scope="src/**")
 
-        with _records_touches_outside(tmp_path) as touches:
+        with _records_touches_outside(tmp_path, value=target) as touches:
             offending = agent._scope_violation(
                 _make_tool_call(tool, path=str(target)))
 
@@ -324,6 +352,37 @@ class TestScopeEnforcementNeverStatsTheValue:
         assert touches == [], (
             "the scope gate reached out and touched the path it was refusing: "
             + "; ".join(touches))
+
+    def test_the_recorder_still_catches_a_stat_of_the_value(
+            self, tmp_path, tmp_path_factory):
+        """Fires-control for the anchor exclusion in
+        :func:`_records_touches_outside`.
+
+        Excluding the cwd anchor's ancestor chain is what makes this class
+        portable, but an exclusion that swallowed the thing it filters for
+        would turn every assertion above into theater: they would pass because
+        nothing is ever recorded, not because nothing is ever touched. So drive
+        a real stat through the recorder and require it to be SEEN.
+
+        Both shapes are covered: a value in a sibling directory (the ordinary
+        case) and a value that IS an ancestor of cwd - the one an
+        ancestor-exclusion alone would swallow, and the reason the recorder
+        checks the value before it applies either filter.
+        """
+        outside = tmp_path_factory.mktemp("outside-cwd")
+        target = outside / "disposable-target.txt"
+        target.write_text("disposable\n", encoding="utf-8")
+
+        with _records_touches_outside(tmp_path, value=target) as touches:
+            os.stat(target)
+        assert touches, "the recorder no longer sees a stat of the value"
+
+        ancestor = tmp_path.parent
+        with _records_touches_outside(tmp_path, value=ancestor) as touches:
+            os.stat(ancestor)
+        assert touches, (
+            "a value that is itself an ancestor of cwd escaped the recorder - "
+            "the anchor exclusion is swallowing the property under test")
 
     def test_an_in_cwd_absolute_path_in_scope_is_still_allowed(self, tmp_path):
         """BUG-6, unchanged: an absolute path INSIDE cwd that matches the scope
@@ -367,7 +426,7 @@ class TestScopeEnforcementNeverStatsTheValue:
         assert via_link.exists(), "the link must really reach the in-cwd file"
 
         agent = _make_agent(tmp_path, scope="src/**")
-        with _records_touches_outside(tmp_path) as touches:
+        with _records_touches_outside(tmp_path, value=via_link) as touches:
             offending = agent._scope_violation(
                 _make_tool_call("read_file", path=str(via_link)))
 

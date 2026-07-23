@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.machinery
+import importlib.metadata
 import io
 import sys
 import types
@@ -192,3 +193,58 @@ def test_doctor_cli_surfaces_broken_hf_backend_end_to_end(cli_runner, monkeypatc
     assert "HF backend" in out
     assert "UNUSABLE" in out
     assert "torch._C._distributed_c10d" in out
+
+
+# --------------------------------------------------------------------------- #
+#  A broken lazy module must not be misreported as "not installed"             #
+# --------------------------------------------------------------------------- #
+
+def test_missing_dist_metadata_does_not_turn_a_broken_module_into_not_installed(
+        monkeypatch):
+    """_check_packages must keep the module HANDLE when only the VERSION lookup
+    fails, or the usability check above never gets to run.
+
+    The failure this pins is environment-dependent, which is exactly why it
+    needs its own test. _check_packages reads the version from dist metadata
+    first and falls back to ``getattr(m, "__version__", "")``. That fallback
+    only runs when metadata is ABSENT - so on a machine with transformers
+    genuinely installed it is never reached and the end-to-end test above passes
+    regardless. Where transformers is NOT installed (CI, and any lean install),
+    the fallback runs, _LazyModule.__getattr__ raises ModuleNotFoundError for
+    __version__, getattr's default does not suppress it because it is not an
+    AttributeError, and it lands in the `except ImportError` that means "not
+    installed". doctor then reported an imported module as missing and said
+    nothing at all about the breakage.
+
+    Simulated here on EVERY platform by forcing PackageNotFoundError, so the
+    path is covered whether or not this venv has transformers.
+    """
+    broken = _BrokenLazyModule()
+    monkeypatch.setitem(sys.modules, "transformers", broken)
+
+    # _check_packages imports importlib.metadata LOCALLY (as _ilm), so there is
+    # no module attribute to patch - patch the real module it binds to. Only
+    # transformers loses its metadata: blanking it for EVERY package would push
+    # click onto the __version__ fallback too, which is exactly the deprecated
+    # access the metadata-first ordering exists to avoid (AUD-CLICKVER), and the
+    # test would emit the warning it is meant to keep away.
+    _real_version = importlib.metadata.version
+
+    def _no_metadata(name):
+        if name == "transformers":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return _real_version(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", _no_metadata)
+    buf = io.StringIO()
+    monkeypatch.setattr(doctor_mod, "console",
+                        Console(file=buf, force_terminal=False, width=400))
+
+    modules = doctor_mod._check_packages()
+
+    assert modules.get("transformers") is broken, (
+        "the module handle was dropped because its VERSION could not be read - "
+        "_check_hf_backend_usable can no longer see it, so a broken backend "
+        "goes unreported")
+    assert "transformers (HF backend) - not installed" not in buf.getvalue(), (
+        "an imported-but-broken module was reported as not installed")

@@ -483,7 +483,20 @@ def _check_packages() -> dict:
             try:
                 ver = _ilm.version(_dist_names.get(mod, mod))
             except _ilm.PackageNotFoundError:
-                ver = getattr(m, "__version__", "")
+                # A lazy module (transformers._LazyModule is the live example)
+                # raises ModuleNotFoundError from __getattr__ for ANY name it
+                # cannot resolve, __version__ included - and getattr()'s default
+                # only suppresses AttributeError. Unguarded, that escapes into
+                # the `except ImportError` below (ModuleNotFoundError IS an
+                # ImportError) and reports a package that imported perfectly
+                # well as "not installed", which then makes
+                # _check_hf_backend_usable return early and say NOTHING about
+                # the breakage it exists to report. Losing the version STRING is
+                # cosmetic; losing the module handle hides a real fault.
+                try:
+                    ver = getattr(m, "__version__", "")
+                except Exception:
+                    ver = ""
             sym = _OK_SYM
             ver_str = f" {ver}" if ver else ""
         except ImportError:

@@ -19,6 +19,7 @@ section below for why the removal is conditional rather than unconditional.
 import atexit
 import builtins
 import io
+import mimetypes
 import os
 import re
 import stat as _stat
@@ -396,6 +397,36 @@ def _arm_system_path_guard() -> bool:
     _SYSPATH_ARMED = True
     return True
 
+
+# Warm the stdlib mimetypes registry BEFORE arming the guard, deliberately.
+#
+# This is NOT a localm defect being papered over, and the distinction is the
+# whole reason it is done here rather than silenced at the reporting end.
+# Anything that maps a file EXTENSION to a content type must consult the OS mime
+# registry, and the stdlib does that lazily on first use: on POSIX it reads
+# /etc/mime.types plus the httpd/apache paths. Measured directly -
+# mimetypes.guess_type("app.js"), with no add_type call anywhere, touches /etc
+# six times. Windows reads its registry instead, so the marker roots never match
+# and this was invisible there, which is why it only ever failed on Linux.
+#
+# The read is therefore real, legitimate and unavoidable: it cannot be dropped
+# without breaking content-type detection localm genuinely wants (localm/cli/
+# chat.py and localm/plugins/gui/routes/share.py both guess_type user files
+# against system mime data). What it must NOT do is land inside whichever test
+# happens to construct an app first and be reported as that test reaching out -
+# a true statement about the wrong subject. Doing it once, here, in a declared
+# place, keeps a hit meaning what the guard says it means: OUR code touching a
+# system location, not the interpreter initialising itself.
+#
+# guess_type(), NOT init(): this module is re-executed under an ALREADY-ARMED
+# guard by test_conftest_syspath_guard's _real_conftest_module(), which loads the
+# shipped conftest by path to assert against the real file. init() rebuilds the
+# registry unconditionally, so it re-read /etc on every such re-exec and the
+# guard duly reported it against that test - 15 teardown errors, self-inflicted.
+# guess_type() goes through the stdlib's own "if _db is None: init()", so it is
+# idempotent by construction and warms exactly once per process, which is also
+# precisely the call production makes.
+mimetypes.guess_type("warm.js")
 
 _arm_system_path_guard()
 
