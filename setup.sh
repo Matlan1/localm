@@ -137,6 +137,20 @@ else
   say "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
 fi
 
+# 1 = verify against the platform's NATIVE certificate store - the same trust a
+# browser, or an IT-provisioned corporate/security-product proxy's injected
+# root, already has, so a managed machine behind one verifies on the very first
+# attempt with nothing ever shown (verified live: uv's own bundled-only default
+# fails such a network with "invalid peer certificate: UnknownIssuer";
+# --system-certs does not). Falls back to unset (uv's own bundled Mozilla root
+# list) below ONLY on a certificate error - the one case native-store-first
+# misses: a freshly-imaged system whose store has not yet cached a legitimate CA
+# chain. Real env var (UV_SYSTEM_CERTS is uv's own documented override), so
+# every uv call for the REST of this run - venv creation, localm, the runtime
+# wheel, torch/transformers - inherits whichever choice wins (see create_venv
+# below for the actual fallback).
+export UV_SYSTEM_CERTS=1
+
 # ---- uv is required; bootstrap it ourselves if it is missing ----------------
 # uv (Astral's fast Python package manager) builds the venv and resolves the GPU
 # wheels. Instead of dead-ending with "install it yourself", fetch it via Astral's
@@ -235,26 +249,50 @@ is_our_venv() {  # a venv we created carries the marker / the localm console scr
 create_venv() {
   say ""
   say "  Creating .venv (Python 3.12) ..."
+  # Captured, never shown live: the DEFAULT (native store, exported above)
+  # already gets the common case right on the first try - a plain network and a
+  # network behind an IT-provisioned proxy both verify immediately, so this
+  # never shows the user anything beyond the line above. Capturing costs
+  # nothing observable even when the rare fallback below IS needed: a rejected
+  # TLS handshake fails in well under a second, and a real download still
+  # completes normally, just without a live byte-progress readout.
   while : ; do
     # PYPREF is empty (shared) or "--python-preference only-managed" (portable);
-    # left unquoted on purpose so an empty value expands to no argument.
+    # left unquoted on purpose so an empty value expands to no argument. The
+    # `if var=$(cmd); then` form (not a bare assignment) is required under
+    # `set -e` - it is one of the contexts POSIX exempts from aborting on a
+    # non-zero exit, so a failure here can be examined instead of killing setup.
     # shellcheck disable=SC2086
-    if uv venv --python 3.12 $PYPREF --clear .venv; then
+    if errtext="$(uv venv --python 3.12 $PYPREF --clear .venv 2>&1)"; then
       : > .venv/.localm-venv   # marker: this venv was created by localm setup
       break
-    else
-      say ""
-      say "  [!] Could not create the environment."
-      say "      If a localm process is still running, it may be locking the directory."
-      say "      Please close any open LocaLM launchers or servers."
-      say ""
-      if [ "$YES" = 1 ]; then
-        say "  Setup aborted (--yes mode cannot wait for retry). Please stop processes and try again."
-        exit 1
-      fi
-      retry="$(ask "  Try again? [Y/n]: " Y)"
-      case "$retry" in [Nn]*) say "  Setup aborted."; exit 1 ;; esac
     fi
+    # Failed silently so far. Only ever falls back once: if UV_SYSTEM_CERTS is
+    # already unset, the fallback was already tried - show it for real below
+    # instead of guessing again. Applies in --yes mode too (fully automatic, no
+    # prompt needed) - only the GENERIC failure path below still aborts
+    # immediately under --yes.
+    if [ -n "${UV_SYSTEM_CERTS:-}" ] && printf '%s' "$errtext" | grep -qi certificate; then
+      say "  [i] Your system's certificate store did not verify a required download"
+      say "      (possibly a freshly-installed system that has not cached the real"
+      say "      certificate yet). Falling back to uv's own verified certificate"
+      say "      bundle ..."
+      unset UV_SYSTEM_CERTS
+      continue
+    fi
+    say ""
+    say "$errtext"
+    say ""
+    say "  [!] Could not create the environment."
+    say "      If a localm process is still running, it may be locking the directory."
+    say "      Please close any open LocaLM launchers or servers."
+    say ""
+    if [ "$YES" = 1 ]; then
+      say "  Setup aborted (--yes mode cannot wait for retry). Please stop processes and try again."
+      exit 1
+    fi
+    retry="$(ask "  Try again? [Y/n]: " Y)"
+    case "$retry" in [Nn]*) say "  Setup aborted."; exit 1 ;; esac
   done
 }
 

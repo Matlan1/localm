@@ -158,6 +158,21 @@ rem  re-run never ejects with a misleading "could not create" error (uv refuses
 rem  to clobber an existing environment and returns non-zero). Python 3.12 is
 rem  required by the AMD ROCm torch wheels; we standardise on it for all flavours.
 set "PYVER=3.12"
+rem  1 = verify against the platform's NATIVE certificate store (the Windows ROOT
+rem  store) - the same trust a browser, or an IT-provisioned corporate/security-
+rem  product proxy's injected root, already has, so a managed machine behind one
+rem  verifies on the very first attempt with nothing ever shown (verified live:
+rem  uv's own bundled-only default fails such a network with "invalid peer
+rem  certificate: UnknownIssuer"; --system-certs does not). Falls back to empty
+rem  (uv's own bundled Mozilla root list) below ONLY on a certificate error - the
+rem  one case native-store-first misses: a freshly-imaged Windows box whose ROOT
+rem  store has not yet cached a legitimate CA chain (Windows updates that store
+rem  on demand via SChannel / the browser only, never proactively). Real env var
+rem  (UV_SYSTEM_CERTS is uv's own documented override), so every uv call for the
+rem  REST of this run - venv creation, localm, the runtime wheel, torch/
+rem  transformers - inherits whichever choice wins (see the venv-creation retry
+rem  loop below for the actual fallback).
+set "UV_SYSTEM_CERTS=1"
 
 if not exist ".venv" goto venv_create
 
@@ -183,24 +198,52 @@ if errorlevel 2 (
 echo.
 echo  Creating .venv (Python %PYVER%) ...
 
+rem  Captured, never shown live: the DEFAULT above (native store) already gets
+rem  the common case right on the first try - a plain network and a network
+rem  behind an IT-provisioned proxy both verify immediately, so this never shows
+rem  the user anything beyond the line above. Capturing costs nothing observable
+rem  even when the rare fallback below IS needed: a rejected TLS handshake fails
+rem  in well under a second, and a real download still completes normally, just
+rem  without a live byte-progress readout.
 :venv_retry
-uv venv --python %PYVER% %PYPREF% --clear .venv
-if errorlevel 1 (
-    echo.
-    echo  [!] Could not create the environment.
-    echo      If you see "Access is denied" or "os error 5", a localm process is still running.
-    echo      Please close any open LocaLM launchers, chat windows, or server consoles.
-    echo.
-    call :flush
-    choice /c YN /n /m "  Try again? [Y/n]: "
-    if errorlevel 2 (
-        echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
-        echo      ^(Double-click report-issue.bat to send a report about this.^)
-        pause
-        exit /b 1
-    )
-    goto venv_retry
+if exist "%TEMP%\localm_uv_err.txt" del "%TEMP%\localm_uv_err.txt"
+uv venv --python %PYVER% %PYPREF% --clear .venv >"%TEMP%\localm_uv_err.txt" 2>&1
+if not errorlevel 1 goto venv_create_ok
+
+rem  Failed silently so far. Only ever falls back once: if UV_SYSTEM_CERTS is
+rem  already empty, the fallback was already tried - show it for real below
+rem  instead of guessing again.
+if not defined UV_SYSTEM_CERTS goto venv_show_failure
+findstr /i "certificate" "%TEMP%\localm_uv_err.txt" >nul 2>nul
+if errorlevel 1 goto venv_show_failure
+del "%TEMP%\localm_uv_err.txt" 2>nul
+echo  [i] Your system's certificate store did not verify a required download
+echo      ^(possibly a freshly-installed Windows that has not cached the real
+echo      certificate yet^). Falling back to uv's own verified certificate
+echo      bundle ...
+set "UV_SYSTEM_CERTS="
+goto venv_retry
+
+:venv_show_failure
+type "%TEMP%\localm_uv_err.txt" 2>nul
+del "%TEMP%\localm_uv_err.txt" 2>nul
+echo.
+echo  [!] Could not create the environment.
+echo      If you see "Access is denied" or "os error 5", a localm process is still running.
+echo      Please close any open LocaLM launchers, chat windows, or server consoles.
+echo.
+call :flush
+choice /c YN /n /m "  Try again? [Y/n]: "
+if errorlevel 2 (
+    echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
+    echo      ^(Double-click report-issue.bat to send a report about this.^)
+    pause
+    exit /b 1
 )
+goto venv_retry
+
+:venv_create_ok
+echo  Environment ready.
 type nul > ".venv\.localm-venv"
 :venv_done
 
