@@ -101,7 +101,11 @@
 // verified" on the final line (app/coder.js reads the final event's new
 // `verify_state`) - a stale-cached client would render the old unqualified
 // "Task finished" and report an unverified task as a clean one.
-const CACHE = "localm-shell-v80";
+// v81: app/settings-perf.js changed - a chat send that failed before any token
+// streamed no longer has its rendered error wiped a moment later, and the
+// request now falls back to the loaded model when the dropdown is empty or
+// desynced - a stale-cached client would keep both bugs.
+const CACHE = "localm-shell-v81";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
