@@ -98,6 +98,46 @@ class TestFreeTotalVramBytesSkipsTorchWhenNativeLibLoaded:
         poisoned.cuda.is_available.assert_not_called()
 
 
+class TestVramLevelsSkipsTorchWhenNativeLibLoaded:
+    """VramSizingMixin._vram_levels() must get the SAME proactive skip as its
+    sibling _free_total_vram_bytes() above: it also does a bare `import torch`
+    under a broad except, so a resident native runtime makes it re-hit and
+    re-trace the identical STATUS_ENTRYPOINT_NOT_FOUND fault on every call
+    (observed live via tests/test_grammar_sampling.py::
+    test_invalid_grammar_does_not_poison_later_valid_grammars, which runs
+    after a real_gguf-marked test has loaded the native lib in-process)."""
+
+    def test_never_touches_torch_once_native_lib_is_loaded(self, monkeypatch):
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
+
+        poisoned = MagicMock()
+        poisoned.cuda.is_available.side_effect = AssertionError(
+            "torch.cuda must never be touched once native_lib_loaded() is True")
+        monkeypatch.setitem(sys.modules, "torch", poisoned)
+
+        assert VramSizingMixin._vram_levels() == []
+        poisoned.cuda.is_available.assert_not_called()
+
+    def test_still_attempts_torch_when_native_lib_not_loaded(self, monkeypatch):
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+
+        probed = MagicMock()
+        probed.cuda.is_available.return_value = False
+        monkeypatch.setitem(sys.modules, "torch", probed)
+
+        assert VramSizingMixin._vram_levels() == []
+        probed.cuda.is_available.assert_called_once()
+
+    def test_skip_is_surfaced_at_debug_not_silenced(self, monkeypatch, caplog):
+        """Rule 5 (AGENTS.md): a skip must be diagnosable, never silent."""
+        import logging
+
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: True)
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            VramSizingMixin._vram_levels()
+        assert "skipping the torch VRAM read" in caplog.text
+
+
 class TestSuppressNativeErrorDialogs:
     @pytest.fixture(autouse=True)
     def _reset_flag(self):
