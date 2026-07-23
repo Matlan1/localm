@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import InvalidGrammarError, messages_contain_image
 from localm.inference.chat_pipeline import ChatHookContext
+from localm.inference.gbnf import check_grammar_structure
 from localm.inference.protocol import (
     ChatRequest, CompletionRequest, EmbeddingRequest, make_chunk_id,
 )
@@ -134,8 +135,22 @@ def register(app: FastAPI, ctx) -> None:
             # per-request user error from poisoning the feature for all clients.
             if req.grammar:
                 try:
+                    # LM-FZ-001: a pure-Python structural check FIRST, unconditionally
+                    # (no RPC, so it also covers the RunnerBusy-deferred path below,
+                    # which otherwise skips straight to a generation-time native
+                    # call). A grammar built of thousands of unmatched "(" drove
+                    # llama.cpp's native GBNF parser into a real stack overflow -
+                    # this rejects that shape before any of it reaches the parser.
+                    check_grammar_structure(req.grammar)
                     engine.validate_grammar(req.grammar)
                 except InvalidGrammarError as e:
+                    raise HTTPException(400, f"Invalid grammar: {e}")
+                except RuntimeError as e:
+                    # Defense in depth: a crashed/faulted native worker surfaces
+                    # here as a bare RuntimeError (not InvalidGrammarError), which
+                    # would otherwise escape as an unhandled 500. The structural
+                    # check above should catch the confirmed crash shape before
+                    # this point; this is the safety net for whatever it does not.
                     raise HTTPException(400, f"Invalid grammar: {e}")
 
             if req.stream:
@@ -370,8 +385,22 @@ def register(app: FastAPI, ctx) -> None:
             # _grammar_unsupported degrade for every later request.
             if req.grammar:
                 try:
+                    # LM-FZ-001: a pure-Python structural check FIRST, unconditionally
+                    # (no RPC, so it also covers the RunnerBusy-deferred path below,
+                    # which otherwise skips straight to a generation-time native
+                    # call). A grammar built of thousands of unmatched "(" drove
+                    # llama.cpp's native GBNF parser into a real stack overflow -
+                    # this rejects that shape before any of it reaches the parser.
+                    check_grammar_structure(req.grammar)
                     engine.validate_grammar(req.grammar)
                 except InvalidGrammarError as e:
+                    raise HTTPException(400, f"Invalid grammar: {e}")
+                except RuntimeError as e:
+                    # Defense in depth: a crashed/faulted native worker surfaces
+                    # here as a bare RuntimeError (not InvalidGrammarError), which
+                    # would otherwise escape as an unhandled 500. The structural
+                    # check above should catch the confirmed crash shape before
+                    # this point; this is the safety net for whatever it does not.
                     raise HTTPException(400, f"Invalid grammar: {e}")
 
             if req.stream:
