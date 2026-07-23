@@ -320,7 +320,7 @@ def test_guard_different_explicit_backend_reprovisions(wired, monkeypatch):
     monkeypatch.setattr(setup_llama, "nvidia_preflight",
                         lambda: setup_llama.NvidiaInfo(present=False))
     monkeypatch.setattr(setup_llama, "_cuda_setup_dialogue",
-                        lambda info, yes: ("cuda", False))
+                        lambda info, yes, det=None: ("cuda", False))
     result = _run(["--backend", "cuda"])
     assert result.exit_code == 0, result.output
     # Collapse whitespace: rich word-wraps the console at ~80 cols, so the phrase

@@ -1140,24 +1140,33 @@ def _native_loads_ok() -> tuple:
     return False, _informative_error_line(detail)
 
 
-def _warn_off_profile(chosen: str) -> None:
+def _warn_off_profile(chosen: str):
     """One-line heads-up when a vendor-specific backend was chosen for a vendor
     we did NOT detect. We respect the user's choice - no block, no nag, no
-    re-prompt - just flag it once so a misclick is visible."""
+    re-prompt - just flag it once so a misclick is visible.
+
+    Returns the ``hwdetect.Detection`` used for the check (or ``None`` if it
+    was never computed, or detection failed), so a caller that needs the SAME
+    vendor info downstream - the CUDA dialogue, to name what IS actually
+    present instead of a generic "not found" hedge - does not need a second,
+    redundant ``hwdetect.detect()`` call, and the two can never see different
+    hardware if detection is non-deterministic (e.g. a flaky WMI query)."""
     vendor_specific = {"cuda": "nvidia", "amd-rocm": "amd", "hip": "amd",
                        "sycl": "intel", "metal": "apple"}
     owner = vendor_specific.get(chosen)
     if not owner:
-        return
+        return None
     try:
         from localm import hwdetect
-        vendors = hwdetect.detect().vendors or []
+        det = hwdetect.detect()
     except Exception:
-        return
+        return None
+    vendors = det.vendors or []
     if vendors and owner not in vendors:
         seen = ", ".join(vendors)
         console.print(f"[yellow]Heads up:[/yellow] Picked [bold]{chosen}[/bold] but detected [bold]{seen}[/bold].\n"
                       "[yellow]Proceeding. Hardware must be present.[/yellow]")
+    return det
 
 
 def _flush_stdin() -> None:
@@ -1187,7 +1196,7 @@ def _flush_stdin() -> None:
         pass
 
 
-def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
+def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
     """Given the preflight, walk the user through making CUDA land. Returns
     ``(backend_to_provision, fetch_cudart_bundle)``.
 
@@ -1196,11 +1205,23 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
         (default yes); declining falls back to vulkan.
       * driver too old     -> a driver cannot be self-assembled; recommend
         vulkan now and tell them how to enable CUDA later.
-      * no NVIDIA detected  -> the user forced cuda; confirm-continue, else
-        vulkan. (warn-once, do not block.)
+      * no NVIDIA detected, hardware unknown -> the user forced cuda;
+        confirm-continue, else vulkan (warn-once, do not block).
+      * no NVIDIA detected, but *det* (the SAME hwdetect.Detection
+        _warn_off_profile already computed) shows a DIFFERENT vendor is
+        actually present -> name it, recommend the real policy-backed match
+        for it (hwdetect.recommended_install_backend - not a hardcoded
+        vulkan regardless of hardware), and offer a genuine three-way choice
+        (continue / switch to the recommendation / quit) instead of a binary
+        confirm whose "no" silently imposes vulkan either way.
+
+    *det* is optional and changes nothing when it is None or shows no vendor
+    other than nvidia (the vast majority of existing callers/tests) - the
+    dialogue falls back to the original generic behaviour unchanged.
     """
     console.print("[bold]CUDA selected[/bold] (peak NVIDIA performance). "
                   "Checking your system...")
+    other_vendors = [v for v in (det.vendors if det else []) if v != "nvidia"]
     if info.present:
         console.print(f"  [green]OK[/green] NVIDIA GPU: {info.gpu_name or 'detected'}")
         if info.cuda_capability:
@@ -1209,6 +1230,10 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
             console.print(f"  [{colour}]{mark}[/{colour}] Driver {info.driver_version} "
                           f"supports CUDA {info.cuda_capability} "
                           f"(need >= {_MIN_DRIVER_CUDA[0]}.{_MIN_DRIVER_CUDA[1]})")
+    elif other_vendors:
+        seen = "/".join(v.upper() for v in other_vendors)
+        console.print(f"  [yellow]?[/yellow] Could not run nvidia-smi - this machine "
+                      f"looks like [bold]{seen}[/bold], not NVIDIA.")
     else:
         console.print("  [yellow]?[/yellow] Could not run nvidia-smi - no NVIDIA driver "
                       "detected here (or it is not on PATH).")
@@ -1222,13 +1247,37 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
 
     # No NVIDIA detected, but the user explicitly asked for cuda: their call.
     if not info.present:
-        if assume_yes:
-            console.print("  [dim]--yes: using Vulkan (no NVIDIA GPU detected).[/dim]")
+        if not other_vendors:
+            # No specific alternative to recommend - the original generic
+            # continue-or-vulkan choice (also what a fully headless machine,
+            # or one where hwdetect itself failed, falls back to).
+            if assume_yes:
+                console.print("  [dim]--yes: using Vulkan (no NVIDIA GPU detected).[/dim]")
+                return "vulkan", False
+            _flush_stdin()
+            if click.confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
+                return "cuda", True
             return "vulkan", False
+
+        # We KNOW what IS actually here - recommend the real match for it
+        # rather than a hardcoded vulkan, via the SAME policy setup.bat/sh use.
+        from localm import hwdetect as _hwdetect
+        recommended = _hwdetect.recommended_install_backend(det)
+        if assume_yes:
+            seen = "/".join(v.upper() for v in other_vendors)
+            console.print(f"  [dim]--yes: using {recommended} "
+                          f"({seen} detected, not NVIDIA).[/dim]")
+            return recommended, False
         _flush_stdin()
-        if click.confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
+        console.print("    [1] Continue with CUDA anyway")
+        console.print(f"    [2] Switch to {recommended} (recommended for your hardware)")
+        console.print("    [3] Quit")
+        pick = click.prompt("  Pick 1-3", type=click.Choice(["1", "2", "3"]), default="2")
+        if pick == "1":
             return "cuda", True
-        return "vulkan", False
+        if pick == "3":
+            sys.exit(1)
+        return recommended, False
 
     # Driver OK (or capability unknown but a GPU is present): offer the fetch.
     console.print("  [yellow]i[/yellow] Fetching self-contained CUDA runtime bundle. [bold]No Toolkit needed[/bold].")
@@ -1496,13 +1545,16 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         chosen = _auto_backend() if backend == "auto" else backend
         # warn-once-then-comply: an explicit off-profile choice is the user's to
         # make, but flag a vendor mismatch a single time so a misclick is visible.
-        if backend != "auto":
-            _warn_off_profile(chosen)
+        # Also captures the SAME detection for the CUDA dialogue below, so a
+        # "no NVIDIA found" fallback can name the vendor that IS actually
+        # present and recommend the real match for it, rather than compute it
+        # a second time (or not have it at all).
+        det = _warn_off_profile(chosen) if backend != "auto" else None
         # CUDA is the visible peak-NVIDIA option: detect the driver, then offer to
         # fetch a self-contained runtime (no Toolkit) or fall back cleanly.
         with_cudart = False
         if chosen == "cuda" and sys.platform == "win32":
-            chosen, with_cudart = _cuda_setup_dialogue(nvidia_preflight(), assume_yes)
+            chosen, with_cudart = _cuda_setup_dialogue(nvidia_preflight(), assume_yes, det)
         result = _provision_with_fallback(chosen, target, sha256, with_cudart,
                                           assume_yes)
         _record_provisioned_backend(target, result)

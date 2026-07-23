@@ -12,6 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Picking CUDA on a machine `setup-llama` already knows is AMD (or another
+  non-NVIDIA vendor) no longer offers only a generic "no NVIDIA driver
+  detected" message with Vulkan as the sole fallback.** The vendor mismatch
+  was already detected and reported once ("Heads up: picked cuda but detected
+  amd"), but that information never reached the CUDA driver-preflight dialogue
+  a moment later, which only knew "no NVIDIA GPU" - not what actually IS
+  present - and offered a binary continue-or-Vulkan choice regardless of
+  hardware. It now names the vendor that was actually detected, recommends
+  the real match for it (the same policy `setup.bat`/`setup.sh` use - e.g. the
+  self-contained ROCm build for AMD on Windows, not a hardcoded Vulkan), and
+  offers a genuine three-way choice: continue with CUDA anyway, switch to the
+  recommendation, or quit.
 - **A blocked or corrupted `setup-llama` download now says specifically what
   went wrong, instead of naming every possible cause at once.** A downloaded
   runtime archive that turns out too small or not a valid archive used to get
