@@ -417,7 +417,16 @@ def _arm_system_path_guard() -> bool:
 # a true statement about the wrong subject. Doing it once, here, in a declared
 # place, keeps a hit meaning what the guard says it means: OUR code touching a
 # system location, not the interpreter initialising itself.
-mimetypes.init()
+#
+# guess_type(), NOT init(): this module is re-executed under an ALREADY-ARMED
+# guard by test_conftest_syspath_guard's _real_conftest_module(), which loads the
+# shipped conftest by path to assert against the real file. init() rebuilds the
+# registry unconditionally, so it re-read /etc on every such re-exec and the
+# guard duly reported it against that test - 15 teardown errors, self-inflicted.
+# guess_type() goes through the stdlib's own "if _db is None: init()", so it is
+# idempotent by construction and warms exactly once per process, which is also
+# precisely the call production makes.
+mimetypes.guess_type("warm.js")
 
 _arm_system_path_guard()
 
