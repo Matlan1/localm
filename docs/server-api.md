@@ -134,10 +134,10 @@ and `POST /v1/comfy/restart`).
 Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load. A handful of settings (the `rag_*` indexing paths,
-`net_allow_private`, and the `bugreport_upload_*` / `update_*` endpoints) widen
-a trust boundary and are hidden from, and refused for, a non-owner
-`config:write` key - only an `admin`-scoped key or the open-mode owner may read
-or change them.
+`net_allow_private`, `cors_origins`, and the `bugreport_upload_*` / `update_*`
+endpoints) widen a trust boundary and are hidden from, and refused for, a
+non-owner `config:write` key - only an `admin`-scoped key or the open-mode
+owner may read or change them.
 
 Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
 settings: this endpoint cannot validate what is inside them, and their own write

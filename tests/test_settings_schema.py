@@ -188,8 +188,11 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     # disables the SSRF guard (a network trust boundary). Both are owner-only, so
     # a non-owner config:write key cannot flip either (pentest finding LM-PT-001).
     # The bug-report / update endpoints are the same class of boundary.
+    # cors_origins names which browser origins may call the authenticated API -
+    # the same class of trust-widening boundary - and must be owner-only too
+    # (security-checkup finding 2026-07-23).
     assert ss.admin_only_keys() == (
-        RAG_OWNER_KEYS | {"net_allow_private"} | OUTBOUND_OWNER_KEYS)
+        RAG_OWNER_KEYS | {"net_allow_private", "cors_origins"} | OUTBOUND_OWNER_KEYS)
 
 
 def test_outbound_endpoint_keys_are_owner_only():
@@ -208,6 +211,12 @@ def test_net_allow_private_is_admin_only():
         "the SSRF-guard-disable toggle must be owner-only"
     # A sibling network field the scoped key legitimately manages stays non-admin.
     assert by_key["net_allow"].admin_only is False
+
+
+def test_cors_origins_is_admin_only():
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    assert by_key["cors_origins"].admin_only is True, \
+        "cors_origins widens the browser-origin trust boundary and must be owner-only"
 
 
 # --- non-finite (NaN / inf) numbers are rejected (fuzzing finding LM-FZ-001) --- #
