@@ -281,6 +281,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the trace no longer appears.
 
 ### Fixed
+- **`localm doctor` no longer reports an installed-but-broken package as
+  simply "not installed", and no longer goes quiet about the breakage.**
+  Doctor shows each key dependency with its version, reading that version from
+  the installed package's metadata and falling back to the package's own
+  `__version__` when no metadata is present. For a package that resolves its
+  attributes lazily (transformers does), asking for `__version__` can itself
+  raise a missing-module error, and that error was indistinguishable from the
+  package failing to import at all. So a transformers that imported perfectly
+  well but was internally broken got listed as "not installed" - and because
+  the deeper "is the HF backend actually usable" check only runs when both
+  transformers and torch are present, it then skipped silently, saying nothing
+  about the fault it exists to report. A version that cannot be read is now
+  just a missing version number: the package is still reported as present, and
+  the usability check still runs and still names the real root cause.
 - **Picking CUDA on a machine `setup-llama` already knows is AMD (or another
   non-NVIDIA vendor) no longer offers only a generic "no NVIDIA driver
   detected" message with Vulkan as the sole fallback.** The vendor mismatch
