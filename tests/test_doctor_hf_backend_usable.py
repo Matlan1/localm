@@ -223,9 +223,17 @@ def test_missing_dist_metadata_does_not_turn_a_broken_module_into_not_installed(
     monkeypatch.setitem(sys.modules, "transformers", broken)
 
     # _check_packages imports importlib.metadata LOCALLY (as _ilm), so there is
-    # no module attribute to patch - patch the real module it binds to.
+    # no module attribute to patch - patch the real module it binds to. Only
+    # transformers loses its metadata: blanking it for EVERY package would push
+    # click onto the __version__ fallback too, which is exactly the deprecated
+    # access the metadata-first ordering exists to avoid (AUD-CLICKVER), and the
+    # test would emit the warning it is meant to keep away.
+    _real_version = importlib.metadata.version
+
     def _no_metadata(name):
-        raise importlib.metadata.PackageNotFoundError(name)
+        if name == "transformers":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return _real_version(name)
 
     monkeypatch.setattr(importlib.metadata, "version", _no_metadata)
     buf = io.StringIO()
