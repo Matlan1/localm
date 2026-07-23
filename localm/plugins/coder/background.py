@@ -597,6 +597,19 @@ class ShellJob(BackgroundJob):
             # higher-integrity process. Returning unconditionally would report a
             # tree kill that never ran, and would skip the fallback sweep below.
             # The POSIX path already warns when killpg fails; match it.
+            #
+            # The same "process not found" race can also land on a NON-root
+            # descendant: /T snapshots the tree once and then terminates each
+            # pid it found in turn, so under heavy scheduler contention one
+            # descendant can legitimately exit in the gap between that snapshot
+            # and taskkill reaching its specific pid. Windows then reports THAT
+            # pid as "There is no running instance of the task" (exit 255 for a
+            # multi-pid /T call, versus 128 for the single direct-child case
+            # above) even though the rest of the tree, including that pid, ends
+            # up fully dead - the fallback sweep below and _verify_tree_gone()'s
+            # independent (pid, create_time) check are what actually confirm
+            # that, not this exit code. Observed for real under `pytest -n
+            # auto`: exit 255 naming a grandchild pid, tree fully dead after.
             detail = (_decode(done.stderr) or _decode(done.stdout)
                       or "no output")
             self.warnings.append(
