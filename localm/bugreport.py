@@ -1348,18 +1348,76 @@ def _crash_dir(home=None):
     return d
 
 
-def arm_crash_guard(context: Optional[dict] = None, home=None) -> bool:
+# Running more than one localm server against the SAME LOCALM_HOME is a
+# first-class, supported scenario (`localm ps` lists "running localm servers
+# (per-directory instances)"; `serve --project/--new/--isolated`; the coder
+# plugin self-starting its own backing server). The marker used to be one
+# unscoped file per home, so a second instance starting up would find the
+# FIRST instance's still-armed marker, misread it as "the previous run died
+# hard", and file a spurious crash report about a server that was never down -
+# and its own later clean-shutdown disarm would then delete whatever marker
+# existed at that point, which could by then belong to a THIRD, still-live
+# instance, silencing a real crash of that instance forever. Scoping the
+# marker (and its companion native-fault-trace file) per instance_id - the
+# same per-process identity instances.py's own registry already uses for
+# exactly this reason (``run/<instance_id>.json``) - means each running
+# instance only ever arms, reports, and disarms its OWN file.
+
+
+def _crash_marker_path(d, instance_id: Optional[str]):
+    if instance_id:
+        return d / f"server-crash.{instance_id}.marker"
+    # No instance identity available (a bare create_app() test harness that
+    # never went through instances.advertise()): fall back to the legacy
+    # shared name rather than silently skipping the crash guard.
+    return d / "server-crash.marker"
+
+
+def _crash_trace_path(d, instance_id: Optional[str]):
+    if instance_id:
+        return d / f"server-crash-trace.{instance_id}.txt"
+    return d / "server-crash-trace.txt"
+
+
+def _trace_path_for_marker(d, marker):
+    """The native-fault-trace file that belongs WITH *marker* (same instance),
+    derived from the marker's own filename rather than a second parameter, so a
+    caller iterating markers it did not itself name (check_and_report_prior_crash)
+    never has to keep the two paths in sync by hand."""
+    name = marker.name
+    prefix, suffix = "server-crash.", ".marker"
+    if name.startswith(prefix) and name.endswith(suffix) and name != "server-crash.marker":
+        return d / f"server-crash-trace.{name[len(prefix):-len(suffix)]}.txt"
+    return d / "server-crash-trace.txt"
+
+
+def _all_crash_markers(d):
+    """Every armed marker under *d*: one per instance that has ever armed
+    against this LOCALM_HOME (plus the legacy unscoped name, if present)."""
+    markers = list(d.glob("server-crash.*.marker"))
+    legacy = d / "server-crash.marker"
+    if legacy.exists():
+        markers.append(legacy)
+    return markers
+
+
+def arm_crash_guard(context: Optional[dict] = None, home=None,
+                    instance_id: Optional[str] = None) -> bool:
     """Mark that a server run is in progress and enable faulthandler so a native
     fault leaves a trace. If the process dies hard the marker survives;
-    check_and_report_prior_crash() reports it on the next start. Returns True if
-    armed. Fully guarded - never raises into the caller."""
+    check_and_report_prior_crash() reports it on the next start. *instance_id*
+    (``app.state.instance_id``, set by instances.advertise() before this is
+    called) scopes the marker to THIS running instance so a sibling instance
+    sharing the same LOCALM_HOME is never mistaken for a crash - see the module
+    note above. Returns True if armed. Fully guarded - never raises into the
+    caller."""
     global _crash_trace_fh
     import faulthandler
     import json
     import os
     try:
         d = _crash_dir(home)
-        _crash_trace_fh = open(d / "server-crash-trace.txt", "w", encoding="utf-8")
+        _crash_trace_fh = open(_crash_trace_path(d, instance_id), "w", encoding="utf-8")
         try:
             faulthandler.enable(file=_crash_trace_fh, all_threads=True)
         except Exception:
@@ -1368,7 +1426,7 @@ def arm_crash_guard(context: Optional[dict] = None, home=None) -> bool:
             # a hard death is still reported next start - just without the native
             # traceback. Arming must not fail over this.
             pass
-        (d / "server-crash.marker").write_text(
+        _crash_marker_path(d, instance_id).write_text(
             json.dumps({"pid": os.getpid(), "context": context or {}}),
             encoding="utf-8")
         return True
@@ -1376,12 +1434,17 @@ def arm_crash_guard(context: Optional[dict] = None, home=None) -> bool:
         return False
 
 
-def disarm_crash_guard(home=None) -> None:
-    """Clean shutdown: drop the marker so the next start does not report a crash."""
+def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
+    """Clean shutdown: drop THIS instance's own marker (never a sibling's) so
+    the next start does not report a crash. *instance_id* must be the SAME id
+    passed to the matching arm_crash_guard() call - see the module note above
+    for why an unscoped delete is unsafe when more than one instance shares a
+    LOCALM_HOME."""
     global _crash_trace_fh
     import faulthandler
     try:
-        (_crash_dir(home) / "server-crash.marker").unlink(missing_ok=True)
+        d = _crash_dir(home)
+        _crash_marker_path(d, instance_id).unlink(missing_ok=True)
     except Exception:
         # Best-effort cleanup on a CLEAN shutdown. Worst case the marker survives
         # and the next start files one spurious "prior crash" report - annoying,
@@ -1398,14 +1461,13 @@ def disarm_crash_guard(home=None) -> None:
         pass
 
 
-def check_and_report_prior_crash(home=None, interactive: bool = False):
-    """If a previous server run left a crash marker (it died without a clean
-    shutdown: a native crash, an OS kill, or a force-closed window), file a bug
-    report so the failure is never lost, then clear the marker. Returns the
-    report path if one was filed, else None. Never raises into the caller."""
+def _report_one_crash_marker(d, marker, home, interactive: bool):
+    """Report *marker* as a crash IF its recorded pid is no longer alive, then
+    clear it. Returns the report path, or None if this marker was skipped (a
+    live sibling instance) or nothing could be filed. Never raises."""
     import json
+    from localm.instances import pid_alive
     try:
-        marker = _crash_dir(home) / "server-crash.marker"
         if not marker.exists():
             return None
         info = {}
@@ -1416,9 +1478,24 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
             # still means a crash happened: fall back to empty context and report
             # it anyway rather than dropping the crash on the floor.
             pass
+        pid = info.get("pid")
+        try:
+            if pid_alive(int(pid)):
+                # The recorded pid is still running: this is a SIBLING instance
+                # that is simply still up, not a crash (SRV-3 follow-up). Leave
+                # its marker alone - its own eventual disarm (clean exit) or a
+                # future check here (real crash) will handle it correctly. PID
+                # reuse is an accepted residual risk here, same as elsewhere in
+                # this codebase (e.g. instances.py) - no whoami-style identity
+                # check is recorded in the marker to rule it out.
+                return None
+        except (TypeError, ValueError):
+            # No/unparseable pid recorded: cannot confirm liveness, so treat it
+            # like the corrupt-marker case above - report rather than drop it.
+            pass
         trace = ""
         try:
-            tp = _crash_dir(home) / "server-crash-trace.txt"
+            tp = _trace_path_for_marker(d, marker)
             if tp.exists():
                 trace = tp.read_text(encoding="utf-8").strip()
         except Exception:
@@ -1455,3 +1532,25 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
             error=None, context=ctx, interactive=interactive)
     except Exception:
         return None
+
+
+def check_and_report_prior_crash(home=None, interactive: bool = False):
+    """Scan every crash marker left under this LOCALM_HOME's run/ dir (one per
+    instance that has ever armed here) and report+clear any whose recorded pid
+    is no longer alive - a hard crash: a native fault, an OS kill, or a
+    force-closed window. A marker whose pid IS still alive is a sibling
+    instance simply still running (see the per-instance-scoping module note
+    above) and is left untouched: not reported, not deleted. Returns the last
+    report path filed, or None if nothing was reported. Never raises into the
+    caller."""
+    try:
+        d = _crash_dir(home)
+        markers = _all_crash_markers(d)
+    except Exception:
+        return None
+    filed = None
+    for marker in markers:
+        result = _report_one_crash_marker(d, marker, home, interactive)
+        if result is not None:
+            filed = result
+    return filed

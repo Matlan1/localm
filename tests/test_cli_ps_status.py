@@ -193,8 +193,10 @@ def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch):
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
     monkeypatch.setattr(instances, "kill_pid", lambda *a, **k: True)
     disarmed = {}
-    monkeypatch.setattr(bugreport, "disarm_crash_guard",
-                         lambda home: disarmed.setdefault("home", home))
+    monkeypatch.setattr(
+        bugreport, "disarm_crash_guard",
+        lambda home, instance_id=None: disarmed.update(
+            home=home, instance_id=instance_id))
 
     with patch("requests.post", return_value=_resp(403)), \
          patch("localm.tls.requests_verify", return_value=True):
@@ -202,6 +204,10 @@ def test_stop_disarms_crash_guard_after_a_confirmed_direct_kill(monkeypatch):
 
     assert res.exit_code == 0
     assert "home" in disarmed
+    # The direct-kill disarm must target THIS entry's own marker (its
+    # instance_id), never an unscoped/shared one - or a still-live sibling
+    # instance sharing the same LOCALM_HOME could have its marker deleted.
+    assert disarmed["instance_id"] == "abcd1234ef"
 
 
 def test_stop_does_not_disarm_crash_guard_when_kill_fails(monkeypatch):
@@ -213,8 +219,9 @@ def test_stop_does_not_disarm_crash_guard_when_kill_fails(monkeypatch):
     monkeypatch.setattr(instances, "list_entries", lambda *a, **k: [entry])
     monkeypatch.setattr(instances, "kill_pid", lambda *a, **k: False)
     disarm_calls = []
-    monkeypatch.setattr(bugreport, "disarm_crash_guard",
-                         lambda home: disarm_calls.append(home))
+    monkeypatch.setattr(
+        bugreport, "disarm_crash_guard",
+        lambda home, instance_id=None: disarm_calls.append(home))
 
     with patch("requests.post", return_value=_resp(403)), \
          patch("localm.tls.requests_verify", return_value=True):

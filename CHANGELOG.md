@@ -12,6 +12,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **A second localm server sharing the same data directory no longer reports
+  the first, healthy one as crashed.** Running more than one server against
+  the same data directory is a normal, supported thing to do (`localm ps`,
+  `serve --project`, the coder plugin starting its own backing server), but the
+  crash-recovery marker used to be a single file per data directory with no
+  notion of which server it belonged to. A second instance starting up would
+  find the first, perfectly healthy instance's marker, conclude it had died
+  hard, and file a bug report about a crash that never happened - and that
+  second instance's own later, clean shutdown would then delete whatever
+  marker happened to be sitting there, which could by then belong to a third,
+  still-running instance, silencing a real crash of that instance for good.
+  Each running server now gets its own marker, and a marker is only ever
+  treated as evidence of a crash once the process id it recorded is confirmed
+  to no longer be running.
 - **A sub-task the coder gave up on can no longer report back that it succeeded.**
   When `dispatch_parallel` runs sub-tasks side by side and one of them overruns the
   time budget, that sub-task is abandoned - it cannot be stopped, only left to run
