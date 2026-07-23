@@ -1426,7 +1426,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     }
   }
 
-  const body = { model: modelSelect.value, messages, stream: true };
+  // The <select> can desync from what the server actually has loaded (e.g. an
+  // empty/not-yet-populated dropdown while modelCache.active - published
+  // immediately on a sidebar load, see switchModel's REG-471 fix - already
+  // reflects the real model): fall back to it so a send never posts a literal
+  // empty model string and draws a needless, hard-to-recover-from 400.
+  const modelName = modelSelect.value || modelCache.active;
+  const body = { model: modelName, messages, stream: true };
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
                    "max_tokens", "seed"]) {
     if (params[k] !== null && !Number.isNaN(params[k])) body[k] = params[k];
@@ -1457,6 +1463,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let finishReason = null;
   let aborted = false;
   let visionRejected = false;
+  let requestFailed = false;   // a generic (non-vision, non-abort) send failure
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   try {
     const r = await fetch("/v1/chat/completions", {
@@ -1510,6 +1517,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
           "chatting (text only)."
         : "Chat request failed: " + e.message, true);
     } else {
+      requestFailed = true;
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
       toast("Chat request failed: " + e.message, true);
     }
@@ -1533,11 +1541,26 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     return;
   }
 
-  // VIS-1: a vision reject (or any failure that streamed nothing) must NOT
-  // persist an empty assistant turn - a blank reply saved every send is the
-  // "every turn after the image is empty" wedge. Re-render from real history
-  // (which now has the image stripped) and stop here so the chat recovers.
-  if (visionRejected || (!full.trim() && !reasoning.trim())) {
+  // VIS-1: a vision reject must NOT persist an empty assistant turn - a blank
+  // reply saved every send is the "every turn after the image is empty" wedge.
+  // Re-render from real history (which now has the image stripped) and stop
+  // here so the chat recovers.
+  if (visionRejected) {
+    renderChat();
+    return;
+  }
+  if (!full.trim() && !reasoning.trim()) {
+    if (requestFailed) {
+      // A generic failure (e.g. a 400 before any token streamed) already
+      // rendered "*[error: ...]*" into the live bubble above. renderChat()
+      // rebuilds #chat-messages purely from conv.messages, which never
+      // received this failed turn - calling it here would silently wipe the
+      // only visible trace of the error the moment the toast auto-dismisses.
+      // Leave the rendered error bubble in place instead.
+      return;
+    }
+    // A successful-but-empty completion: no error to show, just drop the
+    // stray empty live bubble by re-rendering from (unchanged) history.
     renderChat();
     return;
   }
@@ -1550,7 +1573,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
     // NEW-1: record which model produced this turn so the transcript can show a
     // divider when the active model changes between turns (model-switch-indication).
-    model: modelSelect.value || undefined,
+    model: modelName || undefined,
   };
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
