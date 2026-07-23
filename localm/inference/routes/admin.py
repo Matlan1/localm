@@ -41,7 +41,7 @@ def register(app: FastAPI, ctx) -> None:
         method to shut down so the user is not left force-closing the window
         (which segfaults) or relying on a Ctrl+C that sometimes does nothing. The
         model is unloaded before exit. (A Settings button calls this - Lane E.)"""
-        _request_shutdown()
+        _request_shutdown(instance_id=getattr(app.state, "instance_id", None))
         return {"stopping": True}
 
     @app.post("/v1/server/restart",
@@ -56,7 +56,8 @@ def register(app: FastAPI, ctx) -> None:
         otherwise re-runs pick_port() and can bind elsewhere, leaving the reconnect
         overlay waiting forever on a port nothing is listening on (the same root
         cause as REG-605's false rollback, minus the watchdog)."""
-        _request_restart(port=getattr(app.state, "instance_port", None))
+        _request_restart(port=getattr(app.state, "instance_port", None),
+                         instance_id=getattr(app.state, "instance_id", None))
         return {"restarting": True}
 
     @app.post("/api/bug-report",
@@ -238,6 +239,7 @@ def register(app: FastAPI, ctx) -> None:
             # default that is free again by now), the watchdog polls a port
             # nothing answers on, and a perfectly healthy update is auto-rolled
             # back after its 90s timeout (REG-605).
-            _request_restart(update_watchdog=watchdog, port=port)
+            _request_restart(update_watchdog=watchdog, port=port,
+                             instance_id=getattr(app.state, "instance_id", None))
             res["restarting"] = True
         return res

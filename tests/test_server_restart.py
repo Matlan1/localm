@@ -90,7 +90,7 @@ def test_do_restart_disarms_crash_guard_before_relaunch(monkeypatch):
     monkeypatch.setattr(http_server, "_engine", None)
     import localm.bugreport as bugreport
     monkeypatch.setattr(bugreport, "disarm_crash_guard",
-                        lambda: disarmed.append(True))
+                        lambda instance_id=None: disarmed.append(True))
     monkeypatch.setattr(os, "execv", _boom)
     try:
         http_server._do_restart()

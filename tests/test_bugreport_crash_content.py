@@ -73,6 +73,11 @@ class TestBuildReportRendersCrashDetail:
 class TestCheckAndReportAttachesContent:
     def test_recovered_crash_report_includes_log_tail(self, tmp_path, monkeypatch):
         # Arrange: a crash marker for pid 4242 + that run's log, no native trace.
+        # pid_alive is mocked (rather than relying on 4242 happening to be a
+        # dead pid on the test machine) so the new pid-liveness check
+        # deterministically treats this marker as a genuine crash.
+        from localm import instances
+        monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
         run = tmp_path / "run"
         run.mkdir(parents=True, exist_ok=True)
         (run / "server-crash.marker").write_text(

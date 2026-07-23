@@ -2242,12 +2242,17 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
         pass
 
 
-def _do_shutdown() -> None:
+def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
     """SRV-4: the actual stop sequence. Unload the model FIRST so the native
     context is freed cleanly (a hard exit while it is loaded segfaults during
     teardown), clear the crash marker so this intentional stop is not reported as
     a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
-    does nothing). Separated from the route so it can be tested without exiting."""
+    does nothing). Separated from the route so it can be tested without exiting.
+
+    *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
+    the crash-marker clear to THIS instance only - see bugreport.py's
+    per-instance-scoping note; omitting it falls back to the legacy shared
+    marker name rather than silently skipping the clear."""
     # Unload all engines in the multi-model dictionary
     for engine in list(_engines.values()):
         try:
@@ -2286,7 +2291,7 @@ def _do_shutdown() -> None:
         _dbg_swallow("embedder release during shutdown failed (non-fatal)")
     try:
         from localm import bugreport
-        bugreport.disarm_crash_guard()
+        bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
         # If the crash marker is NOT cleared, this intentional stop is reported as
         # a crash on the next boot - a false "it crashed". Log it (WARNING) so that
@@ -2297,15 +2302,17 @@ def _do_shutdown() -> None:
     os._exit(0)
 
 
-def _request_shutdown(delay: float = 0.25) -> None:
+def _request_shutdown(delay: float = 0.25, *,
+                      instance_id: Optional[str] = None) -> None:
     """Run _do_shutdown shortly after returning, so the 200 response flushes to
-    the client before the process exits."""
+    the client before the process exits. *instance_id* is forwarded unchanged -
+    see _do_shutdown's docstring."""
     import threading
     import time as _t
 
     def _run():
         _t.sleep(delay)
-        _do_shutdown()
+        _do_shutdown(instance_id=instance_id)
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -2339,13 +2346,19 @@ def _restart_argv(port: Optional[int] = None) -> list:
 
 
 def _do_restart(*, update_watchdog: Optional[dict] = None,
-                port: Optional[int] = None) -> None:
+                port: Optional[int] = None,
+                instance_id: Optional[str] = None) -> None:
     """R18: restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
     clear the crash marker so this intentional restart is not reported as a crash,
     then re-exec the same command line so the server comes back on the same port.
     os.execv replaces the process image and does not return on success. Separated
     from the route so it can be tested without actually re-execing.
+
+    *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
+    the crash-marker clear to THIS instance only - see _do_shutdown/bugreport.py's
+    per-instance-scoping note. The re-exec'd process re-advertises and gets a
+    fresh instance_id of its own, so no persistence across the restart is needed.
 
     *port* is the port this instance is actually bound to (app.state.instance_port,
     set by advertise()); it is pinned into the re-exec command line so "comes back
@@ -2391,7 +2404,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         _dbg_swallow("embedder release during restart failed (non-fatal)")
     try:
         from localm import bugreport
-        bugreport.disarm_crash_guard()
+        bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
         # Same misattribution hazard as _do_shutdown: an uncleared crash marker
         # makes this intentional restart look like a crash next boot. Log it.
@@ -2482,16 +2495,19 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 
 
 def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
-                     port: Optional[int] = None) -> None:
+                     port: Optional[int] = None,
+                     instance_id: Optional[str] = None) -> None:
     """Run _do_restart shortly after returning, so the 200 response flushes to the
-    client before the process re-execs (mirrors _request_shutdown). *update_watchdog*
-    and *port* are forwarded to _do_restart unchanged - see its docstring."""
+    client before the process re-execs (mirrors _request_shutdown). *update_watchdog*,
+    *port*, and *instance_id* are forwarded to _do_restart unchanged - see its
+    docstring."""
     import threading
     import time as _t
 
     def _run():
         _t.sleep(delay)
-        _do_restart(update_watchdog=update_watchdog, port=port)
+        _do_restart(update_watchdog=update_watchdog, port=port,
+                   instance_id=instance_id)
 
     threading.Thread(target=_run, daemon=True).start()
 

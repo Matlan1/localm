@@ -83,9 +83,19 @@ def run_server(
     # shutdown - native fault / OS kill / force-closed window) now, then arm the
     # crash guard so THIS run is caught the same way if it dies hard. Disarmed in
     # the finally on a clean exit so a normal stop is never reported as a crash.
+    # instance_id (set on app.state by instances.advertise(), which always runs
+    # before this) scopes the marker to THIS instance, so a second instance
+    # sharing the same LOCALM_HOME is never mistaken for a crash - see
+    # bugreport.py's per-instance-scoping note. *app* is a generic ASGI
+    # callable here, not guaranteed to be a FastAPI instance with a `.state`
+    # (test_portmux.py drives this with a bare ASGI function) - getattr on
+    # app itself first, so a plain callable degrades to no instance_id
+    # instead of raising AttributeError before the server ever binds.
+    instance_id = getattr(getattr(app, "state", None), "instance_id", None)
     bugreport.check_and_report_prior_crash()
     bugreport.arm_crash_guard(context={"host": host, "port": port,
-                                        "tls": bool(ssl_certfile)})
+                                        "tls": bool(ssl_certfile)},
+                              instance_id=instance_id)
 
     try:
         if not ssl_certfile:
@@ -124,7 +134,7 @@ def run_server(
             uvicorn.run(app, host=host, port=port, log_level=log_level,
                         ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
-        bugreport.disarm_crash_guard()
+        bugreport.disarm_crash_guard(instance_id=instance_id)
 
 
 async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) -> None:

@@ -798,7 +798,8 @@ def stop_cmd(instance_id, stop_all, timeout):
                 # marker so a later genuine crash is still caught.
                 try:
                     from localm import bugreport
-                    bugreport.disarm_crash_guard(home)
+                    bugreport.disarm_crash_guard(
+                        home, instance_id=entry.get("instance_id"))
                 except Exception:
                     pass
 
