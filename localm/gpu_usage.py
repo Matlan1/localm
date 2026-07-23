@@ -409,6 +409,23 @@ def raw_reading_is_process_scoped() -> bool:
         return False
 
 
+def _gpu_is_amd(gpu: dict) -> bool:
+    """Whether a GPU entry is an AMD card, by its human name.
+
+    The name is whatever the caller put on the entry: ``torch.cuda.get_device_name``
+    or nvidia-smi for :func:`discover._list_gpus_probe` entries, and the adapter's
+    registry ``DriverDesc`` for :func:`discover.vram_info`'s registry tier - all of
+    which read like "AMD Radeon RX 6900 XT", "NVIDIA GeForce ...", "Intel(R) Arc(TM)
+    ...", so a substring test is reliable across vendors and never false-positives
+    NVIDIA/Intel. A missing/blank name answers False - the safe default, since an
+    unrecognised GPU must not be paired with ADL's AMD adapter. Used only to
+    authorise the single-adapter ADL fallback in :func:`device_global_used_bytes`,
+    which is already gated on there being exactly one ADL (AMD) adapter and exactly
+    one requested GPU."""
+    name = str(gpu.get("name") or "").lower()
+    return "amd" in name or "radeon" in name
+
+
 def device_global_used_bytes(gpus: list) -> Dict[int, int]:
     """``{gpu_index: device_global_used_bytes}`` for as many of *gpus* as can be
     mapped to a real adapter, or ``{}`` when this platform has no better source than
@@ -458,7 +475,26 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
             if mapped:
                 return mapped
             if (not any_bus_answered and len(by_bus) == 1 and len(gpus) == 1
-                    and raw_reading_is_process_scoped()):
+                    and (raw_reading_is_process_scoped() or _gpu_is_amd(gpus[0]))):
+                # Fire the single-adapter pairing when EITHER signal says the one
+                # detected GPU is the one AMD adapter ADL sees:
+                #   - raw_reading_is_process_scoped(): the platform's raw reading
+                #     is the measured-blind HIP source (torch ROCm, or a resident
+                #     bundled HIP runtime IN THIS process); or
+                #   - _gpu_is_amd(gpus[0]): the detected GPU is itself an AMD card.
+                # The second authorises the pairing where the first legitimately
+                # answers False: a torch-less process (torch absent, HIP runtime
+                # not resident because GGUF loads out-of-process, #606) on an AMD
+                # box. The concrete caller is discover.vram_info's registry tier,
+                # which on a GGUF-only install is the ONLY VRAM source (list_gpus()
+                # is empty there) and passes the adapter's registry name so this
+                # can recognise the card; that is what lets a torch-less build
+                # recover a device-global free instead of showing total-only. This
+                # gate alone does not change the meter - it is the authorisation
+                # the vram_info wiring depends on. ADL enumerates ONLY AMD adapters,
+                # so a single ADL adapter + a single detected AMD GPU is
+                # unambiguous; a non-AMD detected GPU (the NVIDIA-dGPU-beside-an-
+                # idle-AMD-iGPU hazard) still declines.
                 only_bus, only_used = next(iter(by_bus.items()))
                 logger.debug(
                     "gpu_usage: pairing the single AMD adapter (bus %d) with the "

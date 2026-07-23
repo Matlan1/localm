@@ -1867,6 +1867,116 @@ class TestVramCapacitySplitAware:
         assert vram_capacity() == {"total": 16_000_000_000}
 
 
+class _FakeKey:
+    """A winreg key handle usable as a context manager."""
+    def __init__(self, values=None, subkeys=()):
+        self._values = dict(values or {})
+        self._subkeys = list(subkeys)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeWinreg:
+    """Minimal winreg stand-in modelling the display-adapter class key, so the
+    registry tier of discover.vram_info can be exercised off Windows."""
+    HKEY_LOCAL_MACHINE = object()
+
+    def __init__(self, adapters):
+        self._adapters = adapters   # {subkey_name: {value_name: value}}
+
+    def OpenKey(self, root, sub):
+        if root is self.HKEY_LOCAL_MACHINE:
+            return _FakeKey(subkeys=list(self._adapters))   # the class root
+        return _FakeKey(values=self._adapters[sub])          # an adapter subkey
+
+    def EnumKey(self, key, i):
+        if i < len(key._subkeys):
+            return key._subkeys[i]
+        raise OSError("no more subkeys")
+
+    def QueryValueEx(self, key, name):
+        if name in key._values:
+            return (key._values[name], 1)
+        raise OSError("value not present")
+
+
+class TestVramInfoRegistryTierDeviceGlobalFree:
+    """discover.vram_info's Windows registry tier (reached torch-less, when
+    list_gpus() is empty) must enrich its total-only reading with a DEVICE-GLOBAL
+    free from the ADL/PDH usage source - but ONLY when the probe completed empty,
+    never on a timeout, and never when the source cannot map the adapter. This is
+    the torch-less VRAM-meter fix; on a GGUF-only install the registry is the only
+    VRAM source, so without the free the meter and fit gates see total-only."""
+
+    _TOTAL = 17_163_091_968
+
+    def _arm(self, monkeypatch, *, status, used, name="AMD Radeon RX 6900 XT"):
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        def _fake_list_gpus_kw(**kw):
+            # Mirror the real signature: a bare [] unless the caller asked for the
+            # status tuple (so return_status=False keeps vram_info's status=None).
+            return ([], status) if kw.get("return_status") else []
+        monkeypatch.setattr("localm.discover._list_gpus_kw", _fake_list_gpus_kw)
+        adapters = {
+            "notadigit": {},                                  # skipped (not a digit)
+            "0000": {"HardwareInformation.qwMemorySize": self._TOTAL,
+                     "DriverDesc": name},
+        }
+        monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(adapters))
+        seen = {}
+
+        def _dg(gpus):
+            seen["gpus"] = gpus
+            return {0: used} if used is not None else {}
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", _dg)
+        return seen
+
+    def test_completed_empty_probe_adds_device_global_free(self, monkeypatch):
+        seen = self._arm(monkeypatch, status=GPU_PROBE_OK, used=3_500_000_000)
+        info, st = discover.vram_info(return_status=True)
+        assert st == GPU_PROBE_OK
+        assert info["total"] == self._TOTAL
+        assert info["free"] == self._TOTAL - 3_500_000_000
+        assert info["free_scope"] == discover.FREE_SCOPE_DEVICE
+        # the adapter name from DriverDesc must reach the usage source so it can
+        # authorise the AMD single-adapter pairing (see gpu_usage._gpu_is_amd).
+        assert seen["gpus"][0]["name"] == "AMD Radeon RX 6900 XT"
+
+    def test_timed_out_probe_stays_total_only(self, monkeypatch):
+        """A timeout means the box is unmeasurable and the pre-load gate skips the
+        VRAM check; surfacing an independent ADL number here would silently turn a
+        skipped gate into an enforcing one, so the enrichment must not run."""
+        seen = self._arm(monkeypatch, status=GPU_PROBE_TIMEOUT, used=3_500_000_000)
+        info, st = discover.vram_info(return_status=True)
+        assert st == GPU_PROBE_TIMEOUT
+        assert info == {"total": self._TOTAL}
+        assert "gpus" not in seen, "the usage source must not be consulted on timeout"
+
+    def test_busy_probe_stays_total_only(self, monkeypatch):
+        self._arm(monkeypatch, status=GPU_PROBE_BUSY, used=3_500_000_000)
+        info, _ = discover.vram_info(return_status=True)
+        assert info == {"total": self._TOTAL}
+
+    def test_declining_source_stays_total_only(self, monkeypatch):
+        """A non-AMD / multi-adapter box: the usage source returns {} rather than
+        guess a pairing, and the reading stays honestly total-only."""
+        self._arm(monkeypatch, status=GPU_PROBE_OK, used=None,
+                  name="NVIDIA GeForce RTX 4090")
+        info, _ = discover.vram_info(return_status=True)
+        assert info == {"total": self._TOTAL}
+
+    def test_no_status_requested_still_enriches(self, monkeypatch):
+        """A fit-badge caller (return_status=False, status is None) still gets the
+        free - it never gates on timeout, so the enrichment applies."""
+        self._arm(monkeypatch, status=None, used=3_500_000_000)
+        info = discover.vram_info()
+        assert info["free"] == self._TOTAL - 3_500_000_000
+        assert info["free_scope"] == discover.FREE_SCOPE_DEVICE
+
+
 class TestVramInfoReturnStatus:
     """vram_info(return_status=True) must propagate list_gpus()'s own probe
     status, so a caller reporting a specific VRAM number as CURRENT FACT (not
@@ -3127,7 +3237,7 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
     shows TWO adapter instances there), leaving the opened gate with no source
     at all - this rule is what makes the worker correction actually operate."""
 
-    def _arm(self, monkeypatch, *, by_bus, blind, gpus_n=1):
+    def _arm(self, monkeypatch, *, by_bus, blind, gpus_n=1, name=None):
         import localm.gpu_usage as gu
 
         monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
@@ -3136,6 +3246,9 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
         monkeypatch.setattr(gu, "raw_reading_is_process_scoped", lambda: blind)
         monkeypatch.setattr(gu, "_pdh_adapter_used", lambda: [])
         gpus = [{"index": i, "total": 16_000_000_000} for i in range(gpus_n)]
+        if name is not None:
+            for g in gpus:
+                g["name"] = name
         return gu, gpus
 
     def test_single_amd_adapter_maps_without_torch_on_blind_platform(
@@ -3143,10 +3256,37 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True)
         assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
 
-    def test_rule_does_not_fire_where_reading_is_not_known_blind(
+    def test_torchless_amd_named_gpu_maps_when_signal_is_false(
             self, monkeypatch):
-        """The NVIDIA+iGPU safety case: same shape, but the platform is not the
-        measured-blind one - report nothing rather than pair the wrong adapter."""
+        """The torch-less authorisation path: raw_reading_is_process_scoped() is
+        legitimately False in a torch-less process where no HIP runtime is
+        resident (GGUF loads out-of-process, #606), yet the detected GPU is an
+        AMD card. The single-adapter ADL pairing must still fire, recognised by
+        the GPU name, so a torch-less build gets a real device-global figure
+        instead of nothing. This is the gate discover.vram_info's registry tier
+        relies on to recover a device-global free on a GGUF-only install (where
+        list_gpus() is empty); the meter fix itself lives in that wiring, not
+        here."""
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False,
+                             name="AMD Radeon RX 6900 XT")
+        assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
+
+    def test_rule_does_not_fire_for_a_non_amd_gpu_when_not_blind(
+            self, monkeypatch):
+        """The NVIDIA+iGPU safety case: an NVIDIA dGPU is the single detected GPU
+        while ADL reports the idle AMD iGPU. Neither signal authorises the
+        pairing (not measured-blind, and the detected GPU is not AMD), so report
+        nothing rather than subtract the iGPU's usage from the NVIDIA card's
+        already device-global reading."""
+        gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False,
+                             name="NVIDIA GeForce RTX 4090")
+        assert gu.device_global_used_bytes(gpus) == {}
+
+    def test_rule_does_not_fire_with_no_gpu_name_when_not_blind(
+            self, monkeypatch):
+        """An unrecognised GPU (no name) is not paired on the name signal alone -
+        the safe default is to decline, exactly as before the name gate existed
+        when the process-scoped signal is also False."""
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False)
         assert gu.device_global_used_bytes(gpus) == {}
 
