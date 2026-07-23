@@ -34,6 +34,25 @@ def test_media_schema_image_has_fast_dequant_others_do_not():
         assert key in img and key in mus
 
 
+def test_media_schema_admin_only_fields_hidden_for_non_owner():
+    # Regression for pentest finding LM-PT-002: launch_cmd (a shell command)
+    # and api_url (a render target) are admin_only, mirroring the write-side
+    # REC-MEDIA-CMD gate - a non-owner caller must not see their resolved
+    # value either.
+    cfg = {"comfy_workdir": "/global/comfy"}
+    owner_fields = {f["key"] for f in ss.media_schema_json("image", {}, cfg)}
+    scoped_fields = {f["key"] for f in
+                     ss.media_schema_json("image", {}, cfg, is_owner=False)}
+    assert {"launch_cmd", "api_url"} <= owner_fields, "owner sees everything"
+    assert not ({"launch_cmd", "api_url"} & scoped_fields), \
+        "a non-owner must not see launch_cmd/api_url"
+    assert "workdir" in scoped_fields, "an ordinary field stays visible"
+
+
+def test_media_admin_only_fields_is_the_single_source_of_truth():
+    assert ss.media_admin_only_fields() == {"launch_cmd", "api_url"}
+
+
 def test_media_schema_resolves_block_over_global():
     cfg = {"comfy_workdir": "/global/comfy", "comfy_delete_outputs": False}
     block = {"comfy": {"workdir": "/image/own"}}
@@ -216,3 +235,74 @@ def test_write_requires_config_write_scope(client, monkeypatch):
         m.setenv("LOCALM_API_KEY", "media-cfg-key")
         denied = client.post("/v1/media/config/image", json={"workdir": "/x"})
         assert denied.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+#  Owner vs. non-owner: launch_cmd/api_url must not leak (LM-PT-002)          #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    """Same isolated data dir as `client`, but WITHOUT a pre-built app/client,
+    so a test can put the server in protected mode (LOCALM_API_KEY) itself."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    return tmp_path
+
+
+def test_get_hides_launch_cmd_and_api_url_from_a_config_read_only_key(env):
+    """Regression for pentest finding LM-PT-002: a config:read-scoped,
+    non-owner key (part of the app's own suggested 'Full' key preset) must not
+    learn a media backend's launch_cmd (a shell command) or api_url (a render
+    target) from GET /v1/media/config, even though it may legitimately read
+    every other field. The write side already refuses this key the ability to
+    SET either field (REC-MEDIA-CMD); the read side must match."""
+    from localm import auth, scopes
+
+    auth.set_api_key("owner-secret-media-123")                # protected mode
+    reader = auth.create_key("reader", [scopes.CONFIG_READ])["key"]
+    client = TestClient(create_app(None))
+    owner_hdr = {"Authorization": "Bearer owner-secret-media-123"}
+    reader_hdr = {"Authorization": f"Bearer {reader}"}
+
+    owner_resp = client.get("/v1/media/config", headers=owner_hdr)
+    reader_resp = client.get("/v1/media/config", headers=reader_hdr)
+    assert owner_resp.status_code == 200, owner_resp.text
+    assert reader_resp.status_code == 200, reader_resp.text
+
+    for plugin in owner_resp.json()["plugins"]:
+        owner_keys = {f["key"] for f in plugin["fields"]}
+        assert {"launch_cmd", "api_url"} <= owner_keys, "owner sees everything"
+
+    for plugin in reader_resp.json()["plugins"]:
+        reader_keys = {f["key"] for f in plugin["fields"]}
+        assert not ({"launch_cmd", "api_url"} & reader_keys), \
+            f"{plugin['plugin']}: launch_cmd/api_url must be hidden from a scoped key"
+        assert "workdir" in reader_keys, "an ordinary field stays visible"
+
+
+def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
+    """The write endpoint's own response echoes the plugin's resolved fields
+    back too (e.g. after saving workdir) - same leak, same fix: a config:write
+    key that is not an owner must not have launch_cmd/api_url's value echoed
+    back even for a save that never touched either field."""
+    from localm import auth, scopes
+
+    auth.set_api_key("owner-secret-media-456")
+    writer = auth.create_key("writer", [scopes.CONFIG_WRITE],
+                             allow_privileged=True)["key"]
+    client = TestClient(create_app(None))
+    writer_hdr = {"Authorization": f"Bearer {writer}"}
+
+    r = client.post("/v1/media/config/image", json={"workdir": "/x"},
+                    headers=writer_hdr)
+    assert r.status_code == 200, r.text
+    fields = {f["key"] for f in r.json()["fields"]}
+    assert not ({"launch_cmd", "api_url"} & fields)
+    assert "workdir" in fields

@@ -168,6 +168,29 @@ def test_cors_origins_is_owner_only(app_env):
     assert c.get("/v1/config", headers=_owner()).json().get("cors_origins") == "*"
 
 
+def test_patch_response_hides_admin_only_field_values_from_a_scoped_writer(app_env):
+    """Regression for pentest finding LM-PT-001: update_config() returns the
+    FULL merged config (every key, not just the ones this call changed), so
+    PATCH /v1/config's response must apply the same admin_only_keys() filter
+    GET /v1/config already applies above - otherwise a config:write-scoped,
+    non-owner key's response echoes back an admin_only secret's CURRENT value
+    (e.g. update_token) even though the write itself already refuses to let it
+    SET that field."""
+    c, scoped, _ = app_env
+    from localm.config import update_config
+    update_config(lambda cfg: cfg.update({"update_token": "s3cr3t-owner-set-token"}))
+    # The scoped (non-owner) key makes an ORDINARY write (something it IS
+    # allowed to set) ...
+    resp = c.patch("/v1/config", headers=_scoped(scoped), json={"net_allow": ["x.com"]})
+    assert resp.status_code == 200, resp.text
+    assert "update_token" not in resp.json(), \
+        "an admin_only field's value must not be echoed back to a non-owner key"
+    # The owner's own PATCH response still carries it (parity: not a blanket
+    # drop, only a non-owner boundary).
+    owner_resp = c.patch("/v1/config", headers=_owner(), json={"net_allow": ["y.com"]})
+    assert owner_resp.json().get("update_token") == "s3cr3t-owner-set-token"
+
+
 def test_owner_widening_reaches_the_indexer_policy(app_env):
     """The whole point: the owner's API write flows into the RAG indexer's policy,
     so a folder the owner adds becomes indexable. (A folder genuinely outside the

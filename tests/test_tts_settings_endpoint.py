@@ -67,6 +67,18 @@ def test_schema_flags_the_admin_only_script_url_fields():
     assert fields["voice"]["admin_only"] is False
 
 
+def test_schema_hides_admin_only_fields_for_non_owner():
+    # Regression for pentest finding LM-PT-002: library/wasm_paths become a
+    # script/wasm URL every browser loads, so a non-owner must not see their
+    # resolved value either (mirrors the write-side owner gate).
+    owner_fields = {f["key"] for f in ss.tts_schema_json({})}
+    scoped_fields = {f["key"] for f in ss.tts_schema_json({}, is_owner=False)}
+    assert {"library", "wasm_paths"} <= owner_fields, "owner sees everything"
+    assert not ({"library", "wasm_paths"} & scoped_fields), \
+        "a non-owner must not see library/wasm_paths"
+    assert "voice" in scoped_fields, "an ordinary field stays visible"
+
+
 def test_schema_resolves_block_over_template_default():
     fields = {f["key"]: f for f in ss.tts_schema_json({"voice": "am_onyx"})}
     assert fields["voice"]["value"] == "am_onyx"
@@ -359,6 +371,49 @@ def test_script_url_fields_require_an_owner_admin_key(env):
     allowed = client.post("/v1/tts/config", json={"library": "vendor/kokoro.min.js"},
                           headers=owner_hdr)
     assert allowed.status_code == 200, allowed.text
+
+
+def test_get_hides_library_and_wasm_paths_from_a_config_read_only_key(env):
+    """Regression for pentest finding LM-PT-002: a config:read-scoped,
+    non-owner key must not learn library/wasm_paths (the script/wasm URL
+    every browser loads) from GET /v1/tts/config, even though it may
+    legitimately read every other tts setting."""
+    from localm import auth, scopes
+    from localm.inference.http_server import create_app
+
+    auth.set_api_key("owner-secret-key-tts-789")               # protected mode
+    reader = auth.create_key("reader", [scopes.CONFIG_READ])["key"]
+    client = TestClient(create_app(None))
+    owner_hdr = {"Authorization": "Bearer owner-secret-key-tts-789"}
+    reader_hdr = {"Authorization": f"Bearer {reader}"}
+
+    owner_fields = _fields(client.get("/v1/tts/config", headers=owner_hdr))
+    reader_fields = _fields(client.get("/v1/tts/config", headers=reader_hdr))
+    assert {"library", "wasm_paths"} <= set(owner_fields), "owner sees everything"
+    assert not ({"library", "wasm_paths"} & set(reader_fields)), \
+        "a non-owner must not see library/wasm_paths"
+    assert "voice" in reader_fields, "an ordinary field stays visible"
+
+
+def test_post_response_hides_library_and_wasm_paths_from_a_scoped_writer(env):
+    """The write endpoint's own response echoes the plugin's resolved fields
+    back too (e.g. after saving voice) - same leak, same fix: a config:write
+    key that is not an owner must not have library/wasm_paths' value echoed
+    back even for a save that never touched either field."""
+    from localm import auth, scopes
+    from localm.inference.http_server import create_app
+
+    auth.set_api_key("owner-secret-key-tts-999")
+    writer = auth.create_key("writer", [scopes.CONFIG_WRITE],
+                             allow_privileged=True)["key"]
+    client = TestClient(create_app(None))
+    writer_hdr = {"Authorization": f"Bearer {writer}"}
+
+    r = client.post("/v1/tts/config", json={"voice": "am_onyx"}, headers=writer_hdr)
+    assert r.status_code == 200, r.text
+    fields = _fields(r)
+    assert not ({"library", "wasm_paths"} & set(fields))
+    assert "voice" in fields
 
 
 def test_script_url_fields_allowed_in_open_mode(client):
