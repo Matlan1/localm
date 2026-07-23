@@ -678,6 +678,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its own reflection. The agent has no tool that writes it: the file changes only
   when you run `/remember` or `/forget` (or edit it yourself), and the agent's
   close-time reflection is stored in the localm data directory, not in your repo.
+- **Loading a model could print a scary crash trace even though nothing was
+  wrong.** On some Windows + AMD setups, the VRAM check that runs right after a
+  model loads could collide with a native library already in memory and print a
+  full "Windows fatal exception" stack dump to the console. The load itself
+  always succeeded and this was already being caught safely, so nothing was
+  actually broken - but the trace looked like a crash. That check now recognizes
+  the setup ahead of time and skips it instead of triggering and catching it, so
+  the trace no longer appears.
 
 ### Security
 - **A scoped "settings" key can no longer change plugin settings the plugin's own
