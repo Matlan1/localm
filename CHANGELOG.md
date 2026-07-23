@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **The coder's file edits no longer fail just because a snippet's whitespace
+  differs from the file.** The `edit_file` and `edit_files` tools matched the
+  text to replace byte for byte, so when the model reconstructed a snippet with
+  a slightly different indent, a wrapped line collapsed onto one line, or an
+  extra trailing space, the edit missed and the model was told to try again,
+  sometimes never landing the change at all. The match now falls back to a
+  whitespace-tolerant comparison (a run of spaces, tabs, or newlines in the
+  snippet matches any run of whitespace in the file), applied ONLY when it
+  resolves to a single region so it can never silently edit the wrong one of two
+  candidates. An exact match still wins outright, and a genuine miss still shows
+  the closest-match hint.
 - **A second localm server sharing the same data directory no longer reports
   the first, healthy one as crashed.** Running more than one server against
   the same data directory is a normal, supported thing to do (`localm ps`,

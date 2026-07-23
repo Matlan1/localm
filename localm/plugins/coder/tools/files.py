@@ -219,6 +219,40 @@ def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
     return result
 
 
+def _resolve_edit(text: str, old: str):
+    """Find the single region of `text` an edit should replace.
+
+    Returns ``(start, end, exact_count, tolerant)`` or ``None``:
+      - ``start, end``: the slice of ``text`` to replace with ``new``.
+      - ``exact_count``: how many EXACT occurrences of ``old`` exist (for the
+        "N more unchanged" note); 1 for a whitespace-tolerant match.
+      - ``tolerant``: True when the exact match missed and a whitespace-tolerant
+        match was used instead (so the caller can say so, not hide it).
+
+    An exact substring match is tried first and always wins (unchanged
+    behavior). Only on an exact miss does it retry with a whitespace-tolerant
+    match: every run of whitespace in ``old`` is allowed to match any run of
+    whitespace in the file, so a snippet the model reconstructed with a
+    different indentation or a collapsed line wrap still lands. That fallback is
+    accepted ONLY when it matches exactly one region - never guess between
+    several candidates - so it can widen what matches but can never change WHICH
+    of two ambiguous regions is edited.
+    """
+    idx = text.find(old)
+    if idx != -1:
+        return idx, idx + len(old), text.count(old), False
+    # Whitespace-tolerant fallback. Tokens (the non-whitespace runs) must still
+    # match literally and in order; only the whitespace between them is relaxed.
+    stripped = old.strip()
+    if not stripped:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in re.split(r"\s+", stripped))
+    matches = list(re.finditer(pattern, text))
+    if len(matches) == 1:
+        return matches[0].start(), matches[0].end(), 1, True
+    return None
+
+
 def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
     try:
@@ -241,11 +275,11 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
             "write_file."
         )
 
-    if old not in text:
+    located = _resolve_edit(text, old)
+    if located is None:
         return ToolResult.error(_edit_miss_message(path, old, text))
-
-    count = text.count(old)
-    new_text = text.replace(old, new, 1)
+    start, end, count, tolerant = located
+    new_text = text[:start] + new + text[end:]
     try:
         p.write_text(new_text, encoding="utf-8")
     except Exception as e:
@@ -253,8 +287,9 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
 
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
     note = f" ({count - 1} more occurrence(s) unchanged)" if count > 1 else ""
+    tnote = " (matched ignoring whitespace differences)" if tolerant else ""
     result = ToolResult.success(
-        f"Replaced 1 occurrence in {rel}{note}",
+        f"Replaced 1 occurrence in {rel}{note}{tnote}",
         summary=f"edited {rel}{note}",
     )
     warn = _verify_syntax(p, new_text)
@@ -374,10 +409,12 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
             except Exception as e:
                 return ToolResult.error(f"{label} ({path}): {e}")
 
-        if old not in text:
+        located = _resolve_edit(text, old)
+        if located is None:
             return ToolResult.error(
                 f"{label}: " + _edit_miss_message(str(path), old, text))
-        current[p] = text.replace(old, new, 1)
+        start, end, _count, _tolerant = located
+        current[p] = text[:start] + new + text[end:]
         planned.append((p, current[p]))
 
     # ---- Phase 2: write, rolling every file back if any write fails ----

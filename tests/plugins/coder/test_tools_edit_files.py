@@ -191,12 +191,26 @@ class TestValidation:
         assert (project / "a.py").read_bytes() == before
 
     def test_miss_shows_the_closest_snippet_hint(self, project):
+        # A GENUINE miss (a token that is not in the file) still shows the
+        # closest-snippet hint. A whitespace-only variant is no longer a miss
+        # (see test_whitespace_only_variant_matches below), so the miss here is
+        # a real token difference, not just different spacing.
         r = tool_edit_files(project, [
-            {"path": "a.py", "old": "import  old", "new": "import new"},   # 2 spaces
+            {"path": "a.py", "old": "import  older", "new": "import new"},
         ])
         assert r.ok is False
         assert "Closest match in the file" in r.output
         assert "import old" in r.output
+
+    def test_whitespace_only_variant_matches(self, project):
+        # `old` differs from the file ("import old") only in spacing. edit_files
+        # tolerates that (unique match) so the coder is not blocked by a snippet
+        # it reconstructed with a different amount of whitespace.
+        r = tool_edit_files(project, [
+            {"path": "a.py", "old": "import  old", "new": "import new"},   # 2 spaces
+        ])
+        assert r.ok is True
+        assert (project / "a.py").read_text(encoding="utf-8") == "import new\nvalue = 1\n"
 
     def test_path_traversal_rejected(self, project):
         r = tool_edit_files(project, [

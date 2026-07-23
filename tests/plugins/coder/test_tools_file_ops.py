@@ -217,6 +217,78 @@ class TestEditFile:
         assert "syntax" in r.output.lower()
 
 
+class TestEditFileWhitespaceTolerant:
+    """A model routinely reconstructs the `old` snippet with slightly different
+    whitespace (a wrapped line collapsed to one line, a different indent, a
+    trailing space). A byte-exact-only match rejects those legitimate edits and
+    the coder is left unable to edit the file at all. edit_file therefore falls
+    back to a whitespace-tolerant match, but ONLY when it is unique, so it can
+    never silently edit the wrong one of two candidate regions."""
+
+    def test_collapsed_line_wrap_still_matches(self, tmp_path):
+        # File has the snippet across two physical lines; the model sends it as
+        # one line (the hard wrap collapsed to a space). It must still land.
+        f = tmp_path / "code.py"
+        f.write_text(
+            "a = 1\n"
+            "value = compute(first_argument,\n"
+            "                second_argument)\n"
+            "b = 2\n"
+        )
+        r = tool_edit_file(
+            tmp_path, "code.py",
+            old="value = compute(first_argument, second_argument)",
+            new="value = compute(only_argument)",
+        )
+        assert r.ok
+        assert "ignoring whitespace" in r.output.lower()
+        content = f.read_text()
+        assert "value = compute(only_argument)" in content
+        # Surrounding lines are untouched.
+        assert content.startswith("a = 1\n")
+        assert content.endswith("b = 2\n")
+
+    def test_different_indentation_still_matches(self, tmp_path):
+        f = tmp_path / "code.py"
+        f.write_text("def f():\n        return 1\n")   # 8-space indent on disk
+        r = tool_edit_file(
+            tmp_path, "code.py",
+            old="    return 1",   # model used a 4-space indent
+            new="    return 2",
+        )
+        assert r.ok
+        assert "return 2" in f.read_text()
+
+    def test_ambiguous_tolerant_match_refuses_to_guess(self, tmp_path):
+        # Two regions match `old` once whitespace is relaxed, and neither is an
+        # exact match. A tolerant match would hit both, so the tool must REFUSE
+        # rather than pick one (whitespace tolerance must never decide WHICH of
+        # two candidate regions gets edited).
+        original = "a = foo( x )\nb = foo(  x  )\n"   # 1-space and 2-space forms
+        f = tmp_path / "code.py"
+        f.write_text(original)
+        # Precondition: `old` (3 spaces) matches NEITHER region exactly, so this
+        # genuinely exercises the tolerant path, not the exact fast path.
+        assert "foo(   x   )" not in original
+        r = tool_edit_file(tmp_path, "code.py", old="foo(   x   )", new="foo(y)")
+        assert not r.ok
+        assert "not found" in r.output.lower()
+        # File is untouched by a refused edit.
+        assert f.read_text() == original
+
+    def test_exact_match_wins_over_whitespace_variant(self, tmp_path):
+        # An exact occurrence exists AND a whitespace-variant occurrence exists.
+        # The exact one must be the one edited (exact match takes precedence and
+        # is never overridden by the tolerant path).
+        f = tmp_path / "code.py"
+        f.write_text("gap =  1\ngap = 1\n")   # line 1 has two spaces, line 2 one
+        r = tool_edit_file(tmp_path, "code.py", old="gap = 1", new="gap = 42")
+        assert r.ok
+        assert "ignoring whitespace" not in r.output.lower()
+        content = f.read_text()
+        assert content == "gap =  1\ngap = 42\n"   # only the exact match changed
+
+
 # ---------------------------------------------------------------------------
 #  tool_list_dir
 # ---------------------------------------------------------------------------
