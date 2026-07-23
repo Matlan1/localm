@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -195,6 +196,38 @@ def test_pid_alive_self_and_invalid():
 #  kill_pid (the `localm stop` direct-kill fallback)                 #
 # ------------------------------------------------------------------ #
 
+def _wait_until_reads_dead(pid: int, timeout: float = 10.0) -> bool:
+    """Wait for *pid* to stop reading as alive, and report whether it did.
+
+    Popen.wait() returns as soon as the process handle is signalled, which is
+    process TERMINATION, not the end of process rundown. On Windows the exited
+    process stays in the OS process enumeration for a short window afterwards,
+    and psutil.pid_exists() (what pid_alive uses there) is enumeration-based,
+    not exit-code-based: OpenProcess + GetExitCodeProcess already report the
+    real exit code while psutil still answers True. Sampling pid_alive ONCE
+    right after wait() therefore samples inside that window and is inherently
+    racy. Measured on a 12-core Windows box under a loaded parallel run: the
+    enumeration window is ~0.12 ms at the median, 0.37 ms at p90 and 2.0 ms at
+    worst, which made the old single-sample assertion fail 3.3% of the time
+    (150 failures in 4573 runs). The same harness, polling, failed 0 times in
+    4573 runs, and a live process was never once misreported as dead.
+
+    The contract under test is that a pid which has exited stops reading as
+    alive, not that the OS process table updates synchronously with exit, so
+    poll for it. This returns in ~0.3 ms at the median; the worst observed wait
+    was 27.6 ms, which is sleep granularity and scheduler delay under load
+    rather than the window itself. The timeout is ~360x that worst case, so a
+    genuine regression (a pid that never stops reading as alive) still fails
+    hard rather than being waited away.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if instances.pid_alive(pid) is False:
+            return True
+        time.sleep(0.001)
+    return False
+
+
 def test_kill_pid_invalid_pid_is_noop():
     assert instances.kill_pid(-1) is True
     assert instances.kill_pid(0) is True
@@ -203,7 +236,8 @@ def test_kill_pid_invalid_pid_is_noop():
 def test_kill_pid_already_dead_returns_true():
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait(timeout=10)
-    assert instances.pid_alive(proc.pid) is False
+    assert _wait_until_reads_dead(proc.pid), (
+        "an exited pid never stopped reading as alive")
     assert instances.kill_pid(proc.pid) is True
 
 
