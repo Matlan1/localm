@@ -17,6 +17,8 @@ All grammars use ``root`` as the entry rule, which is what
 
 from __future__ import annotations
 
+import re
+
 #  JSON grammars
 
 # Any valid JSON value at the root
@@ -88,5 +90,62 @@ opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 # on the bundled runtime: prose before the tag flows free; a started
 # <tool_call> is forced to a valid call.
 TOOL_CALL_TRIGGER = r"[\s\S]*?(<tool_call>[\s\S]*)"
+
+
+#  Structural pre-validation (LM-FZ-001)
+
+# llama.cpp's GBNF parser is a hand-written recursive-descent parser with no
+# bound on nesting depth, alternation count, or repeat-count size. A grammar
+# string built of thousands of unmatched "(" drives its recursion far enough
+# to overflow the native call stack - observed live as both a caught
+# "exception: stack overflow" and a hard STATUS_ACCESS_VIOLATION process
+# crash for the identical input, depending on heap layout at the moment of
+# overflow. These bounds are deliberately generous for any real grammar (the
+# largest production grammar in this file, TOOL_CALLS_ONLY, nests 3 levels
+# deep) while being far below anything that risks the native stack.
+MAX_GRAMMAR_BYTES = 65536
+MAX_GRAMMAR_NESTING_DEPTH = 128
+MAX_GRAMMAR_REPEAT_COUNT = 10000
+
+_REPEAT_COUNT_RE = re.compile(r"\{(\d+)(?:,(\d+))?\}")
+
+
+def check_grammar_structure(grammar: str) -> None:
+    """Reject a grammar whose size or structural complexity could drive the
+    native GBNF parser into stack overflow, BEFORE any of it reaches that
+    parser. Pure Python, no native call - safe to run unconditionally on
+    every grammar-bearing request, including the path where up-front
+    validation would otherwise be deferred (RunnerBusy) straight into a
+    generation-time native call.
+
+    Raises :class:`InvalidGrammarError` (the same typed error the native
+    validation path raises for a malformed grammar) so callers can treat both
+    as one clean 400, never a native fault."""
+    from localm.inference.backends.base import InvalidGrammarError
+
+    if len(grammar) > MAX_GRAMMAR_BYTES:
+        raise InvalidGrammarError(
+            f"grammar is {len(grammar)} bytes, over the {MAX_GRAMMAR_BYTES}-byte limit")
+
+    depth = 0
+    max_depth = 0
+    for ch in grammar:
+        if ch in "([":
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+    if max_depth > MAX_GRAMMAR_NESTING_DEPTH:
+        raise InvalidGrammarError(
+            f"grammar nests {max_depth} levels deep, over the "
+            f"{MAX_GRAMMAR_NESTING_DEPTH}-level limit (a common shape behind a "
+            "native parser stack overflow)")
+
+    for m in _REPEAT_COUNT_RE.finditer(grammar):
+        for group in m.groups():
+            if group is not None and int(group) > MAX_GRAMMAR_REPEAT_COUNT:
+                raise InvalidGrammarError(
+                    f"grammar repeat count {{{m.group(0)}}} exceeds the "
+                    f"{MAX_GRAMMAR_REPEAT_COUNT} limit")
 
 

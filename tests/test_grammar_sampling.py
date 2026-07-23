@@ -146,6 +146,72 @@ def test_route_rejects_invalid_grammar_with_400_not_silent_200():
     engine.chat_stream.assert_not_called()
 
 
+def test_route_rejects_pathologically_nested_grammar_before_any_native_call():
+    """LM-FZ-001 regression pin: a grammar built of deep unmatched-paren nesting
+    (the exact minimized PoC that drove llama.cpp's native GBNF parser into a
+    real stack overflow - caught exception in one run, a hard
+    STATUS_ACCESS_VIOLATION process crash in another) must be rejected with a
+    clean 400 by a pure-Python structural check BEFORE it ever reaches
+    engine.validate_grammar() - not merely turned into a 400 *after* a native
+    call, which would still crash a real backend. Proven here by asserting
+    engine.validate_grammar is never even invoked, so the check protects the
+    RunnerBusy-deferred path too (which otherwise skips up-front validation
+    entirely and lets a bad grammar reach the native sampler at generation
+    time instead)."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.chat_stream.side_effect = AssertionError(
+        "generation must not start on a pathologically nested grammar")
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    # Exact minimized repro from the fuzzing engagement (LM-FZ-001).
+    pathological = "root ::= " + "(" * 5000 + '"a"'
+    r = client.post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "grammar": pathological,
+        "max_tokens": 4,
+    })
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert "grammar" in r.text.lower(), r.text
+    engine.validate_grammar.assert_not_called(), (
+        "the structural check must reject this BEFORE any call reaches the "
+        "engine/native layer, not merely translate a native failure into a 400")
+    engine.chat_stream.assert_not_called()
+
+
+def test_check_grammar_structure_accepts_realistic_deeply_nested_grammar():
+    """The structural guard must not be so tight it rejects real, legitimate
+    grammars. TOOL_CALLS_ONLY (localm's own production tool-call grammar) and a
+    moderately nested JSON-schema-derived grammar (nesting comparable to a
+    real multi-level object schema) must both pass."""
+    from localm.inference.gbnf import TOOL_CALLS_ONLY, check_grammar_structure
+
+    check_grammar_structure(TOOL_CALLS_ONLY)  # must not raise
+
+    moderately_nested = "root ::= " + "(" * 20 + '"leaf"' + ")" * 20
+    check_grammar_structure(moderately_nested)  # must not raise
+
+
+def test_check_grammar_structure_rejects_huge_repeat_count():
+    """A `{100000}` repeat count is a second documented pathological shape
+    (LM-FZ-001) distinct from paren-depth nesting - reject it too."""
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import check_grammar_structure
+
+    with pytest.raises(InvalidGrammarError):
+        check_grammar_structure('root ::= "a"{100000}')
+
+
 def test_generate_never_calls_accept_after_sample():
     llm = _bare_llama()
     mock_api = MagicMock()

@@ -691,6 +691,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Installing an update was never at risk from this: an update is verified against
   a signing key built into localm, and one that is unsigned or signed by anything
   else is refused before any file is replaced.
+- **A malformed grammar could crash the server instead of being rejected.** The
+  `grammar` field on chat and completion requests had no limit on size or nesting
+  depth before it reached llama.cpp's native grammar parser, so a deeply nested or
+  oversized grammar could drive that parser past its native stack limit - crashing
+  the whole server process for every request it was handling, not just failing the
+  one that sent it. The grammar is now checked in Python first, before any of it
+  reaches the native parser, and an oversized or pathologically nested grammar is
+  now rejected with an ordinary 400 error instead of being able to crash anything.
 
 ## [0.1.2] - 2026-07-18
 
