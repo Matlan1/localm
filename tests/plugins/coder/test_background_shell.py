@@ -117,6 +117,20 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _unexplained_taskkill_failures(warnings: list) -> list:
+    """taskkill "exited" warnings whose reason is NOT the one known-benign
+    race documented at background.py:593-608 (and its grandchild variant,
+    background.py's later comment in the same method): a descendant that
+    legitimately exits between taskkill's tree snapshot and taskkill
+    reaching that specific pid, reported as "There is no running instance
+    of the task" even though the whole tree ends up fully dead. Anything
+    else (access-denied, a reason we have never seen) is a genuine,
+    unexplained taskkill failure.
+    """
+    benign = "there is no running instance of the task"
+    return [w for w in warnings if "taskkill exited" in w and benign not in w.lower()]
+
+
 # --------------------------------------------------------------------------- #
 #  Poll mid-run / poll after completion                                        #
 # --------------------------------------------------------------------------- #
@@ -1163,6 +1177,63 @@ def test_a_taskkill_that_SUCCEEDED_is_silent(tmp_path, make_registry, monkeypatc
     assert swept == [], "a successful taskkill must not run the fallback sweep"
 
 
+def test_the_benign_taskkill_descendant_race_is_not_flagged_unexplained(
+        tmp_path, make_registry, monkeypatch):
+    """Regression for a real flake under `pytest -n auto`: taskkill's /T walk
+    snapshots the tree once and terminates each pid in turn, so a descendant
+    can legitimately exit in that gap. Windows then reports exit 255 naming
+    that one pid as "There is no running instance of the task" even though
+    the fallback sweep (asserted below) still runs and the tree ends up fully
+    dead - this is background.py:593-608's documented race recurring against
+    a descendant instead of the root pid, not a partial failure."""
+    import subprocess as _sp
+
+    reg = make_registry()
+    job = reg.submit(lambda: ShellJob(_argv("print('x')"), tmp_path, label="tk"),
+                     kind="shell")
+    assert _wait_for(lambda: job.state == "done")
+
+    monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
+        argv, 255, b"",
+        b'ERROR: The process with PID 35352 (child process of PID 14540) could '
+        b'not be terminated. Reason: There is no running instance of the task.'))
+    swept = []
+    monkeypatch.setattr(ShellJob, "_kill_children_via_psutil",
+                        lambda self: swept.append("psutil"))
+    monkeypatch.setattr(ShellJob, "_kill_via_handle",
+                        lambda self, *, force: swept.append("handle"))
+
+    job._terminate_tree_windows()
+
+    assert swept, "the benign race must still fall through to the fallback kill"
+    assert _unexplained_taskkill_failures(job.warnings) == [], (
+        f"the known-benign taskkill race was wrongly treated as unexplained: "
+        f"{job.warnings}")
+
+
+def test_a_genuinely_different_taskkill_failure_is_still_flagged_unexplained(
+        tmp_path, make_registry, monkeypatch):
+    """Fires-control for the relaxation above: an UNRELATED taskkill failure
+    (e.g. access-denied) must still read as unexplained, proving the benign-
+    race allowance is not a blanket bypass of the exit-code contract."""
+    import subprocess as _sp
+
+    reg = make_registry()
+    job = reg.submit(lambda: ShellJob(_argv("print('x')"), tmp_path, label="tk"),
+                     kind="shell")
+    assert _wait_for(lambda: job.state == "done")
+
+    monkeypatch.setattr(bg.subprocess, "run", lambda argv, **kw: _sp.CompletedProcess(
+        argv, 1, b"", b"ERROR: Access is denied."))
+
+    job._terminate_tree_windows()
+
+    unexplained = _unexplained_taskkill_failures(job.warnings)
+    assert unexplained, (
+        "a genuinely different taskkill failure must still be flagged unexplained")
+    assert any("Access is denied" in w for w in unexplained)
+
+
 # -- finding 4: escalation and the "killed" report saw only the DIRECT child -- #
 
 def test_kill_reports_descendants_that_outlived_the_direct_child(
@@ -1300,11 +1371,28 @@ def test_tree_snapshot_pins_a_REAL_descendant_and_clears_once_it_dies(tmp_path, 
     # CRY-WOLF GUARD. On Windows this ran the real `taskkill /F /T`, so this is
     # the only place the actual exit-code contract is exercised (the taskkill
     # unit tests drive a fabricated CompletedProcess). If a real, fully
-    # successful tree kill ever returns non-zero, every kill would start telling
-    # the model "the process tree may not be fully dead" and nothing else would
-    # notice.
-    assert [w for w in job.warnings if "taskkill exited" in w] == [], (
-        f"a REAL successful tree kill reported a taskkill failure: {job.warnings}")
+    # successful tree kill ever returns non-zero for a reason we do NOT already
+    # know to be benign, every kill would start telling the model "the process
+    # tree may not be fully dead" and nothing else would notice.
+    #
+    # It must NOT flag the ONE race background.py:593-608 already documents and
+    # designs for: taskkill's /T walk snapshots the descendant tree once and
+    # then terminates each pid in turn, so under heavy scheduler contention (a
+    # full -n auto suite on a shared box) a descendant can legitimately exit in
+    # the gap between that snapshot and taskkill reaching its specific pid.
+    # Windows then reports exit 255 naming that one pid with "There is no
+    # running instance of the task" even though the tree as a whole - verified
+    # above, independently, by (pid, create_time), not by taskkill's own say-so
+    # - is fully dead. That is not a partial failure, it is the documented
+    # direct-child race recurring against a grandchild; a bounded wait would
+    # not help, because the warning is appended synchronously inside kill()
+    # before it returns "killed", so there is nothing left to poll for by the
+    # time this assertion runs. Any OTHER reason (access-denied, a return code
+    # we have never seen, ...) is still a genuine unexplained failure.
+    unexplained = _unexplained_taskkill_failures(job.warnings)
+    assert unexplained == [], (
+        f"a REAL successful tree kill reported an UNEXPLAINED taskkill "
+        f"failure: {unexplained}")
 
 
 # -- finding 5: two independent status snapshots could tear ------------------ #
