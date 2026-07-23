@@ -446,3 +446,147 @@ class TestRunTests:
             r = tool_run_tests(tmp_path, runner="pytest")
         assert "<runner>" in r.output
         assert "<status>" in r.output
+
+
+class TestCallerArgsReachTheRunner:
+    """``run_tests``' own ``path`` and ``extra_args`` had the npm problem the
+    ``--passWithNoTests`` fix solved one code path over: appended bare, so npm
+    swallowed anything flag-shaped and quietly ran a plain suite instead.
+
+    Measured on npm 11.13.0: ``npm test --watch`` gives the package script
+    ``ARGV=[]`` plus an "Unknown cli config" warning, while ``npm test --
+    --watch`` delivers it. So ``run_tests(runner="npm", extra_args="--watch")``
+    reported success for a run nobody asked for.
+    """
+
+    @staticmethod
+    def _pkg(tmp_path, test_script="node argv.js"):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "p", "private": True,
+                        "scripts": {"test": test_script}}), encoding="utf-8")
+
+    @staticmethod
+    def _cmd_for(tmp_path, **kwargs) -> list:
+        """The argv ``run_tests`` would launch, with the subprocess stubbed."""
+        captured = []
+
+        def fake_run(cmd, **_kw):
+            captured.append(list(cmd))
+            p = MagicMock()
+            p.stdout, p.stderr, p.returncode = "ok", "", 0
+            return p
+
+        with patch("localm.plugins.coder.tools.subprocess.run",
+                   side_effect=fake_run):
+            tool_run_tests(tmp_path, **kwargs)
+        assert len(captured) == 1, captured
+        return captured[0]
+
+    def test_npm_gets_the_separator_before_a_flag(self, tmp_path):
+        self._pkg(tmp_path)
+        assert self._cmd_for(tmp_path, runner="npm", extra_args="--watch")[1:] \
+            == ["test", "--", "--watch"]
+
+    def test_npm_gets_the_separator_before_a_path_too(self, tmp_path):
+        """A positional needs no separator of its own (``npm test somepath``
+        already arrives), but one in front of it is measurably inert - ``npm
+        test -- somepath`` delivers the same ``["somepath"]`` - and a call
+        passing BOTH has to put them on the same side of it."""
+        self._pkg(tmp_path)
+        assert self._cmd_for(tmp_path, runner="npm", path="tests")[1:] \
+            == ["test", "--", "tests"]
+
+    def test_npm_path_and_flags_land_together_past_one_separator(self, tmp_path):
+        self._pkg(tmp_path)
+        assert self._cmd_for(tmp_path, runner="npm", path="tests",
+                             extra_args="--watch -t slow")[1:] \
+            == ["test", "--", "tests", "--watch", "-t", "slow"]
+
+    def test_the_auto_detected_npm_command_gets_it_as_well(self, tmp_path):
+        """``auto`` is the branch the model actually reaches, and it does not go
+        through the explicit npm branch, so it needs its own pin."""
+        self._pkg(tmp_path)
+        assert self._cmd_for(tmp_path, extra_args="--watch")[1:] \
+            == ["test", "--", "--watch"]
+
+    def test_an_existing_separator_is_never_doubled(self, tmp_path):
+        """The ``--passWithNoTests`` command already carries one and everything
+        appended lands after it. A second would reach the runner as a literal
+        argument (measured: ``npm test -- -- --watch`` delivers
+        ``["--", "--watch"]``), demoting the flag behind it."""
+        self._pkg(tmp_path, "jest")
+        assert self._cmd_for(tmp_path, runner="npm", extra_args="--watch")[1:] \
+            == ["test", "--", "--passWithNoTests", "--watch"]
+
+    def test_a_caller_written_separator_is_honoured_not_doubled(self, tmp_path):
+        self._pkg(tmp_path)
+        assert self._cmd_for(tmp_path, runner="npm",
+                             extra_args="-- --watch")[1:] == ["test", "--", "--watch"]
+
+    def test_no_caller_args_means_no_separator(self, tmp_path):
+        self._pkg(tmp_path)
+        assert self._cmd_for(tmp_path, runner="npm")[1:] == ["test"]
+
+    def test_yarn_never_gets_a_separator(self, tmp_path):
+        """npm and yarn are opposites, and both directions were measured. yarn
+        classic forwards a bare flag today and warns that a future yarn "will
+        forward any explicit -- as-is to the scripts", which would hand the
+        runner a literal ``--`` and demote the flag to a positional. Giving yarn
+        npm's separator would break the case npm needs it for."""
+        self._pkg(tmp_path)
+        (tmp_path / "yarn.lock").write_text("", encoding="utf-8")
+        assert self._cmd_for(tmp_path, runner="yarn", path="tests",
+                             extra_args="--watch")[1:] \
+            == ["test", "tests", "--watch"]
+        # ...and through auto-detection, which is where yarn.lock is read.
+        assert self._cmd_for(tmp_path, extra_args="--watch")[1:] \
+            == ["test", "--watch"]
+
+    @pytest.mark.parametrize("runner", ["pytest", "cargo", "go"])
+    def test_the_other_runners_are_untouched(self, runner, tmp_path):
+        """They parse their own argv, so their flags already arrive; a
+        separator here would be an invented argument."""
+        cmd = self._cmd_for(tmp_path, runner=runner, path="tests",
+                            extra_args="--watch")
+        assert "--" not in cmd
+        assert cmd[-2:] == ["tests", "--watch"]
+
+    def test_the_args_really_arrive_when_run_tests_launches_npm(self, tmp_path):
+        """The end-to-end the argv assertions above cannot make: launch the REAL
+        npm through ``run_tests`` and read back what the package script actually
+        received.
+
+        The second half is the fires-control. The argv this repository shipped
+        before (caller args appended bare) is run against the SAME project with
+        the SAME npm in the SAME test, and the flag does NOT arrive while the
+        positional does. Without it a green first half would only prove that npm
+        exists, not that the separator is what delivers the flag - and that is
+        exactly the gap the bug lived in, since an argv-shape assertion cannot
+        see whether npm forwards what it is handed.
+        """
+        if shutil.which("npm") is None:
+            pytest.skip("npm is not installed on this box")
+        (tmp_path / "argv.js").write_text(
+            'console.log("ARGV=" + JSON.stringify(process.argv.slice(2)));\n',
+            encoding="utf-8")
+        # `node argv.js` is deliberately NOT a --passWithNoTests runner, so the
+        # command carries no separator of its own and the only one in play is
+        # the one run_tests inserts.
+        self._pkg(tmp_path, "node argv.js")
+        (tmp_path / "sub").mkdir()
+
+        r = tool_run_tests(tmp_path, runner="npm", path="sub",
+                           extra_args="--watch")
+        assert r.ok, r.output
+        assert 'ARGV=["sub","--watch"]' in r.output, (
+            "run_tests did not deliver its caller args to the package script: "
+            f"{r.output!r}")
+
+        npm = _js_test_command(tmp_path, "npm")[0]
+        bare = subprocess.run([npm, "test", "sub", "--watch"], cwd=tmp_path,
+                              capture_output=True, text=True, timeout=180)
+        assert 'ARGV=["sub"]' in bare.stdout, (
+            "npm forwarded a BARE --watch after all. If that is real, the "
+            "separator is unnecessary and this fix needs re-measuring - do not "
+            "just relax the assertion. "
+            f"stdout={bare.stdout!r} stderr={bare.stderr!r}")
