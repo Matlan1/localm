@@ -341,16 +341,13 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                                   reason=f"blocked redirect to {newurl}")
             return super().redirect_request(rq, fp, code, msg, hdrs, newurl)
 
-    # Verify against certifi, not the OS cert store (see localm/http_ssl.py): the
-    # download follows a 302 to the GitHub release CDN, and a fresh Windows box
-    # whose ROOT store has not cached that CA chain otherwise fails the hop with
-    # CERTIFICATE_VERIFY_FAILED. The HTTPSHandler context applies to the CDN hop too.
-    from localm.http_ssl import client_ssl_context
-    built_opener = urllib.request.build_opener(
-        _HttpsOnlyRedirect, urllib.request.HTTPSHandler(context=client_ssl_context()))
+    # verified_urlopen (see localm/http_ssl.py): the download follows a 302 to the
+    # GitHub release CDN and verifies both hops, native cert store first, certifi
+    # as fallback.
+    from localm.http_ssl import verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with built_opener.open(req, timeout=timeout) as resp:
+        with verified_urlopen(req, timeout=timeout, handlers=(_HttpsOnlyRedirect,)) as resp:
             if not (200 <= int(resp.status) < 300):
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)

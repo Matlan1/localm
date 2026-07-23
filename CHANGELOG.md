@@ -23,6 +23,31 @@ permanent public record of what shipped and are never rewritten; the in-progress
   resolves to a single region so it can never silently edit the wrong one of two
   candidates. An exact match still wins outright, and a genuine miss still shows
   the closest-match hint.
+- **Setup no longer fails with a certificate error on a network that intercepts
+  HTTPS (a corporate proxy or security product).** `uv`'s default certificate
+  verification (its own bundled root list) and localm's own previous certifi-based
+  verification for setup-llama, `localm update`, the issues list, and bug-report
+  uploads all rejected a TLS-intercepting proxy's re-signed certificate, since
+  neither bundle can know about a private, locally-issued root - even though a
+  browser on the same machine trusts it fine, because IT already provisions that
+  root into the operating system's own certificate store. Every outbound download
+  in setup and in the app now verifies against the platform's native certificate
+  store first (the same trust a browser already has), falling back to a bundled
+  root list only if that specific verification fails - which still covers the
+  original case this replaces: a freshly-imaged Windows box whose certificate
+  store has not yet cached a legitimate CA. The fallback (when it is ever needed)
+  is silent: setup tries the download once, unseen, before ever showing anything.
+- **Picking "Portable" during setup no longer silently reuses an already-installed
+  `uv`.** Both installers checked only whether any `uv` was reachable on PATH
+  before deciding whether to confine it to the clone - not whether it was
+  Portable's OWN, previously-confined copy. A `uv` left on PATH by a Shared
+  install, a package manager, or even a different clone (Astral's installer adds
+  its target directory to the persistent user PATH, so one portable clone's `uv`
+  could leak into another's setup) was silently reused, skipping the "install uv
+  into this folder" step the Portable prompt promises. Portable now looks
+  specifically for its own confined copy and only falls back to the normal
+  install-and-confine flow when that copy does not exist yet; Shared mode is
+  unaffected.
 - **A second localm server sharing the same data directory no longer reports
   the first, healthy one as crashed.** Running more than one server against
   the same data directory is a normal, supported thing to do (`localm ps`,

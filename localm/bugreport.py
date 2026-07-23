@@ -995,18 +995,15 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
         import urllib.error
         import urllib.request
 
-        from localm.http_ssl import client_ssl_context
+        from localm.http_ssl import verified_urlopen
 
         def opener(u, data, hdrs, to):  # noqa: E306
             req = urllib.request.Request(u, data=data, headers=hdrs, method="POST")
             try:
-                # Verify against certifi, not the OS cert store (see
-                # localm/http_ssl.py): a fresh Windows box whose ROOT store lacks
-                # the proxy CA chain otherwise fails the upload with
-                # CERTIFICATE_VERIFY_FAILED - and this is the very path the
-                # setup-llama failure message tells the user to use to report it.
-                with urllib.request.urlopen(req, timeout=to,
-                                            context=client_ssl_context()) as resp:
+                # verified_urlopen (see localm/http_ssl.py): this is the very path
+                # the setup-llama failure message tells the user to use to report
+                # it, so it must work under the same conditions setup-llama does.
+                with verified_urlopen(req, timeout=to) as resp:
                     return resp.status, resp.read().decode("utf-8", "replace")
             except urllib.error.HTTPError as e:
                 detail = ""
