@@ -225,6 +225,140 @@ def test_dialogue_assume_yes_uses_vulkan_when_no_nvidia():
     assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("vulkan", False)
 
 
+# ------------- known-vendor case: name it, recommend the REAL match -------- #
+#
+# Picking cuda on a box hwdetect already identified as AMD used to get the
+# same generic "no NVIDIA driver detected here (or it is not on PATH)" and a
+# binary confirm whose "No" silently imposed vulkan - even though the vendor
+# that IS present was already known from _warn_off_profile's own detection.
+# These prove: the status line names the real vendor, the recommendation is
+# computed via the SAME policy setup.bat/sh use (not hardcoded vulkan), and a
+# genuine three-way choice (continue / switch / quit) replaces the binary one
+# - all ONLY when det actually shows a specific other vendor; every existing
+# test above (det omitted) is unaffected, proven by their being unchanged.
+
+def _amd_windows_det():
+    from localm import hwdetect
+    return hwdetect.Detection(vendors=["amd"])
+
+
+def test_dialogue_no_nvidia_known_amd_names_vendor_in_status(monkeypatch, capsys):
+    monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "2")
+    info = sl.NvidiaInfo(present=False)
+    sl._cuda_setup_dialogue(info, assume_yes=False, det=_amd_windows_det())
+    out = capsys.readouterr().out
+    assert "amd" in out.lower()
+    assert "not on path" not in out.lower()   # the old generic hedge is gone here
+
+
+def test_dialogue_no_nvidia_known_amd_offers_three_way_choice(monkeypatch, capsys):
+    monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "2")
+    info = sl.NvidiaInfo(present=False)
+    sl._cuda_setup_dialogue(info, assume_yes=False, det=_amd_windows_det())
+    out = capsys.readouterr().out
+    assert "Continue with CUDA anyway" in out
+    assert "Quit" in out
+    assert "Switch to" in out
+
+
+def test_dialogue_no_nvidia_known_amd_pick_continue(monkeypatch):
+    monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "1")
+    info = sl.NvidiaInfo(present=False)
+    assert sl._cuda_setup_dialogue(info, False, _amd_windows_det()) == ("cuda", True)
+
+
+def test_dialogue_no_nvidia_known_amd_pick_switch_uses_real_recommendation(monkeypatch):
+    # The recommendation must come from hwdetect.recommended_install_backend
+    # (the SAME installer policy), not a hardcoded "vulkan" - proven by faking
+    # that function to return something else and confirming it is honoured.
+    from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "recommended_install_backend", lambda det: "amd-rocm")
+    monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "2")
+    info = sl.NvidiaInfo(present=False)
+    assert sl._cuda_setup_dialogue(info, False, _amd_windows_det()) == ("amd-rocm", False)
+
+
+def test_dialogue_no_nvidia_known_amd_pick_quit_exits(monkeypatch):
+    monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "3")
+    info = sl.NvidiaInfo(present=False)
+    with pytest.raises(SystemExit):
+        sl._cuda_setup_dialogue(info, False, _amd_windows_det())
+
+
+def test_dialogue_assume_yes_known_amd_uses_recommendation_not_hardcoded_vulkan(monkeypatch):
+    from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "recommended_install_backend", lambda det: "amd-rocm")
+    info = sl.NvidiaInfo(present=False)
+    assert sl._cuda_setup_dialogue(info, True, _amd_windows_det()) == ("amd-rocm", False)
+
+
+def test_dialogue_det_with_only_nvidia_vendor_falls_back_to_generic(monkeypatch):
+    # hwdetect thinks NVIDIA is present (e.g. a broken driver install) but
+    # nvidia-smi itself failed - there is no OTHER vendor to recommend, so
+    # this must take the original generic path, not crash or misfire.
+    from localm import hwdetect
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: False)
+    info = sl.NvidiaInfo(present=False)
+    det = hwdetect.Detection(vendors=["nvidia"])
+    assert sl._cuda_setup_dialogue(info, False, det) == ("vulkan", False)
+
+
+def test_warn_off_profile_returns_detection_for_reuse(monkeypatch):
+    """The caller (main()) needs this SAME detection for the CUDA dialogue,
+    so a second, potentially-inconsistent hwdetect.detect() call is never
+    needed (or skipped) downstream."""
+    _fake_vendors(monkeypatch, ["amd"])
+    det = sl._warn_off_profile("cuda")
+    assert det is not None
+    assert det.vendors == ["amd"]
+
+
+def test_warn_off_profile_returns_none_for_non_vendor_specific_backend(monkeypatch):
+    # vulkan/cpu are not vendor-specific - no detection is needed or run.
+    from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "detect",
+                        lambda: pytest.fail("must not detect for a non-vendor-specific backend"))
+    assert sl._warn_off_profile("vulkan") is None
+
+
+def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeypatch, tmp_path):
+    """End-to-end wiring check: `setup-llama --backend cuda` on a machine
+    hwdetect identifies as AMD must reach the vendor-aware three-way dialogue
+    (not the old generic one) using the SAME detection _warn_off_profile
+    already computed - proving main() actually threads det through, not just
+    that _cuda_setup_dialogue behaves correctly in isolation."""
+    from localm import hwdetect
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "detect", lambda: hwdetect.Detection(vendors=["amd"]))
+    monkeypatch.setattr(hwdetect, "recommended_install_backend", lambda det: "amd-rocm")
+    monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(present=False))
+
+    target = tmp_path / "lib"
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+    provisioned = []
+
+    def fake_provision_backend(backend, tgt, sha256, with_cudart):
+        provisioned.append(backend)
+        (tgt / sl._lib_name()).write_bytes(b"stub")
+
+    monkeypatch.setattr(sl, "_provision_backend", fake_provision_backend)
+    monkeypatch.setattr(sl, "_clear_target", lambda tgt: None)
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg_dir: True)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    monkeypatch.setattr(sl, "_verify", lambda: None)
+
+    from click.testing import CliRunner
+    runner = CliRunner()
+    # "2" answers the three-way prompt: switch to the recommendation.
+    result = runner.invoke(sl.main, ["--backend", "cuda"], input="2\n")
+    assert result.exit_code == 0, result.output
+    assert "this machine looks like" in result.output.lower()
+    assert "amd" in result.output.lower()
+    assert "Switch to amd-rocm" in result.output
+    assert provisioned == ["amd-rocm"], (
+        "the recommendation from the three-way dialogue must be what actually gets provisioned")
+
+
 # ---------------- real click.confirm: reprompt + stray-input handling ------ #
 #
 # The tests above monkeypatch sl.click.confirm itself, so they never exercise
