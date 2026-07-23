@@ -652,6 +652,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   writes to its episodic memory is unchanged: a session that stumbled and then
   recovered still records what went wrong, and is no longer described as
   unfinished when it did finish.
+- **A client plugin reading `window.modelCache` (or another reassigned GUI
+  export) got a value frozen at page load, never the current one.** The GUI's
+  module loader copies each `app/*` and `pages/*` module's exports onto `window`
+  once, right after they evaluate, so a runtime-injected client plugin can reach
+  them as `window.X` the same way the pre-module globals worked. That copy was
+  only a snapshot: a handful of exports, `modelCache` among them, are
+  *reassigned* rather than mutated, and a snapshot never sees a reassignment.
+  `window.modelCache` in particular stayed at its initial `{models: [], active:
+  ""}` forever, even with a model loaded and chat already working, while the
+  module's own internal `import` of the same binding was always current.
+  `window.X` is now a live getter into the module's namespace object instead of
+  a one-time copy, so it reads the current value the same way the module itself
+  does. No plugin reads `window.modelCache` yet, so this had no visible symptom
+  before now, but the fix covers every export with this pattern, not just this
+  one.
 
 ### Changed
 - **Coder: `grep` is much faster on real repositories, and its limits are now

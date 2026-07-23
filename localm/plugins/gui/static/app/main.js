@@ -3,7 +3,16 @@
  * Imports every app/* and pages/* module in the original load order (so top-level
  * side effects run in order), then attaches every public binding to window so the
  * index.html install-UI module + runtime-injected client plugins reach them as
- * window.X, as the pre-module global functions were reachable. */
+ * window.X, as the pre-module global functions were reachable.
+ *
+ * Each window.X is a getter into the module namespace object, not a one-time value
+ * copy: several `export let` bindings (modelCache, timer ids, caches, ...) are
+ * REASSIGNED at runtime, and a namespace object's properties are live bindings back
+ * to the module's own variables, so the getter always reads the current value.
+ *
+ * A getter with no setter makes window.X effectively read-only: reassigning it
+ * (`window.X = ...`) throws in strict mode (every ES module is strict), loudly
+ * rather than silently. Reassign the binding via the module itself instead. */
 import * as m0 from "./client-log.js";
 import * as m1 from "./helpers.js";
 import * as mIcons from "./icons.js";
@@ -30,6 +39,8 @@ import * as m20 from "../pages/knowledge.js";
 
 for (const mod of [m0, m1, mIcons, mPk, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20]) {
   for (const name of Object.keys(mod)) {
-    try { window[name] = mod[name]; } catch (_) { /* read-only global; skip */ }
+    try {
+      Object.defineProperty(window, name, { get: () => mod[name], configurable: true, enumerable: true });
+    } catch (_) { /* read-only global; skip */ }
   }
 }

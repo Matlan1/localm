@@ -105,7 +105,12 @@
 // streamed no longer has its rendered error wiped a moment later, and the
 // request now falls back to the loaded model when the dropdown is empty or
 // desynced - a stale-cached client would keep both bugs.
-const CACHE = "localm-shell-v81";
+// v82: app/main.js now installs window.X as a live getter into each module's
+// namespace object instead of a one-time value copy, so reassigned `export let`
+// bindings (modelCache and friends) stay live on window instead of freezing at
+// their value from first load - a stale-cached client would keep the old
+// snapshot-copy loop and window.modelCache would never reflect model switches.
+const CACHE = "localm-shell-v82";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
