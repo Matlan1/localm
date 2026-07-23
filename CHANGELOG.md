@@ -734,6 +734,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
   not exposed: this needed a key you had minted yourself with settings-write
   but not owner rights, and no key preset localm ships grants that
   combination.
+- **A scoped "read settings" key could see plugin settings only an owner is
+  supposed to see.** Media (image/music/video) and text-to-speech settings each
+  reserve a couple of fields for an owner key to change: a media backend's
+  launch command and API address (a shell command, and where renders are sent),
+  and text-to-speech's script and WASM paths (what every browser loads).
+  Changing them already required an owner key; reading their current value back
+  through the same two settings endpoints did not check the same thing, so a key
+  you had created with only "read settings" permission - including the
+  ready-made "Full" preset localm itself offers when minting a key - could see
+  them anyway. Both endpoints now hide those fields' value from a non-owner
+  key, the same treatment the general settings page already gives its own
+  owner-only fields. Reading everything else through these endpoints is
+  unchanged.
+- **A settings change could echo back an owner-only value it was never asked to
+  change.** The general settings endpoint already refuses to let a key with
+  permission to change settings but deliberately WITHOUT owner rights set an
+  owner-only field (for example the update endpoint's shared secret), but the
+  response after a successful, otherwise-ordinary change carried the CURRENT
+  value of every setting, owner-only ones included, so that key could read a
+  value it could never write. This needed a key you had minted yourself with
+  settings-write but not owner rights (no key preset localm ships grants that
+  combination), so a default install was not exposed by this finding alone. The
+  response now hides the same fields the write already refuses.
 
 ## [0.1.2] - 2026-07-18
 

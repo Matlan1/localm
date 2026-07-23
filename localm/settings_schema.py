@@ -1067,6 +1067,7 @@ class MediaField:
     options: Optional[list] = None
     image_only: bool = False       # fast_dequant only applies to the Flux image backend
     plugins: Optional[list] = None # restrict to these plugins only (e.g. ["music", "video"])
+    admin_only: bool = False       # requires an owner (ADMIN) principal to see or set
 
 
 # Order = display order within each plugin subsection.
@@ -1074,13 +1075,19 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
                "ComfyUI folder",
                "This plugin's ComfyUI install folder. Blank uses the shared default."),
+    # REC-MEDIA-CMD: launch_cmd is a shell command and api_url is a render
+    # target, so both widen a trust boundary the same way the tts library/
+    # wasm_paths script-URL fields do - admin_only=True hides their RESOLVED
+    # value from a non-owner config:read caller (see media_schema_json) on top
+    # of the existing write-side owner gate in set_media_config.
     MediaField("launch_cmd", ("comfy", "launch_cmd"), "comfy_launch_cmd", Widget.TEXT,
                "ComfyUI launch command",
                "Launcher that starts ComfyUI for this plugin. Blank auto-detects one "
-               "in the folder."),
+               "in the folder.", admin_only=True),
     MediaField("api_url", ("comfy", "api_url"), "comfy_api_url", Widget.TEXT,
                "ComfyUI API URL",
-               "Where this plugin's ComfyUI listens. Blank uses the shared default."),
+               "Where this plugin's ComfyUI listens. Blank uses the shared default.",
+               admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
                "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
@@ -1128,15 +1135,32 @@ def media_fields_for(name: str) -> list:
     ]
 
 
-def media_schema_json(name: str, block: Optional[dict], full_config: dict) -> list:
+def media_admin_only_fields() -> set:
+    """Field keys (across all media plugins) flagged owner-only (today:
+    launch_cmd, api_url). A non-owner config:write key must not set them
+    (set_media_config's REC-MEDIA-CMD gate) and must not see their resolved
+    value either (media_schema_json). The single source of truth for both."""
+    return {f.key for f in MEDIA_PLUGIN_FIELDS if f.admin_only}
+
+
+def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
+                       is_owner: bool = True) -> list:
     """Serialize one media plugin's editable fields with their RESOLVED values.
 
     ``value`` is the per-plugin block value when set, else the global comfy_*
     fallback, so the GUI shows what is actually in effect. ``is_override`` flags
-    whether this plugin has its own value (vs inheriting the shared default)."""
+    whether this plugin has its own value (vs inheriting the shared default).
+
+    When *is_owner* is False, admin_only fields (launch_cmd, api_url) are
+    OMITTED entirely, mirroring schema_json's admin_only handling for the core
+    schema: a non-owner config:read caller must not learn a shell command or a
+    render target it is not allowed to set either. Callers that are not
+    request-scoped (the CLI, tests) default to owner (see everything)."""
     block = block if isinstance(block, dict) else {}
     out = []
     for f in media_fields_for(name):
+        if f.admin_only and not is_owner:
+            continue
         block_val = _block_get(block, f.block_path)
         has_own = block_val not in (None, "")
         value = block_val if has_own else full_config.get(f.global_key)
@@ -1338,7 +1362,8 @@ def known_tts_voices() -> list:
 
 
 def tts_admin_only_fields() -> set:
-    """Block keys a non-owner ``config:write`` key must not set."""
+    """Block keys a non-owner ``config:write`` key must not set, and must not
+    see the resolved value of either (see tts_schema_json's *is_owner*)."""
     return {f.key for f in TTS_FIELDS if f.admin_only}
 
 
@@ -1351,18 +1376,25 @@ def _tts_options(f: "TtsField") -> Optional[list]:
     return f.options
 
 
-def tts_schema_json(block: Optional[dict]) -> list:
+def tts_schema_json(block: Optional[dict], *, is_owner: bool = True) -> list:
     """Serialize the tts block's editable fields with their RESOLVED values.
 
     ``value`` is the block value when the user set one, else the shipped
     template default, so the GUI shows what is actually in effect;
     ``is_override`` says which. ``gui``/``advanced``/``admin_only`` tell the GUI
     what to render and where.
-    """
+
+    When *is_owner* is False, admin_only fields (library, wasm_paths) are
+    OMITTED entirely (mirrors schema_json's core-schema handling): a non-owner
+    config:read caller must not learn the script/wasm path it is not allowed
+    to set either. Callers that are not request-scoped (the CLI, tests)
+    default to owner (see everything)."""
     block = block if isinstance(block, dict) else {}
     defaults = tts_defaults()
     out = []
     for f in TTS_FIELDS:
+        if f.admin_only and not is_owner:
+            continue
         own = block.get(f.key)
         has_own = own not in (None, "")
         d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,

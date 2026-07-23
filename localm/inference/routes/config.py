@@ -128,6 +128,8 @@ def register(app: FastAPI, ctx) -> None:
             validated = validate_update(body)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
         # SEC-3: refuse to enable require_auth while no API key exists. Doing so
         # is a one-way self-lockout: the very next keyless request 401s and the
         # GUI sends no Bearer, so the toggle could never be undone from the GUI.
@@ -153,8 +155,20 @@ def register(app: FastAPI, ctx) -> None:
         # time.sleep for up to _CROSS_LOCK_TIMEOUT. This handler is `async def`,
         # so doing that inline would freeze the whole server - health checks,
         # token streaming, every concurrent request - for the entire wait.
-        return await run_in_threadpool(update_config,
-                                       lambda cfg: cfg.update(validated))
+        result = await run_in_threadpool(update_config,
+                                         lambda cfg: cfg.update(validated))
+        # REC-OWNER-SETTINGS: update_config() returns the FULL merged config
+        # (every key, not just the ones this call changed), so without this
+        # filter a config:write-only, non-owner key's PATCH response would echo
+        # back an admin_only field's value (e.g. update_token) even though the
+        # write itself already refuses to let it SET that field - the same
+        # owner/non-owner boundary get_config applies above, applied to the
+        # echo here too.
+        if is_owner:
+            return result
+        for k in admin_only_keys():
+            result.pop(k, None)
+        return result
 
     # ---------------------------------------------------------------- #
     #  Per-plugin media config (image / music / video)                   #
@@ -162,21 +176,29 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/media/config",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def get_media_config():
+    async def get_media_config(request: Request):
         """Per-plugin media (ComfyUI) config for image/music/video, each with its
         editable fields and RESOLVED values (the per-plugin block value, else the
         shared global comfy_* fallback). The GUI 'Media' section renders one
-        subsection per plugin so the three are configured independently."""
+        subsection per plugin so the three are configured independently.
+
+        REC-MEDIA-CMD: launch_cmd/api_url are admin_only (a shell command / a
+        render target), so their resolved value is OMITTED for a non-owner
+        config:read caller - mirrors the write-side owner gate below, and the
+        same admin_only_keys() treatment GET /v1/config gives the core schema."""
         from localm.config import load_config
         from localm.settings_schema import MEDIA_PLUGINS, media_schema_json
         cfg = load_config()
         plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
         labels = {"image": "Image", "music": "Music", "video": "Video"}
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
         out = []
         for name in MEDIA_PLUGINS:
             block = plugins.get(name) if isinstance(plugins.get(name), dict) else {}
             out.append({"plugin": name, "label": labels[name],
-                        "fields": media_schema_json(name, block, cfg)})
+                        "fields": media_schema_json(name, block, cfg,
+                                                     is_owner=is_owner)})
         return {"plugins": out}
 
     @app.post("/v1/media/config/{name}",
@@ -228,13 +250,25 @@ def register(app: FastAPI, ctx) -> None:
         await run_in_threadpool(update_config, _mutate)
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
-        return {"plugin": name, "fields": media_schema_json(name, block, cfg)}
+        # Same admin_only filter as the GET route above: a non-owner config:write
+        # key that just saved an ORDINARY field (the launch_cmd/api_url gate
+        # above only blocks setting those two) must not have their resolved
+        # value echoed back in this response either.
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
+        return {"plugin": name, "fields": media_schema_json(name, block, cfg,
+                                                              is_owner=is_owner)}
 
     # ---------------------------------------------------------------- #
     #  The tts plugin's config block (the browser-rendered Kokoro voice) #
     # ---------------------------------------------------------------- #
 
     def _tts_payload(request: Request) -> dict:
+        """Shared by GET and POST /v1/tts/config, so the same admin_only filter
+        (library/wasm_paths - REC-MEDIA-CMD's tts counterpart) applies to both
+        the plain read and whatever a write response echoes back: a non-owner
+        config:read/write caller must not learn the script/wasm path it is not
+        allowed to set either."""
         from localm.config import load_config
         from localm.settings_schema import TTS_PLUGIN, tts_schema_json
         cfg = load_config()
@@ -248,9 +282,11 @@ def register(app: FastAPI, ctx) -> None:
         # reads the config), the same blocking reads this handler already makes
         # via load_config(), exactly like the media GET beside it.
         mgr = getattr(request.app.state, "plugin_manager", None)
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
         return {"plugin": TTS_PLUGIN,
                 "active": bool(mgr and mgr.is_active(TTS_PLUGIN)),
-                "fields": tts_schema_json(block)}
+                "fields": tts_schema_json(block, is_owner=is_owner)}
 
     @app.get("/v1/tts/config",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
