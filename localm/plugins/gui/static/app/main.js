@@ -8,7 +8,11 @@
  * Each window.X is a getter into the module namespace object, not a one-time value
  * copy: several `export let` bindings (modelCache, timer ids, caches, ...) are
  * REASSIGNED at runtime, and a namespace object's properties are live bindings back
- * to the module's own variables, so the getter always reads the current value. */
+ * to the module's own variables, so the getter always reads the current value.
+ *
+ * A getter with no setter makes window.X effectively read-only: reassigning it
+ * (`window.X = ...`) throws in strict mode (every ES module is strict), loudly
+ * rather than silently. Reassign the binding via the module itself instead. */
 import * as m0 from "./client-log.js";
 import * as m1 from "./helpers.js";
 import * as mIcons from "./icons.js";
