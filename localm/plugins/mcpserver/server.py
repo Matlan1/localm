@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, Optional
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
-SERVER_VERSION = "0.1.2"
+SERVER_VERSION = "0.1.3"
 
 
 def _log(msg: str) -> None:
