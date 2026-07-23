@@ -165,6 +165,19 @@ _MIN_ARTIFACT_BYTES = 256 * 1024   # 256 KiB
 _DOWNLOAD_STALL_TIMEOUT = 60   # seconds
 
 
+@dataclass
+class _DownloadResult:
+    """What actually happened on the wire, captured for diagnosis - never
+    guessed after the fact. ``content_length`` is 0 when the server sent none
+    (completeness could not be checked structurally); ``final_url`` is the URL
+    after following redirects (a proxy that redirects to its own block page
+    shows up here even when the request otherwise looked normal)."""
+    bytes_received: int
+    content_length: int
+    content_type: str
+    final_url: str
+
+
 class ArtifactError(Exception):
     """A downloaded artifact failed integrity validation (size, archive shape,
     or a provided sha256 pin) and must NOT be extracted or installed."""
@@ -439,7 +452,22 @@ def _resolve_backend_url(backend: str) -> str:
 #  Download / validate / extract                                              #
 # --------------------------------------------------------------------------- #
 
-def _download(url: str, dest: Path) -> None:
+def _download(url: str, dest: Path) -> _DownloadResult:
+    """Stream *url* to *dest*, capturing what actually happened on the wire (not
+    just whether it succeeded) so a caller can diagnose a bad result from real
+    evidence instead of a guess. Distinguishes three distinct failure shapes,
+    each reported with its own specific cause:
+
+    * a STALL (no bytes for ``_DOWNLOAD_STALL_TIMEOUT``s) - the connection is
+      alive but frozen;
+    * a transport-level drop mid-transfer (connection reset, broken pipe, ...) -
+      the connection died outright, with however many bytes had arrived so far;
+    * a CLEAN completion that is nonetheless short of what was promised - the
+      server (or something between it and us) considers the response finished,
+      it is just not the archive. This third case is NOT an error here - it is
+      returned normally and diagnosed by the caller once the file is on disk,
+      because "too short" alone does not yet say WHY (see
+      :func:`_diagnose_bad_artifact`)."""
     console.print(f"[dim]Downloading {url}[/dim]")
     last = [-1]
 
@@ -454,6 +482,8 @@ def _download(url: str, dest: Path) -> None:
 
     prev_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(_DOWNLOAD_STALL_TIMEOUT)
+    total = 0
+    nread = 0
     try:
         # verified_urlopen (see localm/http_ssl.py) follows the GitHub -> release-CDN
         # 302 over HTTPS and verifies both hops. Stream in chunks so a multi-hundred-MB
@@ -462,7 +492,14 @@ def _download(url: str, dest: Path) -> None:
         req = urllib.request.Request(url, headers={"User-Agent": "localm-setup-llama"})
         with verified_urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT) as r, open(dest, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
-            nread = 0
+            content_type = r.headers.get("Content-Type") or ""
+            # geturl() is standard on every real urllib response, but stay
+            # defensive for the rare test double that does not implement it -
+            # the final URL is a nice-to-have diagnostic, not load-bearing.
+            try:
+                final_url = r.geturl() or url
+            except Exception:
+                final_url = url
             while True:
                 chunk = r.read(64 * 1024)
                 if not chunk:
@@ -472,14 +509,30 @@ def _download(url: str, dest: Path) -> None:
                 _report(nread, total)
     except (socket.timeout, TimeoutError) as e:
         raise ArtifactError(
-            f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s) - the "
+            f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s, after "
+            f"{nread} of {total or 'an unknown number of'} bytes) - the "
             "connection was interrupted or throttled. Retry on a stable network, "
             "or provision from a local build with 'localm setup-llama --from "
+            "<build-dir>' / '--url <archive-url>'."
+        ) from e
+    except OSError as e:
+        # A live transport failure mid-stream (connection reset, broken pipe, a
+        # proxy dropping the connection outright) - distinct from a download
+        # that completes normally but turns out short (that is not an
+        # exception at all; see the docstring). Report the partial state
+        # honestly instead of a generic "download failed".
+        raise ArtifactError(
+            f"the connection was interrupted after {nread} of "
+            f"{total or 'an unknown number of'} bytes ({e}) - this looks like a "
+            "dropped or flaky connection, not a blocked download. Retry, or "
+            "provision from a local build with 'localm setup-llama --from "
             "<build-dir>' / '--url <archive-url>'."
         ) from e
     finally:
         socket.setdefaulttimeout(prev_timeout)
     console.print()
+    return _DownloadResult(bytes_received=nread, content_length=total,
+                           content_type=content_type, final_url=final_url)
 
 
 def _sha256_file(path: Path) -> str:
@@ -496,10 +549,97 @@ def _is_supported_archive(path: Path) -> bool:
     return zipfile.is_zipfile(path) or tarfile.is_tarfile(path)
 
 
+def _sniff_content_kind(path: Path, peek: int = 4096) -> str:
+    """Classify what the file's own bytes actually look like, independent of
+    what it was supposed to be - the one honest way to tell a substituted
+    HTML/JSON response apart from a genuinely truncated archive. The content
+    itself is authoritative here: a header or URL can be wrong, spoofed, or
+    just uninformative, but a real llama.cpp archive's opening bytes never
+    decode as text.
+
+    Returns one of: 'empty', 'zip_truncated', 'gzip_truncated', 'html', 'xml',
+    'json', 'text', 'binary'. The two '..._truncated' results specifically mean
+    the file STARTS with a real archive's magic bytes but is not (yet, or ever
+    going to be) a complete one - a different cause than a substituted page."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(peek)
+    except OSError:
+        return "binary"
+    if not head:
+        return "empty"
+    if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+        return "zip_truncated"
+    if head[:2] == b"\x1f\x8b":
+        return "gzip_truncated"
+    # Structural markers are pure ASCII and sit at/near the very start of a
+    # real error/block page regardless of the page's OVERALL encoding, so look
+    # for them with a lossy decode first (never raises, so it still finds
+    # HTML/JSON/XML served as e.g. windows-1252, not just UTF-8). A strict
+    # decode is only needed for the weaker 'text vs binary' distinction below.
+    lossy = head.decode("ascii", errors="replace").lstrip()
+    lower = lossy[:200].lower()
+    if lower.startswith("<!doctype html") or lower.startswith("<html") or "<html" in lower:
+        return "html"
+    if lower.startswith("<?xml") or "<error>" in lower:
+        return "xml"
+    if lossy[:1] in ("{", "["):
+        return "json"
+    try:
+        head.decode("utf-8")
+        return "text"
+    except UnicodeDecodeError:
+        return "binary"
+
+
+def _diagnose_bad_artifact(path: Path, dl: Optional["_DownloadResult"]) -> str:
+    """Turn what the bytes on disk actually look like - plus, when available,
+    what the response claimed (:func:`_download`'s result for this same file) -
+    into ONE specific, evidence-backed explanation. Never states a cause the
+    evidence does not actually support: AGENTS.md rule 5 - a confident wrong
+    guess is worse than an honest 'not clear', so the fallback case says so
+    plainly instead of picking the most likely-sounding story."""
+    kind = _sniff_content_kind(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+
+    if kind == "empty":
+        cause = "nothing was received at all"
+    elif kind == "html":
+        cause = ("the response is an HTML page, not the archive - almost always "
+                 "a network that blocks or filters this download (a corporate "
+                 "proxy or security product), not a problem with the release itself")
+    elif kind in ("json", "xml"):
+        cause = (f"the response is {kind.upper()}, not the archive - most likely "
+                 "an error response from a proxy or the CDN standing in for the "
+                 "real file (again typically a corporate network filter)")
+    elif kind in ("zip_truncated", "gzip_truncated"):
+        cause = ("the response starts like the real archive but cuts off "
+                 "partway through - this looks like a genuinely interrupted "
+                 "transfer (a dropped or throttled connection), not a deliberate "
+                 "block")
+    else:
+        cause = ("the content does not clearly indicate the cause - it is "
+                 "neither a recognisable webpage nor a valid archive")
+
+    detail_bits = [f"{size} bytes received"]
+    if dl is not None:
+        detail_bits.append(f"{dl.content_length} expected (Content-Length)"
+                           if dl.content_length else "no Content-Length given")
+        if dl.content_type:
+            detail_bits.append(f"Content-Type: {dl.content_type}")
+        if dl.final_url:
+            detail_bits.append(f"final URL: {dl.final_url}")
+    return f"{cause} ({'; '.join(detail_bits)})."
+
+
 def _validate_archive(
     path: Path,
     expected_sha256: Optional[str] = None,
     min_size: int = _MIN_ARTIFACT_BYTES,
+    dl: Optional[_DownloadResult] = None,
 ) -> None:
     """SEC-8: validate a downloaded artifact BEFORE it is extracted or installed.
     Raises :class:`ArtifactError` on any failure.
@@ -513,6 +653,12 @@ def _validate_archive(
       3. provenance: when *expected_sha256* is given, the file's digest must
          match it (opt-in; refuses on mismatch). Comparison is whitespace- and
          case-insensitive so a pasted hash from any source works.
+
+    *dl*, when given (the :func:`_download` result for this same file), lets
+    checks 1 and 2 explain WHY from real evidence - what the bytes actually
+    look like, plus what the response claimed - instead of a generic hedge
+    that names every possible cause without saying which one actually
+    happened (see :func:`_diagnose_bad_artifact`).
     """
     try:
         size = path.stat().st_size
@@ -520,15 +666,13 @@ def _validate_archive(
         raise ArtifactError(f"could not stat downloaded file: {e}") from e
     if size < min_size:
         raise ArtifactError(
-            f"download is too small ({size} bytes < {min_size} minimum) - "
-            "this is almost certainly an error page or a truncated transfer, "
-            "not the prebuilt runtime."
+            f"download is too small ({size} bytes < {min_size} minimum): "
+            f"{_diagnose_bad_artifact(path, dl)}"
         )
     if not _is_supported_archive(path):
         raise ArtifactError(
-            "download is not a valid zip or tar archive - it may be a truncated "
-            "transfer, an HTML error page served with a 200, or a tampered "
-            "payload."
+            f"download is not a valid zip or tar archive: "
+            f"{_diagnose_bad_artifact(path, dl)}"
         )
     if expected_sha256:
         want = expected_sha256.strip().lower()
@@ -848,8 +992,8 @@ def _fetch_and_place(url: str, target: Path, sha256: Optional[str] = None) -> in
     with tempfile.TemporaryDirectory() as tmp:
         suffix = ".zip" if url.lower().endswith(".zip") else ".tar.gz"
         arc = Path(tmp) / f"llama-prebuilt{suffix}"
-        _download(url, arc)
-        _validate_archive(arc, expected_sha256=sha256)   # SEC-8 gate, pre-extract
+        dl = _download(url, arc)
+        _validate_archive(arc, expected_sha256=sha256, dl=dl)   # SEC-8 gate, pre-extract
         ex = Path(tmp) / "x"
         _extract_archive(arc, ex)
         return _copy_binaries(ex, target)
@@ -1156,6 +1300,17 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # A self-contained backend the user pinned: do not silently swap to another.
     if chosen in ("vulkan", "cpu"):
         if not provisioned:
+            # The exception handler above already printed the SPECIFIC cause
+            # (from _diagnose_bad_artifact, when it was a download/validation
+            # failure) - this adds the escape hatches, which that message does
+            # not otherwise mention, so a genuinely blocked network is not a
+            # dead end.
+            console.print(
+                f"[dim]If your network blocks or filters this download (common on "
+                f"a corporate network), download the archive yourself through a "
+                f"browser and use --from <extracted-dir>, or point --url at a "
+                f"mirror your network allows. Retry the same command once the "
+                f"cause is fixed: localm setup-llama --backend {chosen}[/dim]")
             sys.exit(1)
         # Provisioned but would not load: vulkan/cpu are the universal fallbacks,
         # so this is an unexpected environment fault worth a report - not an exit-0

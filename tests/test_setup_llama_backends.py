@@ -402,3 +402,337 @@ def test_custom_url_warning_printed(monkeypatch, tmp_path):
     runner = CliRunner()
     result = runner.invoke(sl.main, ["--url", "https://dummy.invalid/llama.zip", "--force"])
     assert "Warning: Custom URL download is unverified" in result.output
+
+
+# --------------------------- bad-download diagnosis (issue #827) ---------- #
+#
+# A too-small/invalid download used to get ONE generic hedge naming every
+# possible cause ("an error page or a truncated transfer") without saying
+# which one actually happened. Confirmed live (issue #827): a corporate
+# network's content filter substituted a small response for a real 32 MB
+# llama.cpp archive, and the user had no way to tell that apart from a merely
+# flaky connection from the message alone. These tests prove _sniff_content_kind
+# and _diagnose_bad_artifact tell the different causes apart CORRECTLY from
+# real evidence (actual bytes, actual response metadata) - not a guess dressed
+# as a fact - and stay honest (no confident cause) when the evidence really is
+# ambiguous.
+
+import gzip
+import io
+import zipfile as _zipfile_mod
+
+
+def _real_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with _zipfile_mod.ZipFile(buf, "w") as zf:
+        zf.writestr("bin/llama.dll", b"x" * 5000)
+        zf.writestr("bin/ggml.dll", b"y" * 5000)
+    return buf.getvalue()
+
+
+def _real_gzip_bytes() -> bytes:
+    return gzip.compress(b"not actually a tar but real gzip framing" * 200)
+
+
+class TestSniffContentKind:
+    def test_empty_file(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"")
+        assert sl._sniff_content_kind(p) == "empty"
+
+    def test_truncated_real_zip_is_zip_truncated_not_binary(self, tmp_path):
+        # A GENUINE zip, cut short mid-stream - starts with the real local-file
+        # header magic, so this must be told apart from a substituted page.
+        full = _real_zip_bytes()
+        assert not _zipfile_mod.is_zipfile(io.BytesIO(full[:50])), "sanity: our cut is actually incomplete"
+        p = tmp_path / "a.zip"
+        p.write_bytes(full[:50])
+        assert sl._sniff_content_kind(p) == "zip_truncated"
+
+    def test_truncated_real_gzip_is_gzip_truncated(self, tmp_path):
+        full = _real_gzip_bytes()
+        p = tmp_path / "a.tar.gz"
+        p.write_bytes(full[:10])
+        assert sl._sniff_content_kind(p) == "gzip_truncated"
+
+    def test_html_with_doctype(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"<!DOCTYPE html>\n<html><body>Access to this content is blocked "
+                       b"by your network administrator.</body></html>")
+        assert sl._sniff_content_kind(p) == "html"
+
+    def test_html_without_doctype(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"<html><head><title>Blocked</title></head><body>Denied</body></html>")
+        assert sl._sniff_content_kind(p) == "html"
+
+    def test_html_non_utf8_encoding_still_detected(self, tmp_path):
+        # A block page served as windows-1252 (a smart quote / accented char
+        # later in the body) must NOT be misclassified as 'binary' just
+        # because a STRICT utf-8 decode of the whole peek window would fail -
+        # the structural marker at the start is pure ASCII and must win first.
+        body = "<!DOCTYPE html><html><body>Café access blocked</body></html>"
+        p = tmp_path / "a"
+        p.write_bytes(body.encode("windows-1252"))
+        assert sl._sniff_content_kind(p) == "html"
+
+    def test_json_object(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b'{"error": "forbidden", "code": 403}')
+        assert sl._sniff_content_kind(p) == "json"
+
+    def test_json_array(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b'[{"message": "blocked"}]')
+        assert sl._sniff_content_kind(p) == "json"
+
+    def test_xml_s3_style_error(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                       b'<Error><Code>AccessDenied</Code></Error>')
+        assert sl._sniff_content_kind(p) == "xml"
+
+    def test_plain_text_no_markup(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"This content is not available in your region.\n")
+        assert sl._sniff_content_kind(p) == "text"
+
+    def test_genuine_binary_garbage_is_honestly_unclear(self, tmp_path):
+        # Bytes that are neither a known archive signature nor decodable text -
+        # a genuinely ambiguous case. Must NOT be misclassified as any specific
+        # kind (that would be a confident wrong guess).
+        p = tmp_path / "a"
+        p.write_bytes(bytes([0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81, 0xC0, 0xC1]) * 100)
+        assert sl._sniff_content_kind(p) == "binary"
+
+
+class TestDiagnoseBadArtifact:
+    def test_html_cause_mentions_network_filtering_not_github(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"<!DOCTYPE html><html>blocked</html>")
+        msg = sl._diagnose_bad_artifact(p, None)
+        low = msg.lower()
+        assert "html" in low or "webpage" in low
+        assert "network" in low or "proxy" in low or "filter" in low
+        assert "bytes received" in low
+
+    def test_truncated_zip_cause_says_interrupted_not_blocked(self, tmp_path):
+        full = _real_zip_bytes()
+        p = tmp_path / "a.zip"
+        p.write_bytes(full[:50])
+        msg = sl._diagnose_bad_artifact(p, None).lower()
+        assert "interrupted" in msg or "dropped" in msg or "throttled" in msg
+        # Must NOT claim this is a deliberate block - the evidence (valid
+        # archive framing, just cut short) does not support that conclusion.
+        assert "block" not in msg or "not a deliberate block" in msg
+
+    def test_ambiguous_binary_is_honest_not_a_confident_guess(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(bytes([0xFF, 0xFE, 0x80, 0x81]) * 200)
+        msg = sl._diagnose_bad_artifact(p, None).lower()
+        assert "not clear" in msg or "does not clearly indicate" in msg
+        # Must not fabricate a specific cause it has no evidence for.
+        assert "corporate" not in msg
+        assert "html" not in msg
+
+    def test_includes_response_metadata_when_available(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"<html>blocked</html>")
+        dl = sl._DownloadResult(bytes_received=21, content_length=33554432,
+                                content_type="text/html; charset=utf-8",
+                                final_url="https://proxy.corp.example/blocked")
+        msg = sl._diagnose_bad_artifact(p, dl)
+        assert "33554432" in msg
+        assert "text/html" in msg
+        assert "proxy.corp.example" in msg
+
+    def test_no_content_length_is_stated_honestly(self, tmp_path):
+        p = tmp_path / "a"
+        p.write_bytes(b"\x00" * 10)
+        dl = sl._DownloadResult(bytes_received=10, content_length=0,
+                                content_type="", final_url="")
+        msg = sl._diagnose_bad_artifact(p, dl)
+        assert "no content-length given" in msg.lower()
+
+
+class TestValidateArchiveRichDiagnosis:
+    def test_too_small_html_error_names_the_real_cause(self, tmp_path):
+        p = tmp_path / "a.zip"
+        p.write_bytes(b"<!DOCTYPE html><html>Access blocked by policy</html>")
+        with pytest.raises(sl.ArtifactError) as exc_info:
+            sl._validate_archive(p)
+        msg = str(exc_info.value).lower()
+        assert "too small" in msg
+        assert "html" in msg or "webpage" in msg
+
+    def test_shape_check_also_gets_rich_diagnosis(self, tmp_path):
+        # Big enough to pass the SIZE gate, but still not a real archive -
+        # the shape check's message must ALSO be evidence-based, not the old
+        # generic "may be a truncated transfer, an HTML error page ... or a
+        # tampered payload" hedge that names every cause at once.
+        p = tmp_path / "a.zip"
+        p.write_bytes(b"<!DOCTYPE html>" + b" " * sl._MIN_ARTIFACT_BYTES)
+        with pytest.raises(sl.ArtifactError) as exc_info:
+            sl._validate_archive(p)
+        msg = str(exc_info.value).lower()
+        assert "not a valid zip or tar" in msg
+        assert "html" in msg or "webpage" in msg
+
+    def test_valid_archive_passes_regardless_of_diagnosis_machinery(self, tmp_path):
+        # STORED (uncompressed) so the on-disk size is genuinely >= the floor -
+        # padding bytes AFTER a real zip's end (rather than growing an entry
+        # inside it) would move the End-Of-Central-Directory record and make
+        # zipfile correctly reject it as a different, real corruption.
+        buf = io.BytesIO()
+        with _zipfile_mod.ZipFile(buf, "w") as zf:
+            zf.writestr("bin/llama.dll", b"x" * (sl._MIN_ARTIFACT_BYTES + 1000),
+                       compress_type=_zipfile_mod.ZIP_STORED)
+        p = tmp_path / "a.zip"
+        p.write_bytes(buf.getvalue())
+        assert p.stat().st_size >= sl._MIN_ARTIFACT_BYTES, "sanity: actually exceeds the floor"
+        sl._validate_archive(p)   # must not raise
+
+
+class TestDownloadTransportDiagnosis:
+    def test_connection_reset_mid_transfer_is_distinct_from_stall(self, monkeypatch, tmp_path):
+        """A live connection drop (ConnectionResetError, an OSError - NOT a
+        timeout) must be reported as an interrupted connection, not confused
+        with a stalled/frozen one, and must include how many bytes DID arrive."""
+        class _DropResp:
+            headers = {"Content-Length": "1000000", "Content-Type": "application/zip"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def geturl(self): return "https://example/big.zip"
+            _sent = False
+            def read(self, n=-1):
+                if not type(self)._sent:
+                    type(self)._sent = True
+                    return b"x" * 1000
+                raise ConnectionResetError("connection reset by peer")
+
+        monkeypatch.setattr(sl.urllib.request, "urlopen",
+                           lambda req, timeout=None, context=None: _DropResp())
+        with pytest.raises(sl.ArtifactError) as exc_info:
+            sl._download("https://example/big.zip", tmp_path / "a.zip")
+        msg = str(exc_info.value).lower()
+        assert "interrupted" in msg
+        assert "1000" in msg                 # bytes received so far, not hidden
+        assert "stalled" not in msg          # must not be conflated with the timeout case
+
+    def test_clean_short_completion_returns_full_metadata(self, monkeypatch, tmp_path):
+        """A response that ends normally (no exception) but is short of its
+        own Content-Length is NOT an error at the _download level - the
+        caller (_validate_archive) decides that, using the metadata returned
+        here. Confirms content_type and final_url are actually captured."""
+        class _ShortResp:
+            headers = {"Content-Length": "33554432", "Content-Type": "text/html; charset=utf-8"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def geturl(self): return "https://proxy.corp.example/blocked-notice"
+            _sent = False
+            def read(self, n=-1):
+                if type(self)._sent:
+                    return b""
+                type(self)._sent = True
+                return b"<html>blocked</html>"
+
+        monkeypatch.setattr(sl.urllib.request, "urlopen",
+                           lambda req, timeout=None, context=None: _ShortResp())
+        dl = sl._download("https://github.com/x/releases/download/y/z.zip", tmp_path / "a.zip")
+        assert dl.bytes_received == len(b"<html>blocked</html>")
+        assert dl.content_length == 33554432
+        assert dl.content_type == "text/html; charset=utf-8"
+        assert dl.final_url == "https://proxy.corp.example/blocked-notice"
+
+    def test_geturl_missing_falls_back_gracefully(self, monkeypatch, tmp_path):
+        """A response object without geturl() (an unusual test double, or a
+        future urllib change) must not crash the download - the final URL is
+        a diagnostic nice-to-have, never load-bearing."""
+        class _NoGeturlResp:
+            headers = {"Content-Length": "4"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            _sent = False
+            def read(self, n=-1):
+                if type(self)._sent:
+                    return b""
+                type(self)._sent = True
+                return b"data"
+
+        monkeypatch.setattr(sl.urllib.request, "urlopen",
+                           lambda req, timeout=None, context=None: _NoGeturlResp())
+        dl = sl._download("https://example/x.zip", tmp_path / "a.zip")
+        assert dl.final_url == "https://example/x.zip"   # fell back to the request URL
+
+
+class TestVulkanCpuTerminalGuidance:
+    """The explicit-vulkan/cpu-pick-failed exit used to be bare sys.exit(1) -
+    zero guidance beyond whatever the exception handler printed, unlike every
+    other failure path in this function. A user hitting a blocked download
+    got no hint that --from/--url exist. Confirms the guidance is now there."""
+
+    def test_vulkan_not_provisioned_shows_escape_hatches_and_exits(self, monkeypatch, tmp_path, capsys):
+        def fake_provision_backend(chosen, target, sha256, with_cudart):
+            raise sl.ArtifactError("download is too small (196608 bytes < 262144 minimum): "
+                                   "the response is an HTML page, not the archive.")
+
+        monkeypatch.setattr(sl, "_provision_backend", fake_provision_backend)
+        monkeypatch.setattr(sl, "_clear_target", lambda target: None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            sl._provision_with_fallback("vulkan", tmp_path, None, False)
+        assert exc_info.value.code == 1
+
+        out = capsys.readouterr().out
+        assert "--from" in out
+        assert "--url" in out
+        assert "vulkan" in out
+        # The underlying specific cause (from _diagnose_bad_artifact via the
+        # exception message) must still be visible, not swallowed by the new
+        # guidance replacing it.
+        assert "HTML page" in out or "html page" in out.lower()
+
+
+class TestIssue827Reproduction:
+    """End-to-end reproduction of the exact reported failure: picking vulkan
+    on a network that substitutes a small response for the real archive."""
+
+    def test_reproduces_and_correctly_diagnoses_the_reported_failure(self, monkeypatch, tmp_path):
+        # The reported byte counts: 196608 received where 262144 is the floor
+        # and the real archive is ~32MB - modeled here as an HTML block page,
+        # the most common real-world cause of exactly this signature. The
+        # filler must be long enough BEFORE slicing, or the slice is a no-op
+        # and the body silently ends up shorter than the exact count asserted
+        # below (measured, not assumed - this is what bit the first draft).
+        prefix = b"<!DOCTYPE html><html><body>"
+        filler = b"Access to this file is restricted by your organization's security policy. " * 5000
+        assert len(prefix + filler) >= 196608, "sanity: filler exceeds the slice target"
+        body = (prefix + filler)[:196608]
+        assert len(body) == 196608, "sanity: reproduces the EXACT reported byte count"
+        assert len(body) < sl._MIN_ARTIFACT_BYTES, "sanity: reproduces the undersized report"
+
+        class _CorpProxyResp:
+            headers = {"Content-Length": "33554432", "Content-Type": "text/html; charset=UTF-8"}
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def geturl(self): return "https://github.com/ggml-org/llama.cpp/releases/download/b10092/llama-b10092-bin-win-vulkan-x64.zip"
+            _sent = False
+            def read(self, n=-1):
+                if type(self)._sent:
+                    return b""
+                type(self)._sent = True
+                return body
+
+        monkeypatch.setattr(sl.urllib.request, "urlopen",
+                           lambda req, timeout=None, context=None: _CorpProxyResp())
+
+        url = "https://github.com/ggml-org/llama.cpp/releases/download/b10092/llama-b10092-bin-win-vulkan-x64.zip"
+        with pytest.raises(sl.ArtifactError) as exc_info:
+            sl._fetch_and_place(url, tmp_path / "target")
+        msg = str(exc_info.value).lower()
+        # Must be SPECIFIC (names the actual, correct cause) not the old generic
+        # "almost certainly an error page or a truncated transfer" hedge.
+        assert "webpage" in msg or "html" in msg
+        assert "network" in msg or "proxy" in msg or "filter" in msg
+        assert "196608" in msg or "196,608" in str(exc_info.value)
+        assert "33554432" in msg
