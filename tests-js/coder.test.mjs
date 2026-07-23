@@ -34,7 +34,7 @@ test("CODER-3: renderSessionSelect lists each live session as an option", () => 
   // Seed the top-level `coder` state (a const, not on window) from the realm.
   runScript(window, `
     coder.activeId = null;
-    coder.sessions.set("sid1", { info: { id: "sid1", cwd: "C:/proj", model: "m",
+    coder.sessions.set("sid1", { info: { id: "sid1", cwd: "Z:/proj", model: "m",
       mode: "privacy", busy: false, turns: 0, total_tokens: 0, created_at: 0 },
       busy: false });
     renderSessionSelect();
@@ -48,7 +48,7 @@ test("CODER-2: 'Continue last session' shows when the cwd has a checkpoint", asy
   const state = { resumable: true };
   const { window } = loadApp({ fetchImpl: okFetch(state) });
   assert.equal(typeof window.refreshResumable, "function");
-  window.document.getElementById("setup-cwd").value = "C:/proj";
+  window.document.getElementById("setup-cwd").value = "Z:/proj";
 
   await window.refreshResumable();
   await settle();

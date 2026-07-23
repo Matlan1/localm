@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ProjectMap.build: directory pruning, bounded collection, and a wall-clock
-deadline so a coder session pointed at a huge root (C:\\) cannot appear to hang
+deadline so a coder session pointed at a huge root (Z:\\) cannot appear to hang
 (CODER-1). The old build did sorted(root.rglob("*")) - it materialised and
 sorted the WHOLE tree (descending into node_modules / .git / system dirs) before
 the file cap was ever checked."""

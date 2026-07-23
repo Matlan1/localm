@@ -142,7 +142,7 @@ class TestModelsRouteExposesActiveSplit:
         app, _ = gui_app
         monkeypatch.setattr(
             "localm.config.load_registry",
-            lambda: {"model-a": {"path": "C:/nonexistent/a.gguf",
+            lambda: {"model-a": {"path": "Z:/nonexistent/a.gguf",
                                  "source": "local"}})
         # loaded=True: the route reads engine.loaded per registry row.
         eng = SimpleNamespace(loaded=True,
@@ -174,7 +174,7 @@ class TestModelsRouteExposesActiveSplit:
         app, _ = gui_app
         monkeypatch.setattr(
             "localm.config.load_registry",
-            lambda: {"model-a": {"path": "C:/nonexistent/a.gguf",
+            lambda: {"model-a": {"path": "Z:/nonexistent/a.gguf",
                                  "source": "local"}})
         monkeypatch.setattr(hs, "_engines", {})
         with TestClient(app) as client:

@@ -41,7 +41,7 @@ BAD_ENTRIES = {
 }
 _BAD = list(BAD_ENTRIES.items())
 
-_GOOD = {"path": "C:/nonexistent/good.gguf", "source": "local", "model_type": "llm"}
+_GOOD = {"path": "Z:/nonexistent/good.gguf", "source": "local", "model_type": "llm"}
 
 
 # --------------------------------------------------------------------------- #

@@ -575,7 +575,7 @@ def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
 def test_model_detail_does_not_leak_absolute_path(auth, monkeypatch):
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
-    fake = {"m1": {"path": r"C:\Users\Secret\models\m1.gguf",
+    fake = {"m1": {"path": r"Z:\Users\Secret\models\m1.gguf",
                    "source": "local", "sha256": "abc"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: fake)
     app = create_app(None)

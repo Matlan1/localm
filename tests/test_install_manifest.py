@@ -122,7 +122,7 @@ def test_dry_run_touches_nothing(tmp_path):
 
 def test_unsafe_data_dir_refuses_dangerous_targets(tmp_path):
     repo = tmp_path
-    root_anchor = Path(tmp_path.anchor)           # "/" or "C:\\"
+    root_anchor = Path(tmp_path.anchor)           # "/" or "Z:\\"
     assert im._unsafe_data_dir("", repo)
     assert im._unsafe_data_dir("relative/dir", repo)
     assert im._unsafe_data_dir(str(root_anchor), repo)

@@ -155,7 +155,7 @@ def test_apply_window_identity_skips_console_own_in_debug(monkeypatch):
     # Mock sys.executable basename to be localm.exe
     monkeypatch.setattr(os.path, "basename", lambda path: "localm.exe" if "python" not in path else os.path.basename(path))
     # We can mock sys.executable specifically
-    monkeypatch.setattr(sys, "executable", "C:\\some\\path\\localm.exe")
+    monkeypatch.setattr(sys, "executable", "Z:\\some\\path\\localm.exe")
     monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
     
     applaunch.apply_window_identity()

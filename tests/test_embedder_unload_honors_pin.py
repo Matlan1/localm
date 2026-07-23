@@ -159,8 +159,8 @@ def test_unload_one_model_skips_pinned_matching_embedder(isolated, monkeypatch):
     reset_embedder(force=False) still makes the authoritative decision under
     embedder._LOCK rather than the precheck being trusted on its own."""
     monkeypatch.setattr("localm.config.load_registry",
-                        lambda: {"emb-model": {"path": "C:/models/emb.gguf"}})
-    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/emb.gguf")
+                        lambda: {"emb-model": {"path": "Z:/models/emb.gguf"}})
+    monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/emb.gguf")
     monkeypatch.setattr(emb, "active_requests", lambda: 0)  # precheck: idle
     calls = []
 
@@ -194,8 +194,8 @@ def test_unload_one_model_precheck_skips_pinned_embedder_without_probing_vram(
     _vram_free_reading() (or delete it and rely on reset_embedder(force=False)
     alone) and only this test goes red - probe_calls becomes 1."""
     monkeypatch.setattr("localm.config.load_registry",
-                        lambda: {"emb-model": {"path": "C:/models/emb.gguf"}})
-    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/emb.gguf")
+                        lambda: {"emb-model": {"path": "Z:/models/emb.gguf"}})
+    monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/emb.gguf")
     monkeypatch.setattr(emb, "active_requests", lambda: 1)  # precheck: busy
 
     probe_calls = []
@@ -218,8 +218,8 @@ def test_unload_one_model_precheck_skips_pinned_embedder_without_probing_vram(
 
 def test_unload_one_model_releases_idle_matching_embedder(isolated, monkeypatch):
     monkeypatch.setattr("localm.config.load_registry",
-                        lambda: {"emb-model": {"path": "C:/models/emb.gguf"}})
-    monkeypatch.setattr(emb, "loaded_path", lambda: "C:/models/emb.gguf")
+                        lambda: {"emb-model": {"path": "Z:/models/emb.gguf"}})
+    monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/emb.gguf")
     monkeypatch.setattr(emb, "active_requests", lambda: 0)  # precheck: idle
     calls = []
 

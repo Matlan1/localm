@@ -90,7 +90,7 @@ def test_sync_models_dir_survives_a_concurrent_registry_writer(home, monkeypatch
         cfg.update_registry(
             lambda reg: reg.__setitem__(
                 "concurrent-writer-model",
-                {"path": "C:/concurrent.gguf", "source": "local"}))
+                {"path": "Z:/concurrent.gguf", "source": "local"}))
 
     t1 = threading.Thread(target=run_sync)
     t2 = threading.Thread(target=concurrent_writer)
@@ -99,7 +99,7 @@ def test_sync_models_dir_survives_a_concurrent_registry_writer(home, monkeypatch
 
     final = json.loads(cfg.REGISTRY_FILE.read_text(encoding="utf-8"))
     assert final["m"]["missing"] is True, "sync's own flagging must still land"
-    assert final.get("concurrent-writer-model", {}).get("path") == "C:/concurrent.gguf", (
+    assert final.get("concurrent-writer-model", {}).get("path") == "Z:/concurrent.gguf", (
         "sync_models_dir() must reconcile through update_registry() (atomic), "
         "not load_registry()/save_registry() - a concurrent registry write "
         "during its scan was lost")

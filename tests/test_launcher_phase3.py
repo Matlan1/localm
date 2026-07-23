@@ -104,7 +104,7 @@ def test_windows_spawn_passes_create_new_console(launcher_mod, monkeypatch):
         launcher_mod.subprocess, "CREATE_NEW_CONSOLE", sentinel, raising=False
     )
 
-    launcher_mod._spawn_detached(["python", "-m", "localm", "gui"], cwd="C:\\repo")
+    launcher_mod._spawn_detached(["python", "-m", "localm", "gui"], cwd="Z:\\repo")
 
     kwargs = spy.last_kwargs
     assert kwargs.get("creationflags") == sentinel, (

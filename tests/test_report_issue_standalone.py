@@ -46,7 +46,7 @@ def test_read_proxy_reads_the_real_shipped_config():
 # ------------------------------- scrub ------------------------------------ #
 
 def test_scrub_redacts_windows_username():
-    out = ri.scrub(r"error at C:\Users\alice\localm\home\logs\x.log")
+    out = ri.scrub(r"error at Z:\Users\alice\localm\home\logs\x.log")
     assert "alice" not in out
     assert "<redacted>" in out or "~" in out
 
@@ -218,7 +218,7 @@ def test_main_scrubs_home_path_in_uploaded_title(tmp_path, monkeypatch, capsys):
         return {"url": "https://github.com/o/r/issues/1"}
 
     monkeypatch.setattr(ri, "post_report", _capture)
-    rc = ri.main(["--yes", "--summary", r"crash at C:\Users\bob\localm\home\x.log"])
+    rc = ri.main(["--yes", "--summary", r"crash at Z:\Users\bob\localm\home\x.log"])
     assert rc == 0
     # What post_report RECEIVES as the title (what actually gets filed) is scrubbed.
     assert "bob" not in captured["title"]

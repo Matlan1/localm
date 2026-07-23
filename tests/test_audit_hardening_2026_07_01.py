@@ -130,8 +130,8 @@ def test_scrub_home_redacts_user_segment_both_separators():
     # The always-on backstop strips the username from a home-rooted path in
     # both separator forms and the posix roots - the leak the old single
     # literal str.replace missed.
-    assert "Alice" not in _scrub_home(r"see C:\Users\Alice\app\config.json")
-    assert "Alice" not in _scrub_home("see C:/Users/Alice/app/config.json")
+    assert "Alice" not in _scrub_home(r"see Z:\Users\Alice\app\config.json")
+    assert "Alice" not in _scrub_home("see Z:/Users/Alice/app/config.json")
     assert "bob" not in _scrub_home("path /home/bob/.localm/models")
     assert "carol" not in _scrub_home("path /Users/carol/Library/x")
 
@@ -141,7 +141,7 @@ def test_scrub_home_case_insensitive_on_windows():
     from localm.bugreport import _scrub_home
     # Lowercased drive + 'users' still gets redacted on Windows (paths there are
     # case-insensitive), which the old case-sensitive replace/regex missed.
-    out = _scrub_home(r"opened c:\users\alice\secret.txt").lower()
+    out = _scrub_home(r"opened z:\users\alice\secret.txt").lower()
     assert "alice" not in out
 
 
