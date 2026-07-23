@@ -19,6 +19,7 @@ section below for why the removal is conditional rather than unconditional.
 import atexit
 import builtins
 import io
+import mimetypes
 import os
 import re
 import stat as _stat
@@ -396,6 +397,27 @@ def _arm_system_path_guard() -> bool:
     _SYSPATH_ARMED = True
     return True
 
+
+# Warm the stdlib mimetypes registry BEFORE arming the guard, deliberately.
+#
+# This is NOT a localm defect being papered over, and the distinction is the
+# whole reason it is done here rather than silenced at the reporting end.
+# Anything that maps a file EXTENSION to a content type must consult the OS mime
+# registry, and the stdlib does that lazily on first use: on POSIX it reads
+# /etc/mime.types plus the httpd/apache paths. Measured directly -
+# mimetypes.guess_type("app.js"), with no add_type call anywhere, touches /etc
+# six times. Windows reads its registry instead, so the marker roots never match
+# and this was invisible there, which is why it only ever failed on Linux.
+#
+# The read is therefore real, legitimate and unavoidable: it cannot be dropped
+# without breaking content-type detection localm genuinely wants (localm/cli/
+# chat.py and localm/plugins/gui/routes/share.py both guess_type user files
+# against system mime data). What it must NOT do is land inside whichever test
+# happens to construct an app first and be reported as that test reaching out -
+# a true statement about the wrong subject. Doing it once, here, in a declared
+# place, keeps a hit meaning what the guard says it means: OUR code touching a
+# system location, not the interpreter initialising itself.
+mimetypes.init()
 
 _arm_system_path_guard()
 
