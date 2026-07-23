@@ -709,3 +709,88 @@ def test_background_agent_tools_are_registered_and_unscoped():
     assert TOOL_REGISTRY["spawn_agent_background"].destructive is True
     assert TOOL_REGISTRY["check_agent_job"].destructive is False
     assert "spawn_agent" in _INTENTIONALLY_UNSCOPED or True   # spawn is scoped via child
+
+
+# --------------------------------------------------------------------------- #
+#  A late write must not flip a TERMINAL job on the model's polling surface     #
+# --------------------------------------------------------------------------- #
+
+class TestLateWriteCannotFlipATerminalJob:
+    """The AgentJob half of the abandoned-child invariant.
+
+    ``dispatch_parallel``'s ``_ChildOutcome`` needed a seal added for this
+    (tools/parallel.py). This path already holds the equivalent guard - ``_watch``
+    and ``kill`` both re-check ``state != "running"`` while holding the job lock
+    before calling ``_finish``, and the worker publishes ``_outcome`` under that
+    same lock - so these are REGRESSION tests pinning behaviour that is already
+    correct, not a second bug being fixed. They are here because the guard is one
+    unremarkable early-return away from being deleted, and because a background
+    sub-agent cannot be preempted: its worker genuinely does outlive the terminal
+    verdict, so the window is real on this path too.
+    """
+
+    def _hung_job(self, monkeypatch, release: threading.Event):
+        """A registered agent job whose child blocks until *release*."""
+        from localm.plugins.coder import background as bg
+
+        # A kill's two grace periods are 3s each by default; nothing here is
+        # waiting on a real process, so shorten them to keep the test quick.
+        monkeypatch.setattr(bg, "_KILL_GRACE", 0.15)
+
+        class _HungChild:
+            turns = 3
+            last_run_ok = True
+
+            def run_task(self, task):
+                assert release.wait(timeout=30), "driver never released the child"
+                return "I finished long after you gave up on me"
+
+        return get_registry().submit(
+            lambda: bg.AgentJob(_HungChild(), "task", label="late"), kind="agent")
+
+    def test_a_child_finishing_after_the_kill_cannot_report_finished(
+            self, tmp_path, monkeypatch):
+        release = threading.Event()
+        job = self._hung_job(monkeypatch, release)
+        try:
+            # The parent gives up on it: a terminal verdict is recorded and the
+            # model is entitled to have been told about it already.
+            outcome = job.kill()
+            assert job.state != "running", f"kill left the job {job.state}"
+            terminal_state, terminal_error = job.state, job.error
+
+            # NOW the abandoned child finishes and its worker publishes.
+            release.set()
+            deadline = time.time() + 20
+            while job._outcome is None and time.time() < deadline:
+                time.sleep(0.02)
+            assert job._outcome is not None, "the child never published"
+            # Give the watcher every chance to act on that publication.
+            time.sleep(0.3)
+
+            # The terminal record must be exactly what it was.
+            assert job.state == terminal_state, (
+                f"a late write moved the job from {terminal_state} to {job.state}")
+            assert job.error == terminal_error
+            assert outcome  # kill said something
+
+            # And the model's own polling surface must not read as a success.
+            res = tool_check_agent_job(tmp_path, job.id)
+            assert "finished in" not in res.output, (
+                "check_agent_job reported a killed sub-agent as finished:\n"
+                + res.output)
+            assert "FAILED" in res.output, res.output
+        finally:
+            release.set()
+
+    def test_a_child_that_finishes_normally_still_reports_finished(
+            self, tmp_path, monkeypatch):
+        """The control: the same machinery must still report a real success."""
+        release = threading.Event()
+        release.set()                       # never blocks
+        job = self._hung_job(monkeypatch, release)
+        _wait_done(job)
+
+        res = tool_check_agent_job(tmp_path, job.id)
+        assert "finished in 3 turn(s)" in res.output, res.output
+        assert "FAILED" not in res.output

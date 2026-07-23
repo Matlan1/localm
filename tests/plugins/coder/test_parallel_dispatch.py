@@ -523,3 +523,192 @@ def test_child_is_confined_to_its_worktree_and_knows_where_it_is(repo):
     assert captured["scope"] == "src/**"
     # The child can report which worktree/branch its diff belongs to.
     assert captured["worktree_path"] and captured["branch"]
+
+
+# --------------------------------------------------------------------------
+# THE RACE: an abandoned worker must never overwrite the parent's verdict
+#
+# A child that outlives the batch deadline is ABANDONED, not stopped, so its
+# thread is still alive and still holding the shared _ChildOutcome while the
+# parent reports on it. Before the seal, that worker's `outcome.status = "ok"`
+# landed on top of the parent's "timeout" and the model was handed a delegated
+# job that read [ok].
+#
+# These tests DRIVE that interleaving instead of racing for it. The window is
+# genuinely microseconds wide in production, so a test that merely hangs a child
+# and hopes would pass on the broken code most runs - which is the same thing as
+# not testing it. Nothing about the mechanism is faked: the real parent, the real
+# pool, the real _run_one_child and the real _ChildOutcome all run. Only the
+# SCHEDULING is pinned, by releasing the hung child at the exact point between
+# the parent stamping its verdict (the `_FuturesTimeout` branch) and reading it
+# back (the commit/teardown/report pass), then waiting for the write to land.
+# --------------------------------------------------------------------------
+
+def _drive_late_write(monkeypatch, release: threading.Event,
+                      wrote: threading.Event, late_child: str = "child1"):
+    """Pin the interleaving that produces the late write.
+
+    Two seams, both observation-only:
+
+    * ``_run_one_child`` is wrapped so the test can tell when the REAL function
+      has returned, i.e. when its write to the shared outcome has landed. The
+      real function is what runs; the wrapper only signals afterwards.
+    * ``ThreadPoolExecutor.shutdown`` is the parent's first unconditional step
+      after the wait loop has stamped every verdict and before it reads any of
+      them back. Releasing the hung child there, and blocking until its write is
+      done, puts the worker's write squarely inside the window under test.
+    """
+    real_run_one_child = par._run_one_child
+
+    def observed(parent, spec, child_cwd, branch, max_turns, outcome):
+        try:
+            real_run_one_child(parent, spec, child_cwd, branch, max_turns, outcome)
+        finally:
+            if spec["name"] == late_child:
+                wrote.set()
+
+    monkeypatch.setattr(par, "_run_one_child", observed)
+
+    real_pool_cls = par.ThreadPoolExecutor
+
+    class _PinnedPool(real_pool_cls):
+        def shutdown(self, *a, **kw):
+            # The parent has stamped its verdicts and has not yet read one back.
+            release.set()
+            # Do not proceed until the abandoned worker's write has actually
+            # happened, or "the race did not occur this run" could pass for green.
+            assert wrote.wait(timeout=30), "the abandoned child never finished"
+            return super().shutdown(*a, **kw)
+
+    monkeypatch.setattr(par, "ThreadPoolExecutor", _PinnedPool)
+
+
+def test_an_abandoned_child_cannot_report_ok_after_the_parent_gave_up(
+        repo, monkeypatch):
+    """The invariant: once the parent has reported a child as timed out, no later
+    write from that child can flip its observed status to success."""
+    release, wrote = threading.Event(), threading.Event()
+
+    def hang(agent):
+        # Bounded, so a regression cannot wedge the suite.
+        assert release.wait(timeout=30), "test driver never released the child"
+        (agent.cwd / "shared.txt").write_text("late work\n", encoding="utf-8")
+        return "finished, but far too late"
+
+    FakeAgent.behaviour = {"child1": hang}
+    _drive_late_write(monkeypatch, release, wrote)
+    parent = DummyParent(repo)
+
+    res = par.tool_dispatch_parallel(
+        repo, tasks=[{"name": "child1", "task": "hang"},
+                     {"name": "child2", "task": "fine"}],
+        timeout_s=1, _parent_agent=parent,
+    )
+
+    # The whole point. On the pre-seal code this reads "=== child1 [ok] ===".
+    assert "=== child1 [timeout] ===" in res.output, (
+        "an abandoned child's late write overwrote the parent's verdict:\n"
+        + res.output)
+    assert "=== child1 [ok] ===" not in res.output
+    # ...and every other consumer of that status agrees.
+    assert "1/2 child(ren) finished" in res.summary, res.summary
+    # The late result is REFUSED, not swallowed: we say the work exists.
+    assert "too late to be used" in res.output, res.output
+
+
+def test_the_late_result_is_reported_rather_than_silently_dropped(
+        repo, monkeypatch):
+    """Refusing the write must not hide that the child finished, or where its
+    files went (AGENTS.md rule 5)."""
+    release, wrote = threading.Event(), threading.Event()
+
+    def hang(agent):
+        assert release.wait(timeout=30)
+        return "done at last"
+
+    FakeAgent.behaviour = {"child1": hang}
+    _drive_late_write(monkeypatch, release, wrote)
+
+    res = par.tool_dispatch_parallel(
+        repo, tasks=[{"name": "child1", "task": "hang"},
+                     {"name": "child2", "task": "fine"}],
+        timeout_s=1, _parent_agent=DummyParent(repo),
+    )
+    assert "NOTE:" in res.output
+    assert "AFTER the batch was given up on" in res.output
+    # It names the verdict the child tried to report, so nothing is lost.
+    assert "reporting 'ok'" in res.output, res.output
+    # The worktree it left behind is still pointed at.
+    assert "left in place" in res.output
+
+
+def test_a_late_write_cannot_flip_the_tools_ok_flag_or_the_change_set(
+        repo, monkeypatch):
+    """Not just the rendered text: the machine-readable consumers too.
+
+    ``ToolResult.ok`` gates the parent's own last_run_ok and the --ci exit code,
+    and the DelegatedChangeSet status is what /diff shows. A single abandoned
+    child flipping to ok would make all three claim a success.
+    """
+    from localm.plugins.coder import delegated as _delegated
+
+    release, wrote = threading.Event(), threading.Event()
+
+    def hang(agent):
+        assert release.wait(timeout=30)
+        return "too late"
+
+    FakeAgent.behaviour = {"child1": hang}
+    _drive_late_write(monkeypatch, release, wrote)
+    recorded = []
+    monkeypatch.setattr(_delegated, "record",
+                        lambda _p, cs: recorded.append(cs))
+
+    res = par.tool_dispatch_parallel(
+        repo, tasks=[{"name": "child1", "task": "hang"}],
+        timeout_s=1, _parent_agent=DummyParent(repo),
+    )
+    # The ONLY child was abandoned, so the dispatch did not succeed.
+    assert res.ok is False, "a late write flipped the tool's ok flag"
+    assert [cs.status for cs in recorded] == ["timeout"], (
+        f"the /diff change-set records {[cs.status for cs in recorded]}")
+
+
+def test_a_child_that_finishes_in_time_still_reports_ok(repo, monkeypatch):
+    """The fires-control's other half: the seal must not suppress ALL writes.
+
+    Runs through the SAME pinned-pool driver, so this cannot pass merely because
+    the seam was absent - only because the child published before any seal.
+    """
+    release, wrote = threading.Event(), threading.Event()
+    # Released up front: the child never blocks, so it publishes long before the
+    # deadline and the parent's wait returns normally with nothing to seal.
+    release.set()
+
+    FakeAgent.behaviour = {}
+    _drive_late_write(monkeypatch, release, wrote)
+
+    res = par.tool_dispatch_parallel(
+        repo, tasks=[{"name": "child1", "task": "quick"}],
+        timeout_s=30, _parent_agent=DummyParent(repo),
+    )
+    assert "=== child1 [ok] ===" in res.output, res.output
+    assert res.ok is True
+    assert "1/1 child(ren) finished" in res.summary
+    # No refusal happened, so there is nothing to warn about.
+    assert "too late to be used" not in res.output
+
+
+def test_a_failed_child_that_finishes_in_time_still_reports_error(repo):
+    """The seal must not launder a genuine failure into a success either."""
+    def fail(agent):
+        agent.last_run_ok = False
+        return "hit max_turns"
+
+    FakeAgent.behaviour = {"child1": fail}
+    res = par.tool_dispatch_parallel(
+        repo, tasks=[{"name": "child1", "task": "doomed"}],
+        timeout_s=30, _parent_agent=DummyParent(repo),
+    )
+    assert "=== child1 [error] ===" in res.output, res.output
+    assert res.ok is False
