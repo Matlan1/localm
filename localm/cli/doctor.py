@@ -605,7 +605,7 @@ def doctor():
 
     \b
     Verifies:
-      - Python version (3.10+ required)
+      - Python version (3.12 required)
       - llama.dll / llama.so available on PATH or in expected locations
       - The isolated worker process (used by every GGUF model load and the
         voice/STT engine) can actually be spawned - a real subprocess.Popen
