@@ -51,8 +51,7 @@ def gallery_dir(dir_name: str) -> Path:
 
 
 def _resolved_home() -> Path | None:
-    """The resolved data dir, or None when it cannot be resolved (warned once at
-    the call site that needs it)."""
+    """The resolved data dir, or None when it cannot be resolved."""
     from localm.config import home_dir
     try:
         return home_dir().resolve()
@@ -108,7 +107,13 @@ def allowed_input_roots() -> list[Path]:
     effect of making a directory. A root that does not exist simply matches
     nothing.
     """
-    home = _resolved_home()
+    return _input_roots(_resolved_home())
+
+
+def _input_roots(home: Path | None) -> list[Path]:
+    """allowed_input_roots() against an already-resolved *home*, so a caller that
+    needs the data dir too resolves it once (and cannot log the unresolvable
+    warning twice for one request)."""
     roots: list[Path] = list(_home_input_roots(home)) if home is not None else []
     # When running from a SOURCE CHECKOUT, the repo root is a legitimate place to
     # keep a reference image (e.g. an examples/ asset).
@@ -138,7 +143,8 @@ def confined_input_image(raw: str) -> Path:
              "uploads folder) or one of the generated-media galleries. "
              "Other locations, including the localm data directory itself, "
              "are not readable by this route.")
-    if not any(_under(resolved, r) for r in allowed_input_roots()):
+    home = _resolved_home()
+    if not any(_under(resolved, r) for r in _input_roots(home)):
         raise refused
     # The source-checkout allowance can CONTAIN the data dir: with no LOCALM_HOME
     # set (and no localm-home.cfg), localm falls back to <repo>/home, so the repo
@@ -146,7 +152,6 @@ def confined_input_image(raw: str) -> Path:
     # narrowing exists to stop. Re-deny anything under the data dir that is not
     # in one of its four explicitly allowed subdirectories, whatever root let it
     # through. Checked SECOND so the allowed subdirs still pass either way.
-    home = _resolved_home()
     if home is not None and _under(resolved, home) \
             and not any(_under(resolved, h) for h in _home_input_roots(home)):
         raise refused
