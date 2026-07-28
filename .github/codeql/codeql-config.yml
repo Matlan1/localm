@@ -1,0 +1,34 @@
+name: "localm CodeQL config"
+
+# Extend the default (remote-only) threat model with local sources: command-line
+# arguments, environment variables, file contents, stdin, database reads.
+#
+# This is deliberately NOT the generic desktop-app assumption that "the user owns
+# their own machine, so local input is trusted". For localm a large share of what
+# CodeQL classes as LOCAL input is network-derived and merely lands on disk first:
+# a downloaded GGUF's filename and contents, HuggingFace registry metadata, a
+# ComfyUI HTTP response, an MCP server reply, a RAG document, a third-party plugin
+# manifest. The read is local; the provenance is remote.
+#
+# Measured, not assumed: narrowing to the remote-only model closed 105 alerts, of
+# which 80 were in product code doing exactly that - model_manager/registry.py,
+# the llamacpp _loader/_sizing pair, media/comfy_client.py, plugins/mcpserver/
+# server.py, inference/embedder.py. They were closed as "fixed" with zero lines of
+# code changed, which is precisely the kind of silently-hidden problem AGENTS.md
+# rule 5 exists to prevent.
+threat-models: local
+
+paths-ignore:
+  # Test harnesses only. Test code runs on a developer's own machine against
+  # inputs the test itself supplies, so a tainted path or an eval inside a test is
+  # the point of the test rather than an attack surface. This is where the real
+  # noise was concentrated: every critical-severity alert under the wider threat
+  # model came from here (eval-ing a service worker under test in tests-js/, and
+  # spawning a server with argv in tests-e2e/).
+  #
+  # scripts/ is deliberately NOT excluded, even though it is dev-only and
+  # release-exclude: sign_release.py and build_release.py are part of the release
+  # supply chain, so a path-injection there is a genuine concern, not noise.
+  - tests
+  - tests-js
+  - tests-e2e
