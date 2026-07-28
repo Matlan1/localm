@@ -10,6 +10,7 @@ from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
 from ..memory import cap_user_instructions, forget, remember
+from ..parser import strip_xml_tool_calls
 from ..prompts import build_subagent_system_prompt, build_system_prompt
 from ..audit import SessionMode
 
@@ -287,7 +288,6 @@ class _SessionMixin:
         Tool calls embedded in assistant messages are extracted and listed
         as bullet points.
         """
-        import re as _re
         import time as _time
 
         ts_label = _time.strftime("%Y-%m-%d_%H%M%S")
@@ -314,10 +314,16 @@ class _SessionMixin:
             lines.append(tokens_line)
         lines += ["", "---", ""]
 
-        _TC_RE = _re.compile(
-            r"<tool_call>\s*(.*?)\s*</tool_call>", _re.DOTALL
-        )
-
+        # The transcript strips tool_call blocks with the PARSER's splitter rather
+        # than a private copy of the regex. The copy that used to live here was the
+        # same ambiguous ``>\s*(.*?)\s*</tool_call>`` shape (cubic: measured
+        # 0.11 / 0.88 / 5.49s on a bare <tool_call> followed by 500 / 1000 / 2000
+        # spaces, min of 3 on a quiet box) and it runs over EVERY
+        # stored assistant message at teardown, so a single poisoned response
+        # re-hung the export on every later close. Two copies also meant two things
+        # to fix and a drift risk; the parser's is a strict superset (it also
+        # matches the ``name=`` attribute form and is case-insensitive), so the
+        # transcript now renders mangled calls it previously dumped as raw XML.
         for msg in self._messages:
             role    = msg.get("role", "")
             content = msg.get("content", "")
@@ -339,20 +345,34 @@ class _SessionMixin:
 
             elif role == "assistant":
                 # Strip tool_call blocks and extract summaries
-                call_matches = _TC_RE.findall(content)
-                clean = _TC_RE.sub("", content).strip()
+                calls, clean = strip_xml_tool_calls(content)
+                clean = clean.strip()
 
                 if clean:
                     lines.append(f"**{self.name}**: {clean[:2000]}")
-                elif call_matches:
+                elif calls:
                     lines.append(f"**{self.name}**:")
 
-                for raw_json in call_matches:
+                for name_attr, raw_json in calls:
                     try:
                         import json as _json
                         obj  = _json.loads(raw_json)
-                        tool = obj.get("name", "?")
-                        args = obj.get("args", {})
+                        # Two body shapes, same split _try_parse_body makes: a
+                        # full {"name":..., "args":...}, or an args-ONLY body
+                        # whose tool name lives on the name= attribute. Those
+                        # tagged blocks used to survive into the transcript as
+                        # raw XML that at least named the tool, so without the
+                        # name_attr fallback stripping them renders a bare "?".
+                        if "name" in obj:
+                            tool = obj.get("name") or "?"
+                            args = obj.get("args")
+                            if args is None:
+                                args = obj.get("arguments", {})
+                        else:
+                            tool = name_attr or "?"
+                            args = obj
+                        if not isinstance(args, dict):
+                            args = {}
                         # Show path/command arg if present, else first arg value
                         hint = (
                             args.get("path")

@@ -82,10 +82,14 @@ async def web_search_endpoint(req: WebSearchRequest):
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     loop = asyncio.get_running_loop()
+    # Defanging runs INSIDE the executor with the search itself. It is pure CPU
+    # over remote-controlled text, so on the event loop it is a whole-server
+    # stall, not a slow request - see the fetch handler below.
     results = await loop.run_in_executor(
         get_plugin_executor(),
-        lambda: web_search(req.query, max_results=req.max_results))
-    return {"query": req.query, "results": _neutralise_results(results)}
+        lambda: _neutralise_results(
+            web_search(req.query, max_results=req.max_results)))
+    return {"query": req.query, "results": results}
 
 
 @_router.post("/api/web/fetch")
@@ -95,14 +99,21 @@ async def web_search_endpoint(req: WebSearchRequest):
 })
 async def web_fetch_endpoint(req: WebFetchRequest):
     from localm.netpolicy import fetch_text
-    loop = asyncio.get_running_loop()
-    final_url, text = await loop.run_in_executor(
-        get_plugin_executor(), lambda: fetch_text(req.url))
     max_chars = max(500, min(req.max_chars, 60_000))
-    truncated = len(text) > max_chars
-    return {"url": final_url,
-            "text": neutralise(text[:max_chars]),
-            "truncated": truncated}
+
+    def _fetch_and_defang():
+        # neutralise() belongs in the SAME executor call as the fetch. Both the
+        # URL and the bytes are attacker-controlled (under net_mode=allow the
+        # model picks the URL, so a poisoned page can chain into a fetch of the
+        # attacker's own), and defanging is unbounded CPU over that text - on the
+        # event loop it stalls every other request, not just this one.
+        final_url, text = fetch_text(req.url)
+        return final_url, neutralise(text[:max_chars]), len(text) > max_chars
+
+    loop = asyncio.get_running_loop()
+    final_url, text, truncated = await loop.run_in_executor(
+        get_plugin_executor(), _fetch_and_defang)
+    return {"url": final_url, "text": text, "truncated": truncated}
 
 
 def register(host) -> None:
