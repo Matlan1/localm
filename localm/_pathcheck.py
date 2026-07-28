@@ -2,6 +2,8 @@
 """Syscall-free screens for a path component that came from somewhere untrusted.
 
 TEMPORARY MODULE - MERGE INTO ``localm/pathsafe.py`` AND DELETE THIS FILE.
+Tracked as issue #843, which also records the two properties that must survive
+the move (both were found by measurement, not review).
 
 These two helpers belong next to ``pathsafe.confined_name``. They live here only
 because ``localm/pathsafe.py`` is being rewritten concurrently by another change

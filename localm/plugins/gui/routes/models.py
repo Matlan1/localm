@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
-from localm import _pathcheck
+from localm import _pathcheck   # TODO(#843): fold into localm.pathsafe
 from localm import scopes
 from localm.debuglog import logger
 from localm.inference.http_server import (principal_id, require_fs_host,

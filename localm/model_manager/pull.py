@@ -694,8 +694,9 @@ def _snapshot_is_complete(dest: Path, repo_siblings, repo_id: str) -> bool:
 
     Module-level rather than a closure so the confinement below is directly
     testable (tests/test_registry_confinement.py)."""
-    # TODO: switch to localm.pathsafe once the shared helper lands there - see
-    # localm/_pathcheck.py's module docstring for why it is temporarily separate.
+    # TODO(#843): switch to localm.pathsafe once the shared helper lands there -
+    # see localm/_pathcheck.py's module docstring for why it is temporarily
+    # separate, and issue #843 for the properties that must survive the move.
     from localm import _pathcheck
     if not (dest / "config.json").exists():
         return False
