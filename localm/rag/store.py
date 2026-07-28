@@ -41,6 +41,32 @@ from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines, split_jsonl
+
+# numpy is bound ONCE, HERE, at module import - deliberately not lazily inside the
+# functions that use it. It is an optional dependency (not pinned in
+# pyproject.toml; it arrives transitively), hence the None fallback.
+#
+# The lazy imports this replaces were the SOURCE of the partial-initialisation
+# fault, not merely a victim of it. CPython's import lock has been PER-MODULE
+# since 3.3, so a thread that finds numpy already in sys.modules does not wait for
+# it to finish initialising - it gets the module as it currently stands. Both
+# users of numpy here run on the shared plugin ThreadPoolExecutor (rag/plug.py:357
+# and :612), so two requests could race the FIRST import: thread A starts numpy's
+# long top-level init, thread B sees `import numpy` succeed and finds np.asarray
+# missing. Binding at module import is single-threaded by construction and closes
+# the window entirely.
+#
+# It also explains what a state-handling fix alone could not: why the failure is
+# NONDETERMINISTIC on identical trees, why CI reddens where local passes
+# (contention widens the window), and why one OS stays green (different
+# scheduling). Diagnosis credit: local_f7754072 (CodeQL triage lane).
+#
+# The (ImportError, AttributeError) catches at the call sites STAY, as defence for
+# any partial-init shape this binding does not prevent.
+try:
+    import numpy as _numpy
+except ImportError:      # optional dependency - every caller degrades to pure Python
+    _numpy = None
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
 from .collection_lock import (CollectionLockedError, collection_write_lock,
@@ -91,7 +117,9 @@ def _vectors_finite(vectors) -> bool:
     reason, never be trusted (AGENTS rule 5). Structure is already validated by
     ``_well_formed_vectors``; this checks the values."""
     try:
-        import numpy as np
+        np = _numpy
+        if np is None:
+            raise ImportError("numpy is not installed")
         for v in vectors:
             if not v:
                 continue
@@ -102,7 +130,19 @@ def _vectors_finite(vectors) -> bool:
             if not np.isfinite(arr).all():
                 return False
         return True
-    except ImportError:
+    # AttributeError as well as ImportError: this is the site where an unusable
+    # numpy did the MOST damage. _cosine returning a wrong score mis-ranks; THIS
+    # function returns the boolean that decides whether the vector store is
+    # trusted at all, and an escaping AttributeError does not degrade to BM25 with
+    # a surfaced reason (what the docstring promises) - it errors the whole query.
+    # CI only ever pointed at _cosine because it was reached first.
+    except (ImportError, AttributeError) as e:
+        if not _NUMPY_DEGRADE_LOGGED:
+            _NUMPY_DEGRADE_LOGGED.add(True)
+            _log.warning(
+                "numpy is present but unusable (%s: %s); falling back to pure-Python "
+                "vector validation. Results are identical, checking is slower on "
+                "large collections.", type(e).__name__, e)
         for v in vectors:
             if not v:
                 continue
@@ -2016,7 +2056,9 @@ def _cosine(a: list, b: list) -> float:
             f"cosine similarity needs equal-length vectors "
             f"(got {len(a)} and {len(b)})")
     try:
-        import numpy as np
+        np = _numpy
+        if np is None:
+            raise ImportError("numpy is not installed")
         va, vb = np.asarray(a, dtype="float32"), np.asarray(b, dtype="float32")
         denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
         sim = float(va @ vb) / denom if denom else 0.0

@@ -245,36 +245,66 @@ def test_pruning_never_touches_the_live_index(tmp_path):
     assert Collection("kb", base=tmp_path).vector_degrade_reason is None
 
 
-def test_cosine_falls_back_when_numpy_is_present_but_unusable(monkeypatch, caplog):
-    """The shared Windows-CI red across several lanes: numpy is PARTIALLY
-    INITIALISED on those runners, so `import numpy` SUCCEEDS while np.asarray is
-    absent. The fallback caught only ImportError, so the AttributeError escaped
-    into every caller of a vector query."""
-    import sys
+#: numpy is bound at MODULE level (store._numpy) to close the concurrent-first-
+#: import race, so these tests must patch THAT, never sys.modules["numpy"].
+#: Patching sys.modules would leave the code under test using the real numpy while
+#: every assertion below still "passed" - testing nothing at all.
+def _unusable_numpy():
+    """A numpy that IMPORTS but has no asarray - the observed CI shape."""
     import types
+    return types.ModuleType("numpy")
 
+
+@pytest.mark.parametrize("fn,args", [
+    ("_cosine", ([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])),
+    ("_vectors_finite", ([[1.0, 2.0]],)),
+])
+def test_numpy_present_but_unusable_falls_back_at_every_site(monkeypatch, fn, args):
+    """The shared Windows-CI red: numpy is PARTIALLY INITIALISED, so `import numpy`
+    SUCCEEDS while np.asarray is absent. Both sites caught only ImportError.
+
+    _vectors_finite is the worse of the two - it returns the boolean deciding
+    whether the vector store is TRUSTED, so an escaping AttributeError errors the
+    whole query instead of degrading to BM25 with a surfaced reason. CI only ever
+    pointed at _cosine because it was reached first."""
     from localm.rag import store as store_mod
 
-    monkeypatch.setitem(sys.modules, "numpy", types.ModuleType("numpy"))
+    monkeypatch.setattr(store_mod, "_numpy", _unusable_numpy())
+    store_mod._NUMPY_DEGRADE_LOGGED.clear()
+
+    result = getattr(store_mod, fn)(*args)          # must not raise
+
+    assert result == pytest.approx(1.0) if fn == "_cosine" else result is True
+
+
+def test_the_unusable_numpy_degrade_is_announced_once_not_per_chunk(monkeypatch, caplog):
+    from localm.rag import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_numpy", _unusable_numpy())
     store_mod._NUMPY_DEGRADE_LOGGED.clear()
 
     with caplog.at_level("WARNING"):
-        same = store_mod._cosine([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
-        orthogonal = store_mod._cosine([1.0, 0.0], [0.0, 1.0])
-        store_mod._cosine([1.0, 1.0], [1.0, 1.0])          # third call
+        assert store_mod._cosine([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+        store_mod._cosine([1.0, 1.0], [1.0, 1.0])
+        store_mod._vectors_finite([[1.0, 2.0]])
 
-    assert same == pytest.approx(1.0), "fallback must still compute a correct cosine"
-    assert orthogonal == pytest.approx(0.0)
-    # surfaced, not silent (AGENTS rule 5) - but once per process, not per chunk
     warned = [r for r in caplog.records if "numpy is present but unusable" in r.getMessage()]
     assert len(warned) == 1, f"expected exactly one warning across 3 calls, got {len(warned)}"
 
 
-def test_cosine_does_not_swallow_a_real_numerical_failure(monkeypatch):
-    """Widening the except must not become a bare catch-all: a USABLE numpy that
-    fails for a real reason has to propagate, or a broken install silently halves
-    retrieval quality forever."""
-    import sys
+def test_numpy_absent_entirely_still_works(monkeypatch):
+    """numpy is optional and arrives transitively - None must be a clean path."""
+    from localm.rag import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_numpy", None)
+    assert store_mod._cosine([1.0, 2.0], [1.0, 2.0]) == pytest.approx(1.0)
+    assert store_mod._vectors_finite([[1.0, 2.0]]) is True
+    assert store_mod._vectors_finite([[float("nan")]]) is False
+
+
+def test_a_usable_numpy_failing_for_a_real_reason_still_propagates(monkeypatch):
+    """The widened except must not become a bare catch-all: a broken install that
+    fails numerically has to surface, not silently halve retrieval quality."""
     import types
 
     from localm.rag import store as store_mod
@@ -285,10 +315,49 @@ def test_cosine_does_not_swallow_a_real_numerical_failure(monkeypatch):
         raise ValueError("genuine numerical failure")
 
     fake.asarray = _boom
-    monkeypatch.setitem(sys.modules, "numpy", fake)
+    monkeypatch.setattr(store_mod, "_numpy", fake)
 
     with pytest.raises(ValueError, match="genuine numerical failure"):
         store_mod._cosine([1.0, 2.0], [1.0, 2.0])
+
+
+def test_numpy_is_never_imported_lazily_inside_a_function():
+    """THE RACE GUARD, and the reason the module-level binding exists.
+
+    Both numpy users run on the shared plugin ThreadPoolExecutor. CPython's import
+    lock is PER-MODULE since 3.3, so a thread finding numpy already in sys.modules
+    does NOT wait for it to finish initialising - it gets the module as it stands.
+    That is what produced a numpy with no asarray, and it is why the failure is
+    nondeterministic on identical trees.
+
+    A future edit re-introducing `import numpy` inside one of these functions would
+    silently restore the race while every other test here still passed, because the
+    state-handling fallback would keep masking it. This pins the absence."""
+    import ast
+    import inspect
+    import textwrap
+
+    from localm.rag import store as store_mod
+
+    # Parsed, not string-matched: these functions legitimately DISCUSS `import
+    # numpy` in their comments explaining the race, and a substring check flags
+    # that as a violation. An oracle that fails on its own documentation is a bad
+    # oracle - it trains you to loosen it until it catches nothing.
+    for fn in (store_mod._cosine, store_mod._vectors_finite):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        imported = {
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            (node.module or "").split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+        assert "numpy" not in imported, (
+            f"{fn.__name__} imports numpy lazily again - that reopens the "
+            "concurrent-first-import race the module-level binding closed")
 
 
 def _api():
