@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
 import sys
 import threading
 import tomllib
@@ -40,6 +41,87 @@ _log = logging.getLogger("localm.plugins")
 # while never clobbering a third-party plugin. A hidden file, so discovery
 # (which only walks directories) ignores it.
 _PLUGIN_MARKER = ".localm-source.json"
+
+
+# --------------------------------------------------------------------------- #
+#  Path safety: the plugin id, and an untrusted source tree                    #
+# --------------------------------------------------------------------------- #
+
+def _is_valid_plugin_name(name: Any) -> bool:
+    """True iff *name* is a legal plugin id: ONE path component, shaped like an
+    identifier once hyphens are folded to underscores.
+
+    This is deliberately the SAME rule ``parse_spec`` applies to a manifest's
+    ``[plugin] name`` (see below), so the id that names a directory and the id
+    inside the manifest cannot drift. It is enforced at the two places a name
+    becomes a path (``_installed_dir`` / ``_store_dir``) because those feed
+    ``shutil.rmtree``/``copytree``/``rename``: the id arrives from the CLI and
+    from the HTTP ``{name}`` path param, and starlette's path-param regex is
+    ``[^/]+`` while uvicorn unquotes before routing - so ``..%5Coutside``
+    reaches a handler as the single segment ``..\\outside``.
+    """
+    if not name or not isinstance(name, str):
+        return False
+    # BOTH halves are load-bearing; neither alone is enough (verified on
+    # Windows and Linux, not assumed):
+    #   - Path(name).name drops any directory part, so it differs from name for
+    #     './x', '../x', 'a/b', a drive-qualified path, and on Windows 'a\\b'.
+    #   - It does NOT catch '..' (Path('..').name is '..', equal to the input),
+    #     and on POSIX a backslash is an ordinary character, so '..\\outside' is
+    #     one component there. isidentifier() is what rejects both of those,
+    #     plus a space, a dot, or a leading digit in the name.
+    return name == Path(name).name and name.replace("-", "_").isidentifier()
+
+
+def _check_plugin_name(name: str) -> str:
+    """Return *name* if it is a legal plugin id, else raise ValueError. Raising
+    (rather than an HTTP error) is deliberate: the CLI, the MCP tools and the
+    HTTP routes all reach these helpers, and only the routes may speak HTTP."""
+    if not _is_valid_plugin_name(name):
+        raise ValueError(f"invalid plugin name: {name!r}")
+    return name
+
+
+def _reject_escaping_links(src: Path) -> None:
+    """Refuse an untrusted plugin source tree that contains a link (symlink or
+    Windows junction) resolving OUTSIDE *src*. Raises ValueError.
+
+    Copying such a tree with ``shutil.copytree``'s default ``symlinks=False``
+    DEREFERENCES the link, flattening the target file's CONTENTS into the
+    installed plugin dir - and a plugin's declared assets dir is then served by
+    a StaticFiles mount, so the link never has to be followed at read time for
+    the data to escape. ``mount_static``'s own resolve()-based guard cannot see
+    this: by then the bytes are an ordinary file.
+
+    The walk resolves every entry (not only ones that report as symlinks), so a
+    Windows junction is covered without relying on ``islink()`` semantics for
+    reparse points, and it de-duplicates by resolved directory, so a link cycle
+    inside the tree terminates instead of recursing forever.
+    """
+    root = Path(src).resolve()
+    seen: set[str] = set()
+    stack: list[Path] = [root]
+    while stack:
+        d = stack.pop()
+        if str(d) in seen:
+            continue                  # already scanned: a link cycle, not new content
+        seen.add(str(d))
+        try:
+            entries = list(os.scandir(d))
+        except OSError as e:
+            raise ValueError(f"plugin source is not readable: {d} ({e})") from e
+        for entry in entries:
+            p = Path(entry.path)
+            # strict=False, so a BROKEN link still resolves lexically and is
+            # judged on where it pointed - a dangling '-> /etc/shadow' is
+            # rejected rather than quietly copied as a dead link.
+            real = p.resolve()
+            if real != root and root not in real.parents:
+                raise ValueError(
+                    f"plugin source contains a link that points outside it: "
+                    f"{p.name} -> {real}")
+            if entry.is_dir():        # follows links on purpose; `seen` bounds it
+                stack.append(real)
 
 
 def _dir_content_hash(d: Path) -> str:
@@ -663,7 +745,13 @@ class PluginManager:
         return self._specs
 
     def _store_dir(self, name: str) -> Optional[Path]:
-        if not self._store_root:
+        # Choke point #1 (read side). A non-conforming id is definitively not a
+        # bundled-store plugin, so None is the ACCURATE answer here, not a
+        # swallowed error: every caller turns it into a clean "no such builtin
+        # plugin" KeyError (404 over HTTP, a red line via run_or_die in the
+        # CLI). Returning before the join also means no traversing id ever
+        # probes for a plugin.toml outside the store root.
+        if not self._store_root or not _is_valid_plugin_name(name):
             return None
         d = Path(self._store_root) / name
         return d if (d / "plugin.toml").is_file() else None
@@ -883,7 +971,13 @@ class PluginManager:
 
     # ---- provisioning helpers ----------------------------------------------
     def _installed_dir(self, name: str) -> Path:
-        return Path(self._installed_root) / name
+        # Choke point #2 (write side), and the important one: install, refresh,
+        # uninstall and the third-party copy ALL resolve their directory here,
+        # so validating the id once at this join confines shutil.rmtree
+        # (_remove_installed_dir), copytree and the refresh rename dance
+        # together. Without it, install('..\\outside') deleted a sibling
+        # directory of the plugins root. Raises ValueError on a bad id.
+        return Path(self._installed_root) / _check_plugin_name(name)
 
     def _provision_from_store(self, name: str) -> None:
         """Copy the plugin from the bundled store into the installed folder (or,
@@ -976,6 +1070,19 @@ class PluginManager:
         import shutil
         tmp = dest.parent / f".{name}.refresh.tmp"
         backup = dest.parent / f".{name}.refresh.bak"
+        # The staging pair drives copytree, two renames and four rmtree calls,
+        # and both are built by INTERPOLATING the name into a basename - so a
+        # traversing id would place them outside the plugins root even though
+        # dest itself looked fine. Today dest comes from _installed_dir(), which
+        # already rejects such an id; assert the invariant here as well so a
+        # future caller passing a hand-built dest cannot silently reinstate the
+        # escape.
+        if (not _is_valid_plugin_name(name)
+                or dest.parent != Path(self._installed_root)
+                or tmp.parent != dest.parent or backup.parent != dest.parent):
+            raise ValueError(
+                f"refusing to stage a refresh for {name!r}: the staging paths "
+                f"do not sit in the installed root")
         # Stage 1 - build the fresh copy in a temp sibling. A failure here leaves
         # the existing install completely untouched.
         try:
@@ -1087,6 +1194,10 @@ class PluginManager:
         almost verbatim (PLUGIN-ENGINE-1). Returns (parsed spec, dest dir)."""
         import shutil
         src = Path(source)
+        # An arbitrary-source tree is UNTRUSTED, and the very first thing we do
+        # with it is read a file out of it. Reject a link that escapes the tree
+        # before that, not after the copy: see _reject_escaping_links.
+        _reject_escaping_links(src)
         spec0 = parse_spec(src)                       # validate + name (raises)
         name = spec0.name
         # A third-party plugin must not shadow a built-in command name
@@ -1098,13 +1209,24 @@ class PluginManager:
             raise ValueError(
                 f"plugin name {name!r} clashes with a built-in command")
         self._reject_scope_collision(spec0)
+        # `name` came out of the MANIFEST, and dest is safe here BECAUSE
+        # parse_spec already rejected any name that is not a single
+        # identifier-shaped component (the same rule _installed_dir re-checks).
+        # Do not drop either check in a refactor: this line feeds
+        # _remove_installed_dir -> shutil.rmtree just below, and copytree after.
         dest = self._installed_dir(name)
         if dest.exists():
             if not force:
                 raise ValueError(f"plugin {name!r} is already installed")
             self._remove_installed_dir(name)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dest)
+        # symlinks=True: copy a link AS a link. The default (False) dereferences
+        # it, so a third-party plugin shipping 'web/notes.txt -> ~/.ssh/id_rsa'
+        # would land that file's CONTENTS in a directory localm then serves.
+        # _reject_escaping_links above already refused any link leaving src, so
+        # this is the second half of the same fix: whatever survives points
+        # inside the plugin's own tree and stays a link there.
+        shutil.copytree(src, dest, symlinks=True)
         _write_marker(dest, "external", _dir_content_hash(src))
         return spec0, dest
 
@@ -1529,6 +1651,15 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     manager.load_enabled()
     app.state.plugin_manager = manager
 
+    def _valid_name_or_404(name: str) -> None:
+        """A ``{name}`` that is not a legal plugin id can never match a plugin,
+        so it is a 404. Called BEFORE each handler's try block on purpose: the
+        handlers catch broad ``Exception`` to turn a failure into a 400, which
+        would otherwise downgrade this 404. The engine rejects such an id again
+        at the path join (_installed_dir); this only fixes the status code."""
+        if not _is_valid_plugin_name(name):
+            raise HTTPException(404, f"No such plugin: {name}")
+
     @app.get("/api/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins_engine():
         return manager.api_state()
@@ -1536,6 +1667,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/install",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_engine(name: str):
+        _valid_name_or_404(name)
         try:
             manager.install(name)
         except KeyError:
@@ -1572,6 +1704,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/uninstall",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def uninstall_plugin_engine(name: str, delete_data: bool = False):
+        _valid_name_or_404(name)
         try:
             manager.uninstall(name, delete_data=delete_data)
         except KeyError:
@@ -1590,6 +1723,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/refresh",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def refresh_plugin_engine(name: str):
+        _valid_name_or_404(name)
         try:
             refreshed = manager.refresh(name)
         except KeyError:
@@ -1601,6 +1735,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/enable",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def enable_plugin(name: str):
+        _valid_name_or_404(name)
         try:
             manager.enable(name)
         except KeyError:
@@ -1614,6 +1749,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/{name}/disable",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def disable_plugin(name: str):
+        _valid_name_or_404(name)
         try:
             manager.disable(name)
         except ValueError as e:

@@ -6,6 +6,7 @@ Uses a synthetic plugin written to a temp dir; runs open-mode (no API key) so
 the mounted, auto-scoped routes are reachable.
 """
 
+import os
 import textwrap
 
 import pytest
@@ -695,6 +696,222 @@ def test_install_external_rejects_bad_input(env):
         r = c.post("/api/plugins/install-external", json={"source": str(src)})
         assert r.status_code == 400
         assert "already installed" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+#  Plugin id confinement (CodeQL 18-44).
+#
+#  _installed_dir()/_store_dir() used to join a caller-supplied id straight onto
+#  a root, and the id arrives unvalidated from the CLI, the MCP tools and the
+#  HTTP {name} path param. Traversal reached shutil.rmtree (install rollback),
+#  the refresh staging rename/rmtree dance, and a marker WRITE outside the
+#  plugins root. Existing coverage only tested traversal for `data_subdir`
+#  (see _delete_plugin_data above); the id itself was untested, which is how
+#  this survived.
+# ---------------------------------------------------------------------------
+
+def _traversal_roots(env):
+    """store/, installed/ and a SENTINEL dir that `installed/../outside`
+    resolves to, so an escape is observable as damage to the sentinel."""
+    base = env / "roots"
+    store = base / "store"
+    store.mkdir(parents=True)
+    installed = base / "installed"
+    installed.mkdir(parents=True)
+    sentinel = _make_plugin(base, "outside", _ping("outside"))
+    (sentinel / "keep.txt").write_text("important", encoding="utf-8")
+    return store, installed, sentinel
+
+
+def _sentinel_intact(sentinel):
+    return (sentinel.is_dir()
+            and (sentinel / "keep.txt").read_text(encoding="utf-8") == "important"
+            and (sentinel / "plugin.toml").is_file())
+
+
+def test_is_valid_plugin_name_rule():
+    """The id rule is EXACTLY parse_spec's manifest-name rule, so the name that
+    becomes a directory and the name inside the manifest cannot drift."""
+    from localm.plugins.engine import _is_valid_plugin_name as ok
+
+    for good in ("chat", "coder", "my-plugin", "_x", "a1"):
+        assert ok(good), good
+    for bad in ("", ".", "..", "../outside", "..\\outside", "a/b", "a\\b",
+                "C:/Windows", "/etc", "my plugin", "1abc", ".hidden",
+                "x.y", None, 7):
+        assert not ok(bad), bad
+
+
+@pytest.mark.parametrize("evil", ["../outside", "..\\outside"])
+def test_install_with_traversing_id_raises_and_deletes_nothing(env, evil):
+    """PROVEN in triage: install('..\\outside') recursively DELETED a sibling of
+    the plugins root (provision early-returns on the traversed dir's own
+    plugin.toml, then the verify step's rollback rmtree's it). Both separator
+    forms must be refused; on POSIX only '../outside' actually traverses, but
+    the id is illegal - and therefore refused - on every platform."""
+    from localm.plugins.engine import PluginManager
+    store, installed, sentinel = _traversal_roots(env)
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
+
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        mgr.install(evil)
+    assert _sentinel_intact(sentinel)
+    assert not any(installed.iterdir())          # and nothing landed in the root
+
+
+@pytest.mark.parametrize("evil", ["../outside", "..\\outside"])
+def test_refresh_with_traversing_id_raises_and_writes_nothing(env, evil):
+    """The refresh half (CodeQL 32-43): the same unvalidated id drives the
+    staging swap and, before that, a provenance-marker WRITE at the traversed
+    destination - a file created outside the plugins root."""
+    from localm.plugins.engine import PluginManager
+    store, installed, sentinel = _traversal_roots(env)
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
+
+    with pytest.raises(KeyError):
+        mgr.refresh(evil)
+    assert _sentinel_intact(sentinel)
+    assert not (sentinel / ".localm-source.json").exists()   # no marker escaped
+    assert sorted(p.name for p in sentinel.iterdir()) == [
+        "keep.txt", "plug.py", "plugin.toml"]                # and nothing staged
+
+
+def test_uninstall_and_enable_with_traversing_id_are_refused(env):
+    """uninstall()/enable() gate on _installed_set()/_specs membership, which
+    only ever holds single-component basenames - they were NEVER the traversal
+    sink, and this test is not a claim that they were. It pins that they keep
+    refusing cleanly rather than growing a path join.
+
+    It does record one deliberate behaviour change: enable() used to answer a
+    traversing id with ValueError('...is not installed; install it first'),
+    because _resolve_missing_plugin_error's `_store_dir(name)` probe traversed
+    out of the store and found the sentinel's plugin.toml. With _store_dir
+    returning None for an illegal id it is now KeyError - the accurate answer,
+    since an illegal id can never be installed and the install hint was
+    misleading. Both are clean failures for CLI and HTTP alike."""
+    from localm.plugins.engine import PluginManager
+    store, installed, sentinel = _traversal_roots(env)
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
+
+    for evil in ("../outside", "..\\outside"):
+        with pytest.raises(KeyError):
+            mgr.uninstall(evil)
+        with pytest.raises(KeyError):
+            mgr.enable(evil)
+    assert _sentinel_intact(sentinel)
+
+
+def test_swap_in_store_copy_refuses_staging_outside_the_installed_root(env):
+    """_swap_in_store_copy interpolates the name into two SIBLING basenames
+    ('.<name>.refresh.tmp'/'.bak') that drive copytree, two renames and four
+    rmtree calls. Today its dest always comes from the validated _installed_dir;
+    the guard exists so a future caller passing a raw name cannot silently
+    reinstate the escape."""
+    from localm.plugins.engine import PluginManager
+    store, installed, sentinel = _traversal_roots(env)
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
+
+    with pytest.raises(ValueError, match="staging"):
+        mgr._swap_in_store_copy("../outside", sentinel,
+                                installed / ".." / "outside", "deadbeef")
+    assert _sentinel_intact(sentinel)
+
+
+def test_http_plugin_routes_404_a_traversing_name(env, monkeypatch):
+    """uvicorn unquotes before routing and starlette's path-param regex is
+    [^/]+, so '..%5Cx' is delivered to the handler as the ONE segment '..\\x'.
+    The route must 404 it (not 400 it, and not act on it) - the handlers catch
+    broad Exception, so the guard has to run before their try block.
+
+    On POSIX that id cannot traverse (a backslash is an ordinary character), so
+    there the assertion is the status code and the absence of any new
+    directory; on Windows the sentinel is the file-system proof."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    from localm.plugins.engine import attach_engine
+    # attach_engine uses the default roots: installed_root = <home>/plugins,
+    # so <installed_root>/../x is <home>/x.
+    sentinel = _make_plugin(env, "x", _ping("x"))
+    (sentinel / "keep.txt").write_text("important", encoding="utf-8")
+
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        for verb in ("install", "uninstall", "refresh", "enable", "disable"):
+            r = c.post(f"/api/plugins/..%5Cx/{verb}")
+            assert r.status_code == 404, (verb, r.status_code, r.text)
+        # a name that is not a path at all but still not a legal id
+        assert c.post("/api/plugins/not%20an%20id/install").status_code == 404
+    assert _sentinel_intact(sentinel)
+
+
+# ---------------------------------------------------------------------------
+#  Third-party source trees are untrusted (CodeQL 45).
+#
+#  shutil.copytree defaults to symlinks=False, which DEREFERENCES links: a
+#  plugin shipping 'web/notes.txt -> ~/.ssh/id_rsa' had that file's CONTENTS
+#  copied into a directory localm then serves from a StaticFiles mount, before
+#  mount_static's own resolve()-based escape guard could ever see it.
+# ---------------------------------------------------------------------------
+
+def _symlink_or_skip(link, target, *, dir_link=False):
+    try:
+        os.symlink(target, link, target_is_directory=dir_link)
+    except (OSError, NotImplementedError) as e:   # locked-down Windows host
+        pytest.skip(f"cannot create symlinks here: {e}")
+
+
+def test_install_external_rejects_a_link_escaping_the_source(env):
+    from localm.plugins.engine import PluginManager
+    src = _make_plugin(env / "src", "linky", _ping("linky"))
+    (src / "web").mkdir()
+    secret = env / "secret.txt"
+    secret.write_text("TOP-SECRET", encoding="utf-8")
+    _symlink_or_skip(src / "web" / "link", secret)
+
+    installed = env / "installed"
+    mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
+    with pytest.raises(ValueError, match="points outside"):
+        mgr.set_installed_from_dir(src)
+
+    leaked = installed / "linky" / "web" / "link"
+    assert not (leaked.is_file() and not leaked.is_symlink()), \
+        "the link target's contents were flattened into the installed tree"
+    assert not (installed / "linky").exists()
+
+
+def test_install_external_keeps_an_internal_link_a_link(env):
+    """A link that stays inside the plugin's own tree is legitimate and is
+    copied AS a link (symlinks=True), not dereferenced."""
+    from localm.plugins.engine import PluginManager
+    src = _make_plugin(env / "src", "inner", _ping("inner"))
+    (src / "web").mkdir()
+    (src / "web" / "real.txt").write_text("payload", encoding="utf-8")
+    _symlink_or_skip(src / "web" / "alias.txt", src / "web" / "real.txt")
+
+    installed = env / "installed"
+    mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
+    mgr.set_installed_from_dir(src)
+
+    copied = installed / "inner" / "web" / "alias.txt"
+    assert copied.is_symlink()
+    assert copied.read_text(encoding="utf-8") == "payload"
+
+
+def test_install_external_survives_an_internal_link_cycle(env):
+    """A link cycle inside the source must not make the pre-copy walk (or the
+    copy) recurse without bound - that DoS lands before any plugin code runs,
+    so it is reachable by a source that never gets loaded."""
+    from localm.plugins.engine import PluginManager
+    src = _make_plugin(env / "src", "cyclic", _ping("cyclic"))
+    (src / "web").mkdir()
+    _symlink_or_skip(src / "web" / "loop", src, dir_link=True)
+
+    installed = env / "installed"
+    mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
+    mgr.set_installed_from_dir(src)               # must return, not recurse
+
+    assert (installed / "cyclic" / "web" / "loop").is_symlink()
+    assert (installed / "cyclic" / "plugin.toml").is_file()
 
 
 def test_parse_spec_reads_tool_exports(tmp_path):
