@@ -175,9 +175,40 @@ class TestIsUncOrDevicePath:
             "corpus error: Windows does not consider this a drive/UNC root")
 
     @pytest.mark.parametrize("raw", [
-        "/nonexistent/x", "relative/x", "a.png", "", "Q:/x", r"Q:\x",
+        "/nonexistent/x", "relative/x", "a.png", "", "   ", "Q:/x", r"Q:\x",
+        "Q://models/x.gguf",     # drive + DOUBLED slash: the drive-vs-scheme edge
+        "Q:x",                   # drive-RELATIVE - not UNC (confined_under still
+                                 # rejects it as a component; different question)
+        "/usr/local/share/x.gguf",   # the false-positive trap: a POSIX absolute
+                                     # path containing the word "share". Any rule
+                                     # matching on "share" or on a single leading
+                                     # slash fails here.
+        "./rel/x.gguf",
+        "~/models/x.gguf",       # tilde, unexpanded
+        "bge-small-en-v1.5",     # a model key, not a path at all
+        "my-registered-model",
     ])
     def test_false_for_ordinary_paths(self, raw):
+        """Corpus contributed by the WS7 lane, which consumes this predicate for
+        remote-supplied embedding specs."""
+        assert not is_unc_or_device_path(raw)
+
+    @pytest.mark.parametrize("raw", [
+        "http://e/x", "https://e/x", "file:///nonexistent/x", "smb://h/s",
+    ])
+    def test_url_schemes_are_deliberately_NOT_judged_here(self, raw):
+        """BOUNDARY, asserted so nobody "fixes" it by adding scheme handling.
+
+        pathsafe answers "given that this IS a path, is it confined / is it UNC".
+        Whether a string is a path at all or a URL is CALLER policy: the rules
+        differ per call site (an embedding spec, a model ref, a media source), and
+        a scheme check smuggled in here would be a second concern inside a
+        security primitive that the next caller would either bend or fork.
+
+        The WS7 lane composes its own scheme check locally, using
+        ``^[A-Za-z][A-Za-z0-9+.-]+://`` - note the ``+`` rather than ``*``, which
+        makes a single-letter drive unmatchable so ``C://models/x.gguf`` stays a
+        path (verified: PureWindowsPath('C://models/x.gguf').drive == 'C:')."""
         assert not is_unc_or_device_path(raw)
 
 
