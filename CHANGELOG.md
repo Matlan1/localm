@@ -208,7 +208,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that created each entry, but only `auth.key` - which holds the key itself - was
   locked to your account; the two files holding the hashes inherited permissions
   that let any local account read them. All three are now restricted the same
-  way.
+  way. Note this protects where those hashes are STORED; how the owner key
+  itself is hashed is a separate, still-open issue if you set a short or
+  guessable key by hand (prefer `localm key generate`).
 - **The bug-report proxy no longer echoes internal errors to callers.** An
   unexpected failure returned the raw error text, readable from any web origin;
   it now returns an opaque request id and logs the real error, with its stack,

@@ -526,12 +526,19 @@ class TestKeyDigestFilePermsPosix:
                       owner="deadbeef" * 8))
         assert (store._defs_file.stat().st_mode & 0o077) == 0
 
-    def test_hash_key_stays_sha256(self):
-        """Deliberate, documented choice - see the why-comment at auth._hash_key.
-        Keystore keys are secrets.token_urlsafe(32) and this runs on the
-        per-request verify path, so a slow KDF is a latency regression for no
-        gain. This test exists so a future 'harden the hash' pass has to read
-        that reasoning before it can go green."""
-        from localm.auth import _hash_key
-        digest = _hash_key("x" * 32)
-        assert len(digest) == 64 and int(digest, 16) >= 0
+    # DELIBERATELY NO "the hash stays SHA-256" TEST HERE.
+    #
+    # An earlier revision of this file had one, on the premise that every key
+    # reaching auth._hash_key is a generated secrets.token_urlsafe(32) so a KDF
+    # would be pure latency cost. That premise is FALSE for the owner key:
+    # `localm key set KEY` takes a key the user provides, and the LOCALM_API_KEY
+    # env var and a hand-edited auth.key bypass set_api_key's length/charset
+    # guards entirely (its own docstring says so). A user-chosen, unvalidated
+    # secret therefore reaches a single unsalted SHA-256, which makes CodeQL
+    # alert 88 a true positive on that path.
+    #
+    # A test pinning the algorithm would have turned the CORRECT fix red and
+    # made it look like the regression. The ACL coverage above is the part of
+    # alert 88 this unit actually closes; the hashing half is an open design
+    # decision (move the expensive verify off the per-request path) tracked
+    # outside this file. See the comment at auth._hash_key.

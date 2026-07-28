@@ -341,23 +341,40 @@ def keystore_file() -> Path:
 
 
 def _hash_key(key: str) -> str:
-    # SHA-256 IS THE RIGHT PRIMITIVE HERE - do not "harden" this into bcrypt /
-    # scrypt / argon2. A static analyser flags unsalted SHA-256 of a credential
-    # (CodeQL py/weak-sensitive-data-hashing, alert 88), and that rule is correct
-    # for a USER-CHOSEN password, where a slow salted KDF defeats brute force and
-    # rainbow tables. Neither threat applies to this input:
-    #   * every key hashed here is secrets.token_urlsafe(32) - 256 bits of CSPRNG
-    #     output (see create_key). There is no dictionary to try and no rainbow
-    #     table to precompute against 2^256; a KDF's work factor buys nothing on
-    #     top of entropy that is already beyond brute force.
-    #   * this runs on the PER-REQUEST verify path (see _principal_from_token),
-    #     so a deliberately-slow KDF would add its cost to every authenticated
-    #     request - a latency regression and a cheap DoS lever, paid for no gain.
-    # The real defect the alert pointed at was NOT the algorithm: it was that the
-    # files storing this digest (sessions.json, jobs.json) were not permission-
-    # restricted on Windows while auth.key holding the PLAINTEXT was, so the
-    # digest was readable where the secret was not. That is fixed at the file
-    # ACL - see config.restrict_file_perms and its callers.
+    # KNOWN ACCEPTED WEAKNESS on the user-chosen-owner-key path, recorded rather
+    # than justified. CodeQL py/weak-sensitive-data-hashing (alert 88) flags this
+    # unsalted SHA-256, and on one of the two paths that reach it the rule is
+    # RIGHT. Do not read this comment as a defence of the status quo.
+    #
+    # Two kinds of secret arrive here, and they are not equivalent:
+    #   * NAMED KEYSTORE KEYS are always secrets.token_urlsafe(32) (see
+    #     create_key) - 256 bits of CSPRNG output. No dictionary and no rainbow
+    #     table touches 2^256, so a KDF's work factor buys nothing here.
+    #   * THE OWNER KEY CAN BE USER-CHOSEN, and may be a human-memorable
+    #     password. `localm key set KEY` persists a key the user provides
+    #     (docs/cli.md), and set_api_key's own docstring above records that its
+    #     MIN_KEY_LEN and charset checks are CONFIG-time guards only: the
+    #     LOCALM_API_KEY env var and a hand-edited auth.key BYPASS THAT FUNCTION
+    #     ENTIRELY. So a short, low-entropy owner key reaches this line
+    #     unvalidated, and its digest is then persisted in sessions.json and
+    #     jobs.json. Against that input a single unsalted SHA-256 is exactly what
+    #     the rule warns about.
+    #
+    # Why it is not simply swapped for a KDF here: this runs on the PER-REQUEST
+    # verify path (_principal_from_token), so a naive scrypt/argon2 at this line
+    # is a latency cost on every authenticated request and a cheap DoS lever.
+    # The fix therefore has to move the expensive check off the hot path - verify
+    # once at session establishment (sessions.py already stores a key_hash), or
+    # salt+KDF the owner key at SET time and keep generated tokens on the cheap
+    # path behind a per-key marker. That is a design decision with a measurable
+    # latency budget, not a one-line edit, and it is open rather than settled.
+    #
+    # SEPARATE, and fixed: the files holding this digest (sessions.json,
+    # jobs.json) were not permission-restricted on Windows while auth.key holding
+    # the PLAINTEXT was, so the digest was readable where the secret was not.
+    # See config.restrict_file_perms and its callers. That was the ACL half of
+    # alert 88; it is NOT the whole of it, and the alert should not be treated as
+    # closed by it.
     #
     # surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
     # UnicodeEncodeError on a lone surrogate, which would just move the crash here
