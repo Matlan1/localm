@@ -983,7 +983,8 @@ class Collection:
                      "'localm rag reembed %s' (no source files needed) or rebuild "
                      "from source with 'localm rag repair %s --embed'.",
                      self.name, dest.name,
-                     self.vector_degrade_reason or "unusable", self.name)
+                     self.vector_degrade_reason or "unusable",
+                     self.name, self.name)
         self._prune_rejected_vectors()
 
     def _prune_rejected_vectors(self) -> None:
