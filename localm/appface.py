@@ -67,7 +67,7 @@ def open_logs(logfile) -> None:
             return
         if sys.platform == "win32":
             import os
-            os.startfile(str(logfile))   # noqa: type-ignore (Windows-only)
+            os.startfile(str(logfile))   # os.startfile is Windows-only (guarded above)
         else:
             webbrowser.open("file://" + str(logfile))
     except Exception:
