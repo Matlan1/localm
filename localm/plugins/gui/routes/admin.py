@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from localm import scopes
 from localm.inference.http_server import require_fs_host, require_scope
+from localm.pathsafe import reject_unsafe_path_string
 from localm.plugins.gui.web import LogExportRequest
 
 # Cap a single /api/fs/dirs listing so pointing the browser at a directory with an
@@ -26,15 +27,28 @@ from localm.plugins.gui.web import LogExportRequest
 _FS_LIST_CAP = 5000
 
 
+def _norm_path_str(s: str) -> str:
+    """Lexically normalize a path string for comparison. PURE STRING WORK - no
+    filesystem access - so it is safe to run on unsanitized caller input before
+    any syscall. normpath collapses separators, "." and lexical ".."; normcase
+    lowercases and maps "/" to "\\" on Windows."""
+    return os.path.normcase(os.path.normpath(s))
+
+
 def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/logs/export", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def export_logs(req: LogExportRequest):
+    def export_logs(req: LogExportRequest):
         """R30: copy every log of this running instance into a user-chosen folder
         (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
         subfolder so repeated exports never clobber each other. Logs live under
         <home>/logs; a few (e.g. comfy-launch.log) sit in the home root, so we
-        sweep both. Returns the counts and the destination path."""
+        sweep both. Returns the counts and the destination path.
+
+        Plain `def`, NOT `async def`: this stats a caller-supplied directory and
+        then runs a whole shutil.copy2 loop, all blocking. Starlette threadpools
+        a sync handler; an async one would hold the event loop for the length of
+        the copy."""
         import shutil
         import time as _time
         from localm.config import home_dir
@@ -42,6 +56,12 @@ def register(app: FastAPI, ctx) -> None:
         dest = (req.dest or "").strip()
         if not dest:
             raise HTTPException(400, "Choose a destination folder first.")
+        # BEFORE is_dir(): same UNC credential-leak/stall as the two handlers
+        # below - the destination is caller-supplied and reaches the filesystem.
+        try:
+            reject_unsafe_path_string(dest)
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid destination: {e}")
         dest_dir = Path(dest).expanduser()
         if not dest_dir.is_dir():
             raise HTTPException(400, "That folder does not exist.")
@@ -106,7 +126,12 @@ def register(app: FastAPI, ctx) -> None:
         return result
 
     @app.post("/api/comfyui/create-launcher", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def create_comfy_launcher(workdir: str):
+    def create_comfy_launcher(workdir: str):
+        # Plain `def`, NOT `async def`: every branch below touches the filesystem
+        # (resolve/is_dir/exists/write_text), and a blocking syscall inside an
+        # async handler stalls the whole event loop for its duration. Starlette
+        # runs a sync handler in its threadpool, so a slow filesystem cannot take
+        # the server down with it. Same reason as fs_dirs below.
         if not workdir:
             raise HTTPException(400, "Missing workdir parameter")
 
@@ -128,7 +153,35 @@ def register(app: FastAPI, ctx) -> None:
         if not valid_workdirs:
             raise HTTPException(400, "ComfyUI working directory is not configured")
 
-        import os
+        # Allowlist the RAW string BEFORE any filesystem call, so no syscall ever
+        # touches a path that is not already configured. This is the fix for the
+        # pre-allowlist `Path(workdir).resolve()` that used to sit here: resolve()
+        # on Windows calls _getfinalpathname (CreateFileW) plus a stat, so a UNC
+        # path aimed at an attacker's SMB server dialled out - Windows
+        # auto-authenticates and surrenders the host net-NTLMv2 credential -
+        # BEFORE the allowlist below could return its 403. Both branches
+        # returning the same 403 is why this looked harmless; the exfiltration
+        # channel is the connection, not the response.
+        #
+        # normcase+normpath is pure string work (no filesystem access): it
+        # absorbs separator, trailing-separator, "." and lexical ".." spelling
+        # differences, and case on Windows. It is a PREFILTER, never a
+        # replacement - the resolved exact-match below still runs, so this can
+        # only make the gate stricter. It does narrow two corner cases: a symlink
+        # that merely POINTS at a configured workdir, and a relative spelling of
+        # one, are now refused. Both are correct to refuse - this endpoint WRITES
+        # a launcher script into the directory.
+        #
+        # Deliberately NOT pathsafe.reject_unsafe_path_string here, unlike the
+        # two handlers around it. This allowlist is the STRICTER gate and it
+        # already runs with zero syscalls, so the rejector would add no security;
+        # it would only break a legitimate setup, because a ComfyUI workdir on a
+        # network share (comfy_workdir = a UNC path) is a real configuration and
+        # dialling a path the user themselves configured is not the attack. The
+        # rejector guards the routes that have NO allowlist to stand on.
+        if _norm_path_str(workdir) not in {_norm_path_str(v) for v in valid_workdirs}:
+            raise HTTPException(403, "workdir must match a configured comfy_workdir")
+
         try:
             p = Path(workdir).resolve()
 
@@ -160,8 +213,8 @@ def register(app: FastAPI, ctx) -> None:
         return {"status": "ok"}
 
     @app.get("/api/fs/dirs", dependencies=[Depends(require_fs_host)])
-    async def fs_dirs(path: str = "", include_files: bool = False,
-                      meta: bool = False):
+    def fs_dirs(path: str = "", include_files: bool = False,
+                meta: bool = False):
         """Directory listing for the GUI file/folder picker.
 
         Requires HOST filesystem access (owner / open mode / a key granted
@@ -176,7 +229,21 @@ def register(app: FastAPI, ctx) -> None:
         ``{name, is_dir, size, mtime}`` so the picker can show sizes and dates;
         the flat ``dirs``/``files`` arrays stay for older callers. A listing over
         ``_FS_LIST_CAP`` entries is truncated with ``truncated: true``.
+
+        Plain `def`, NOT `async def`: is_dir/resolve/iterdir/stat all block, and
+        blocking inside an async handler stalls the event loop for every other
+        request. Starlette threadpools a sync handler instead. The path itself
+        stays UNCONSTRAINED (browsing the host disk is the entire point of the
+        picker); only the UNC/device form is refused, before any syscall.
         """
+        # BEFORE Path()/is_dir(): a UNC path here dials SMB from the event loop.
+        # No require_absolute - the picker legitimately accepts "~/..." (expanded
+        # below) and relative input.
+        if path:
+            try:
+                reject_unsafe_path_string(path)
+            except ValueError as e:
+                raise HTTPException(400, f"Invalid path: {e}")
         if not path:
             if os.name == "nt":
                 import string
@@ -250,7 +317,7 @@ def register(app: FastAPI, ctx) -> None:
         return result
 
     @app.get("/api/fs/places", dependencies=[Depends(require_fs_host)])
-    async def fs_places():
+    def fs_places():
         """Quick-access locations for the picker's Places rail: the user's home
         and its standard subfolders (only the ones that exist), plus drive roots
         on Windows (the filesystem root elsewhere). Requires HOST filesystem
@@ -260,6 +327,10 @@ def register(app: FastAPI, ctx) -> None:
         relocated profile still resolves, and a subfolder that is absent (a
         localized profile, a machine with no Downloads) is simply omitted rather
         than guessed.
+
+        Plain `def` for the same reason as fs_dirs: probing A-Z drive roots calls
+        is_dir() on each, and a mapped-but-disconnected network drive blocks. No
+        caller input reaches it, so there is nothing to reject here.
         """
         places = []
         try:

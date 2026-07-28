@@ -2936,6 +2936,18 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # protected mode too, so an open-mode-only refusal would miss them).
     _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks")
 
+    # Same refusal, matched by PREFIX rather than exact path. /api/fs/* is the
+    # host filesystem browser: it enumerates the user's disk, which is host
+    # detail of exactly the kind above, and it is a GET, so it is exempt from
+    # both the CSRF gate (unsafe methods only) and the open-mode shell-token
+    # gate. The generic /api,/v1 metadata-GET gate below does cover it, but only
+    # inside the `not any_key_configured()` branch - so in PROTECTED mode a
+    # cookie-authenticated cross-origin GET would execute. SameSite=strict does
+    # not close it either: "site" ignores port, so any other page on a loopback
+    # port is same-site, which is the precise actor the comment above at the
+    # _cross_origin_refused definition names. Refused in EVERY mode instead.
+    _CROSS_ORIGIN_GET_REFUSED_PREFIXES = ("/api/fs/",)
+
     def _cross_origin_refused(request) -> bool:
         """True when this request carries an Origin header that is neither
         same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
@@ -2961,11 +2973,14 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     async def _origin_guard(request, call_next):
         _path = request.url.path
         # Cross-origin refusal (every mode): every state-changing method (CSRF),
-        # plus the sensitive UNAUTHENTICATED GETs in _CROSS_ORIGIN_GET_REFUSED
-        # (host-detail disclosure, LM-PT-002). Both are subject to the same
-        # same-origin / CORS-allowlist check.
+        # plus the sensitive GETs in _CROSS_ORIGIN_GET_REFUSED (exact) and
+        # _CROSS_ORIGIN_GET_REFUSED_PREFIXES (prefix) - host-detail disclosure,
+        # LM-PT-002. All are subject to the same same-origin / CORS-allowlist
+        # check.
         if ((request.method in _UNSAFE_METHODS
-             or (request.method == "GET" and _path in _CROSS_ORIGIN_GET_REFUSED))
+             or (request.method == "GET"
+                 and (_path in _CROSS_ORIGIN_GET_REFUSED
+                      or _path.startswith(_CROSS_ORIGIN_GET_REFUSED_PREFIXES))))
                 and not _path.startswith(_CROSS_ORIGIN_OK)):
             if _cross_origin_refused(request):
                 return JSONResponse(

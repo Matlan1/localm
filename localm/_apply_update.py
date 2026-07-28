@@ -189,6 +189,39 @@ def _unsafe_member(name: str) -> bool:
     return ".." in norm.split("/")
 
 
+def _unsafe_swap_name(name) -> bool:
+    """True if *name* is not usable as a top-level swap/rollback entry.
+
+    Stricter than :func:`_unsafe_member`, and for a different reason. A swap name
+    must be exactly ONE component living directly inside the install, because
+    every caller does ``installed / name`` and then rmtree/unlink/copy on the
+    result. ``_unsafe_member`` only answers "would this ESCAPE the extraction
+    root", which is a narrower question, and three shapes slip past it:
+
+    * ``""`` and ``"."`` do not escape - they COLLAPSE. ``Path(install) / ""``
+      is the install dir itself (verified on 3.12), so ``shutil.rmtree`` on it
+      deletes the entire installation. Escape is not the only way to be lethal.
+    * A NESTED name (``a/b``) reaches a path the swap set never describes.
+    * A ``NEVER_TOUCH`` name is by definition not part of any swap: swap_entries
+      excludes them, so a manifest naming one is poisoned by construction. This
+      matters most on a PORTABLE install, where ``home`` sits INSIDE the install
+      root - rolling back an entry named ``home`` would delete the user's models,
+      chat history and auth keys, and the backup does not contain them to restore.
+
+    Used on the ``<home>/updates/applied_names.json`` manifest, which is an
+    ordinary file in the data dir and so is attacker-writable given any write
+    primitive there.
+    """
+    if not isinstance(name, str):
+        return True
+    if _unsafe_member(name):
+        return True
+    parts = [p for p in name.replace("\\", "/").strip().split("/") if p]
+    if len(parts) != 1 or parts[0] in (".", ".."):
+        return True
+    return parts[0] in NEVER_TOUCH
+
+
 def extract(zip_path, staging) -> Path:
     """Extract *zip_path* into *staging* (cleared first) and return the source root -
     descending into a single wrapper directory if the archive has one.
@@ -300,6 +333,25 @@ def rollback(backup_dir, installed, names) -> None:
     backup_dir, installed = Path(backup_dir), Path(installed)
     errors = []
     for name in names:
+        # The names can come from <home>/updates/applied_names.json, which is a
+        # plain file in the data dir: until here it was only type-checked as
+        # list[str], so a poisoned entry (a "../.." traversal, or a
+        # drive-qualified absolute name) reached `installed / name` and then
+        # rmtree/unlink. This module already
+        # rejects exactly those shapes for zip members in _unsafe_member; the
+        # manifest path simply omitted the check. _unsafe_swap_name adds the
+        # collapse/nesting/NEVER_TOUCH cases that a pure escape test misses (see
+        # its docstring). Reject, do NOT silently skip:
+        # the entry is recorded as an error so the RuntimeError below reports it
+        # and the backup is kept (we do not hide problems).
+        #
+        # Checked HERE rather than in each caller because this is the choke point
+        # both reach - scripts/rollback_update.py (stdlib-only, loads this module
+        # by file path) and localm.updater.rollback - so a future caller cannot
+        # bypass it.
+        if _unsafe_swap_name(name):
+            errors.append(f"refused unsafe name from the update manifest: {name!r}")
+            continue
         dst = installed / name
         try:
             if dst.exists():

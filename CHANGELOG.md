@@ -135,6 +135,38 @@ permanent public record of what shipped and are never rewritten; the in-progress
   erroring the query, and says which situation it hit - including naming the
   path when something has put an empty stand-in numpy on the import path, which
   is a broken environment rather than a missing optional dependency.
+- **A ComfyUI server can no longer delete files outside its own folders.** When
+  you turn on output containment (or run in privacy mode, which forces it on),
+  localm deletes ComfyUI's duplicate copies of what it generated. It took the
+  filenames for that straight from ComfyUI's replies, so a ComfyUI on your
+  network, an attacker sitting on that plaintext connection, or a malicious
+  custom node could name any file on your disk and have localm delete it. Those
+  names are now confined to ComfyUI's own output and input folders. Nested
+  outputs (ComfyUI's `subfolder`) still work exactly as before, and a name that
+  gets refused is reported in the result rather than skipped silently, so you
+  are never told a copy was removed when it was not. This affected the most
+  privacy-conscious setups specifically, since containment is what turns it on.
+- **The folder picker and the ComfyUI launcher no longer freeze the server on a
+  network path.** Handing either one a Windows network path (`\\host\share`)
+  made localm contact that host before it checked whether the path was allowed,
+  which stalled every other request for as long as the connection took - over
+  four minutes against an unreachable address - and would have handed the
+  machine's Windows credentials to whoever answered. The path is now checked
+  before anything touches the disk, the ComfyUI launcher matches your configured
+  folder before it looks at the filesystem at all, and none of these handlers
+  can block the server while they wait on a slow disk. Browsing your own drives
+  is unchanged, and a ComfyUI folder that genuinely lives on a network share
+  still works.
+- **The file browser can no longer be read by another page on your machine.**
+  A different local page could ask localm to list your folders and read the
+  answer. It is now refused whether or not you have an API key set.
+- **A tampered update record can no longer delete the wrong files during a
+  rollback.** Rolling back an update read a list of file names from your data
+  folder without checking them, so an edited list could point the rollback at
+  files outside the installation - including, on a portable install, your own
+  models and chat history. Those names are now validated, and a rejected one
+  fails the rollback loudly with the backup left intact, rather than being
+  quietly skipped.
 
 ### Fixed
 - **`localm rm` no longer offers to delete a file it will only unregister.** The

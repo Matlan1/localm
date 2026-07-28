@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from localm.pathsafe import confined_under
+
 
 # ---------------------------------------------------------------------------
 #  Role-based node resolution (resolve nodes by class_type + graph edges)
@@ -1794,14 +1796,31 @@ def contain_comfy_artifacts(
     # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
     # output/). Surface a failure (do not silence): it is still a stray copy of
     # the user's input that they asked to contain.
+    #
+    # `uploaded_input` is ComfyUI's OWN reply (result["name"] from /upload/image),
+    # so it is remote data driving an unlink(). Confine it: pathlib would let an
+    # absolute component REPLACE the base outright and a "../.." walk out of it,
+    # which on a LAN or public api_url (sanitize_comfy_url permits both, over
+    # plaintext http) hands a hostile or compromised ComfyUI arbitrary file
+    # deletion with localm's privileges.
     if uploaded_input and root is not None:
         try:
-            inp = root.parent / "input" / uploaded_input
-            if inp.exists():
-                inp.unlink()
-        except OSError as e:
+            inp = confined_under(root.parent / "input", uploaded_input)
+        except ValueError:
+            # AGENTS rule 5: NOT silently skipped. Containment was requested and
+            # did not happen, so the user is told - a success we did not achieve
+            # is never reported as one.
             warnings.append(
-                f"a copy of your input image remains in ComfyUI's input folder ({e})")
+                f"ComfyUI returned an out-of-bounds input filename "
+                f"({uploaded_input!r}); its copy in ComfyUI's input folder was "
+                f"not removed")
+        else:
+            try:
+                if inp.exists():
+                    inp.unlink()
+            except OSError as e:
+                warnings.append(
+                    f"a copy of your input image remains in ComfyUI's input folder ({e})")
 
     # Delete ComfyUI's on-disk copy of the output. type "temp" is auto-purged
     # by ComfyUI, so only a real "output" artifact needs removing.
@@ -1813,12 +1832,26 @@ def contain_comfy_artifacts(
                 "until you set the ComfyUI output dir (Settings -> Media, or: "
                 "localm config comfy_output_dir <path>)")
         else:
+            # `subfolder` and `filename` are parsed straight out of ComfyUI's
+            # /history JSON - remote data, same as uploaded_input above. Nesting
+            # is legitimate here (that is what `subfolder` IS), so this needs
+            # confined_under's nested form, not confined_name.
+            rel = "/".join(
+                p for p in (str(info.get("subfolder", "") or ""),
+                            str(info.get("filename", "") or "")) if p)
             try:
-                copy = root / info.get("subfolder", "") / info.get("filename", "")
-                if copy.exists():
-                    copy.unlink()
-            except OSError as e:
-                warnings.append(f"could not delete ComfyUI's copy of the output ({e})")
+                copy = confined_under(root, rel)
+            except ValueError:
+                warnings.append(
+                    f"ComfyUI returned an out-of-bounds output filename "
+                    f"({rel!r}); its copy in ComfyUI's output folder was not "
+                    f"removed")
+            else:
+                try:
+                    if copy.exists():
+                        copy.unlink()
+                except OSError as e:
+                    warnings.append(f"could not delete ComfyUI's copy of the output ({e})")
 
     return ("WARNING: " + "; ".join(warnings) + ".") if warnings else ""
 
