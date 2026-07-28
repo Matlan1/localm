@@ -309,6 +309,18 @@ class TestOllamaManifestDigestIsConfined:
         "",
     ])
     def test_malformed_digests_are_all_rejected(self, tmp_path, digest):
+        """SHAPE PIN, not proof of the fix. Verified against pristine
+        origin/master: every case here PASSES there, because master's walk-up loop
+        only reports a blob it can actually find, and none of these name a file
+        that exists in the fixture - so master returns None for "not found" while
+        the fix returns None for "malformed", and the assertion cannot tell them
+        apart. It still earns its place: it pins the accepted SHAPE, so a later
+        loosening of _OLLAMA_BLOB_RE fails here.
+
+        The discriminating test is
+        test_a_traversing_digest_returns_none_and_stays_inside_blobs, which PLANTS
+        the traversal target so master's loop finds it and returns it - and which
+        does fail on master."""
         from localm.model_manager import registry as reg
         root = tmp_path / "ollama"
         manifest_dir = _ollama_tree(root, digest)
@@ -467,7 +479,17 @@ class TestRemoveModelDeleteGate:
 
     def test_a_sibling_prefix_directory_is_not_deleted(self, home, monkeypatch):
         """`<data dir>/models-old` string-prefix-matched `<data dir>/models` in the
-        old startswith fallback."""
+        old startswith fallback.
+
+        NON-DISCRIMINATING BY MEASUREMENT, kept as a regression pin only. Verified
+        against pristine origin/master: this PASSES there, because the startswith
+        arm was dead code - `hasattr(path, "is_relative_to")` is always true on the
+        pinned 3.12 interpreter, so master took the is_relative_to branch, which
+        happens to answer this case correctly. The discriminating test for the
+        startswith variant is
+        TestIsOwnedModelPathIsTheSingleDefinition::test_it_rejects_what_the_startswith_variant_accepted,
+        which asserts the old predicate's answer directly and DOES fail on master.
+        Do not read a green here as evidence the delete gate is fixed."""
         import localm.model_manager as _mm
         from localm.model_manager import registry as reg
         monkeypatch.setattr(_mm, "HOME_DIR", home)
