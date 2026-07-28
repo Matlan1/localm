@@ -24,9 +24,18 @@ them reachable by a scoped NON-owner key:
     with fs_access="none" could mkdir + write anywhere, and the exists-or-not
     400 was a directory-existence oracle for the whole disk.
 
-The dest-not-created assertions are load-bearing twice over: they are the real
-security property, AND mkdir(parents=True) means a regression would otherwise
-litter the test tree with the directories it was not supposed to make.
+On the /move tests the dest-not-created assertions are load-bearing twice over:
+they are the real security property, AND mkdir(parents=True) means a regression
+would otherwise litter the test tree with directories it was not supposed to
+make. That is NOT true of the log-export denials - export_logs 400s on a missing
+dest before it mkdirs anything, so "the folder was not created" would hold with
+or without the gate. Those tests therefore point at a dest that EXISTS and
+assert nothing was written INTO it, which is the only falsifiable form.
+
+Every path in this file is built from tmp_path, never a real location. That is a
+safety requirement, not a style choice: proving this oracle works means reverting
+the fix and re-running, and a negative pass executes the unsafe path for real. A
+sibling lane's negative pass named C:/Users/Public and emptied it via shutil.rmtree.
 """
 
 from pathlib import Path
@@ -87,7 +96,7 @@ def _no_upload(monkeypatch):
     reached only deep inside it, so an assertion on this list right after the
     HTTP response returns is INERT - it would be empty even if confinement had
     let the file through. It is kept as a cheap tripwire, not as the check.
-    ``_no_job_started`` below is the assertion that can actually fail."""
+    ``_job_count`` below is the assertion that can actually fail."""
     calls = []
 
     def _record(image_path, api_url):
@@ -99,6 +108,29 @@ def _no_upload(monkeypatch):
     monkeypatch.setattr(_img, "_upload_image", _record)
     monkeypatch.setattr(_vid, "_upload_image", _record)
     return calls
+
+
+def _dead_backend(monkeypatch):
+    """Make the media backends inert for the whole test.
+
+    CONTAINMENT FOR THE NEGATIVE PASS, not for the passing run. Proving this
+    oracle works means reverting the fix and re-running, and a negative pass
+    executes the UNSAFE path for real - that is its entire purpose. Against
+    unfixed source these input_image requests do NOT 400; they return 200 and
+    ``jobs.start_fn`` dispatches a real generation on a worker thread, which
+    calls ``_backend.ensure_available`` -> ComfyUI probe/launch. The passing run
+    never reaches it, so nothing here would ever reveal that. Stubbing
+    ensure_available to a hard False means the worker returns immediately on
+    either source, so the negative pass cannot dial or spawn anything.
+
+    (Payload containment is separate and already handled: every path in this
+    file is built from tmp_path, never a real location - see the sibling lane's
+    C:/Users/Public incident, where a negative pass rmtree'd a real directory.)"""
+    from localm.plugins.builtin.image import backend as _ib
+    from localm.plugins.builtin.video import backend as _vb
+    for mod in (_ib, _vb):
+        monkeypatch.setattr(mod, "ensure_available",
+                            lambda s, *a, **k: (False, "backend disabled in test"))
 
 
 def _job_count(app) -> int:
@@ -127,6 +159,7 @@ def _job_count(app) -> int:
 def test_input_image_cannot_name_the_credential_store(
         tmp_path, monkeypatch, plugin, route, body_extra, secret_name):
     app, home = _media_app(tmp_path, monkeypatch, plugin)
+    _dead_backend(monkeypatch)
     uploaded = _no_upload(monkeypatch)
     secret = home / secret_name
     secret.write_bytes(b"\x89PNG\r\n\x1a\nowner-key-material")  # readable AND image-shaped
@@ -154,6 +187,7 @@ def test_input_image_cannot_name_the_credential_store(
 def test_input_image_outside_the_data_dir_still_rejected(tmp_path, monkeypatch,
                                                          plugin, route):
     app, _home = _media_app(tmp_path, monkeypatch, plugin)
+    _dead_backend(monkeypatch)
     uploaded = _no_upload(monkeypatch)
     outside = tmp_path / "elsewhere" / "secret.png"
     outside.parent.mkdir(parents=True)
