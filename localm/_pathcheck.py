@@ -46,12 +46,35 @@ def is_unc_or_device_path(raw: str) -> bool:
     screened by this BEFORE any stat/resolve/exists, never after.
 
     Every UNC and device form shares one property - two leading separators - so
-    one check covers them all. Deliberately NOT gated on ``os.name == "nt"``: the
-    inputs this screens are remote- or lower-privilege-supplied, a leading ``//``
-    is never a legitimate value there on any platform, and an unconditional rule
-    means the Linux CI run exercises the same branch Windows does.
+    one normalise-then-test covers them all, including the MIXED spellings
+    (``\/host\share``, ``/\host/share``) that a two-prefix check misses. Windows
+    treats ``\`` and ``/`` interchangeably in the prefix; a raw
+    ``startswith("\\\\") or startswith("//")`` does not.
+
+    Deliberately NOT gated on ``os.name == "nt"``: the inputs this screens are
+    remote- or lower-privilege-supplied, a leading ``//`` is never a legitimate
+    value there on any platform, and an unconditional rule means the Linux CI run
+    exercises the same branch Windows does.
+
+    DELIBERATELY NO ``.strip()`` - and this is the subtle half. Stripping first
+    looks harmless and is an OVER-MATCH: for ``"  \\\\host\\share\\x"`` Windows
+    keeps the leading whitespace and COLLAPSES the doubled separator, so both
+    ``PureWindowsPath.drive`` and ``ntpath.splitdrive`` report no drive at all -
+    it is an ordinary RELATIVE path under a directory literally named ``"  "``.
+    Windows does not strip whitespace to reveal a UNC prefix, so neither may this.
+
+    A predicate can be wrong in two directions: UNDER-matching (the bypass, which
+    the normalisation above fixes) and OVER-matching (this). Only the OS parser
+    says which side you are on, so the test corpus carries false-positive traps
+    next to the hostile cases. Refusing legitimate input is not the safe
+    direction: a guard that rejects real paths gets loosened later to compensate,
+    and that is how the property it was protecting gets lost.
+
+    A caller that legitimately wants to trim USER-typed input does so itself,
+    where the intent is visible (see _spec_names_a_host_path in
+    plugins/gui/routes/models.py).
     """
-    return str(raw).strip().replace("/", "\\").startswith("\\\\")
+    return str(raw).replace("/", "\\").startswith("\\\\")
 
 
 def confined_under(base: Path, relpath: str) -> Path:

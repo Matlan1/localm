@@ -607,6 +607,62 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         with pytest.raises(ValueError):
             _pathcheck.confined_under(tmp_path, rfilename)
 
+    @pytest.mark.parametrize("rfilename", [
+        # FALSE-POSITIVE TRAPS. A hostile-only corpus passes an over-matching
+        # guard, and an over-matching guard is not the safe direction: it gets
+        # loosened later to accept the real input it broke, and the property it
+        # was protecting is what gets lost in the loosening.
+        "/usr/local/share/x.gguf",       # ordinary POSIX path containing "share"
+        "sharepoint/model.gguf",         # "share" as a name prefix
+        "a/share/b.gguf",                # "share" as a whole component
+        # Whitespace-padded UNC-LOOKALIKES. Windows KEEPS the leading whitespace
+        # and COLLAPSES the doubled separator, so both PureWindowsPath.drive and
+        # ntpath.splitdrive report NO drive - these are ordinary relative paths
+        # under a directory literally named "  ". A predicate that strips first
+        # calls them UNC and refuses a legitimate name. Verified against both OS
+        # parsers; see _pathcheck.is_unc_or_device_path on why there is no strip.
+        "  " + chr(92) * 2 + "host" + chr(92) + "share" + chr(92) + "x",
+        "\t" + chr(92) * 2 + "host" + chr(92) + "share",
+        "  //host/share/x",
+    ])
+    def test_legitimate_names_are_not_refused(self, tmp_path, rfilename):
+        from localm import _pathcheck
+        got = _pathcheck.confined_under(tmp_path, rfilename)
+        assert tmp_path.resolve() in got.resolve().parents or got.parent == tmp_path
+
+    @pytest.mark.parametrize("raw", [
+        "  " + chr(92) * 2 + "host" + chr(92) + "share" + chr(92) + "x",
+        "\t" + chr(92) * 2 + "host" + chr(92) + "share",
+        "  //host/share/x",
+        "/usr/local/share/x.gguf",
+    ])
+    def test_the_unc_predicate_does_not_over_match(self, raw):
+        """Pinned directly on the predicate, not only through confined_under, so
+        a future edit that reintroduces a .strip() fails here with the reason
+        attached rather than surfacing as a mysterious rejection downstream."""
+        import ntpath
+        from pathlib import PureWindowsPath
+        from localm import _pathcheck
+        assert _pathcheck.is_unc_or_device_path(raw) is False, raw
+        # The oracle for "is this really UNC" is the OS parser, not our opinion.
+        assert PureWindowsPath(raw).drive == "", raw
+        assert ntpath.splitdrive(raw)[0] == "", raw
+
+    @pytest.mark.parametrize("raw", [
+        chr(92) * 2 + "host" + chr(92) + "share",
+        "//host/share",
+        chr(92) + "/host" + chr(92) + "share",     # mixed spelling
+        "/" + chr(92) + "host/share",              # mixed spelling
+        chr(92) * 2 + "." + chr(92) + "PhysicalDrive0",
+    ])
+    def test_the_unc_predicate_does_not_under_match(self, raw):
+        """The other direction, in the same file: both mixed spellings ARE UNC to
+        Windows, and a raw two-prefix check misses them."""
+        from pathlib import PureWindowsPath
+        from localm import _pathcheck
+        assert _pathcheck.is_unc_or_device_path(raw) is True, raw
+        assert PureWindowsPath(raw).drive != "", raw
+
     def test_nested_subpaths_are_still_permitted(self, tmp_path):
         """A real HF listing uses them, so confined_name's flat-only rule is wrong
         here and confined_under must allow this."""

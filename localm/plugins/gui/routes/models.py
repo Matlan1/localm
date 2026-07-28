@@ -52,6 +52,12 @@ def _spec_names_a_host_path(spec: str) -> bool:
     requires the path to exist) - a non-existent absolute path is refused here
     even though pull.py would have gone on to treat it as a remote spec, which is
     the safe direction to differ in."""
+    # Trimming here is deliberate and is NOT the over-match that _pathcheck's
+    # predicate avoids: this value is USER-TYPED (a spec pasted into the GUI
+    # arrives with a trailing newline routinely), the route already trimmed it
+    # once, and the consequence of over-matching is requiring host filesystem
+    # access for an odd-looking spec - the fail-safe direction, for a path the
+    # caller named themselves rather than one a remote service supplied.
     s = spec.strip()
     if not s:
         return False
