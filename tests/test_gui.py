@@ -2443,8 +2443,16 @@ class TestRagEndpoints:
             # unknown collection / bad path validation
             assert client.post("/api/rag/collections/ghost/add",
                                json={"paths": [str(docs)]}).status_code == 404
+            # "Z:/nope" is outside the allowed indexing roots, so the owner is
+            # offered the add-and-continue consent flow (409) - the SAME answer
+            # an out-of-policy path that DOES exist gets. It used to 400 "Not
+            # found" here, and that difference was a path-existence oracle over
+            # the whole disk for any rag-scoped key (CodeQL 59): permission is
+            # now decided before anything touches the filesystem. A missing path
+            # INSIDE the allowed roots still reports "Not found" - see
+            # tests/test_disclosure.py::TestRagAddExistenceOracle.
             assert client.post("/api/rag/collections/kb/add",
-                               json={"paths": ["Z:/nope"]}).status_code == 400
+                               json={"paths": ["Z:/nope"]}).status_code == 409
 
             r = client.post("/api/rag/collections/kb/add",
                             json={"paths": [str(docs)], "embed": False})

@@ -157,21 +157,40 @@ def app(tmp_path, monkeypatch):
 
 
 def test_debug_stacks_open_mode_loopback(app):
-    # Open mode (no key configured) + loopback bind -> require_fs_host passes.
+    # Open mode (no key configured) + loopback bind -> require_fs_host passes,
+    # but the open-mode SHELL TOKEN is now also required (CodeQL 97): keyless
+    # effective_fs_access returns "host" for everyone, so require_fs_host alone
+    # left this fully unauthenticated. See tests/test_disclosure.py for the
+    # refusal side; this asserts the diagnostic still works for the GUI shell.
     app.state.bind_host = "127.0.0.1"
     c = TestClient(app)
-    r = c.get("/debug/stacks")
+    r = c.get("/debug/stacks",
+              headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert set(("pid", "loop_lag_s", "threads", "tasks")) <= set(body)
     assert isinstance(body["threads"], dict) and body["threads"]   # at least one thread
 
 
+def test_debug_stacks_open_mode_needs_shell_token(app):
+    # The other half of the change above: no token -> refused, where it used to
+    # return every thread's stack to any local caller.
+    app.state.bind_host = "127.0.0.1"
+    assert TestClient(app).get("/debug/stacks").status_code in (401, 403)
+
+
 def test_debug_stacks_hidden_on_network_bind(app):
+    # Still 404 (not 403) with NO credential: the shell-token gate is applied
+    # only on a loopback bind precisely so this stays "hidden" rather than
+    # becoming "exists but needs auth".
     for host in ("0.0.0.0", "192.168.1.50", "10.0.0.7"):
         app.state.bind_host = host
         r = TestClient(app).get("/debug/stacks")
         assert r.status_code == 404, f"{host} -> {r.status_code}"
+        with_token = TestClient(app).get(
+            "/debug/stacks",
+            headers={"Authorization": f"Bearer {app.state.shell_token}"})
+        assert with_token.status_code == 404, f"{host} -> {with_token.status_code}"
 
 
 def test_debug_stacks_requires_fs_host_key(tmp_path, monkeypatch):

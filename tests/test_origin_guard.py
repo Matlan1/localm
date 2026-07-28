@@ -253,8 +253,14 @@ class TestSensitiveGetCrossOriginRefused:
         assert client.get("/whoami").status_code == 200
 
     def test_same_origin_debug_stacks_allowed(self, client):
+        # Same-origin is not refused by the CROSS-ORIGIN check (what this class
+        # covers). The shell token is now also required in open mode - a separate
+        # gate added for CodeQL 97, covered in tests/test_disclosure.py - so it is
+        # supplied here to keep this test about the cross-origin behaviour.
         r = client.get("/debug/stacks",
-                       headers={"Origin": "http://testserver", "Host": "testserver"})
+                       headers={"Origin": "http://testserver", "Host": "testserver",
+                                "Authorization":
+                                    f"Bearer {client.app.state.shell_token}"})
         assert r.status_code == 200
         assert "threads" in r.json()
 

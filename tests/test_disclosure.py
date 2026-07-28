@@ -154,6 +154,24 @@ class TestDebugStacksGate:
             r = c.get("/debug/stacks", headers=_shell(app))
             assert r.status_code == 404, r.text
 
+    @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.50", "10.0.0.7"])
+    def test_off_loopback_no_credential_still_404s_not_403(self, monkeypatch, host):
+        """The token gate must NOT answer 403 off loopback.
+
+        /debug/stacks is deliberately hidden (404) on a network bind, and an
+        unknown path under /debug/ also 404s - so a 403 here would tell an
+        unauthenticated network caller that this endpoint exists, opening a new
+        existence oracle while closing a disclosure. It must stay
+        indistinguishable from a path that is not there."""
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+        app = create_app(_engine())
+        with TestClient(app) as c:
+            app.state.bind_host = host
+            assert c.get("/debug/stacks").status_code == 404
+            # The control: a path that genuinely does not exist.
+            assert c.get("/debug/no-such-endpoint").status_code == 404
+
 
 # --------------------------------------------------------------------------- #
 #  Embedding status strings (alert 98)                                         #
@@ -388,6 +406,34 @@ class TestKeyDigestFilePermsWindows:
         assert _has_explicit_user_ace(out), out
         assert "BUILTIN\\Users" not in out, out
         assert "Everyone" not in out, out
+
+    def test_corrupt_backup_is_owner_only(self, tmp_path, monkeypatch):
+        """The quarantine copy is a VERBATIM copy of jobs.json, digests and all,
+        and nothing ever deletes it - so restricting only the live file would
+        leave the exposure behind permanently on the first corrupt read."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "h"))
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "h")
+        from localm.plugins.builtin.jobs.store import Job, JobStore
+        store = JobStore(root=tmp_path / "h" / "jobs")
+        store.add(Job(name="j", task_kind="chat", prompt="hi",
+                      owner="deadbeef" * 8))
+        # Corrupt the defs file WITHOUT losing its contents - appending garbage
+        # keeps the digests in the file the quarantine copies. (Overwriting it
+        # outright made the backup carry only the garbage, which the premise
+        # assertion below correctly refused to accept as coverage.)
+        store._defs_file.write_text(
+            store._defs_file.read_text(encoding="utf-8") + "\n{trailing garbage",
+            encoding="utf-8")
+        store._read_all()
+        backups = list(store._defs_file.parent.glob("jobs.json.corrupt-*"))
+        assert backups, "no quarantine copy was written"
+        for b in backups:
+            assert "deadbeef" in b.read_text(encoding="utf-8"), (
+                "premise check: the backup really does carry the digest")
+            out = _icacls(b)
+            assert _has_explicit_user_ace(out), out
+            assert "BUILTIN\\Users" not in out, out
 
 
 class TestKeyDigestFilePermsPosix:

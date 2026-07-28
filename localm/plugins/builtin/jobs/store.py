@@ -260,6 +260,13 @@ class JobStore:
                 f"{self._defs_file.name}.corrupt-{stamp}")
             if raw is not None:
                 backup.write_text(raw, encoding="utf-8")
+                # The backup is a verbatim copy of jobs.json, so it carries the
+                # same `owner` key digests - restrict it too, or the quarantine
+                # path quietly reintroduces exactly the exposure the ACL on the
+                # live file closes (CodeQL 88), and it PERSISTS because nothing
+                # ever cleans these up.
+                from localm.config import restrict_file_perms
+                restrict_file_perms(backup)
             logger.warning(
                 "jobs store %s is corrupt (%s); backed up to %s and starting "
                 "with an empty job list - your scheduled jobs are preserved in "

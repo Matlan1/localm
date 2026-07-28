@@ -43,9 +43,14 @@ from typing import Callable, List, Tuple
 # A home-rooted path whose account segment must go even when it is NOT exactly
 # Path.home() - a different account, or any path under the well-known user
 # roots that an exact-prefix replacement would miss.
-_USER_ROOT_RE = re.compile(
-    r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+",
-    re.IGNORECASE if sys.platform == "win32" else 0)
+#
+# Kept as a PATTERN STRING, not a pre-compiled object: the flags depend on
+# sys.platform, and compiling at import time would freeze them, so a test that
+# patches sys.platform to exercise the Windows branch would silently get the
+# case-SENSITIVE regex. The original implementation this replaces read
+# sys.platform per call, and this stays byte-identical to it. re caches compiled
+# patterns, so there is no per-call compile cost.
+_USER_ROOT_PATTERN = r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+"
 
 
 def _sub_prefix(text: str, prefix: str, replacement: str) -> str:
@@ -83,7 +88,8 @@ def scrub_user_paths(text: str) -> str:
         home = ""
     if home:
         text = _sub_prefix(text, home, "~")
-    return _USER_ROOT_RE.sub(r"\1<redacted>", text)
+    flags = re.IGNORECASE if sys.platform == "win32" else 0
+    return re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
 
 
 def _machine_prefixes() -> List[Tuple[str, str]]:

@@ -2981,6 +2981,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # shell calls to discover whether it needs a key at all, so requiring the
     # token to read it would be circular. Its disclosure is handled by the
     # cross-origin refusal above and is a separate, narrower surface.
+    # NOTE: enforced only on a LOOPBACK bind - see the comment at token_gated_get
+    # below for why answering 403 off loopback would open a new oracle.
     _SHELL_TOKEN_GETS = ("/debug/stacks",)
 
     def _cross_origin_refused(request) -> bool:
@@ -3034,11 +3036,23 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             # it is not a management credential - a configured external origin must
             # use an API key for state changes.
         is_unsafe = request.method in _UNSAFE_METHODS
-        is_metadata_get = (
+        # A _SHELL_TOKEN_GETS path is token-gated only where it is actually
+        # SERVED. /debug/stacks 404s off a loopback bind (deliberately hidden),
+        # and returning 403 there instead would tell an unauthenticated NETWORK
+        # caller that the endpoint exists - a brand new existence oracle opened
+        # in the middle of closing a disclosure, since an unknown path under
+        # /debug/ 404s. So off loopback, fall through to the handler's own 404.
+        # The handler does the loopback check before computing anything, so
+        # nothing is spent serving it.
+        token_gated_get = (
+            request.method == "GET"
+            and request.url.path in _SHELL_TOKEN_GETS
+            and _is_loopback_host(
+                getattr(request.app.state, "bind_host", "127.0.0.1")))
+        is_metadata_get = token_gated_get or (
             request.method == "GET"
             and (request.url.path.startswith("/api/")
-                 or request.url.path.startswith("/v1/")
-                 or request.url.path in _SHELL_TOKEN_GETS)
+                 or request.url.path.startswith("/v1/"))
             and request.url.path != "/api/session"
             and not request.url.path.startswith("/v1/models")
         )
