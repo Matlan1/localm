@@ -85,6 +85,18 @@ def confined_under(base: Path, relpath: str) -> Path:
             raise ValueError(f"absolute or drive-qualified path: {relpath!r}")
         if any(part == ".." for part in pure.parts):
             raise ValueError(f"'..' is not allowed in a path component: {relpath!r}")
+    # A drive letter on ANY component, not just the first. pathlib only parses a
+    # drive at position 0, so "a/C:evil" passes every check above - and then
+    # joinpath() treats that component as drive-relative. MEASURED: with a base on
+    # C:, Path(base).joinpath("a", "C:evil") yields <base>/a/EVIL - the "C:" is
+    # silently dropped and the caller gets back a path naming a DIFFERENT FILE
+    # than it asked for. That is not an escape (it stays under base), which is
+    # exactly why a containment-only check cannot see it; it is a silent rename,
+    # and at a delete call site it means unlinking the wrong file. With a base on
+    # a DIFFERENT drive the same component escapes instead. Reject the shape.
+    for part in str(relpath).replace("\\", "/").split("/"):
+        if len(part) >= 2 and part[1] == ":":
+            raise ValueError(f"drive-qualified path component: {relpath!r}")
     target = base / relpath
     # is_relative_to is LEXICAL - it does not resolve '..', which is exactly the
     # case that defeats it. That is sound HERE, and only here, because every '..'

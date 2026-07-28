@@ -518,6 +518,14 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         "../../../etc/passwd",
         r"\\192.0.2.1\share\x",
         "C:evil",
+        # A drive letter on a NESTED component. pathlib only parses a drive at
+        # position 0, so this survives an is_absolute/.drive check and a
+        # containment check both - joinpath treats it as drive-relative, and when
+        # it matches the base's drive the "C:" is silently DROPPED, handing back a
+        # path that names a different file than was requested. Measured, and the
+        # reason the rejection is per-component rather than per-string.
+        "a/C:evil",
+        "sub/dir/C:evil",
     ])
     def test_an_escaping_rfilename_is_rejected_before_the_stat(self, tmp_path, rfilename):
         from localm import _pathcheck
