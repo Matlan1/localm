@@ -68,7 +68,15 @@ def allowed_input_roots() -> list[Path]:
     roots: list[Path] = []
     try:
         home = home_dir().resolve()
-    except OSError:
+    except OSError as e:
+        # Not silently swallowed (AGENTS rule 5): dropping the data-dir roots
+        # makes every legitimate input_image fail confinement, which looks like
+        # a bad path rather than an unresolvable data dir. Fail CLOSED (the
+        # roots are simply absent) but say so where it can be found.
+        from localm.debuglog import logger
+        logger.warning("cannot resolve the localm data directory (%s); no "
+                       "input-image root is available, so every input_image "
+                       "will be rejected until it resolves", e)
         home = None
     if home is not None:
         for name in (UPLOADS_DIR_NAME, IMAGE_DIR_NAME, VIDEO_DIR_NAME,
@@ -121,10 +129,11 @@ def confined_move_dest(request: Request, raw: str) -> Path:
     supplies ``dest`` in the GUI flow (``/api/fs/dirs``) is itself gated on the
     same dial, so this route simply stops being the weaker door.
 
-    Every other principal is confined to the data dir. Note the gate this
-    replaces was ``gallery.require_owner``, which proves ARTIFACT ownership, not
-    authority over the host filesystem - an artifact with no recorded owner
-    passes it for any caller.
+    Every other principal is confined to the data dir. This SUPPLEMENTS
+    ``gallery.require_owner`` rather than replacing it: that dependency proves
+    ARTIFACT ownership, which is a different question from authority over the
+    host filesystem, and it passes for ANY caller when the artifact has no
+    recorded owner (open mode, legacy or hand-placed files).
     """
     from localm.config import home_dir
     from localm.inference.http_server import effective_fs_access
@@ -136,9 +145,14 @@ def confined_move_dest(request: Request, raw: str) -> Path:
         return resolved
     try:
         home = home_dir().resolve()
-    except OSError:
-        home = None
-    if home is None or not (resolved == home or home in resolved.parents):
+    except OSError as e:
+        # The boundary itself is unavailable, so the destination cannot be
+        # proven inside it. Deny - but with the REAL reason, not the ordinary
+        # "outside the data directory" one, which would hide a fault behind a
+        # routine-looking refusal (AGENTS rule 5).
+        raise HTTPException(
+            500, f"Cannot resolve the localm data directory: {e}")
+    if not (resolved == home or home in resolved.parents):
         raise HTTPException(
             403, "This key cannot move media outside the localm data "
                  "directory (it has no host filesystem access).")
