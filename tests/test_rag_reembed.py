@@ -245,6 +245,52 @@ def test_pruning_never_touches_the_live_index(tmp_path):
     assert Collection("kb", base=tmp_path).vector_degrade_reason is None
 
 
+def test_cosine_falls_back_when_numpy_is_present_but_unusable(monkeypatch, caplog):
+    """The shared Windows-CI red across several lanes: numpy is PARTIALLY
+    INITIALISED on those runners, so `import numpy` SUCCEEDS while np.asarray is
+    absent. The fallback caught only ImportError, so the AttributeError escaped
+    into every caller of a vector query."""
+    import sys
+    import types
+
+    from localm.rag import store as store_mod
+
+    monkeypatch.setitem(sys.modules, "numpy", types.ModuleType("numpy"))
+    store_mod._NUMPY_DEGRADE_LOGGED.clear()
+
+    with caplog.at_level("WARNING"):
+        same = store_mod._cosine([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
+        orthogonal = store_mod._cosine([1.0, 0.0], [0.0, 1.0])
+        store_mod._cosine([1.0, 1.0], [1.0, 1.0])          # third call
+
+    assert same == pytest.approx(1.0), "fallback must still compute a correct cosine"
+    assert orthogonal == pytest.approx(0.0)
+    # surfaced, not silent (AGENTS rule 5) - but once per process, not per chunk
+    warned = [r for r in caplog.records if "numpy is present but unusable" in r.getMessage()]
+    assert len(warned) == 1, f"expected exactly one warning across 3 calls, got {len(warned)}"
+
+
+def test_cosine_does_not_swallow_a_real_numerical_failure(monkeypatch):
+    """Widening the except must not become a bare catch-all: a USABLE numpy that
+    fails for a real reason has to propagate, or a broken install silently halves
+    retrieval quality forever."""
+    import sys
+    import types
+
+    from localm.rag import store as store_mod
+
+    fake = types.ModuleType("numpy")
+
+    def _boom(*a, **k):
+        raise ValueError("genuine numerical failure")
+
+    fake.asarray = _boom
+    monkeypatch.setitem(sys.modules, "numpy", fake)
+
+    with pytest.raises(ValueError, match="genuine numerical failure"):
+        store_mod._cosine([1.0, 2.0], [1.0, 2.0])
+
+
 def test_reembed_after_a_mismatch_lets_the_add_succeed(tmp_path):
     """End to end: hit the refusal, follow the advice, and the add now works -
     which is the whole user journey that was a dead end."""

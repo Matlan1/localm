@@ -537,6 +537,12 @@ _REJECTED_VECTORS = "vectors.json.rejected"
 #: least useful ones. Keep the newest few, delete the rest LOUDLY.
 _MAX_REJECTED_KEPT = 3
 
+#: Set once when numpy has been found present-but-unusable, so the pure-Python
+#: cosine fallback announces itself exactly once per process instead of on every
+#: scored chunk. A set rather than a bool because rebinding a module-level bool
+#: from inside a function needs `global`, and this is read from a hot path.
+_NUMPY_DEGRADE_LOGGED: set = set()
+
 #: (collection dir, reason) pairs already logged in THIS process. _load() runs
 #: from __init__ and every request builds a fresh Collection, so an instance-level
 #: guard re-armed constantly and the same warning was emitted 25+ times a session.
@@ -2014,7 +2020,28 @@ def _cosine(a: list, b: list) -> float:
         va, vb = np.asarray(a, dtype="float32"), np.asarray(b, dtype="float32")
         denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
         sim = float(va @ vb) / denom if denom else 0.0
-    except ImportError:
+    except (ImportError, AttributeError) as e:
+        # ImportError is the ordinary "numpy not installed" case. AttributeError is
+        # the one that broke Windows CI across several lanes: numpy is PARTIALLY
+        # INITIALISED on those runners, so `import numpy` SUCCEEDS while np.asarray
+        # is absent - the fallback below was never reached and the AttributeError
+        # escaped into every caller of a vector query.
+        #
+        # Deliberately NOT a bare `except`: that would also swallow a genuinely
+        # broken numpy and silently halve retrieval quality forever with nobody
+        # the wiser (AGENTS rule 5). These two are the exact shapes of "numpy is
+        # unusable HERE", and a usable-numpy failure (a real numerical error) still
+        # propagates. And the degrade is ANNOUNCED once per process rather than
+        # taken silently, because "semantic search got slower and nobody knows why"
+        # is exactly the invisible fault that rule exists to prevent.
+        if not _NUMPY_DEGRADE_LOGGED:
+            _NUMPY_DEGRADE_LOGGED.add(True)
+            _log.warning(
+                "numpy is present but unusable (%s: %s); falling back to pure-Python "
+                "cosine similarity. Results are identical, scoring is slower on large "
+                "collections. This usually means a partially-initialised or broken "
+                "numpy install - reinstall it to restore the fast path.",
+                type(e).__name__, e)
         dot = sum(x * y for x, y in zip(a, b))
         na = math.sqrt(sum(x * x for x in a))
         nb = math.sqrt(sum(y * y for y in b))
