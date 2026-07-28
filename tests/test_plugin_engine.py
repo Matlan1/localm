@@ -879,28 +879,32 @@ def test_install_external_rejects_a_link_escaping_the_source(env):
     assert not (installed / "linky").exists()
 
 
-def test_install_external_keeps_an_internal_link_a_link(env):
-    """A link that stays inside the plugin's own tree is legitimate and is
-    copied AS a link (symlinks=True), not dereferenced."""
+def test_install_external_rejects_an_internal_link_too(env):
+    """An INTERNAL link is refused as well, and this is not belt-and-braces.
+
+    An escape-only rule leaves two holes. (1) An ABSOLUTE link whose target sits
+    inside the source resolves inside it, so it passes an escape check and is
+    then copied verbatim - the installed plugin keeps pointing at the operator's
+    source directory and is not self-contained. (2) A directory link back into
+    the tree is the cycle case (see the junction test below). Plugin sources
+    must be plain files."""
     from localm.plugins.engine import PluginManager
     src = _make_plugin(env / "src", "inner", _ping("inner"))
     (src / "web").mkdir()
     (src / "web" / "real.txt").write_text("payload", encoding="utf-8")
-    _symlink_or_skip(src / "web" / "alias.txt", src / "web" / "real.txt")
+    # absolute, and pointing INSIDE the source - passes any escape-only check
+    _symlink_or_skip(src / "web" / "alias.txt", (src / "web" / "real.txt").resolve())
 
     installed = env / "installed"
     mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
-    mgr.set_installed_from_dir(src)
-
-    copied = installed / "inner" / "web" / "alias.txt"
-    assert copied.is_symlink()
-    assert copied.read_text(encoding="utf-8") == "payload"
+    with pytest.raises(ValueError, match="plain files"):
+        mgr.set_installed_from_dir(src)
+    assert not (installed / "inner").exists()
 
 
-def test_install_external_survives_an_internal_link_cycle(env):
-    """A link cycle inside the source must not make the pre-copy walk (or the
-    copy) recurse without bound - that DoS lands before any plugin code runs,
-    so it is reachable by a source that never gets loaded."""
+def test_install_external_rejects_a_directory_link_cycle(env):
+    """A directory link back into the source is the unbounded-copy case, and it
+    must be refused by the WALK - not delegated to copytree(symlinks=True)."""
     from localm.plugins.engine import PluginManager
     src = _make_plugin(env / "src", "cyclic", _ping("cyclic"))
     (src / "web").mkdir()
@@ -908,10 +912,88 @@ def test_install_external_survives_an_internal_link_cycle(env):
 
     installed = env / "installed"
     mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
-    mgr.set_installed_from_dir(src)               # must return, not recurse
+    with pytest.raises(ValueError, match="plain files"):
+        mgr.set_installed_from_dir(src)
+    assert not (installed / "cyclic").exists()
 
-    assert (installed / "cyclic" / "web" / "loop").is_symlink()
-    assert (installed / "cyclic" / "plugin.toml").is_file()
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="directory junctions are a Windows-only construct")
+def test_install_external_rejects_a_windows_junction_cycle(env):
+    """REGRESSION GUARD, and the reason the rule is 'any link' rather than 'any
+    ESCAPING link'.
+
+    shutil.copytree deliberately DEMOTES a directory junction to a non-symlink
+    and recurses into it (stdlib shutil.py: "Special check for directory
+    junctions, which appear as symlinks but we want to recurse"), so
+    symlinks=True neither preserves a junction nor bounds a junction cycle.
+    Measured on the escape-only version of this fix: 63 nested levels copied
+    before it failed on path length. A junction also needs NO elevation to
+    create, unlike os.symlink, so it is the more reachable primitive - and
+    is_symlink() reports False for it, which is why the walk tests the
+    reparse-point attribute instead."""
+    import _winapi
+    from localm.plugins.engine import PluginManager
+    src = _make_plugin(env / "src", "juncy", _ping("juncy"))
+    (src / "web").mkdir()
+    _winapi.CreateJunction(str(src), str(src / "web" / "loop"))
+    # precondition: this is exactly the shape islink()-based checks miss
+    assert not (src / "web" / "loop").is_symlink()
+
+    installed = env / "installed"
+    mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
+    with pytest.raises(ValueError, match="plain files"):
+        mgr.set_installed_from_dir(src)
+    assert not (installed / "juncy").exists()
+
+
+def test_failed_install_never_deletes_a_dir_it_did_not_create(env):
+    """A legal id can still name an ALREADY-INSTALLED plugin's directory - on a
+    case-insensitive filesystem 'MyTool' is 'mytool'. The id check cannot see
+    that (it is a shape rule, not a uniqueness one), so the rollback must not
+    delete a directory this install never created. Before the fix this
+    destroyed the real plugin and its user data."""
+    from localm.plugins.engine import PluginManager
+    store = env / "store"; store.mkdir(parents=True, exist_ok=True)
+    installed = env / "installed"
+    real = _make_plugin(installed, "mytool", _ping("mytool"))
+    (real / "USER_DATA.txt").write_text("irreplaceable", encoding="utf-8")
+
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
+    # install() has TWO rollback sites (verify-failed and load-failed); fixing
+    # only the first still let the exact-case name delete the plugin, so all
+    # three variants are pinned. test_install_rolls_back_on_load_failure above
+    # is the fires-control: rollback of a copy this call DID create still runs.
+    for variant in ("MyTool", "mytool", "MYTOOL"):
+        with pytest.raises((ValueError, KeyError, RuntimeError)):
+            mgr.install(variant)          # no store source -> cannot succeed
+        assert real.is_dir(), f"{variant} deleted the installed plugin"
+        assert (real / "USER_DATA.txt").read_text(encoding="utf-8") == "irreplaceable"
+
+
+def test_remove_installed_dir_confines_without_demanding_an_identifier(env):
+    """The DELETE site confines by resolved parent, not identifier shape.
+
+    Routing it through the id check made a legitimately-installed directory
+    whose basename is not identifier-shaped (a hand-extracted 'coolplugin-1.0')
+    impossible to uninstall. The relaxation must not cost containment, so this
+    pins BOTH directions: the odd basename is removable, a traversing one is
+    still refused."""
+    from localm.plugins.engine import PluginManager
+    installed = env / "installed"
+    odd = _make_plugin(installed, "coolplugin-1.0", _ping("coolplugin"))
+    sentinel = _make_plugin(env, "outside", _ping("outside"))
+    mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
+
+    # the guard still FIRES on a genuinely different failure
+    with pytest.raises(ValueError, match="installed-plugins root"):
+        mgr._remove_installed_dir("../outside")
+    assert _sentinel_intact(sentinel)
+
+    # ...and no longer blocks a legitimate removal
+    assert odd.is_dir()
+    mgr._remove_installed_dir("coolplugin-1.0")
+    assert not odd.exists()
 
 
 def test_parse_spec_reads_tool_exports(tmp_path):

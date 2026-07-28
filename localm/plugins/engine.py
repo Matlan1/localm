@@ -21,6 +21,7 @@ import importlib.util
 import json
 import logging
 import os
+import stat
 import sys
 import threading
 import tomllib
@@ -62,14 +63,19 @@ def _is_valid_plugin_name(name: Any) -> bool:
     """
     if not name or not isinstance(name, str):
         return False
-    # BOTH halves are load-bearing; neither alone is enough (verified on
-    # Windows and Linux, not assumed):
-    #   - Path(name).name drops any directory part, so it differs from name for
-    #     './x', '../x', 'a/b', a drive-qualified path, and on Windows 'a\\b'.
-    #   - It does NOT catch '..' (Path('..').name is '..', equal to the input),
-    #     and on POSIX a backslash is an ordinary character, so '..\\outside' is
-    #     one component there. isidentifier() is what rejects both of those,
-    #     plus a space, a dot, or a leading digit in the name.
+    # isidentifier() is the half that does the WORK: no separator, dot, space or
+    # leading digit survives it, so it alone rejects '.', '..', '../x', 'a/b',
+    # 'a\\b' and a drive-qualified path on every platform. The Path(name).name
+    # comparison is redundant defence kept deliberately, so that a later
+    # relaxation of the identifier rule (someone allowing '.' for 'my.plugin')
+    # cannot silently reintroduce traversal. Do not read it as the traversal
+    # guard, and do not delete it as dead code.
+    #
+    # NOTE what this rule does NOT give you: it is a SHAPE check, not a
+    # uniqueness one. 'MyTool' is a legal id, and on a case-insensitive
+    # filesystem it names the same directory as an installed 'mytool'. Nothing
+    # here prevents that; what makes it non-destructive is that rollback only
+    # deletes a directory the call itself created (see _provision_from_store).
     return name == Path(name).name and name.replace("-", "_").isidentifier()
 
 
@@ -82,9 +88,9 @@ def _check_plugin_name(name: str) -> str:
     return name
 
 
-def _reject_escaping_links(src: Path) -> None:
-    """Refuse an untrusted plugin source tree that contains a link (symlink or
-    Windows junction) resolving OUTSIDE *src*. Raises ValueError.
+def _reject_source_links(src: Path) -> None:
+    """Refuse an untrusted plugin source tree that contains ANY link (symlink or
+    Windows directory junction). Raises ValueError.
 
     Copying such a tree with ``shutil.copytree``'s default ``symlinks=False``
     DEREFERENCES the link, flattening the target file's CONTENTS into the
@@ -93,35 +99,57 @@ def _reject_escaping_links(src: Path) -> None:
     the data to escape. ``mount_static``'s own resolve()-based guard cannot see
     this: by then the bytes are an ordinary file.
 
-    The walk resolves every entry (not only ones that report as symlinks), so a
-    Windows junction is covered without relying on ``islink()`` semantics for
-    reparse points, and it de-duplicates by resolved directory, so a link cycle
-    inside the tree terminates instead of recursing forever.
+    The rule is ANY link, not merely one that escapes, and that is deliberate.
+    An escape-only rule does not hold on Windows: ``shutil.copytree`` demotes a
+    directory JUNCTION to a non-symlink and recurses into it on purpose
+    (stdlib shutil.py, "Special check for directory junctions, which appear as
+    symlinks but we want to recurse"), so ``symlinks=True`` does NOT preserve a
+    junction and does NOT bound a junction cycle. Measured: a junction pointing
+    back at the source root produced a 63-level nested copy before failing on
+    path length. ``mklink /J`` needs no elevation, while ``os.symlink`` does, so
+    the junction is the MORE reachable primitive of the two.
+
+    Rejecting every link also makes the installed tree self-contained plain
+    files, which an escape-only rule does not: an ABSOLUTE link whose target sits
+    inside the source still resolves inside it, passes an escape check, and is
+    then copied verbatim so the installed plugin keeps pointing at the operator's
+    source directory.
     """
     root = Path(src).resolve()
-    seen: set[str] = set()
-    stack: list[Path] = [root]
+    try:
+        entries = list(os.scandir(root))
+    except OSError as e:
+        raise ValueError(f"plugin source is not readable: {root} ({e})") from e
+    stack: list[os.DirEntry] = list(entries)
     while stack:
-        d = stack.pop()
-        if str(d) in seen:
-            continue                  # already scanned: a link cycle, not new content
-        seen.add(str(d))
+        entry = stack.pop()
+        p = Path(entry.path)
         try:
-            entries = list(os.scandir(d))
-        except OSError as e:
-            raise ValueError(f"plugin source is not readable: {d} ({e})") from e
-        for entry in entries:
-            p = Path(entry.path)
+            st = entry.stat(follow_symlinks=False)
+            # A Windows junction reports is_symlink() False, so the reparse-point
+            # attribute is the only thing that sees it. st_file_attributes exists
+            # on Windows only; getattr keeps this one branch cross-platform.
+            reparse = bool(getattr(st, "st_file_attributes", 0)
+                           & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+            is_link = entry.is_symlink() or reparse
+        except OSError as e:          # unreadable/malformed reparse point
+            raise ValueError(
+                f"plugin source entry cannot be inspected: {p.name} ({e})") from e
+        if is_link:
             # strict=False, so a BROKEN link still resolves lexically and is
-            # judged on where it pointed - a dangling '-> /etc/shadow' is
-            # rejected rather than quietly copied as a dead link.
-            real = p.resolve()
-            if real != root and root not in real.parents:
-                raise ValueError(
-                    f"plugin source contains a link that points outside it: "
-                    f"{p.name} -> {real}")
-            if entry.is_dir():        # follows links on purpose; `seen` bounds it
-                stack.append(real)
+            # named by where it pointed rather than silently skipped.
+            target = p.resolve()
+            escapes = target != root and root not in target.parents
+            raise ValueError(
+                f"plugin source contains a "
+                f"{'link that points outside it' if escapes else 'link'}: "
+                f"{p.name} -> {target}. Plugin sources must be plain files "
+                f"(no symlinks or directory junctions).")
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                stack.extend(os.scandir(p))
+        except OSError as e:
+            raise ValueError(f"plugin source is not readable: {p} ({e})") from e
 
 
 def _dir_content_hash(d: Path) -> str:
@@ -979,20 +1007,28 @@ class PluginManager:
         # directory of the plugins root. Raises ValueError on a bad id.
         return Path(self._installed_root) / _check_plugin_name(name)
 
-    def _provision_from_store(self, name: str) -> None:
+    def _provision_from_store(self, name: str) -> bool:
         """Copy the plugin from the bundled store into the installed folder (or,
         if missing from the store, fetch it from its GitHub repo). No-op if it is
-        already installed. Raises KeyError when no source exists."""
+        already installed. Raises KeyError when no source exists.
+
+        Returns True only if THIS call created the directory. The caller must
+        pass that through to _provision_and_verify's rollback: rolling back a
+        directory we did not create is destructive, and it is the mechanism
+        behind two separate data-loss bugs (a traversing id resolving onto a
+        sibling of the plugins root, and - on a case-insensitive filesystem - an
+        id like 'MyTool' whose is_file() probe matches an already-installed
+        'mytool', so the rollback rmtree'd the real plugin and its data)."""
         import shutil
         dest = self._installed_dir(name)
         if (dest / "plugin.toml").is_file():
-            return                                   # already installed on disk
+            return False                             # already installed on disk
         src = self._store_dir(name)
         if src is not None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(src, dest)
             _write_marker(dest, "store", _dir_content_hash(src))
-            return
+            return True
         from localm.plugins import catalog as _cat
         entry = _cat.get(name)
         url = entry.source_url() if entry else ""
@@ -1004,7 +1040,24 @@ class PluginManager:
 
     def _remove_installed_dir(self, name: str) -> None:
         import shutil
-        d = self._installed_dir(name)
+        # The DELETE site's safety property is CONTAINMENT, not identifier shape.
+        # uninstall() admits any basename present on disk (_installed_set returns
+        # raw directory names, which need not equal the manifest name), so a
+        # hand-extracted directory like 'coolplugin-1.0' is a legitimate thing to
+        # remove even though it is not identifier-shaped - routing this through
+        # _installed_dir made such a plugin impossible to uninstall. Confining by
+        # RESOLVED parent keeps a traversing name out just as firmly, and also
+        # refuses a symlinked plugin dir whose target lives outside the root.
+        root = Path(self._installed_root)
+        d = root / name
+        try:
+            contained = d.resolve().parent == root.resolve()
+        except OSError:
+            contained = False
+        if not contained:
+            raise ValueError(
+                f"refusing to delete {name!r}: it does not resolve to a direct "
+                f"child of the installed-plugins root")
         try:
             if d.is_dir():
                 shutil.rmtree(d)
@@ -1196,8 +1249,8 @@ class PluginManager:
         src = Path(source)
         # An arbitrary-source tree is UNTRUSTED, and the very first thing we do
         # with it is read a file out of it. Reject a link that escapes the tree
-        # before that, not after the copy: see _reject_escaping_links.
-        _reject_escaping_links(src)
+        # before that, not after the copy: see _reject_source_links.
+        _reject_source_links(src)
         spec0 = parse_spec(src)                       # validate + name (raises)
         name = spec0.name
         # A third-party plugin must not shadow a built-in command name
@@ -1220,12 +1273,13 @@ class PluginManager:
                 raise ValueError(f"plugin {name!r} is already installed")
             self._remove_installed_dir(name)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # symlinks=True: copy a link AS a link. The default (False) dereferences
-        # it, so a third-party plugin shipping 'web/notes.txt -> ~/.ssh/id_rsa'
-        # would land that file's CONTENTS in a directory localm then serves.
-        # _reject_escaping_links above already refused any link leaving src, so
-        # this is the second half of the same fix: whatever survives points
-        # inside the plugin's own tree and stays a link there.
+        # symlinks=True is defence in depth ONLY. _reject_source_links above has
+        # already refused every link, so nothing here should be one; if a link
+        # appeared between that walk and this copy, this at least does not
+        # DEREFERENCE it (the default, False, would flatten the target file's
+        # contents into a directory localm serves). Do NOT weaken the walk on
+        # the strength of this flag: symlinks=True does not cover a Windows
+        # junction, which copytree demotes and recurses into by design.
         shutil.copytree(src, dest, symlinks=True)
         _write_marker(dest, "external", _dir_content_hash(src))
         return spec0, dest
@@ -1260,13 +1314,18 @@ class PluginManager:
         """Install a plugin: copy it from the bundled store (or its GitHub repo)
         into the installed folder, then load + enable it on the live app. Rolls
         back the copy if it does not load. KeyError if no such plugin exists."""
-        self._provision_from_store(name)             # may raise KeyError
-        self._provision_and_verify(name)
+        copied = self._provision_from_store(name)    # may raise KeyError
+        # Roll back ONLY what this call created - see _provision_from_store.
+        # There are TWO rollback sites in this method and both need the guard:
+        # fixing only the first still let `install('mytool')` on an
+        # already-installed plugin delete it when its load failed.
+        self._provision_and_verify(name, rollback_on_fail=copied)
         try:
             if name not in self._loaded:
                 self._load(self._specs[name])
         except Exception:
-            self._remove_installed_dir(name)         # roll back the copy
+            if copied:
+                self._remove_installed_dir(name)     # roll back OUR copy only
             raise
         self._invoke_hook(name, "on_install")        # optional lifecycle hook
         self._set_enabled(name, True)
@@ -1466,8 +1525,9 @@ class PluginManager:
         load_enabled on its next start. Installing also enables by default;
         uninstalling disables. Honours protection on uninstall."""
         if on:
-            self._provision_from_store(name)         # copy store -> installed (raises if unknown)
-            self._provision_and_verify(name)
+            copied = self._provision_from_store(name)  # copy store -> installed (raises if unknown)
+            # Roll back ONLY what this call created - see _provision_from_store.
+            self._provision_and_verify(name, rollback_on_fail=copied)
             if enable:
                 self._set_enabled(name, True)
         else:

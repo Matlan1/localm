@@ -12,23 +12,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Security
-- **A plugin name can no longer escape the plugins folder.** Install, refresh,
-  enable, disable and uninstall took the name you gave them and joined it
-  straight onto a path, so a crafted name like `..\something` pointed at a
-  directory NEXT TO the plugins folder - and the install path reached its
-  clean-up step and deleted that directory. Any name that is not a plain
-  one-word plugin id is now refused before it becomes a path: the HTTP API
-  answers 404, the CLI prints an error, and nothing on disk is touched. Normal
-  plugin names are unaffected.
+- **A plugin name can no longer escape the plugins folder.** Installing or
+  refreshing a plugin took the name you gave it and joined it straight onto a
+  path, so a crafted name like `..\something` pointed at a directory NEXT TO
+  the plugins folder - and installing reached its clean-up step and deleted
+  that directory. Any name that is not a plain one-word plugin id is now
+  refused before it becomes a path: the HTTP API answers 404, the CLI prints an
+  error, and nothing on disk is touched. Normal plugin names are unaffected.
+- **Installing a plugin can no longer delete a different plugin.** The clean-up
+  that runs when an install fails deleted the destination folder even when the
+  install had not created it. On Windows and macOS, where folder names are
+  case-insensitive, installing `MyTool` while `mytool` was installed therefore
+  destroyed `mytool` and everything in it. Clean-up now only removes a folder
+  that the failed install itself created.
 - **A third-party plugin can no longer smuggle a file out of your machine
   through a symlink.** Installing a plugin from a directory followed symlinks
   while copying, so a plugin shipping something like
   `web/notes.txt -> <your private key>` had that file's CONTENTS copied into
-  the installed plugin folder, which localm then serves over HTTP. Links are
-  now copied as links, and a source directory containing a link that points
-  outside itself is refused with a message naming the link. This also removes a
-  hang: a directory that linked back to itself made the copy recurse without
-  bound before any of the plugin's own code ran.
+  the installed plugin folder, which localm then serves over HTTP. A plugin
+  source containing any symlink or Windows directory junction is now refused
+  with a message naming it, so an installed plugin is always plain files. That
+  also stops a folder linking back to itself from driving a huge recursive copy
+  (measured at 63 nested levels before it failed), which happened before any of
+  the plugin's own code ran.
 
 ## [0.1.3] - 2026-07-23
 
