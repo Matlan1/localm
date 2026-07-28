@@ -1009,7 +1009,11 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     models_root = _mm.MODELS_DIR.resolve()
 
     def _under_models_dir(p: Path) -> bool:
-        return models_root in p.resolve().parents
+        # Same predicate as everywhere else, with the root hoisted out of the
+        # per-entry loop below (see is_owned_model_path). This one was already
+        # correct; it is routed through the shared helper so a future edit cannot
+        # leave the repo with two definitions that disagree again.
+        return is_owned_model_path(p, models_root)
 
     flagged = restored = pruned = 0
     note = ""
@@ -1344,6 +1348,40 @@ def _register_with_dedup(
 
 
 
+def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
+    """THE definition of "this file is localm's to delete": it lives strictly
+    inside ``<data dir>/models``.
+
+    Every caller that decides whether a registered file is managed - the deletion
+    in :func:`remove_model`, the "PERMANENTLY deletes" wording in the ``localm rm``
+    confirmation prompt, and the managed/external split in
+    :func:`sync_models_dir` - MUST route through this. Three hand-rolled variants
+    had drifted apart, and two of them were wrong in a way that reaches
+    ``shutil.rmtree``:
+
+    * ``path.is_relative_to(MODELS_DIR)`` is purely LEXICAL. Measured:
+      ``<models>/../models-old/x.gguf`` tests True while resolving to a file
+      OUTSIDE the models folder entirely.
+    * ``str(path).startswith(str(MODELS_DIR))`` is a raw string prefix, so the
+      sibling directory ``<data dir>/models-old`` matches ``<data dir>/models``.
+
+    Both are answered by resolving first, which is what
+    ``sync_models_dir._under_models_dir`` already did correctly. Using
+    ``.parents`` rather than an ``is_relative_to`` on the resolved path also
+    excludes the models root ITSELF, so a registry row pointing at the models
+    folder can never become an rmtree of the whole library.
+
+    *models_root* lets a caller hoist an already-resolved root out of a loop
+    (sync_models_dir walks the whole registry); it must be a RESOLVED path.
+    An unresolvable path is not one we are willing to delete under, so it is
+    reported as not owned rather than raising at the call site."""
+    root = models_root if models_root is not None else _mm.MODELS_DIR.resolve()
+    try:
+        return root in Path(path).resolve().parents
+    except OSError:
+        return False
+
+
 def remove_model(name: str) -> None:
     reg = _mm.load_registry()
     if name not in reg:
@@ -1376,24 +1414,12 @@ def remove_model(name: str) -> None:
         return
 
     # Only delete files that live inside <data dir>/models/ - never touch
-    # externally registered paths (Ollama blobs, user model dirs, etc.).
-    #
-    # This gate stands immediately in front of shutil.rmtree / unlink, so it has to
-    # hold on a path that was NOT written by this process. Both halves of the old
-    # test failed that bar. `Path.is_relative_to` is purely LEXICAL - verified, it
-    # does not normalise '..' - so "<models>/../../victim" tested as owned and was
-    # deleted; and the `startswith` fallback compared raw strings, so the sibling
-    # "<data dir>/models-old" prefix-matched "<data dir>/models" and was deleted
-    # too. Resolve both sides and require a real parent relationship instead, the
-    # same test sync_models_dir._under_models_dir already uses. Using .parents
-    # (rather than an is_relative_to on the resolved path) also excludes MODELS_DIR
-    # ITSELF, so a registry row pointing at the models root can never rmtree it.
-    models_root = _mm.MODELS_DIR.resolve()
-    try:
-        owned = models_root in path.resolve().parents
-    except OSError:
-        # An unresolvable path is not a path we are willing to delete under.
-        owned = False
+    # externally registered paths (Ollama blobs, user model dirs, etc.). This gate
+    # stands immediately in front of shutil.rmtree / unlink, and it has to hold on
+    # a path that was NOT written by this process, so it goes through the single
+    # resolving definition rather than a local test (see is_owned_model_path for
+    # the two hand-rolled variants it replaces and why both were wrong).
+    owned = is_owned_model_path(path)
     if owned and path.exists():
         if path.is_dir():
             import shutil

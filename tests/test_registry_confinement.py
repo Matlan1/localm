@@ -299,6 +299,69 @@ class TestOllamaManifestDigestIsConfined:
 #  (d) the remove_model delete gate                                            #
 # --------------------------------------------------------------------------- #
 
+class TestIsOwnedModelPathIsTheSingleDefinition:
+    """Three hand-rolled variants of "is this file localm's to delete" had drifted
+    apart in the repo, two of them wrong in a way that reaches shutil.rmtree. The
+    predicate now lives in ONE place; these tests pin its behavior directly, so a
+    caller that stops using it cannot quietly reintroduce a weaker copy."""
+
+    def test_it_rejects_what_the_lexical_variant_accepted(self, home, monkeypatch):
+        """`is_relative_to` does not normalise '..' - the traversal below tested
+        True under it while resolving outside the models folder."""
+        import localm.model_manager as _mm
+        from localm.model_manager import is_owned_model_path
+        monkeypatch.setattr(_mm, "MODELS_DIR", home / "models")
+        evil = home / "models" / ".." / "models-old" / "x.gguf"
+        assert evil.is_relative_to(home / "models"), \
+            "precondition: the OLD lexical test must accept this, else the case is moot"
+        assert is_owned_model_path(evil) is False
+
+    def test_it_rejects_what_the_startswith_variant_accepted(self, home, monkeypatch):
+        """A raw string prefix matches a SIBLING directory."""
+        import localm.model_manager as _mm
+        from localm.model_manager import is_owned_model_path
+        monkeypatch.setattr(_mm, "MODELS_DIR", home / "models")
+        sibling = home / "models-old" / "x.gguf"
+        assert str(sibling).startswith(str(home / "models")), \
+            "precondition: the OLD startswith test must accept this"
+        assert is_owned_model_path(sibling) is False
+
+    def test_the_models_root_itself_is_not_owned(self, home, monkeypatch):
+        import localm.model_manager as _mm
+        from localm.model_manager import is_owned_model_path
+        monkeypatch.setattr(_mm, "MODELS_DIR", home / "models")
+        assert is_owned_model_path(home / "models") is False
+
+    def test_a_real_managed_model_is_owned(self, home, monkeypatch):
+        """The fires-control: the predicate must still say YES to the thing it
+        exists to permit, or every assertion above passes for free."""
+        import localm.model_manager as _mm
+        from localm.model_manager import is_owned_model_path
+        monkeypatch.setattr(_mm, "MODELS_DIR", home / "models")
+        mine = home / "models" / "mine.gguf"
+        mine.write_bytes(b"GGUF")
+        assert is_owned_model_path(mine) is True
+        assert is_owned_model_path(home / "models" / "sub" / "deep.gguf") is True
+
+    def test_remove_model_routes_through_it(self, home, monkeypatch):
+        """Pins the WIRING, not just the predicate: if remove_model stops calling
+        the shared definition, this fails even though the predicate is still
+        correct on its own."""
+        import localm.model_manager as _mm
+        from localm.model_manager import registry as reg
+        monkeypatch.setattr(_mm, "MODELS_DIR", home / "models")
+        seen = []
+        real = reg.is_owned_model_path
+        monkeypatch.setattr(reg, "is_owned_model_path",
+                            lambda p, root=None: seen.append(Path(p)) or real(p, root))
+        owned = home / "models" / "mine.gguf"
+        owned.write_bytes(b"GGUF")
+        _mm.save_registry({"mine": {"path": str(owned), "source": "local",
+                                    "model_type": "llm"}})
+        reg.remove_model("mine")
+        assert owned in seen, "remove_model must decide ownership via the shared helper"
+
+
 class TestRemoveModelDeleteGate:
     def test_a_traversing_entry_does_not_delete_outside_models_dir(self, home, monkeypatch):
         """`<models>/../../victim` passed the OLD lexical is_relative_to test and
