@@ -596,6 +596,50 @@ def _snapshot_bytes_on_disk(dest: Path) -> int:
         return 0
 
 
+def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
+    """Say plainly when a downloaded repo contains Python.
+
+    ``snapshot_download`` fetches the WHOLE repo, so a HuggingFace repo's own .py
+    lands on disk like any other file. Historically the HF backend then loaded a
+    model directory with transformers' remote-code flag hard-coded on, so that
+    Python was imported and executed on the next load (CodeQL alert 49).
+
+    Two reasons this is a warning and not an allow_patterns allowlist:
+
+    1. Execution is already off. ``hf_trust_remote_code`` defaults to False and a
+       model that needs custom code is refused with an explanation instead of
+       being run (see inference/backends/hf.py), so the file on disk is inert.
+    2. An allowlist is the riskier change. A model needs more than weights plus a
+       tokenizer - chat templates (.jinja), merges.txt, shard index files,
+       per-component subdirectories for multimodal repos - and a pattern list that
+       misses one silently produces a broken, half-downloaded model. Refusing to
+       download a file we might need, to protect against code we already refuse to
+       run, trades a real breakage for no extra safety.
+
+    So: fetch everything, and make the presence of code VISIBLE at the moment it
+    arrives, rather than leaving the user to discover it later or not at all.
+    """
+    try:
+        py = sorted(p for p in dest.rglob("*.py") if p.is_file())
+    except OSError as e:
+        # A failed scan must not fail an otherwise-good download, but it must not
+        # read as "no code found" either (AGENTS.md rule 5): say it was not checked.
+        console.print(f"[yellow]Could not check {repo_id} for bundled code: {e}[/yellow]")
+        return
+    if not py:
+        return
+    shown = ", ".join(p.name for p in py[:5])
+    if len(py) > 5:
+        shown += f", and {len(py) - 5} more"
+    console.print(
+        f"[yellow]Note:[/yellow] {repo_id} ships {len(py)} Python file(s) "
+        f"({shown}).")
+    console.print(
+        "[dim]  localm will NOT run them: model-bundled custom code is disabled "
+        "by default. A model that requires it is refused with an explanation "
+        "unless you enable 'hf_trust_remote_code'.[/dim]")
+
+
 def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     """The type to register a downloaded HF snapshot under.
 
@@ -764,6 +808,7 @@ def _pull_hf_snapshot(
         console.print(f"[red]Download failed:[/red] {e}")
         return False
 
+    _warn_if_repo_ships_code(dest, repo_id)
     _mm._register(model_name, dest, f"hf:{repo_id}",
                   model_type=_resolve_snapshot_type(dest, model_type))
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")

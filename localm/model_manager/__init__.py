@@ -77,6 +77,7 @@ from .registry import (
     is_auto_chat_eligible,
     is_llm,
     is_external_path,
+    unregistered_model_error,
     list_models,
     model_is_external,
     MODEL_SHORTCUTS,
@@ -119,6 +120,7 @@ __all__ = [
     # registry
     "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",
+    "unregistered_model_error",
     "vision_capable_models", "vision_input_guidance", "list_models",
     "relocate_model", "set_model_type", "is_auto_chat_eligible", "is_llm",
     "is_external_path", "model_is_external",

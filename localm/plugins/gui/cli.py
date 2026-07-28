@@ -471,7 +471,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     model_path = None
     display_name = ""
     if not model_less:
-        info = get_model_info(model)
+        # allow_direct_path: this is the STARTUP model, typed by the operator as
+        # `localm gui <path>`. The runtime switch path below is a different case
+        # and deliberately does NOT opt in.
+        info = get_model_info(model, allow_direct_path=True)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
             sys.exit(1)
@@ -501,8 +504,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     from localm.inference import http_server as hs
     from .web import attach_gui
 
-    def _make_engine(name: str) -> Engine:
-        m_info = get_model_info(name)
+    def _make_engine(name: str, *, allow_direct_path: bool = False) -> Engine:
+        # This factory has TWO callers with different trust: the startup load just
+        # below (operator-typed `localm gui <path>`, opts in) and switch_engine
+        # (a model name off the wire from the GUI/API, which must not). Defaulting
+        # to False means the wire path gets the safe behaviour by construction -
+        # switch_engine calls factory(name) positionally and cannot opt in.
+        m_info = get_model_info(name, allow_direct_path=allow_direct_path)
         if m_info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = m_info
@@ -518,7 +526,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     engine = None
     if not model_less:
         try:
-            engine = _make_engine(model)
+            engine = _make_engine(model, allow_direct_path=True)
         except Exception as e:
             # A single bad registry entry must not stop the server from starting;
             # degrade to the model-less path and let the user pick on the Models page.

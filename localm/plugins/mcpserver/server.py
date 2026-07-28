@@ -165,11 +165,30 @@ class EngineCache:
         """Resident display names, least-recently-used first."""
         return list(self._lru)
 
-    @staticmethod
-    def _build_engine(model_name: str):
+    def _operator_supplied(self, model_name) -> bool:
+        """True only for the model the OPERATOR named when starting this server.
+
+        ``default_model`` comes from the ``--model`` flag / the LOCALM_MODEL
+        environment variable, i.e. from the person who launched the process, so a
+        filesystem path is legitimate there and gating it would break
+        ``localm mcp --model <path>``. Every OTHER name arrives in a tool call
+        from the MCP client, which is normally an LLM that can be steered by
+        content it was asked to summarise - so a name from that source is treated
+        as hostile input and must be a registered one."""
+        return bool(model_name) and model_name == self.default_model
+
+    def _build_engine(self, model_name: str):
         from localm.inference.engine import Engine
-        from localm.model_manager import get_model_info
-        info = get_model_info(model_name)
+        from localm.model_manager import get_model_info, unregistered_model_error
+        # Checked here as well as in resolve_model because _build_engine is also
+        # reachable directly (and is the injection point tests replace), so the
+        # gate must not depend on having come through resolve_model.
+        trusted = self._operator_supplied(model_name)
+        if not trusted:
+            bad = unregistered_model_error(model_name)
+            if bad:
+                raise ValueError(bad)
+        info = get_model_info(model_name, allow_direct_path=trusted)
         if info is None:
             raise ValueError(f"Model not found: {model_name!r}. "
                              f"Run 'localm list' to see registered models.")
@@ -177,6 +196,13 @@ class EngineCache:
         return Engine(str(path), display_name=model_name)
 
     def resolve_model(self, requested: Optional[str]) -> str:
+        # A client-supplied name must be a registered one; the operator's own
+        # --model default is exempt (see _operator_supplied).
+        if requested and not self._operator_supplied(requested):
+            from localm.model_manager import unregistered_model_error
+            bad = unregistered_model_error(requested)
+            if bad:
+                raise ValueError(bad)
         name = requested or self.default_model
         if name:
             return name
@@ -240,7 +266,11 @@ class EngineCache:
             model_footprint_bytes, required_vram_bytes)
         try:
             from localm.model_manager import get_model_info
-            info = get_model_info(name)
+            # Operator-supplied default may be a path (see _operator_supplied);
+            # a client name may not, and returns None here = "cannot prove the
+            # fit" = single-resident, which is the safe direction.
+            info = get_model_info(
+                name, allow_direct_path=self._operator_supplied(name))
             if info is None:
                 return None
             path, _hint = info
@@ -288,12 +318,14 @@ class EngineCache:
                  f"single-resident")
             return False
 
-    @staticmethod
-    def _is_gguf(name: str) -> bool:
+    def _is_gguf(self, name: str) -> bool:
         try:
             from localm.inference.engine import _is_gguf
             from localm.model_manager import get_model_info
-            info = get_model_info(name)
+            # Instance method (was static) so it can tell the operator's own
+            # --model path from a client-supplied name, same split as _size_for.
+            info = get_model_info(
+                name, allow_direct_path=self._operator_supplied(name))
             return bool(info) and _is_gguf(info[0])
         except Exception:
             # Fail CLOSED. This only decides whether to run the per-device split
@@ -490,7 +522,10 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     try:
         name = engines.resolve_model(None)
         from localm.model_manager import get_model_info
-        info = get_model_info(name)
+        # resolve_model(None) yields the operator's own default, so a path is
+        # legitimate here; anything else is already registry-gated upstream.
+        info = get_model_info(
+            name, allow_direct_path=engines._operator_supplied(name))
         if info is not None:
             path, _hint = info
             if str(path).lower().endswith(".gguf"):

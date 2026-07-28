@@ -46,13 +46,49 @@ DEFAULT_HEADROOM_BYTES = 1024 ** 3  # 1 GB
 UNKNOWN_FOOTPRINT_BYTES = 4 * 1024 ** 3
 
 
+# Ceiling on the recursive walk below. A real model directory holds tens of files
+# (shards, tokenizer, config); thousands means we are not looking at a model. The
+# walk used to be unbounded, so a caller who could name a directory could spend
+# the server's time enumerating it (CodeQL 73-76) - a deep or huge tree, or one
+# whose contents change under us, cost an arbitrary amount of work on the calling
+# thread. Stopping early only makes the measured size SMALLER, and a smaller
+# footprint is the conservative direction for every caller: it can only make a
+# model look easier to fit, never harder, and the admit decision is re-checked
+# against real VRAM at load time.
+_FOOTPRINT_MAX_FILES = 10_000
+
+
 def model_footprint_bytes(model_path: Any) -> int:
-    """On-disk size of a model: a single GGUF file, or a sharded HF directory."""
+    """On-disk size of a model: a single GGUF file, or a sharded HF directory.
+
+    The directory walk is bounded (see _FOOTPRINT_MAX_FILES).
+    """
+    from localm.debuglog import logger     # function-scoped, as elsewhere here
     p = Path(model_path)
     if p.is_file():
         return p.stat().st_size
     if p.is_dir():
-        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        total = 0
+        seen = 0
+        for f in p.rglob("*"):
+            try:
+                if not f.is_file():
+                    continue
+                total += f.stat().st_size
+            except OSError as e:
+                # One unreadable entry (a broken link, a race with a delete, a
+                # permission hole) must not abort the whole measurement, but it
+                # is not silently ignored either (AGENTS.md rule 5).
+                logger.debug("footprint: skipping unreadable %s: %s", f, e)
+                continue
+            seen += 1
+            if seen >= _FOOTPRINT_MAX_FILES:
+                logger.debug(
+                    "footprint: stopped after %d files under %s; this does not "
+                    "look like a model directory, reporting the partial size",
+                    seen, p)
+                break
+        return total
     return UNKNOWN_FOOTPRINT_BYTES
 
 

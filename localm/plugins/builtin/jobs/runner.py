@@ -209,9 +209,23 @@ def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
       * ``(None, False)`` when no model can be resolved."""
     from localm.config import load_config, load_registry
     from localm.inference.engine import Engine
-    from localm.model_manager import get_model_info
+    from localm.model_manager import get_model_info, unregistered_model_error
 
     name = model
+
+    # Re-check the job's model name at RUN time, not only at the API write: rows
+    # persisted by a build that predates the create/update gate are still on disk,
+    # and the scheduler runs them unattended.
+    #
+    # This is deliberately the FIRST thing in the function, ahead of the
+    # live-engine reuse and VRAM branch below. That branch can call
+    # _evict_shared_engine_for_media and unload the live chat engine BEFORE any
+    # name is resolved, so validating later would still let an unregistered name
+    # cost the user their loaded model - a denial of service that needs no
+    # successful load at all.
+    _bad = unregistered_model_error(name)
+    if _bad:
+        raise RuntimeError(_bad)
 
     try:
         from localm.inference.http_server import _engine as _live

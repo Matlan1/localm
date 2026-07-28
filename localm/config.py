@@ -270,6 +270,13 @@ DEFAULT_CONFIG: dict = {
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
     # False (default) = open in local/dev mode on loopback.
     "require_auth": False,
+    # Let transformers IMPORT AND RUN a HuggingFace model directory's own bundled
+    # Python (its `auto_map` custom code) when loading it. That is arbitrary code
+    # execution as the server user, and a pulled repo's .py lands on disk like any
+    # other file, so it is OFF by default and owner-only to turn on. With it off, a
+    # model that needs custom code is REFUSED with an explanatory error rather than
+    # silently executed (see inference/backends/hf.py).
+    "hf_trust_remote_code": False,
     # Quick-select scope bundles for the "Keys & devices" manager (Settings),
     # each {name, scopes}, offered as one-tap presets when minting a key.
     # Re-seeded only when ABSENT (an emptied list stays empty). Privileged

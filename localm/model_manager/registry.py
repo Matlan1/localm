@@ -227,23 +227,84 @@ def resolve_spec(spec: str) -> str:
 
 
 
-def get_model_path(name: str) -> Optional[Path]:
+def get_model_path(name: str, *, allow_direct_path: bool = False) -> Optional[Path]:
     """Resolve a model name/alias/path to the model file or directory.
 
     Returns the resolved Path, or None if not found.
     To also get a display name hint, use get_model_info().
+
+    See get_model_info() for what ``allow_direct_path`` opts into, and why it
+    defaults to off.
     """
-    result = get_model_info(name)
+    result = get_model_info(name, allow_direct_path=allow_direct_path)
     return result[0] if result else None
 
 
 
 
-def get_model_info(name: str):
+def unregistered_model_error(name) -> Optional[str]:
+    """None when an UNTRUSTED caller may use *name* as a model name, else a
+    ready-to-show message explaining the refusal.
+
+    This is layer 2 of the model-name gate, and it exists for the error message.
+    Layer 1 is get_model_info's ``allow_direct_path``, which is unconditional and
+    is what actually stops a path from resolving. Without layer 2 a caller naming
+    a path would get a bare "model not found", which is true but useless; with it
+    they are told the name must be registered and which names exist.
+
+    Returns None (allowed) in two non-name cases:
+
+    * an empty/None *name*, which means "use the server default" and is not a
+      name at all; and
+    * an EMPTY registry, mirroring the same convention already used by the /v1
+      registration check in http_server ("only enforce ... if the registry is not
+      empty"), so a fresh install or a test harness with no registry is not made
+      unusable. That is safe precisely BECAUSE layer 1 is unconditional: with an
+      empty registry a path still fails to resolve, so skipping this check cannot
+      re-open the direct-path hole - it only changes which message is shown.
+
+    Callers raise their own exception type from the returned string (HTTP 400 in
+    the jobs routes, ValueError in the MCP server, RuntimeError in the runner) so
+    this module stays free of any transport dependency.
+    """
+    if not name:
+        return None
+    reg = _mm.load_registry()
+    if not reg or name in reg:
+        return None
+    return (f"Model {name!r} is not registered. "
+            f"Registered models: {', '.join(sorted(reg))}. "
+            "Add one with 'localm pull <spec>', or register a local file with "
+            "'localm add <path>'. A filesystem path is not accepted here: only "
+            "a command-line run may name a model by path.")
+
+
+def get_model_info(name: str, *, allow_direct_path: bool = False):
     """Like get_model_path(), but returns (path, display_hint) or None.
 
     display_hint is a human-readable name when the original arg was an Ollama
     manifest path; otherwise it's None (the engine derives its own name).
+
+    ``allow_direct_path`` opts into resolving *name* as a PATH ON DISK when it is
+    not a registry entry (`localm run D:/models/foo.gguf`, an Ollama store, a
+    HuggingFace directory). That is a documented CLI feature, so it is kept - but
+    it is OFF by default, because the caller decides whether the name it holds is
+    operator-typed or came off the wire, and only the caller can know that.
+
+    Why the default is refuse (CodeQL 11-17, 48, 49, 65-71, 73-76, 108-111): the
+    fallthrough accepted any path on disk, and the jobs plugin and the MCP server
+    both reached it with an attacker-supplied name under a NON-privileged scope.
+    Every downstream sink then ran on an attacker-named path - stat, an unbounded
+    rglob, read_text of a whole directory - and for a directory, create_backend
+    picks HFBackend, which used to enable transformers' remote-code flag and so
+    imported and EXECUTED the directory's own .py. Refusing by default turns that
+    from "any caller who forgot to check" into "only a caller that opted in".
+
+    Pass True ONLY where *name* is operator-typed on the command line. The audited
+    set is localm/cli/*, the `localm gui <model>` startup resolution, and the MCP
+    server's own --model default. Anything reachable over HTTP or MCP keeps the
+    default, and enforces registry membership on top (see http_server's
+    registration check, jobs' _check_model_name, and MCPEngines.resolve_model).
     """
     reg = _mm.load_registry()
     if name in reg:
@@ -252,6 +313,9 @@ def get_model_info(name: str):
             p = Path(epath)
             if p.exists():
                 return p, None
+
+    if not allow_direct_path:
+        return None
 
     direct = Path(name)
     if not direct.exists():
@@ -311,14 +375,21 @@ def find_sibling_mmproj(model_path) -> Optional[Path]:
 
 
 
-def get_model_mmproj(name: str) -> Optional[str]:
+def get_model_mmproj(name: str, *, allow_direct_path: bool = False) -> Optional[str]:
     """The mmproj (vision projector) path for a model, if one is known.
 
     Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
     mmproj GGUF auto-detected next to the model file. Returns an absolute path
     string, or None when no projector is associated. This is what lets a GGUF keep
     vision after a GUI/registry model switch (VIS-1), the same way the CLI --mmproj
-    flag does on a direct run."""
+    flag does on a direct run.
+
+    ``allow_direct_path`` is threaded through to get_model_info for the same reason
+    it exists there: without it, the sibling-projector scan (CodeQL 69/70) would
+    glob a directory named by an unregistered, caller-supplied path. Those two
+    alerts share this root cause; unlike the jobs/MCP sinks they were not shown to
+    have their own remote entry point, and are fixed here by identity, not because
+    a remote chain was demonstrated for them."""
     reg = _mm.load_registry()
     entry = reg.get(name) if isinstance(reg, dict) else None
     if isinstance(entry, dict) and entry.get("mmproj"):
@@ -327,7 +398,7 @@ def get_model_mmproj(name: str) -> Optional[str]:
             return str(mmp)
         # Recorded but gone: fall through to auto-detect rather than handing the
         # backend a dead path that would just fail the mtmd load.
-    info = get_model_info(name)
+    info = get_model_info(name, allow_direct_path=allow_direct_path)
     if info is None:
         return None
     sib = find_sibling_mmproj(info[0])
