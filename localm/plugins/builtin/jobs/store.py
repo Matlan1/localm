@@ -290,13 +290,17 @@ class JobStore:
         # Each job def records `owner` - the sha256 of the creating key, the SAME
         # digest the keystore stores. Restrict the file to this account the way
         # auth.key already is, or the digest is readable where the plaintext is
-        # not (CodeQL 88). The temp file is restricted FIRST because it already
-        # holds the whole payload, and its name is unique per writer, so one left
-        # behind by a crash is never overwritten or cleaned up by anything.
+        # not (CodeQL 88). The TEMP file is what gets restricted: it already holds
+        # the whole payload, its name is unique per writer so one left behind by a
+        # crash is never overwritten or cleaned up, and os.replace carries the
+        # source's ACL onto the destination (measured). One spawn instead of two,
+        # which matters because job writes happen in async handlers. Retry on the
+        # destination only if the first attempt did not happen.
         from localm.config import restrict_file_perms
-        restrict_file_perms(tmp)
+        ok = restrict_file_perms(tmp)
         os.replace(tmp, self._defs_file)
-        restrict_file_perms(self._defs_file)   # replace discards the dest ACL
+        if not ok:
+            restrict_file_perms(self._defs_file)
 
     # ---- CRUD --------------------------------------------------------------
     def list(self) -> list:

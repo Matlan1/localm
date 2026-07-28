@@ -672,10 +672,20 @@ def _perm_warn(path: Path, why: str) -> None:
         pass
 
 
-def restrict_file_perms(path: Path) -> None:
+def restrict_file_perms(path: Path) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod 0600, or
-    Windows icacls). No-op on failure - the data dir is already user-scoped, so
-    this per-file tightening is defence in depth.
+    Windows icacls). Returns True when the tightening is believed to have
+    happened, False when it did not. No-op on failure - the data dir is already
+    user-scoped, so this per-file tightening is defence in depth.
+
+    The return value exists so a caller doing the atomic temp+replace dance can
+    restrict the TEMP file (which already holds the whole payload) and skip a
+    second call on the destination in the happy path. MEASURED on Windows:
+    os.replace carries the source's ACL onto the destination, overwriting the
+    destination's inherited one, so one call is normally enough; POSIX rename
+    likewise carries the source's mode. Callers should still retry on the
+    destination when this returns False, so a failed first attempt is not the
+    single point of failure for a security property.
 
     Lives here, not in auth.py, because THREE files need it and only one used to
     get it (CodeQL 88). ``auth.key`` holds the owner key in PLAINTEXT and got the
@@ -696,7 +706,7 @@ def restrict_file_perms(path: Path) -> None:
             user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
             if not user:
                 _perm_warn(path, "no USERNAME/USER in the environment")
-                return
+                return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
             # /grant:r replaces any existing grant for this user, so the result
             # is an explicit, sole full-control ACE.
@@ -713,14 +723,19 @@ def restrict_file_perms(path: Path) -> None:
                 # would be the worse failure.
                 _perm_warn(path, (r.stderr or r.stdout or b"").decode(
                     "utf-8", "replace").strip() or f"icacls exit {r.returncode}")
-    except Exception:
+                return False
+        return True
+    except Exception as e:
         # Best-effort (see docstring): a failure (icacls missing, a filesystem
         # without per-file perms) leaves the home-dir scoping in effect, which is
         # the real protection. A perms nicety must never raise and break session
         # persistence or job storage. NOT a silenced privacy failure in the rule-5
         # sense: nothing here reports a guarantee to the user, and the secret this
-        # protects is a digest whose plaintext is separately restricted.
-        pass
+        # protects is a digest whose plaintext is separately restricted - but it
+        # is REPORTED (debug) and returned as False rather than swallowed, so a
+        # caller can retry and nothing reads as a success that did not happen.
+        _perm_warn(path, repr(e))
+        return False
 
 
 # Registry and config are mutated from several places at once - the GUI server
