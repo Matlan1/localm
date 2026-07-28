@@ -299,6 +299,37 @@ class TestOllamaManifestDigestIsConfined:
 #  (d) the remove_model delete gate                                            #
 # --------------------------------------------------------------------------- #
 
+class TestPublicSurfaceSurvivesARebase:
+    """localm/model_manager/__init__.py is a pure re-export surface, and two
+    concurrent branches are inserting names into the SAME two blocks. A bad
+    conflict resolution in an export list drops a name silently - there is no
+    conflict marker left behind and nothing fails until an unrelated module
+    raises ImportError at runtime. Assert the name is reachable BOTH ways, so a
+    dropped line fails here instead."""
+
+    def test_is_owned_model_path_is_exported(self):
+        import localm.model_manager as mm
+        from localm.model_manager import is_owned_model_path  # noqa: F401
+        assert "is_owned_model_path" in mm.__all__
+        assert callable(mm.is_owned_model_path)
+
+    def test_a_registry_key_cannot_be_path_shaped(self):
+        """Guards the assumption that makes the poisoned-row fallthrough in
+        get_model_info harmless. When an entry is malformed, get_model_info falls
+        through to Path(<registry KEY>); that is safe only while keys are model
+        NAMES and never path strings. _sanitize_name is the single chokepoint
+        enforcing it for every registration route, so pin its behavior here - if
+        it ever stops stripping separators, the fallthrough becomes a live
+        resolve of an attacker-chosen path for a CLI caller."""
+        from localm.model_manager import _sanitize_name
+        for hostile in ("D:/evil/x.gguf", r"C:\evil\x.gguf", "../../evil",
+                        "/etc/passwd", r"\\server\share\x", ".."):
+            out = _sanitize_name(hostile)
+            assert "/" not in out and "\\" not in out and ":" not in out, out
+            assert ".." not in out, out
+            assert out not in (".", "..", ""), out
+
+
 class TestIsOwnedModelPathIsTheSingleDefinition:
     """Three hand-rolled variants of "is this file localm's to delete" had drifted
     apart in the repo, two of them wrong in a way that reaches shutil.rmtree. The
