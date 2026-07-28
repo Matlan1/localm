@@ -300,3 +300,70 @@ def test_engine_managed_is_not_admin_only():
     them would silently narrow reads."""
     from localm import settings_schema as ss
     assert ss.engine_managed_keys() & ss.admin_only_keys() == set()
+
+
+# --------------------------------------------------------------------------- #
+#  The gate is exercised END TO END, for EVERY gated key (REC-MEDIA-CMD sweep) #
+# --------------------------------------------------------------------------- #
+#
+# tests/test_settings_schema.py pins WHICH keys carry admin_only. That is set
+# membership, and set membership cannot detect a gate that stopped consulting
+# the set: delete the `locked = admin_only_keys() & set(body)` check in
+# routes/config.py and every membership assertion still passes while the flags
+# do nothing. These two tests are the other half - they drive the real route.
+#
+# They also assert the VALUE IS UNCHANGED, not merely that the status was 403.
+# Those are different claims: a 403 proves the REQUEST was refused, only the
+# unchanged value proves the WRITE did not happen. Today the gate sits before
+# update_config() so a write cannot occur, but that is an ordering fact a future
+# refactor could change; asserting the value pins the property, not the ordering.
+
+# A value that is hostile in kind for any field. The gate runs on the RAW body
+# BEFORE validate_update (routes/config.py, "Checked on the RAW body before
+# validation"), so a non-owner is refused up front whatever the value is - which
+# is exactly why one sentinel can cover every gated key regardless of its widget.
+_HOSTILE = "x-owned-by-the-attacker"
+
+
+def test_every_admin_only_key_is_refused_end_to_end_and_nothing_is_written(app_env):
+    """A non-owner config:write key must get 403 from the REAL route for EVERY
+    admin_only key, and must not change the stored value.
+
+    Data-driven over admin_only_keys() on purpose: a key gains the flag and is
+    covered here automatically, with no second list to keep in sync. A per-key
+    hand-written test would be the thing that silently fails to grow."""
+    from localm import settings_schema as ss
+    c, scoped = app_env
+    problems = []
+    for key in sorted(ss.admin_only_keys()):
+        before = _stored(c, key)
+        r = c.patch("/v1/config", json={key: _HOSTILE}, headers=_scoped(scoped))
+        if r.status_code != 403:
+            problems.append(f"{key}: expected 403, got {r.status_code}")
+        after = _stored(c, key)
+        if after != before:
+            problems.append(f"{key}: value CHANGED despite refusal "
+                            f"({before!r} -> {after!r})")
+    assert not problems, "owner-only keys writable by a non-owner: " + "; ".join(problems)
+
+
+def test_the_403_gate_is_selective_not_a_blanket_refusal(app_env):
+    """FIRES-CONTROL for the test above, and it is not optional.
+
+    Without it, that test passes vacuously in the two ways it is most likely to
+    break: if the scoped key never actually held config:write, or if the route
+    refused every PATCH for an unrelated reason, then EVERY key would 403 and the
+    assertion would go green while proving nothing about admin_only.
+
+    So prove the same key, on the same client, in the same session, CAN write an
+    UNGATED field. If this ever fails, the sibling test's greenness is
+    meaningless and must not be trusted."""
+    from localm import settings_schema as ss
+    c, scoped = app_env
+    assert "temperature" not in ss.admin_only_keys(), \
+        "this control needs a field that is deliberately NOT gated"
+    r = c.patch("/v1/config", json={"temperature": 0.42}, headers=_scoped(scoped))
+    assert r.status_code == 200, (
+        f"the scoped key cannot write an UNGATED field ({r.status_code}), so the "
+        "403s in the sibling test prove nothing about admin_only")
+    assert _stored(c, "temperature") == 0.42, "the ungated write did not persist"
