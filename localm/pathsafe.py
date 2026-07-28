@@ -18,6 +18,7 @@ Three shapes, deliberately distinct:
 
 from __future__ import annotations
 
+import ntpath
 import os
 from pathlib import Path
 
@@ -96,6 +97,22 @@ def confined_under(base: Path, relpath: str) -> Path:
         raise ValueError(f"path resolves to no name: {relpath!r}")
     if ".." in parts:
         raise ValueError(f"traversal component not allowed: {relpath!r}")
+    # PER-COMPONENT, not just position 1 of the whole string. The early check
+    # above only sees a drive on the FIRST component, so ``a/C:evil`` slipped
+    # past it - and that is not a harmless miss. pathlib's joinpath treats a
+    # drive-relative component against a SAME-DRIVE base by silently DROPPING
+    # the drive: base.joinpath("a", "C:evil") -> base/a/evil (measured on 3.12).
+    # The result stays strictly under base, so the resolve-based containment
+    # check below cannot see it - it is not an escape, it is a SILENT RENAME.
+    # For the ComfyUI delete call site that means unlinking a real file that is
+    # NOT the one ComfyUI named, while reporting containment succeeded, which is
+    # exactly the failure AGENTS.md rule 5 forbids. It also reproduces only when
+    # base is on the same drive as the injected letter, so it would present as
+    # "works on my D: install, deletes the wrong file on a C: one".
+    # Reported by the WS2 lane against this exact call site.
+    for p in parts:
+        if len(p) >= 2 and p[1] == ":":
+            raise ValueError(f"drive-qualified path component not allowed: {relpath!r}")
     try:
         resolved = base.joinpath(*parts).resolve()
         base_resolved = base.resolve()
@@ -124,8 +141,27 @@ def is_unc_or_device_path(raw: str) -> bool:
     a policy question with a different answer per route - see
     :func:`reject_unsafe_path_string`, which is the policy for a LOCAL path the
     user themselves named. Callers handling REMOTE-supplied values should use this
-    predicate directly and refuse unconditionally."""
-    return raw.startswith("\\\\") or raw.startswith("//")
+    predicate directly and refuse unconditionally.
+
+    MIXED SEPARATORS COUNT. Windows treats ``\\`` and ``/`` interchangeably in the
+    UNC prefix, so ``\\/host\\share`` and ``/\\host/share`` are UNC to the OS even
+    though neither starts with a doubled separator of one kind. Both
+    ``PureWindowsPath(...).drive`` and ``ntpath.splitdrive`` report a UNC drive
+    for them (measured). An earlier revision tested only ``startswith("\\\\\\\\")``
+    or ``startswith("//")`` and returned False for both spellings - a live bypass
+    in precisely the position this predicate exists to guard, since its documented
+    use is remote-supplied values. Reported by the WS7 and WS2 lanes.
+
+    ``ntpath`` is used rather than ``os.path`` on purpose: it is the Windows
+    implementation on every host, which is what "judge by Windows rules
+    everywhere" requires, and it is authoritative for spellings not enumerated
+    here."""
+    if raw[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return True
+    # Authoritative backstop: any non-empty drive that is NOT the "X:" form is a
+    # UNC or device root (``\\host\share``, ``\\?\C:``, ``\\.\PhysicalDrive0``).
+    drive = ntpath.splitdrive(raw)[0]
+    return bool(drive) and not (len(drive) == 2 and drive[1] == ":")
 
 
 def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False) -> None:
@@ -162,7 +198,17 @@ def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False) -> No
     Raises ``ValueError`` (callers translate it to their own error shape).
     """
     s = raw or ""
-    if s.startswith("\\\\") or (os.name == "nt" and s.startswith("//")):
+    # BACKSLASH-LED UNC/device forms are refused on every platform: a leading
+    # ``\\`` or ``\/`` is not a meaningful prefix for a local path on POSIX
+    # either, so there is nothing legitimate to protect there.
+    if s[:2] in ("\\\\", "\\/"):
+        raise ValueError("UNC and device paths are not allowed")
+    # SLASH-LED forms (``//host/share``, ``/\host/share``) are refused on Windows
+    # ONLY, via the full predicate so device namespaces and mixed separators are
+    # covered rather than re-enumerated here. On POSIX a leading ``//`` is a legal
+    # prefix equivalent to ``/``, and this function's input is a path the USER
+    # named, so refusing it there would break a legitimate local folder.
+    if os.name == "nt" and is_unc_or_device_path(s):
         raise ValueError("UNC and device paths are not allowed")
     if require_absolute and not os.path.isabs(s):
         raise ValueError("path must be absolute")

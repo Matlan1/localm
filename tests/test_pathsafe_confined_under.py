@@ -71,6 +71,35 @@ class TestConfinedUnder:
         out = confined_under(base, "nest/a.png")
         assert base.resolve() in out.parents
 
+    @pytest.mark.parametrize("bad", [
+        "a/C:evil", "a/b/C:evil", "a/D:evil", "a/b/Q:z",
+    ])
+    def test_drive_on_a_NESTED_component_is_rejected(self, base, bad):
+        """REGRESSION. The original check tested position 1 of the WHOLE string,
+        so it only saw a drive on the FIRST component and ``a/C:evil`` passed.
+
+        That is not a harmless miss. pathlib joins a drive-relative component
+        against a SAME-DRIVE base by silently DROPPING the drive:
+        base.joinpath("a", "C:evil") -> base/a/evil (measured on 3.12). The result
+        stays strictly under base, so the resolved-containment check cannot see
+        it - it is not an escape, it is a SILENT RENAME. At the ComfyUI delete
+        call site that means unlink()ing a real file that is NOT the one ComfyUI
+        named, while reporting containment succeeded.
+
+        It also only reproduces when base is on the same drive as the injected
+        letter, so it would present as "works on my D: install, deletes the wrong
+        file on a C: one". Found by the WS2 lane."""
+        with pytest.raises(ValueError):
+            confined_under(base, bad)
+
+    def test_nesting_never_silently_renames(self, base):
+        """The property the bug above violated: whatever the caller named as the
+        final component is what comes back. Asserting only 'stayed under base'
+        would have passed the silent-rename bug."""
+        for good in ["a.png", "nest/a.png", "nest/deep/b.png"]:
+            want = good.rsplit("/", 1)[-1]
+            assert confined_under(base, good).name == want
+
     def test_drive_relative_is_rejected_on_every_platform(self, base):
         """Judged by WINDOWS rules regardless of host: a remote-supplied name must
         be judged by what it would mean on the worst platform, not the running
@@ -117,12 +146,33 @@ class TestIsUncOrDevicePath:
         r"\\.\PhysicalDrive0",
         r"\\?\Q:\dir",
         "//192.0.2.1/share",
+        # REGRESSION: mixed separators. Windows treats "\" and "/"
+        # interchangeably in the UNC prefix, so all four of these are UNC to the
+        # OS - PureWindowsPath(...).drive reports "\\host\share" for every one.
+        # The original predicate tested startswith("\\\\") or startswith("//")
+        # and returned False for the two mixed spellings: a live bypass in
+        # exactly the position this predicate guards, since its documented use is
+        # REMOTE-supplied values. Found by the WS7 lane, confirmed by WS2.
+        "\\/192.0.2.1\\share",
+        "/\\192.0.2.1/share",
+        "\\/.\\PhysicalDrive0",
+        "/\\?/Q:/dir",
+        # Device and extended-length namespaces, caught by the splitdrive
+        # backstop rather than the prefix table.
+        "//./pipe/x",
+        r"\\?\UNC\host\share",
     ])
     def test_true_on_every_platform(self, raw):
         """NOT gated on os.name: this answers what the string MEANS, not where it
         is evaluated. Consumers handling remote-supplied values refuse on this
-        unconditionally."""
+        unconditionally.
+
+        Cross-checked against Windows' own parser rather than only against the
+        implementation, so the test cannot drift with the code it guards."""
         assert is_unc_or_device_path(raw)
+        from pathlib import PureWindowsPath
+        assert PureWindowsPath(raw).drive, (
+            "corpus error: Windows does not consider this a drive/UNC root")
 
     @pytest.mark.parametrize("raw", [
         "/nonexistent/x", "relative/x", "a.png", "", "Q:/x", r"Q:\x",
@@ -141,10 +191,27 @@ class TestRejectUnsafePathString:
         r"\\192.0.2.1\share",
         r"\\.\PhysicalDrive0",
         r"\\?\Q:\dir",
+        "\\/192.0.2.1\\share",     # REGRESSION: mixed separator, backslash-led
     ])
     def test_backslash_unc_rejected_on_every_platform(self, raw):
+        """Backslash-led forms are refused everywhere: a leading "\\\\" or "\\/" is
+        not a meaningful local-path prefix on POSIX either, so nothing legitimate
+        is lost by refusing them there."""
         with pytest.raises(ValueError):
             reject_unsafe_path_string(raw)
+
+    @pytest.mark.parametrize("raw", ["//192.0.2.1/share", "/\\192.0.2.1/share"])
+    def test_slash_led_unc_rejected_on_windows(self, raw):
+        """REGRESSION. These reach the filesystem as UNC on Windows and dial SMB,
+        so on nt they must be refused - including the mixed "/\\" spelling, which
+        an earlier revision let through. On POSIX they are ordinary local paths
+        and must NOT be refused, which is why this is platform-split rather than
+        unconditional."""
+        if os.name == "nt":
+            with pytest.raises(ValueError):
+                reject_unsafe_path_string(raw)
+        else:
+            reject_unsafe_path_string(raw)   # must NOT raise
 
     def test_forward_slash_unc_is_platform_split_by_design(self):
         """``//x`` is UNC on Windows but a LEGAL local prefix on POSIX (equivalent
