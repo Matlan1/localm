@@ -346,19 +346,32 @@ class TestRollbackRefusesPoisonedManifestNames:
         _fake_install(inst)
         return inst, bdir
 
-    @pytest.mark.parametrize("name", [
+    # EVERY vector must resolve INSIDE tmp_path. A negative test runs the
+    # deliberately-vulnerable code for real, so a payload naming a REAL location
+    # is not a test, it is a live deletion of that location. This was learned the
+    # hard way: an earlier revision of this test used the literal "C:/Users/Public"
+    # and, run against the reverted code, shutil.rmtree emptied it. Absolute and
+    # drive-qualified vectors are therefore BUILT from tmp_path (which is itself
+    # drive-qualified and absolute on Windows), so they exercise the identical
+    # code path - an absolute component REPLACES the base under pathlib - with the
+    # blast radius contained in the fixture.
+    ABS = "<ABS_OUTSIDE>"          # -> tmp_path/victim, absolute + drive-qualified
+    UNC_HOST = "<UNC>"             # -> a UNC form; never dialed, rejected lexically
+
+    @pytest.mark.parametrize("vector", [
         "../../victim",            # traversal out of the install
         "../victim",
-        "C:/Users/Public",         # drive-qualified (absolute on Windows)
-        "//server/share/x",        # UNC
-        "\\\\server\\share",       # UNC, backslash spelling
-        "/etc",                    # absolute POSIX
+        ABS,                       # absolute + drive-qualified (replaces the base)
+        UNC_HOST,                  # UNC
+        "\\\\198.51.100.7\\share",  # UNC backslash spelling, RFC5737 TEST-NET-2
     ])
-    def test_escaping_name_is_refused_and_reported(self, tmp_path, name):
+    def test_escaping_name_is_refused_and_reported(self, tmp_path, vector):
         inst, bdir = self._install_and_backup(tmp_path)
         victim = tmp_path / "victim"
         victim.mkdir()
         (victim / "keep.txt").write_text("do not delete me", encoding="utf-8")
+        name = {self.ABS: str(victim),
+                self.UNC_HOST: "//198.51.100.7/share/x"}.get(vector, vector)
 
         with pytest.raises(RuntimeError) as ei:
             au.rollback(bdir, inst, [name])
@@ -413,8 +426,12 @@ class TestRollbackRefusesPoisonedManifestNames:
 
     def test_unsafe_swap_name_detection(self):
         """Unit-level truth table, so a future edit to the helper cannot quietly
-        widen it. Includes the two shapes _unsafe_member alone passes."""
-        for bad in ["", ".", "..", "   ", "../x", "C:/x", "/x", "//h/s",
+        widen it. Includes the two shapes _unsafe_member alone passes.
+
+        These are PURE string checks - _unsafe_swap_name touches no filesystem -
+        so naming a drive here deletes nothing. Contrast the parametrized cases
+        above, which drive the real rollback and must stay inside tmp_path."""
+        for bad in ["", ".", "..", "   ", "../x", "Z:/x", "/x", "//h/s",
                     "a/b", "home", ".venv", "__pycache__", None, 3]:
             assert au._unsafe_swap_name(bad), f"should be unsafe: {bad!r}"
         for ok in ["localm", "VERSION", "pyproject.toml", "runtime", "docs"]:

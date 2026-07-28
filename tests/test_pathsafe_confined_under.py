@@ -37,11 +37,11 @@ class TestConfinedUnder:
         "../../victim.txt",          # traversal
         "..",
         "nest/../../victim.txt",     # traversal after a legitimate segment
-        "/etc/passwd",               # absolute POSIX
+        "/nonexistent/target",       # absolute POSIX
         "//host/share/x",            # UNC forward-slash
         "\\\\host\\share",           # UNC backslash
-        "C:/Windows/win.ini",        # drive-qualified absolute
-        "C:evil",                    # drive-RELATIVE: pathlib lets this replace
+        "Q:/nonexistent/target",     # drive-qualified absolute (Q: is not mounted)
+        "Q:evil",                    # drive-RELATIVE: pathlib lets this replace
                                      # the base on Windows, and is_absolute() is
                                      # False for it, so an is_absolute check alone
                                      # would miss it
@@ -74,10 +74,10 @@ class TestConfinedUnder:
     def test_drive_relative_is_rejected_on_every_platform(self, base):
         """Judged by WINDOWS rules regardless of host: a remote-supplied name must
         be judged by what it would mean on the worst platform, not the running
-        one. On Linux `C:evil` is a legal filename, and treating it as one here
+        one. On Linux `Q:evil` is a legal filename, and treating it as one here
         would leave the Windows hole untested until it reached a Windows box."""
         with pytest.raises(ValueError):
-            confined_under(base, "C:evil")
+            confined_under(base, "Q:evil")
 
     def test_symlink_out_of_base_is_rejected(self, base, tmp_path):
         """Lexical checks are not sufficient: a symlink INSIDE base pointing out of
@@ -115,7 +115,7 @@ class TestIsUncOrDevicePath:
     @pytest.mark.parametrize("raw", [
         r"\\192.0.2.1\share",
         r"\\.\PhysicalDrive0",
-        r"\\?\C:\Windows",
+        r"\\?\Q:\dir",
         "//192.0.2.1/share",
     ])
     def test_true_on_every_platform(self, raw):
@@ -125,7 +125,7 @@ class TestIsUncOrDevicePath:
         assert is_unc_or_device_path(raw)
 
     @pytest.mark.parametrize("raw", [
-        "/etc/passwd", "relative/x", "a.png", "", "C:/Windows", r"C:\Windows",
+        "/nonexistent/x", "relative/x", "a.png", "", "Q:/x", r"Q:\x",
     ])
     def test_false_for_ordinary_paths(self, raw):
         assert not is_unc_or_device_path(raw)
@@ -140,7 +140,7 @@ class TestRejectUnsafePathString:
     @pytest.mark.parametrize("raw", [
         r"\\192.0.2.1\share",
         r"\\.\PhysicalDrive0",
-        r"\\?\C:\Windows",
+        r"\\?\Q:\dir",
     ])
     def test_backslash_unc_rejected_on_every_platform(self, raw):
         with pytest.raises(ValueError):
@@ -182,5 +182,5 @@ class TestRejectUnsafePathString:
                 lambda self, *a, _m=meth, **kw: called.append(_m))
         with pytest.raises(ValueError):
             reject_unsafe_path_string(r"\\192.0.2.1\share")
-        reject_unsafe_path_string(r"C:\ordinary")
+        reject_unsafe_path_string(r"Q:\ordinary")
         assert called == []

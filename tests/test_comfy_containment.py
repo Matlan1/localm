@@ -258,16 +258,26 @@ class TestContainmentRejectsOutOfBoundsNames:
         v.write_text("do not delete me", encoding="utf-8")
         return v
 
+    # EVERY vector resolves INSIDE tmp_path. A negative run of this file executes
+    # the deliberately-unconfined code for real, so a payload naming a REAL system
+    # path is a live deletion of that path, not a test. An earlier revision used
+    # the literals "C:/Windows/win.ini" and "/etc/passwd"; the absolute vector is
+    # now BUILT from tmp_path, which is itself absolute AND drive-qualified on
+    # Windows, so it exercises the identical escape (an absolute component
+    # REPLACES the base under pathlib) with the blast radius inside the fixture.
+    ABS = "<ABS_OUTSIDE>"
+
     @pytest.mark.parametrize("subfolder,filename", [
         ("", "../../victim.txt"),          # traversal in the filename
         ("../..", "victim.txt"),           # traversal in the subfolder
-        ("", "C:/Windows/win.ini"),        # drive-qualified: absolute on Windows
-        ("", "/etc/passwd"),               # absolute POSIX
+        ("", ABS),                         # absolute + drive-qualified
         ("", ""),                          # collapses to the output dir itself
     ])
     def test_output_name_escape_is_refused_and_warned(
             self, stub, tmp_path, subfolder, filename):
         victim = self._victim(tmp_path)
+        if filename == self.ABS:
+            filename = str(victim)
 
         warn = comfy.contain_comfy_artifacts(
             stub.base_url, "pidEsc",
@@ -284,13 +294,14 @@ class TestContainmentRejectsOutOfBoundsNames:
 
     @pytest.mark.parametrize("uploaded", [
         "../../victim.txt",
-        "C:/Windows/win.ini",
-        "/etc/passwd",
+        ABS,                               # absolute + drive-qualified, in tmp
         "sub/../../../victim.txt",
     ])
     def test_uploaded_input_escape_is_refused_and_warned(
             self, stub, tmp_path, uploaded):
         victim = self._victim(tmp_path)
+        if uploaded == self.ABS:
+            uploaded = str(victim)
 
         warn = comfy.contain_comfy_artifacts(
             stub.base_url, "pidEsc2",
