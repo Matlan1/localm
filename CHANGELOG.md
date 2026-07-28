@@ -63,13 +63,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   key granted no filesystem access at all could use either one to add a path of
   its choosing and read back the filename and exact byte size, and a network path
   added that way made every later model listing hang while Windows tried to reach
-  it. Both now require host filesystem access.
+  it. A third route, the curated ComfyUI model download, likewise wrote into a
+  folder that key could choose. All three now require host filesystem access.
 - **A malformed Ollama manifest can no longer send localm outside the blobs
   folder.** The digest recorded inside a manifest became a filename with no check
   on its shape, so a hand-written or hostile one could name a file anywhere on
   disk and have it opened as a model. Digests must now actually look like
-  digests, and a manifest with any other unexpected shape is reported instead of
-  crashing the command that read it.
+  digests, and a manifest whose digest is malformed says so instead of being
+  passed along. A manifest that is misshapen in other ways no longer crashes the
+  command that read it; those cases are noted in the debug log rather than shown,
+  because the commonest one is simply a folder that was never an Ollama manifest.
 - **`localm rm` no longer deletes outside your models folder.** The check
   deciding whether a registered file was localm's to delete compared text, not
   real locations, so an entry pointing above the models folder could be removed,
@@ -86,16 +89,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   are refused and the snapshot is re-downloaded.
 
 ### Changed
-- **Scanning for ComfyUI models now requires host filesystem access.** This
-  affects only additional keys you minted yourself without filesystem access.
-  Running localm normally, or using an owner key, is unchanged.
+- **Three model routes now require host filesystem access:** scanning for ComfyUI
+  models, pulling a model by naming a path already on the server, and downloading
+  a curated ComfyUI model. This affects only additional keys you minted yourself
+  without filesystem access. Running localm normally, or using an owner key, is
+  unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
 - **A model registered on an unreachable network path no longer freezes the whole
-  server.** The models list and a model's detail view measured each registered
-  file on the same thread that answers every other request, so one unreachable
-  path stalled everything until Windows gave up on it, which can take minutes.
-  Both now measure off that thread.
+  server.** The models list, a model's detail view and the VRAM estimate each
+  measured registered files on the same thread that answers every other request,
+  so one unreachable path stalled everything until Windows gave up on it, which
+  can take minutes. All three now measure off that thread.
 
 ## [0.1.3] - 2026-07-23
 

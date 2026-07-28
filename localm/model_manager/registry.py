@@ -1352,12 +1352,22 @@ def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
     """THE definition of "this file is localm's to delete": it lives strictly
     inside ``<data dir>/models``.
 
-    Every caller that decides whether a registered file is managed - the deletion
-    in :func:`remove_model`, the "PERMANENTLY deletes" wording in the ``localm rm``
-    confirmation prompt, and the managed/external split in
-    :func:`sync_models_dir` - MUST route through this. Three hand-rolled variants
-    had drifted apart, and two of them were wrong in a way that reaches
-    ``shutil.rmtree``:
+    Every caller that decides whether a registered file is managed MUST route
+    through this. Today that is the deletion in :func:`remove_model` and the
+    managed/external split in :func:`sync_models_dir`.
+
+    NOT YET ROUTED THROUGH IT: the "PERMANENTLY deletes" wording in the
+    ``localm rm`` confirmation prompt (``cli/models.py``), which still uses the
+    weakest of the three variants below. So the prompt and the deletion can
+    currently DISAGREE - the prompt says a sibling like ``<data dir>/models-old``
+    will be permanently deleted while this gate correctly declines to delete it.
+    That mismatch errs toward OVER-warning and can never cause an unexpected
+    deletion, and converting the prompt is a separate change. Stated here rather
+    than implied, because a docstring claiming the prompt already routes through
+    this would make the disagreement look impossible.
+
+    Three hand-rolled variants had drifted apart, and two of them were wrong in a
+    way that reaches ``shutil.rmtree``:
 
     * ``path.is_relative_to(MODELS_DIR)`` is purely LEXICAL. Measured:
       ``<models>/../models-old/x.gguf`` tests True while resolving to a file
@@ -1493,17 +1503,31 @@ def _resolve_ollama_manifest(p: Path):
         if not isinstance(manifest, dict):
             continue
         layers = manifest.get("layers")
+        if layers is None:
+            # The ORDINARY "this JSON file is not an Ollama manifest" case - any
+            # directory can hold a config.json. Silent by design: warning here
+            # would fire on every `localm add <some dir>`. Distinguished from the
+            # ANOMALOUS shapes below, which mean the file IS manifest-shaped but
+            # malformed, and which are worth surfacing (rule 5: do not collapse
+            # "absent" and "corrupt" into one silent path).
+            continue
         if not isinstance(layers, list):
+            logger.debug("ollama manifest %s has a non-list 'layers' (%s); "
+                         "treating as not-a-manifest", tag_file, type(layers).__name__)
             continue
 
         for layer in layers:
             if not isinstance(layer, dict):
+                logger.debug("ollama manifest %s has a non-dict layer (%s); skipping",
+                             tag_file, type(layer).__name__)
                 continue
             if layer.get("mediaType") != "application/vnd.ollama.image.model":
                 continue
 
             digest = layer.get("digest")
             if not isinstance(digest, str):
+                logger.debug("ollama manifest %s has a model layer whose digest is "
+                             "%s, not a string; skipping", tag_file, type(digest).__name__)
                 continue
             blob_name = digest.replace(":", "-")  # sha256:abc -> sha256-abc
 

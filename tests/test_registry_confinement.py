@@ -608,27 +608,28 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
             _pathcheck.confined_under(tmp_path, rfilename)
 
     @pytest.mark.parametrize("rfilename", [
-        # FALSE-POSITIVE TRAPS. A hostile-only corpus passes an over-matching
-        # guard, and an over-matching guard is not the safe direction: it gets
-        # loosened later to accept the real input it broke, and the property it
-        # was protecting is what gets lost in the loosening.
-        "/usr/local/share/x.gguf",       # ordinary POSIX path containing "share"
-        "sharepoint/model.gguf",         # "share" as a name prefix
-        "a/share/b.gguf",                # "share" as a whole component
-        # Whitespace-padded UNC-LOOKALIKES. Windows KEEPS the leading whitespace
-        # and COLLAPSES the doubled separator, so both PureWindowsPath.drive and
-        # ntpath.splitdrive report NO drive - these are ordinary relative paths
-        # under a directory literally named "  ". A predicate that strips first
-        # calls them UNC and refuses a legitimate name. Verified against both OS
-        # parsers; see _pathcheck.is_unc_or_device_path on why there is no strip.
-        "  " + chr(92) * 2 + "host" + chr(92) + "share" + chr(92) + "x",
-        "\t" + chr(92) * 2 + "host" + chr(92) + "share",
-        "  //host/share/x",
+        # FALSE-POSITIVE TRAPS for confined_under. A hostile-only corpus passes an
+        # over-matching guard silently, and over-matching is not the safe
+        # direction: the guard gets loosened later to accept the real input it
+        # broke, and the property it was protecting is what dies in the loosening.
+        #
+        # These are all RELATIVE, deliberately. confined_under's contract is
+        # "a relative component, confined under base", so an ABSOLUTE path is
+        # correctly refused by it and belongs in the rejection corpus above, not
+        # here - an earlier draft of this list carried "/usr/local/share/x.gguf"
+        # and would have failed for that reason. The false-positive traps that
+        # need an absolute or UNC-shaped value live one test down, asserted
+        # against the PREDICATE, which is where that question actually belongs.
+        "sharepoint/model.gguf",              # "share" as a name prefix
+        "a/share/b.gguf",                     # "share" as a whole component
+        "usr/local/share/x.gguf",             # "share" mid-path
+        "model-00001-of-00002.safetensors",   # a real HF shard name
+        "sub/dir/deep/w.bin",                 # legitimately nested
     ])
     def test_legitimate_names_are_not_refused(self, tmp_path, rfilename):
         from localm import _pathcheck
         got = _pathcheck.confined_under(tmp_path, rfilename)
-        assert tmp_path.resolve() in got.resolve().parents or got.parent == tmp_path
+        assert tmp_path.resolve() in got.resolve().parents
 
     @pytest.mark.parametrize("raw", [
         "  " + chr(92) * 2 + "host" + chr(92) + "share" + chr(92) + "x",

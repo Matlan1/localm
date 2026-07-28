@@ -329,16 +329,27 @@ def register(app: FastAPI, ctx) -> None:
         # 500ing the VRAM readout (model_bytes stays 0 -> still a valid estimate).
         epath = _entry_path(load_registry().get(name))
         if epath is not None:
-            try:
-                p = Path(epath)
-                if p.is_file():
-                    model_bytes = p.stat().st_size
-                    # A prior load caches the model's true layer count, so a
-                    # partial-offload estimate (n_gpu_layers < 99) scales by real
-                    # layers instead of the /99 sentinel fallback.
-                    n_layers = cached_n_layers(str(p))
-            except OSError:
-                pass
+            # Off the event loop, for the same reason as /api/models and
+            # /v1/models/{id}: the path comes out of registry.json, not from this
+            # handler, so stat() is a blocking syscall on a value this server did
+            # not choose. A registered UNC row blocks in the Windows SMB
+            # redirector for minutes and draws an outbound authentication attempt
+            # from the server process - inline in this `async def` that stalls
+            # every request the server is serving, not just this one.
+            def _measure(ep: str):
+                try:
+                    p = Path(ep)
+                    if p.is_file():
+                        # A prior load caches the model's true layer count, so a
+                        # partial-offload estimate (n_gpu_layers < 99) scales by
+                        # real layers instead of the /99 sentinel fallback.
+                        return p.stat().st_size, cached_n_layers(str(p))
+                except (OSError, ValueError):
+                    pass
+                return model_bytes, n_layers
+
+            model_bytes, n_layers = await asyncio.get_running_loop().run_in_executor(
+                get_plugin_executor(), _measure, epath)
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it OFF the
         # event loop (it is safe-by-construction but still may take up to its
