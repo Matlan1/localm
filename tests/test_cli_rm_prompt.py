@@ -34,14 +34,25 @@ _KEEP_TEXT = "unregisters the name only"
 def home(tmp_path, monkeypatch):
     """An isolated data dir whose models root BOTH call sites resolve through.
 
-    Patching model_manager.MODELS_DIR is enough for the prompt and the delete
-    gate together precisely because they now share one helper that reads it at
-    call time. REGISTRY_FILE is read at call time by load/save/update_registry,
-    so one patch redirects the whole real path.
+    model_manager.MODELS_DIR is what the shared helper reads, so patching it
+    alone moves the prompt and the delete gate together - that is the fix.
+
+    config.MODELS_DIR is pinned to the SAME directory on purpose, even though no
+    code under test reads it any more. The prompt used to import it from there
+    while the delete gate read the model_manager one; patching only the latter
+    left the pre-fix prompt comparing against the real session home, so it
+    answered "not owned" for every path and these tests passed VACUOUSLY against
+    the very bug they exist to catch. Pinning both makes the predicate itself the
+    only remaining difference, so the negative control actually fires. Do not
+    drop this line.
+
+    REGISTRY_FILE is read at call time by load/save/update_registry, so one patch
+    redirects the whole real path.
     """
     models = tmp_path / "models"
     models.mkdir()
     monkeypatch.setattr(model_manager, "MODELS_DIR", models)
+    monkeypatch.setattr(config, "MODELS_DIR", models)
     monkeypatch.setattr(config, "REGISTRY_FILE", tmp_path / "registry.json")
     return tmp_path
 
