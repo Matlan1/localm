@@ -63,9 +63,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   key granted no filesystem access at all could use either one to add a path of
   its choosing and read back the filename and exact byte size, and a network path
   added that way made every later model listing hang while Windows tried to reach
-  it. Both now require host filesystem access, and a media plugin's ComfyUI
-  folder now needs an owner key to change, the way its launch command and API URL
-  already did.
+  it. Both now require host filesystem access.
 - **A malformed Ollama manifest can no longer send localm outside the blobs
   folder.** The digest recorded inside a manifest became a filename with no check
   on its shape, so a hand-written or hostile one could name a file anywhere on
