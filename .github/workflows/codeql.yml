@@ -1,0 +1,66 @@
+name: CodeQL
+
+# ADVANCED setup, replacing the repo's previous DEFAULT setup. The reason is that
+# default setup has no config file, and both knobs we need live there:
+# paths-ignore (so the test harnesses stop generating alerts) and threat-models
+# (so local-but-network-derived input is still tracked). With default setup the
+# only available noise control was narrowing the threat model itself, which threw
+# away 80 real product-code findings to silence 25 test-harness ones. Advanced
+# setup keeps the wider threat model AND drops the test noise. The two settings
+# are in .github/codeql/codeql-config.yml, with the measurements behind them.
+
+on:
+  # Mirrors ci.yml: push only on master (post-merge verification), branch work
+  # covered by pull_request, so a PR gets ONE run rather than push + PR.
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly full scan so a newly released CodeQL query reaches code that has not
+    # changed since the last push. Offset an hour from ci.yml's Mon 06:00 cron so
+    # the two do not contend for runners.
+    - cron: "0 7 * * 1"
+
+# Workflow-level floor. The repo default for GITHUB_TOKEN is read-only, so the
+# one job that needs more escalates it per-job below rather than here.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Least privilege per job. security-events:write is what uploads the SARIF
+      # and is the only elevated scope needed. actions:read lets the `actions`
+      # language analysis read the workflow definitions it scans. packages:read
+      # is deliberately omitted: every language here is build-mode none, so
+      # nothing is fetched to build.
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      # A failure analyzing one language must not cancel the others: a
+      # Python-only break is exactly the signal this matrix exists to surface.
+      fail-fast: false
+      matrix:
+        # All three are interpreted / no-build, so build-mode none is correct and
+        # no compiler or toolchain setup is required. `actions` scans the workflow
+        # files themselves for script injection, which is worth keeping on a
+        # public repo where workflows run against forks.
+        language: [actions, javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
