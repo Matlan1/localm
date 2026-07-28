@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import ntpath
 import os
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -130,6 +130,44 @@ class TestConfinedUnder:
         and one uniform rule beats a platform-conditional one."""
         with pytest.raises(ValueError):
             confined_under(base, "nest\\..\\..\\victim.txt")
+
+    @pytest.mark.parametrize("bad", [
+        "../../victim.txt", "..", "/nonexistent/target", "//host/share/x",
+        "\\\\host\\share", "\\/host\\share\\x", "/\\host/share/x",
+        "Q:/nonexistent/target", "Q:evil", "a/Q:evil", "a/b/Q:evil",
+        "", ".", "   ", "./", "nest\\..\\..\\victim.txt",
+    ])
+    def test_a_rejected_path_reaches_NO_filesystem_call(self, base, bad,
+                                                        monkeypatch):
+        """ORDER, not verdict: a rejected input must be refused BEFORE any
+        syscall, not after one.
+
+        A correct check paid for too late is worthless. The WS8 lane shipped
+        exactly that: its confined_input_image called
+        Path(raw).expanduser().resolve() FIRST and consulted its allowlist
+        after, so a UNC input was properly refused - but only once the SMB dial
+        had already happened, and their probe hung past 120 seconds proving it.
+        Same defect class as this unit's own admin.py finding, reached from the
+        opposite direction.
+
+        confined_under does every lexical rejection before it touches
+        joinpath().resolve(), and this pins that ordering so a future
+        "simplification" that resolves first cannot pass by still returning the
+        right answer."""
+        seen = []
+        for meth in ("resolve", "is_dir", "is_file", "exists", "stat",
+                     "iterdir", "expanduser", "lstat", "glob"):
+            real = getattr(Path, meth)
+            monkeypatch.setattr(
+                Path, meth,
+                lambda self, *a, _m=meth, _r=real, **kw: (
+                    seen.append(_m), _r(self, *a, **kw))[1])
+
+        with pytest.raises(ValueError):
+            confined_under(base, bad)
+        assert seen == [], (
+            f"{bad!r} was rejected, but only AFTER {seen} - on a UNC path that "
+            f"is the SMB dial, so the refusal came too late to matter")
 
     def test_does_not_require_the_target_to_exist(self, base):
         """Callers check existence themselves (a delete target may already be
