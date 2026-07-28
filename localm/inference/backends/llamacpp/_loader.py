@@ -199,10 +199,18 @@ def _ensure_rocblas_tensile_path() -> None:
     The bundled rocm-sdk wheel ships ``rocblas/library/*.dat`` (the gfx-specific
     GEMM kernels), but rocBLAS otherwise looks beside its own DLL - often an empty
     location in our layout - and aborts a GEMM with "Cannot read
-    TensileLibrary.dat". Text matmuls have a fallback, but the multimodal/clip
-    encode (mtmd, GGUF vision) needs Tensile, so set ``ROCBLAS_TENSILE_LIBPATH``
-    best-effort. No-op when already set or when no such directory exists (non-ROCm
-    builds, or a runtime without the rocm-sdk wheel)."""
+    TensileLibrary.dat". DENSE text matmuls have a fallback, but two paths do NOT
+    and abort the native process outright: the multimodal/clip encode (mtmd, GGUF
+    vision), and the MoE expert matmul (ggml_mul_mat_id) of ANY Mixture-of-Experts
+    model, TEXT-ONLY ONES INCLUDED. Measured 2026-07-28 on gfx1030: with the
+    variable unset a MoE GGUF dies at exit 127 on any prefill, identically at
+    n_gpu_layers=0 and at n_ubatch=32 (so it is neither a batch-size nor a
+    placement threshold), while the same prefill on a dense model succeeds - which
+    is exactly why this went unnoticed, since the common models are dense.
+    So this call is REQUIRED for MoE on ROCm, not a nicety for vision: without it
+    no MoE model runs at all on an AMD box. Do not weaken or drop it.
+    No-op when already set or when no such directory exists (non-ROCm builds, or a
+    runtime without the rocm-sdk wheel)."""
     if os.environ.get("ROCBLAS_TENSILE_LIBPATH"):
         return
     for d in rocm_runtime_dirs():
