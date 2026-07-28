@@ -131,10 +131,23 @@ def test_post_report_still_sends_over_http_and_https(url):
     assert res["url"].endswith("/issues/1")
 
 
-def test_post_report_rejection_message_does_not_leak_url_credentials():
+def test_post_report_rejection_message_does_not_leak_url_credentials(monkeypatch):
+    # The opener and the real sink are BOTH stubbed to fail the test. Without
+    # them this passes vacuously against unfixed code: the send would be
+    # attempted for real, DNS would fail, and the resulting RuntimeError also
+    # happens not to contain the password. It would also make a live outbound
+    # connection from a test whose whole point is that nothing is sent.
+    _explode_urlopen(monkeypatch)
+
+    def _must_not_open(u, data, hdrs, to):
+        raise AssertionError(f"opener was called for a rejected endpoint {u!r}")
+
     with pytest.raises(RuntimeError) as e:
-        ri.post_report("ftp://admin:SECRETPASS@host/x", None, "t", "b")
+        ri.post_report("ftp://admin:SECRETPASS@host/x", None, "t", "b",
+                       opener=_must_not_open)
     assert "SECRETPASS" not in str(e.value)
+    # Rejected for the SCHEME, not incidentally by a network failure.
+    assert "only http:// and https://" in str(e.value)
 
 
 # ------------------------- end to end through main() ----------------------- #
