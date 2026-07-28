@@ -195,6 +195,38 @@ class TestRegistrationRequiresHostFsAccess:
         assert r.status_code == 200, r.text
         assert captured_pull["args"] == ["pull", "--", "owner/repo"]
 
+    def test_curated_comfy_pull_is_403_for_a_key_without_host_fs(
+            self, app, restricted_key):
+        """The THIRD door, found by an adversarial review of the first two.
+        /api/models/pull-comfy-source downloads into comfy_models_dest_dir(),
+        which resolves through `comfy_workdir` whenever the managed ComfyUI
+        instance is not active (the default on a fresh install) - so a
+        config:write key chooses the directory, and the route mkdir -p's it and
+        streams a multi-gigabyte file into it from the server process.
+
+        The gate runs BEFORE the curated-source lookup, so the filename here is
+        deliberately arbitrary: pre-fix this request gets past the gate and is
+        answered on its merits (400 'not a curated download source', or 200 for
+        a real one), never 403. That is what makes this discriminating rather
+        than incidental."""
+        with TestClient(app) as c:
+            r = c.post("/api/models/pull-comfy-source",
+                       headers=_hdr(restricted_key),
+                       json={"filename": "anything.safetensors"})
+        assert r.status_code == 403, r.text
+
+    def test_curated_comfy_pull_is_reachable_for_a_host_fs_key(self, app):
+        """Fires-control for the test above: with host fs access the request gets
+        PAST the gate and is answered on its merits. Without this, the 403 above
+        could be a route that is simply broken for everyone."""
+        from localm import auth
+        key = auth.create_key("hostwriter2", [S.MODELS_WRITE], fs_access="host")["key"]
+        with TestClient(app) as c:
+            r = c.post("/api/models/pull-comfy-source", headers=_hdr(key),
+                       json={"filename": "not-a-curated-name.safetensors"})
+        assert r.status_code != 403, r.text
+        assert r.status_code == 400, r.text   # rejected on merits, not on auth
+
     def test_a_host_fs_key_may_still_pull_a_local_path(
             self, app, tmp_path, home, captured_pull):
         """The capability is re-gated, not removed."""
