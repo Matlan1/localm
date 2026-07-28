@@ -461,7 +461,14 @@ def test_uninstall_unknown_raises(env):
 
 def test_install_rolls_back_on_load_failure(env):
     """A plugin whose register() raises must NOT leave installed/enabled config
-    behind - install loads first and only persists on success."""
+    behind - install loads first and only persists on success.
+
+    The plugin here is ALREADY on disk in the installed root, so install() never
+    copied it, and its directory is now deliberately left alone: deleting a
+    directory this call did not create is the data-loss bug fixed alongside
+    this (a case-variant id did exactly that to a real plugin). This test
+    therefore pins the CONFIG rollback only. The copy-we-did-create case is
+    test_install_rolls_back_a_copy_it_created, which is the fires-control."""
     from localm.config import load_config
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
@@ -474,7 +481,25 @@ def test_install_rolls_back_on_load_failure(env):
     cfg = load_config()
     assert "broken" not in cfg.get("plugins_installed", [])
     assert "broken" not in cfg.get("plugins_enabled", [])
-    assert not mgr.is_installed("broken")
+    assert (plugins / "broken").is_dir()      # pre-existing: not ours to delete
+
+
+def test_install_rolls_back_a_copy_it_created(env):
+    """FIRES-CONTROL for the "never roll back a directory we did not create"
+    guard: when install() DID copy from the store and the load then fails, the
+    copy is still removed. Without this the guard could silently degrade into
+    "never delete anything", which would leave a broken half-install behind."""
+    from localm.plugins.engine import PluginManager
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "badp",
+                 'def register(host):\n    raise RuntimeError("boom")\n'
+                 'def unregister():\n    pass\n')
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    with pytest.raises(RuntimeError):
+        mgr.install("badp")
+    assert not (inst / "badp").exists()       # OUR copy was rolled back
+    assert (store / "badp").is_dir()          # the store source is untouched
 
 
 def test_enable_rolls_back_on_load_failure(env):
@@ -980,14 +1005,19 @@ def test_failed_install_never_deletes_a_dir_it_did_not_create(env):
     from localm.plugins.engine import PluginManager
     store = env / "store"; store.mkdir(parents=True, exist_ok=True)
     installed = env / "installed"
-    real = _make_plugin(installed, "mytool", _ping("mytool"))
+    # register() raises, so the LOAD-FAILURE rollback site is the one exercised
+    # for the exact-case name - that is the site a one-site fix would have
+    # missed, and a working plugin here would install cleanly and prove nothing.
+    real = _make_plugin(installed, "mytool",
+                        'def register(host):\n    raise RuntimeError("boom")\n'
+                        'def unregister():\n    pass\n')
     (real / "USER_DATA.txt").write_text("irreplaceable", encoding="utf-8")
 
     mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
     # install() has TWO rollback sites (verify-failed and load-failed); fixing
     # only the first still let the exact-case name delete the plugin, so all
-    # three variants are pinned. test_install_rolls_back_on_load_failure above
-    # is the fires-control: rollback of a copy this call DID create still runs.
+    # three variants are pinned. test_install_rolls_back_a_copy_it_created is
+    # the fires-control: a copy this call DID create is still rolled back.
     for variant in ("MyTool", "mytool", "MYTOOL"):
         with pytest.raises((ValueError, KeyError, RuntimeError)):
             mgr.install(variant)          # no store source -> cannot succeed
@@ -1007,6 +1037,7 @@ def test_remove_installed_dir_confines_without_demanding_an_identifier(env):
     installed = env / "installed"
     odd = _make_plugin(installed, "coolplugin-1.0", _ping("coolplugin"))
     sentinel = _make_plugin(env, "outside", _ping("outside"))
+    (sentinel / "keep.txt").write_text("important", encoding="utf-8")
     mgr = PluginManager(None, store_root=env / "store", installed_root=installed)
 
     # the guard still FIRES on a genuinely different failure
