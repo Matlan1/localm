@@ -864,10 +864,29 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
     def setup_embeddings(args: dict) -> dict:
         model = args.get("model")
-        from localm.config import update_config
+        from localm.config import load_registry, update_config
         from localm.inference.embedder import (KNOWN_EMBEDDING_MODELS,
                                           resolve_embedding_model_path)
+        # `model` is a free-form string chosen by the MCP CLIENT, which is
+        # normally an LLM steerable by injected content, and this writes the
+        # admin_only `embedding_model` key (a file this process opens). stdio
+        # gives no principal to gate on - the client already runs as the owner -
+        # so the gate here is on the VALUE: a known key or a registered model
+        # name only, never a raw path. Pointing the setting at an arbitrary GGUF
+        # stays available to the owner through `localm setup-embeddings` and the
+        # GUI, both genuinely owner-driven; what this removes is a path chosen by
+        # text the model read. Refuse loudly rather than silently ignoring the
+        # argument, so a caller is never told a selection took effect when it
+        # did not (AGENTS.md rule 5).
         if model:
+            if model not in KNOWN_EMBEDDING_MODELS and model not in load_registry():
+                return _text_result(
+                    f"Refusing to set the embedding model to {model!r}: over MCP it "
+                    f"must be a known key {tuple(KNOWN_EMBEDDING_MODELS)} or an "
+                    "already-registered model name, not a filesystem path. Use "
+                    "'localm setup-embeddings <path>' or the GUI to point it at a "
+                    "GGUF of your own.",
+                    is_error=True)
             update_config(lambda c: c.update({"embedding_model": model}))
 
         with _quiet_stdout():
@@ -1147,7 +1166,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         "inputSchema": {
             "type": "object",
             "properties": {
-                "model": {"type": "string", "description": "Optional embedding model name to set"}
+                "model": {"type": "string", "description": "Optional embedding model to set. Must be a known key (bge-small-en-v1.5, nomic-embed-text-v1.5) or an already-registered model name - a filesystem path is refused here; use 'localm setup-embeddings <path>' or the GUI for that."}
             }
         },
         "handler": setup_embeddings,

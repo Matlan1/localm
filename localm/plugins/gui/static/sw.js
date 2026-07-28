@@ -110,7 +110,12 @@
 // bindings (modelCache and friends) stay live on window instead of freezing at
 // their value from first load - a stale-cached client would keep the old
 // snapshot-copy loop and window.modelCache would never reflect model switches.
-const CACHE = "localm-shell-v82";
+// v83: pages/knowledge.js handles the new "unknown" embedding status, which the
+// server now returns instead of a file-existence answer when the model is an
+// owner-chosen path and the caller is not the owner. A stale-cached client would
+// fall through to the else-branch and tell that user the model is "not installed"
+// and to pick another one - both false, and the second one unactionable.
+const CACHE = "localm-shell-v83";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
