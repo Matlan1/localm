@@ -1,12 +1,22 @@
 name: CI
 
 on:
-  # Push runs only on master (post-merge verification). Branch work is covered by
-  # the pull_request trigger, so a PR gets ONE run, not two (push + PR) - half the
-  # Actions spend. workflow_dispatch + the weekly schedule are unaffected.
+  # Push runs only on master (post-merge verification). PRs deliberately do NOT
+  # run this workflow: the two-OS pytest matrix costs roughly 7 minutes per side,
+  # which is too slow to sit in front of every PR.
+  #
+  # State the consequence rather than let it be discovered later: a PR is no
+  # longer gated by CI. That makes the AGENTS.md "Test-run cadence" rule load
+  # bearing instead of belt-and-braces - the full suite MUST be run locally
+  # before opening a PR, because master's post-merge run is now the first
+  # automated signal, and it arrives after the merge rather than before it. Use
+  # workflow_dispatch to run the suite against a branch on demand.
+  #
+  # Code scanning is unaffected and still runs per-PR (.github/workflows/
+  # codeql.yml): it is about a minute per language and its whole value is
+  # catching a newly introduced alert BEFORE it lands on master.
   push:
     branches: [master]
-  pull_request:
   workflow_dispatch:
   schedule:
     # Weekly drift check of the hand-written llama.cpp ctypes binding against the
