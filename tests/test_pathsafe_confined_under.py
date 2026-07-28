@@ -13,7 +13,9 @@ HTTPException-raising variant.
 
 from __future__ import annotations
 
+import ntpath
 import os
+from pathlib import PureWindowsPath
 
 import pytest
 
@@ -170,7 +172,6 @@ class TestIsUncOrDevicePath:
         Cross-checked against Windows' own parser rather than only against the
         implementation, so the test cannot drift with the code it guards."""
         assert is_unc_or_device_path(raw)
-        from pathlib import PureWindowsPath
         assert PureWindowsPath(raw).drive, (
             "corpus error: Windows does not consider this a drive/UNC root")
 
@@ -192,6 +193,35 @@ class TestIsUncOrDevicePath:
         """Corpus contributed by the WS7 lane, which consumes this predicate for
         remote-supplied embedding specs."""
         assert not is_unc_or_device_path(raw)
+
+    @pytest.mark.parametrize("raw", [
+        "  \\\\host\\share\\x",     # leading spaces
+        "\t\\\\host\\share\\x",     # leading tab
+        "  //host/share/x",
+        "\n\\\\host\\share",
+    ])
+    def test_whitespace_prefixed_is_NOT_unc_and_must_not_be_stripped(self, raw):
+        """A padded UNC-looking string is NOT UNC, and this must stay False.
+
+        Counter-intuitive, so it is pinned with the mechanism: Windows does not
+        strip leading whitespace to reveal a UNC prefix. ``ntpath.normpath`` on
+        "  \\\\\\\\host\\\\share\\\\x" yields "  \\\\host\\\\share\\\\x" - the DOUBLED separator
+        collapses to a single one and the spaces are kept - so ``abspath`` resolves
+        it RELATIVE to the process cwd, under a directory literally named "  ".
+        There is no share, no dial, and nothing to guard against.
+
+        This exists because a proposed alternative implementation normalised with
+        ``.strip()`` before testing the prefix. That would return True here and
+        REFUSE a path Windows treats as an ordinary relative one - a false
+        positive in a security predicate, which is how a guard starts breaking
+        legitimate input and gets weakened later to compensate.
+
+        Both authoritative Windows parsers agree with us: PureWindowsPath(...).drive
+        and ntpath.splitdrive both return "" for every string here."""
+        assert not is_unc_or_device_path(raw)
+        assert not PureWindowsPath(raw).drive, "corpus error: Windows sees a drive"
+        assert not ntpath.splitdrive(ntpath.normpath(raw))[0], (
+            "corpus error: normalization exposed a drive/UNC root")
 
     @pytest.mark.parametrize("raw", [
         "http://e/x", "https://e/x", "file:///nonexistent/x", "smb://h/s",
