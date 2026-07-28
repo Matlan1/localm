@@ -293,7 +293,16 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
 
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
-        time.sleep(stale_after * 4)          # four whole staleness windows
+        # TWO windows, not four, purely to bound how long this test OCCUPIES
+        # heavy_slot. The slot is box-wide across xdist workers, and holding a
+        # global serialisation slot for 4.8 s of pure sleeping delays every
+        # subprocess-heavy sibling behind it. At two windows the hold is 2.4 s,
+        # i.e. exactly what this test already cost before it took the slot, so
+        # taking the slot adds no queueing anywhere. Crossing the staleness
+        # threshold twice proves the same property as crossing it four times:
+        # what is under test is that a REFRESHED record survives past the
+        # threshold at all, not how many times it can do so.
+        time.sleep(stale_after * 2)          # two whole staleness windows
         mine = json.loads(lp.read_text(encoding="utf-8"))["token"]
         with pytest.raises(CollectionLockedError):
             with collection_write_lock(lp, collection="kb", op="a waiter",
