@@ -4,7 +4,7 @@
 registry.json's stored paths are read back by ~40 stat/glob sites across the GUI,
 the /v1 API and the MCP server. Those reads are only safe if the file can only be
 written by a principal that already holds host filesystem reach. Two doors used to
-bypass require_fs_host, and three registry.py defects rode along:
+bypass require_fs_host, and three path-integrity defects rode along:
 
   (a) POST /api/models/scan gated on `if workdir:`, so a BODYLESS post scanned
       get_comfy_workdir() with no fs_access check at all - and comfy_workdir is
@@ -21,8 +21,10 @@ bypass require_fs_host, and three registry.py defects rode along:
 WHY EVERY TEST HERE MINTS A KEY: effective_fs_access() returns "host" for EVERY
 caller when no key is configured (open/dev mode is the trusted loopback owner).
 A fixture that skips create_key would therefore pass VACUOUSLY - every assertion
-would hold for the wrong reason. `keyed_app` mints one and asserts the resulting
-level really is "none" before any test runs on it.
+would hold for the wrong reason. `restricted_key` mints one and asserts its
+recorded level really is "none", and the first two tests in the file prove it end
+to end: the key is refused by the canonical require_fs_host route, and an UNKEYED
+client on the same route is not.
 """
 
 import json
@@ -193,23 +195,16 @@ class TestRegistrationRequiresHostFsAccess:
         assert captured_pull["args"] == ["pull", "--", str(victim)]
 
 
-class TestMediaWorkdirIsAdminGated:
-    """get_comfy_workdir() prefers the per-plugin block over the global key, so
-    the per-plugin write surface is the same door by another name."""
-
-    def test_non_owner_config_write_cannot_set_a_media_workdir(
-            self, app, tmp_path, restricted_key):
-        with TestClient(app) as c:
-            r = c.post("/v1/media/config/image", headers=_hdr(restricted_key),
-                       json={"workdir": str(tmp_path)})
-        assert r.status_code == 403, r.text
-
-    def test_the_owner_key_still_can(self, app, tmp_path, home, monkeypatch):
-        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
-        with TestClient(app) as c:
-            r = c.post("/v1/media/config/image", headers=_hdr("ownersecret"),
-                       json={"workdir": str(tmp_path)})
-        assert r.status_code == 200, r.text
+# NOT TESTED HERE ON PURPOSE: the per-plugin `comfy.workdir` admin gate in
+# POST /v1/media/config/{name}. get_comfy_workdir() prefers the per-plugin block
+# over the global comfy_workdir, so that IS the same door by another name - but
+# localm/inference/routes/config.py has a single designated owner for this
+# program (three lanes were adding admin_only-style flags to it at once, and a
+# rebase taking one side wholesale silently drops another lane's flag with no
+# conflict marker and no failing test). The one-line gate change was handed to
+# that owner and lands in their diff, with the end-to-end non-ADMIN -> 403
+# assertion alongside it. The scan-route fix above closes the registry-poisoning
+# door independently of it.
 
 
 # --------------------------------------------------------------------------- #
@@ -417,15 +412,15 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         "C:evil",
     ])
     def test_an_escaping_rfilename_is_rejected_before_the_stat(self, tmp_path, rfilename):
-        from localm import pathsafe
+        from localm import _pathcheck
         with pytest.raises(ValueError):
-            pathsafe.confined_under(tmp_path, rfilename)
+            _pathcheck.confined_under(tmp_path, rfilename)
 
     def test_nested_subpaths_are_still_permitted(self, tmp_path):
         """A real HF listing uses them, so confined_name's flat-only rule is wrong
         here and confined_under must allow this."""
-        from localm import pathsafe
-        got = pathsafe.confined_under(tmp_path, "subdir/model-00001-of-2.safetensors")
+        from localm import _pathcheck
+        got = _pathcheck.confined_under(tmp_path, "subdir/model-00001-of-2.safetensors")
         assert got == tmp_path / "subdir" / "model-00001-of-2.safetensors"
 
     def test_snapshot_is_incomplete_rather_than_stat_ing_outside_dest(self, tmp_path):

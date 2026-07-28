@@ -694,9 +694,9 @@ def _snapshot_is_complete(dest: Path, repo_siblings, repo_id: str) -> bool:
 
     Module-level rather than a closure so the confinement below is directly
     testable (tests/test_registry_confinement.py)."""
-    # Imported here, not at module scope: localm.pathsafe pulls in fastapi, and
-    # this module is on the CLI's import path.
-    from localm import pathsafe
+    # TODO: switch to localm.pathsafe once the shared helper lands there - see
+    # localm/_pathcheck.py's module docstring for why it is temporarily separate.
+    from localm import _pathcheck
     if not (dest / "config.json").exists():
         return False
     if repo_siblings is None:
@@ -710,7 +710,7 @@ def _snapshot_is_complete(dest: Path, repo_siblings, repo_id: str) -> bool:
         # make an EMPTY download look complete and get registered as ready.
         # Confine before the stat, never after.
         try:
-            fp = pathsafe.confined_under(dest, str(sib.rfilename))
+            fp = _pathcheck.confined_under(dest, str(sib.rfilename))
         except ValueError as e:
             # Rule 5: an out-of-bounds name is a real signal about the repo, so
             # say so. Reporting the snapshot INCOMPLETE is the safe direction - it
