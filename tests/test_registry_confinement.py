@@ -653,15 +653,39 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         "//host/share",
         chr(92) + "/host" + chr(92) + "share",     # mixed spelling
         "/" + chr(92) + "host/share",              # mixed spelling
-        chr(92) * 2 + "." + chr(92) + "PhysicalDrive0",
     ])
     def test_the_unc_predicate_does_not_under_match(self, raw):
         """The other direction, in the same file: both mixed spellings ARE UNC to
-        Windows, and a raw two-prefix check misses them."""
+        Windows, and a raw two-prefix check misses them. Cross-checked against the
+        OS parser, same as the over-match test - these are SHARE paths, where
+        `drive` is unambiguously the `\\\\host\\share` prefix."""
         from pathlib import PureWindowsPath
         from localm import _pathcheck
         assert _pathcheck.is_unc_or_device_path(raw) is True, raw
         assert PureWindowsPath(raw).drive != "", raw
+
+    @pytest.mark.parametrize("raw", [
+        chr(92) * 2 + "." + chr(92) + "PhysicalDrive0",
+        chr(92) * 2 + "?" + chr(92) + "C:" + chr(92),
+    ])
+    def test_the_predicate_rejects_device_namespace_paths(self, raw):
+        """Device-namespace paths, asserted SEPARATELY and WITHOUT a claim about
+        what the OS parser calls them.
+
+        `\\\\.\\` and `\\\\?\\` are the device namespace, NOT a UNC share, and
+        CPython's ntpath has changed how it reports these across versions. An
+        earlier draft of this file lumped them in with the share cases above and
+        asserted `PureWindowsPath(raw).drive != ""` for them too - an unverified
+        claim about the platform, in a test, which is worse than no test at all:
+        it would either fail for a reason unrelated to the code under test, or
+        pass while teaching a future reader something untrue.
+
+        What this unit actually needs from the predicate is behavioural and does
+        not depend on that question: a device path must never be treated as an
+        ordinary relative component, because these routes reach `stat`, `mkdir`
+        and `unlink`. So assert exactly that, and nothing about `drive`."""
+        from localm import _pathcheck
+        assert _pathcheck.is_unc_or_device_path(raw) is True, raw
 
     def test_nested_subpaths_are_still_permitted(self, tmp_path):
         """A real HF listing uses them, so confined_name's flat-only rule is wrong
