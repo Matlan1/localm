@@ -42,31 +42,77 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines, split_jsonl
 
-# numpy is bound ONCE, HERE, at module import - deliberately not lazily inside the
-# functions that use it. It is an optional dependency (not pinned in
-# pyproject.toml; it arrives transitively), hence the None fallback.
+# numpy is optional here: it is NOT in pyproject.toml, and CI installs from
+# pyproject rather than uv.lock, so on those runners it is simply absent and the
+# normal, correct state is a clean ModuleNotFoundError into the pure-Python path.
+# Bound ONCE at module import so this is decided at a single known point instead
+# of per call; absent -> None -> every caller degrades.
 #
-# The lazy imports this replaces were the SOURCE of the partial-initialisation
-# fault, not merely a victim of it. CPython's import lock has been PER-MODULE
-# since 3.3, so a thread that finds numpy already in sys.modules does not wait for
-# it to finish initialising - it gets the module as it currently stands. Both
-# users of numpy here run on the shared plugin ThreadPoolExecutor (rag/plug.py:357
-# and :612), so two requests could race the FIRST import: thread A starts numpy's
-# long top-level init, thread B sees `import numpy` succeed and finds np.asarray
-# missing. Binding at module import is single-threaded by construction and closes
-# the window entirely.
+# THE REAL ROBUSTNESS IS THE (ImportError, AttributeError) CATCH AT EACH CALL
+# SITE, not this binding. An attribute-less `numpy` can appear with no import
+# error at all: a bare DIRECTORY named `numpy` on sys.path resolves as a PEP 420
+# implicit namespace package, so `import numpy` SUCCEEDS and yields a module with
+# no attributes and ``__file__`` of None. An injected stub module looks the same.
+# That is the state CI hit, reproduced with a control (no stray dir ->
+# ModuleNotFoundError; stray dir -> character-identical AttributeError).
 #
-# It also explains what a state-handling fix alone could not: why the failure is
-# NONDETERMINISTIC on identical trees, why CI reddens where local passes
-# (contention widens the window), and why one OS stays green (different
-# scheduling). Diagnosis credit: local_f7754072 (CodeQL triage lane).
+# CORRECTION, kept deliberately because this comment previously asserted it and a
+# reader would otherwise copy it: an earlier diagnosis blamed a per-module
+# import-lock race across the plugin thread pool. That is FALSE and was falsified
+# from the CI logs - numpy is not installed there at all (you cannot
+# half-initialise a package that is not installed), the failing traceback has no
+# thread pool on it (memory/store.py, a plain synchronous call), and every failure
+# landed on gw0 and only gw0, which a first-import race cannot produce. Two CPython
+# details that diagnosis got backwards: a failed import does NOT leave a partial
+# module behind (``_bootstrap._load`` deletes ``sys.modules[name]`` on any
+# BaseException), and plain ``import x`` BLOCKS on the module lock rather than
+# handing a second thread a partial module - it accepts a partial one only on
+# _DeadlockError, i.e. a genuine circular import.
 #
-# The (ImportError, AttributeError) catches at the call sites STAY, as defence for
-# any partial-init shape this binding does not prevent.
+# So this binding NARROWS a lazy-import window that is a latent hazard regardless;
+# it does not close the hole that actually bit us, because it binds a namespace
+# stub just as readily as a lazy import would. What creates that stray directory
+# is an ENVIRONMENT defect, under separate investigation, and is not claimed here.
 try:
     import numpy as _numpy
 except ImportError:      # optional dependency - every caller degrades to pure Python
     _numpy = None
+
+#: True when numpy imported but is a namespace stub / attribute-less object rather
+#: than a real install. ``__file__`` is None for a PEP 420 namespace package, which
+#: is an EXACT discriminator - so the fallback can say WHICH case it hit instead of
+#: collapsing "numpy is legitimately absent" (routine) and "something has put a
+#: fake numpy on your path" (the install is broken) into one benign-sounding
+#: message. Same rule-5 branch as missing-vs-corrupt, applied to the message.
+_NUMPY_IS_STUB = _numpy is not None and getattr(_numpy, "__file__", None) is None
+
+
+def _warn_numpy_degrade(exc: Exception, operation: str) -> None:
+    """Announce the pure-Python fallback ONCE per process, saying which case it is.
+
+    "numpy unavailable, using the pure-Python path" reads as routine and would bury
+    the interesting case. An attribute-less numpy is NOT a missing dependency - it
+    means something has put a fake one on the import path, which will equally break
+    anything else in the environment that imports numpy. That deserves a message
+    naming the artefact so someone can go delete it, not a shrug.
+    """
+    if _NUMPY_DEGRADE_LOGGED:
+        return
+    _NUMPY_DEGRADE_LOGGED.add(True)
+    if _NUMPY_IS_STUB:
+        _log.warning(
+            "numpy imported as an EMPTY NAMESPACE PACKAGE from %s - it is not a real "
+            "install, and this will break anything else here that imports numpy. Most "
+            "likely a bare 'numpy' directory left on sys.path by a failed or "
+            "partially-removed install; find and remove it. Falling back to "
+            "pure-Python %s (%s: %s).",
+            getattr(_numpy, "__path__", None) or "an unknown path",
+            operation, type(exc).__name__, exc)
+    else:
+        _log.warning(
+            "numpy is present but unusable (%s: %s); falling back to pure-Python %s. "
+            "Results are identical, it is slower on large collections.",
+            type(exc).__name__, exc, operation)
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
 from .collection_lock import (CollectionLockedError, collection_write_lock,
@@ -137,12 +183,7 @@ def _vectors_finite(vectors) -> bool:
     # a surfaced reason (what the docstring promises) - it errors the whole query.
     # CI only ever pointed at _cosine because it was reached first.
     except (ImportError, AttributeError) as e:
-        if not _NUMPY_DEGRADE_LOGGED:
-            _NUMPY_DEGRADE_LOGGED.add(True)
-            _log.warning(
-                "numpy is present but unusable (%s: %s); falling back to pure-Python "
-                "vector validation. Results are identical, checking is slower on "
-                "large collections.", type(e).__name__, e)
+        _warn_numpy_degrade(e, "vector validation")
         for v in vectors:
             if not v:
                 continue
@@ -2077,14 +2118,7 @@ def _cosine(a: list, b: list) -> float:
         # propagates. And the degrade is ANNOUNCED once per process rather than
         # taken silently, because "semantic search got slower and nobody knows why"
         # is exactly the invisible fault that rule exists to prevent.
-        if not _NUMPY_DEGRADE_LOGGED:
-            _NUMPY_DEGRADE_LOGGED.add(True)
-            _log.warning(
-                "numpy is present but unusable (%s: %s); falling back to pure-Python "
-                "cosine similarity. Results are identical, scoring is slower on large "
-                "collections. This usually means a partially-initialised or broken "
-                "numpy install - reinstall it to restore the fast path.",
-                type(e).__name__, e)
+        _warn_numpy_degrade(e, "cosine similarity")
         dot = sum(x * y for x, y in zip(a, b))
         na = math.sqrt(sum(x * x for x in a))
         nb = math.sqrt(sum(y * y for y in b))

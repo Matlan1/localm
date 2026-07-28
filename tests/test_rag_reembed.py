@@ -292,6 +292,51 @@ def test_the_unusable_numpy_degrade_is_announced_once_not_per_chunk(monkeypatch,
     assert len(warned) == 1, f"expected exactly one warning across 3 calls, got {len(warned)}"
 
 
+def test_a_namespace_stub_numpy_is_reported_as_a_broken_environment(monkeypatch, caplog):
+    """A bare directory named `numpy` on sys.path resolves as a PEP 420 implicit
+    namespace package: `import numpy` SUCCEEDS, the module has no attributes, and
+    `__file__` is None. That is NOT "numpy is missing" - something has put a fake
+    one on the path, which breaks anything else here that imports numpy.
+
+    Collapsing that into a routine "numpy unavailable" message is the same rule-5
+    error as collapsing missing-vs-corrupt into one code path, made in the message
+    instead of the branch."""
+    import types
+
+    from localm.rag import store as store_mod
+
+    stub = types.ModuleType("numpy")
+    stub.__path__ = ["D:/stray/numpy"]          # namespace packages carry __path__
+    monkeypatch.setattr(store_mod, "_numpy", stub)
+    monkeypatch.setattr(store_mod, "_NUMPY_IS_STUB", True)
+    store_mod._NUMPY_DEGRADE_LOGGED.clear()
+
+    with caplog.at_level("WARNING"):
+        assert store_mod._cosine([1.0, 2.0], [1.0, 2.0]) == pytest.approx(1.0)
+
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "NAMESPACE PACKAGE" in msg, "the broken-environment case must be named as such"
+    assert "D:/stray/numpy" in msg, "the message must name the artefact to delete"
+
+
+def test_an_ordinary_unusable_numpy_is_not_called_a_broken_environment(monkeypatch, caplog):
+    """The discriminator must cut both ways, or it is just a louder message."""
+    import types
+
+    from localm.rag import store as store_mod
+
+    monkeypatch.setattr(store_mod, "_numpy", types.ModuleType("numpy"))
+    monkeypatch.setattr(store_mod, "_NUMPY_IS_STUB", False)
+    store_mod._NUMPY_DEGRADE_LOGGED.clear()
+
+    with caplog.at_level("WARNING"):
+        store_mod._cosine([1.0, 2.0], [1.0, 2.0])
+
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "present but unusable" in msg
+    assert "NAMESPACE PACKAGE" not in msg, "a non-stub was mislabelled as a broken environment"
+
+
 def test_numpy_absent_entirely_still_works(monkeypatch):
     """numpy is optional and arrives transitively - None must be a clean path."""
     from localm.rag import store as store_mod
