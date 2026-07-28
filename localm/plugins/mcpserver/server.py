@@ -165,11 +165,30 @@ class EngineCache:
         """Resident display names, least-recently-used first."""
         return list(self._lru)
 
-    @staticmethod
-    def _build_engine(model_name: str):
+    def _operator_supplied(self, model_name) -> bool:
+        """True only for the model the OPERATOR named when starting this server.
+
+        ``default_model`` comes from the ``--model`` flag / the LOCALM_MODEL
+        environment variable, i.e. from the person who launched the process, so a
+        filesystem path is legitimate there and gating it would break
+        ``localm mcp --model <path>``. Every OTHER name arrives in a tool call
+        from the MCP client, which is normally an LLM that can be steered by
+        content it was asked to summarise - so a name from that source is treated
+        as hostile input and must be a registered one."""
+        return bool(model_name) and model_name == self.default_model
+
+    def _build_engine(self, model_name: str):
         from localm.inference.engine import Engine
-        from localm.model_manager import get_model_info
-        info = get_model_info(model_name)
+        from localm.model_manager import get_model_info, unregistered_model_error
+        # Checked here as well as in resolve_model because _build_engine is also
+        # reachable directly (and is the injection point tests replace), so the
+        # gate must not depend on having come through resolve_model.
+        trusted = self._operator_supplied(model_name)
+        if not trusted:
+            bad = unregistered_model_error(model_name)
+            if bad:
+                raise ValueError(bad)
+        info = get_model_info(model_name, allow_direct_path=trusted)
         if info is None:
             raise ValueError(f"Model not found: {model_name!r}. "
                              f"Run 'localm list' to see registered models.")
@@ -177,6 +196,13 @@ class EngineCache:
         return Engine(str(path), display_name=model_name)
 
     def resolve_model(self, requested: Optional[str]) -> str:
+        # A client-supplied name must be a registered one; the operator's own
+        # --model default is exempt (see _operator_supplied).
+        if requested and not self._operator_supplied(requested):
+            from localm.model_manager import unregistered_model_error
+            bad = unregistered_model_error(requested)
+            if bad:
+                raise ValueError(bad)
         name = requested or self.default_model
         if name:
             return name
@@ -240,7 +266,11 @@ class EngineCache:
             model_footprint_bytes, required_vram_bytes)
         try:
             from localm.model_manager import get_model_info
-            info = get_model_info(name)
+            # Operator-supplied default may be a path (see _operator_supplied);
+            # a client name may not, and returns None here = "cannot prove the
+            # fit" = single-resident, which is the safe direction.
+            info = get_model_info(
+                name, allow_direct_path=self._operator_supplied(name))
             if info is None:
                 return None
             path, _hint = info
@@ -288,12 +318,14 @@ class EngineCache:
                  f"single-resident")
             return False
 
-    @staticmethod
-    def _is_gguf(name: str) -> bool:
+    def _is_gguf(self, name: str) -> bool:
         try:
             from localm.inference.engine import _is_gguf
             from localm.model_manager import get_model_info
-            info = get_model_info(name)
+            # Instance method (was static) so it can tell the operator's own
+            # --model path from a client-supplied name, same split as _size_for.
+            info = get_model_info(
+                name, allow_direct_path=self._operator_supplied(name))
             return bool(info) and _is_gguf(info[0])
         except Exception:
             # Fail CLOSED. This only decides whether to run the per-device split
@@ -490,7 +522,10 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     try:
         name = engines.resolve_model(None)
         from localm.model_manager import get_model_info
-        info = get_model_info(name)
+        # resolve_model(None) yields the operator's own default, so a path is
+        # legitimate here; anything else is already registry-gated upstream.
+        info = get_model_info(
+            name, allow_direct_path=engines._operator_supplied(name))
         if info is not None:
             path, _hint = info
             if str(path).lower().endswith(".gguf"):
@@ -611,6 +646,26 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(
                 "'name' is required - pick a short registry name for this model",
                 is_error=True)
+        # A LOCAL PATH IS NOT A PULL, and letting a client "pull" one turns this
+        # tool into a registry-WRITE primitive: pull_model treats an existing path
+        # as a local add (see pull.py's is_local_path branch), registering an
+        # arbitrary directory under a client-chosen name. That name is then a
+        # registered model, so it sails through the membership check and resolves
+        # via the REGISTRY branch of get_model_info - around the direct-path gate
+        # entirely. It also works with net_mode=off, and even a REFUSED add still
+        # probes the path (config.json read, rglob, sha256), which is the sink set
+        # this gate exists to keep client input away from. An MCP client pulls from
+        # HuggingFace; registering something already on this disk is `localm add`,
+        # a deliberate local action.
+        try:
+            if Path(repo).expanduser().exists():
+                return _text_result(
+                    f"{repo!r} is a path on this machine, not a HuggingFace repo. "
+                    "pull_model downloads a model by repo id (e.g. "
+                    "'owner/name'). To register a model already on this disk, run "
+                    "'localm add <path>' on the host.", is_error=True)
+        except OSError:
+            pass          # unreadable/oversized path: not a local add, fall through
         spec = f"{repo}:{args['file']}" if args.get("file") else repo
 
         from localm.model_manager.pull import pull_model as _pull
@@ -726,6 +781,19 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         cmd = [sys.executable, "-m", "localm", "coder", task,
                "--cwd", str(cwd_path), "--output-format", "json"]
         if args.get("model"):
+            # A MODEL NAME FROM A CLIENT IS NOT OPERATOR INPUT, even though it is
+            # about to become argv. The coder CLI spawns `localm gui <model>` when
+            # no instance is attached for this cwd, and that positional reaches the
+            # startup resolver, which opts into allow_direct_path because a human
+            # typed it. Here a human did not: this string came from an MCP tool
+            # call, and the client also chooses `cwd`, so it can select the spawn
+            # branch at will. Without this check the gate is laundered through our
+            # own command line - "it is a command line" only implies "an operator
+            # typed it" when we are not the one building it.
+            from localm.model_manager import unregistered_model_error
+            bad = unregistered_model_error(args["model"])
+            if bad:
+                return _text_result(bad, is_error=True)
             cmd += ["--model", args["model"]]
         if args.get("max_turns") is not None:
             cmd += ["--max-turns", str(args["max_turns"])]

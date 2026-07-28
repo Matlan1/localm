@@ -271,7 +271,13 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
                     "name or path); reviewing with the agent's own model instead.")
                 return _local_same_model()
             from localm.model_manager import get_model_path
-            mp = get_model_path(rmodel)
+            # allow_direct_path: coder_reviewer_model is documented as "a model
+            # name or path" (see the warning just above), and it is CONFIG, not a
+            # request field - writing it needs the config:write scope, which is in
+            # scopes.PRIVILEGED_SCOPES. That is a different trust level from the
+            # non-privileged jobs/MCP callers this gate exists to stop, so keeping
+            # the documented path form here costs nothing against that threat model.
+            mp = get_model_path(rmodel, allow_direct_path=True)
             if mp is None:
                 print_warning(
                     f"reviewer model '{rmodel}' not found; reviewing with the "

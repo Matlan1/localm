@@ -82,6 +82,23 @@ class JobUpdate(BaseModel):
     enabled: "bool | None" = None
 
 
+def _check_model_name(model) -> None:
+    """Refuse a job whose ``model`` is not a registered model name.
+
+    The jobs scope is NOT in scopes.PRIVILEGED_SCOPES, so a deliberately
+    restricted key reaches this field, and the field used to flow verbatim into
+    get_model_info -> Engine(...). That let any jobs-scoped caller name an
+    arbitrary path on disk and have the server stat it, walk it, read it, and -
+    for a HuggingFace directory - execute its bundled .py through transformers.
+    Registry membership is checked HERE, at the write, so a poisoned row never
+    reaches disk in the first place (the runner re-checks at run time for rows
+    persisted by an older build)."""
+    from localm.model_manager import unregistered_model_error
+    err = unregistered_model_error(model)
+    if err:
+        raise HTTPException(400, err)
+
+
 def _caller_can_allow_shell(request: Request) -> bool:
     """True if the caller may opt a coder job into the full, shell-capable coder.
 
@@ -227,6 +244,7 @@ async def create_job(req: JobCreate, request: Request):
         raise HTTPException(
             403, "allow_shell needs the owner key or a coder:full key; a scheduled "
             "coder job otherwise runs restricted (read + confined edit, no shell).")
+    _check_model_name(req.model)
     from localm.inference.http_server import principal_id
     try:
         job = Job(
@@ -279,6 +297,10 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
     if getattr(job, "allow_shell", False) and not can_shell:
         raise HTTPException(
             403, "editing a shell-enabled job needs the owner key or a coder:full key.")
+    # PUT is the second write path into `model` and needs the same gate as POST,
+    # or the create-time check is simply routed around with an update.
+    if "model" in changes:
+        _check_model_name(changes["model"])
     try:
         job = store.update(job_id, **changes)
     except KeyError:

@@ -74,8 +74,11 @@ def _agent_backend():
 
 def test_local_reviewer_built_heterogeneous(monkeypatch):
     _cfg(monkeypatch)
+    # **kw: get_model_path now takes allow_direct_path, which reviewer.py passes
+    # (coder_reviewer_model is documented as a name OR a path, and setting it
+    # needs the privileged config:write scope).
     monkeypatch.setattr("localm.model_manager.get_model_path",
-                        lambda n: __import__("pathlib").Path("/models/mini.gguf"))
+                        lambda n, **kw: __import__("pathlib").Path("/models/mini.gguf"))
     fake = MagicMock()
     with patch("localm.plugins.coder.backends.local_engine.LocalEngineBackend",
                return_value=fake) as mk:
@@ -87,8 +90,11 @@ def test_local_reviewer_built_heterogeneous(monkeypatch):
 def test_local_reviewer_allowed_in_privacy_mode(monkeypatch):
     # The CPU reviewer stays on-machine, so privacy mode must NOT downgrade it.
     _cfg(monkeypatch)
+    # **kw: get_model_path now takes allow_direct_path, which reviewer.py passes
+    # (coder_reviewer_model is documented as a name OR a path, and setting it
+    # needs the privileged config:write scope).
     monkeypatch.setattr("localm.model_manager.get_model_path",
-                        lambda n: __import__("pathlib").Path("/models/mini.gguf"))
+                        lambda n, **kw: __import__("pathlib").Path("/models/mini.gguf"))
     fake = MagicMock()
     with patch("localm.plugins.coder.backends.local_engine.LocalEngineBackend",
                return_value=fake):
