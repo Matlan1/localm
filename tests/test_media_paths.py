@@ -157,6 +157,58 @@ def test_allowed_input_roots_excludes_the_data_dir_root(tmp_path, monkeypatch):
         assert (home / name).resolve() in roots, name
 
 
+def test_repo_root_allowance_needs_a_real_checkout_not_just_pyproject():
+    """The source-checkout allowance must key on something a release build does
+    NOT have. pyproject.toml alone does not qualify: it is release-include (the
+    updater's verify_zip requires it), so an installed copy carries one and the
+    "source checkout only" guard would never actually narrow. A release zip is
+    assembled from git-TRACKED files, so .git is the distinguishing marker."""
+    real_root = Path(media_paths.__file__).resolve().parents[2]
+    assert (real_root / "pyproject.toml").is_file(), "test runs from a checkout"
+    assert media_paths.source_checkout_root() == real_root
+
+    src = Path(media_paths.__file__).read_text(encoding="utf-8")
+    assert '(root / ".git").exists()' in src, \
+        "pyproject.toml alone would also match an installed copy"
+
+
+def test_data_dir_is_refused_even_when_it_sits_inside_the_repo_root(tmp_path,
+                                                                   monkeypatch):
+    """The repo-root allowance can CONTAIN the data dir: with no LOCALM_HOME and
+    no localm-home.cfg, localm falls back to <repo>/home. Without an explicit
+    re-deny, the source-checkout root would readmit auth.key through the back
+    door - defeating the whole narrowing on every from-source install."""
+    fake_repo = tmp_path / "checkout"
+    home = fake_repo / "home"                 # the fallback layout, verbatim
+    (home / "uploads").mkdir(parents=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(media_paths, "source_checkout_root", lambda: fake_repo)
+
+    secret = home / "auth.key"
+    secret.write_bytes(b"\x89PNG\r\n\x1a\nowner-key")
+    assert fake_repo in {p.resolve() for p in media_paths.allowed_input_roots()}, \
+        "precondition: the repo root really is an allowed root here"
+
+    with pytest.raises(Exception) as ei:
+        media_paths.confined_input_image(str(secret))
+    assert getattr(ei.value, "status_code", None) == 400
+
+    # ...and a legitimate file in an allowed subdir of that same data dir still
+    # passes, so the re-deny did not over-reach.
+    ok = home / "uploads" / "ref.png"
+    ok.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
+    assert media_paths.confined_input_image(str(ok)) == ok.resolve()
+
+    # A non-data-dir file elsewhere in the checkout is still allowed (that is
+    # what the source-checkout allowance is FOR).
+    asset = fake_repo / "examples" / "cat.png"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"\x89PNG\r\n\x1a\nASSET")
+    assert media_paths.confined_input_image(str(asset)) == asset.resolve()
+
+
 def test_input_image_from_the_gallery_and_uploads_still_accepted(tmp_path, monkeypatch):
     """The legitimate flows must survive the narrowing: an uploaded file, and a
     previously generated image reused as img2img input (the GUI's "use as
