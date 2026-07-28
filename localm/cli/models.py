@@ -33,7 +33,8 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
     """
     import time as _time
 
-    info = get_model_info(model)
+    # allow_direct_path: operator-typed on the command line (`localm bench <path>`).
+    info = get_model_info(model, allow_direct_path=True)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")
         sys.exit(1)

@@ -59,13 +59,28 @@ def _store():
                    "scheduled coder job runs restricted (read + confined edit, no "
                    "shell/network) so an unattended run cannot be steered into "
                    "run_shell by hostile content.")
-@click.option("--model", default=None, help="Model to run the job with.")
+@click.option("--model", default=None,
+              help="Registered model to run the job with (a name from "
+                   "'localm list', not a path).")
 @click.option("--disabled", is_flag=True, default=False,
               help="Create the job disabled (it will not run until enabled).")
 def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
             scope, allow_shell, model, disabled):
     """Add a new scheduled job."""
     from localm.plugins.builtin.jobs.store import Job
+
+    # The THIRD write path into `model`, after POST and PUT /api/jobs. The runner
+    # re-checks at run time, so an unregistered name here was not a security hole -
+    # it was worse ergonomics than a hole: the job saved fine and then failed on
+    # every scheduled tick, unattended, with nothing at creation time saying why.
+    # Checking at the write keeps _check_model_name's promise ("a poisoned row
+    # never reaches disk") true for every writer, and turns a silent repeating
+    # failure into one immediate, actionable error.
+    from localm.model_manager import unregistered_model_error
+    _bad = unregistered_model_error(model)
+    if _bad:
+        click.echo(f"Invalid job: {_bad}", err=True)
+        sys.exit(1)
 
     picked = [f for f, on in (("--coder", coder), ("--memory", memory),
                               ("--rag", rag)) if on]

@@ -285,6 +285,18 @@ CORE_FIELDS: list = [
                  "Refuse all requests until an API key is set (fail closed). "
                  "Required before exposing localm on a network.",
                  group="Security", applies=Applies.RESTART),
+    # admin_only: turning this ON lets a downloaded model directory run its own
+    # bundled Python inside the localm process, which is arbitrary code execution
+    # as the server user. Only an owner may make that call, never a config:write
+    # key. See routes/config.py admin_only gate and hf.py's refusal path.
+    SettingField("hf_trust_remote_code", Widget.TOGGLE,
+                 "Allow model-bundled custom code",
+                 "Let a HuggingFace model directory import and run its OWN Python "
+                 "when loading (its 'auto_map' custom code). This is arbitrary code "
+                 "execution on this machine, so it is off by default and a model "
+                 "needing it is refused with an explanation. Turn on only for a "
+                 "model from a source you trust.",
+                 group="Security", applies=Applies.NEXT_LOAD, admin_only=True),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
     # form control. Accepted by PATCH /v1/config so the launcher stays in sync.

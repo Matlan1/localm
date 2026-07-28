@@ -35,6 +35,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   also stops a folder linking back to itself from driving a huge recursive copy
   (measured at 63 nested levels before it failed), which happened before any of
   the plugin's own code ran.
+- **A model name from the API or an MCP client can no longer point at any file on
+  your disk.** Naming a model used to fall back to treating the name as a path, so
+  a scheduled job or an MCP tool call could hand the server any folder on the
+  machine and have it read and load what it found. For a HuggingFace model folder
+  that meant the folder's own bundled Python was imported and RUN, because localm
+  passed transformers' "trust remote code" flag unconditionally. Scheduled jobs and
+  MCP requests now have to name a model you have actually registered, and say which
+  name they did not recognise when they do not. Running a model straight from a path
+  on the command line (`localm run D:\models\foo.gguf`, `localm gui <path>`,
+  `localm mcp --model <path>`) is unchanged: you typed it, so it is still allowed.
+- **A model's own bundled code is no longer executed just because you loaded it.**
+  Custom model code is off by default; a model that needs it is refused with an
+  explanation and the setting to turn on, instead of silently running. The new
+  owner-only "Allow model-bundled custom code" setting (Settings -> Security) turns
+  it back on for a model you trust. `localm pull` now also tells you when a
+  downloaded repository contains Python files.
 
 ## [0.1.3] - 2026-07-23
 

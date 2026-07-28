@@ -33,6 +33,93 @@ def _require_torch():
         raise
 
 
+def _trust_remote_code_enabled() -> bool:
+    """Whether transformers may import and execute a model directory's own .py.
+
+    Config-driven and DEFAULT OFF (config key ``hf_trust_remote_code``, owner-only
+    to set). This flag used to be hard-coded ON at every from_pretrained call in
+    this module, which meant loading a model directory executed whatever
+    Python that directory shipped, via its ``auto_map`` (CodeQL alert 49). A model
+    name that reached this backend from an untrusted caller therefore gave remote
+    code execution as the server user; `localm pull owner/repo` also downloaded a
+    repo's .py, so the file could arrive entirely legitimately and run on load.
+    """
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("hf_trust_remote_code", False))
+    except Exception as e:
+        # Fail CLOSED: an unreadable config must never be read as permission to
+        # execute a model's bundled code. Logged rather than silent (rule 5).
+        logger.debug("hf: could not read hf_trust_remote_code, assuming off: %s", e)
+        return False
+
+
+def _declares_custom_code(model_path: str) -> bool:
+    """True when this model directory asks transformers to run its own Python.
+
+    That is what an ``auto_map`` entry means: a class is loaded from a .py inside
+    the directory. Read from the on-disk JSON only - nothing is imported here.
+    """
+    import json
+    p = Path(model_path)
+    if not p.is_dir():
+        return False
+    # Every file transformers actually consults for auto_map. NOTE the spelling:
+    # it is preprocessor_config.json (with the "pre"), which AutoProcessor reads -
+    # an earlier version of this list said "processor_config.json" and so missed
+    # the most common multimodal case entirely. A miss here is not an execution
+    # bypass (trust_remote_code is genuinely passed as False, so transformers still
+    # refuses), but it costs the user the clear message this function exists to
+    # give: transformers' own refusal for a processor gets caught by the broad
+    # handler in load() and relabelled "processor load failed ... falling back to
+    # text-only tokenizer", so the model quietly loads WITHOUT the capability and
+    # nobody is told it asked to run its own code.
+    for fname in ("config.json", "tokenizer_config.json",
+                  "preprocessor_config.json", "processor_config.json",
+                  "video_preprocessor_config.json"):
+        f = p / fname
+        if not f.is_file():
+            continue
+        try:
+            # Any non-empty auto_map counts. transformers still accepts the legacy
+            # list/tuple form, so an isinstance(dict) test alone under-detects;
+            # this asks "does it declare one" rather than "is it the shape I
+            # expected", which is the safe direction for a refuse-gate.
+            if json.loads(f.read_text(encoding="utf-8")).get("auto_map"):
+                return True
+        except Exception as e:
+            # A malformed/unreadable file is NOT evidence of safety, but it is also
+            # not evidence of custom code - the real load will fail on it later with
+            # a better message. Surface it instead of deciding silently (rule 5).
+            logger.debug("hf: could not parse %s while checking for custom "
+                         "code: %s", f, e)
+    return False
+
+
+def _check_custom_code_allowed(model_path: str) -> None:
+    """Refuse, with an actionable message, a model that needs custom code when
+    ``hf_trust_remote_code`` is off. No-op for an ordinary model.
+
+    Called at the TOP of load(), deliberately BEFORE ``_require_torch()``. A
+    torch-less (GGUF-only) build raises at _require_torch first, so a check placed
+    after it would be dead on exactly the builds where it is easiest to test, and
+    the refusal would differ per build. Before it, the answer is the same
+    everywhere.
+    """
+    if not _declares_custom_code(model_path):
+        return
+    if _trust_remote_code_enabled():
+        return
+    raise RuntimeError(
+        f"'{Path(model_path).name}' requires custom code: it asks to import and "
+        "run Python bundled inside the model directory (auto_map). That is "
+        "arbitrary code execution as the user running localm, so it is refused by "
+        "default.\n"
+        "If you trust the source of this model, enable it with:\n"
+        "  localm config hf_trust_remote_code true\n"
+        "Only do that for a model you obtained from a source you trust.")
+
+
 def _require_transformers():
     try:
         import transformers
@@ -267,6 +354,11 @@ class HFBackend(BaseBackend):
     # ------------------------------------------------------------------ #
 
     def load(self) -> None:
+        # BEFORE _require_torch(): the refusal must be identical on a torch-less
+        # GGUF-only build, where _require_torch would otherwise raise first and
+        # hide it. See _check_custom_code_allowed.
+        _check_custom_code_allowed(self.model_path)
+        trust_remote_code = _trust_remote_code_enabled()
         torch = _require_torch()
         tr = _require_transformers()
 
@@ -306,7 +398,7 @@ class HFBackend(BaseBackend):
         console.print("[dim]  loading processor…[/dim]")
         try:
             self._processor = tr.AutoProcessor.from_pretrained(
-                self.model_path, trust_remote_code=True
+                self.model_path, trust_remote_code=trust_remote_code
             )
             # A processor that wraps only a tokenizer is not "multimodal"
             has_image = hasattr(self._processor, "image_processor")
@@ -326,7 +418,7 @@ class HFBackend(BaseBackend):
             )
             self._processor = None
             self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                self.model_path, trust_remote_code=True
+                self.model_path, trust_remote_code=trust_remote_code
             )
 
         # --- Model ---
@@ -334,7 +426,7 @@ class HFBackend(BaseBackend):
         load_kwargs = {
             **device_map_kwargs,
             "torch_dtype": dtype,
-            "trust_remote_code": True,
+            "trust_remote_code": trust_remote_code,
         }
 
         # Try Auto classes in order: multimodal (vision/audio + text), then

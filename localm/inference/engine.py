@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Iterator, List, Optional
@@ -124,16 +125,49 @@ def create_backend(
     )
 
 
+# A model's self-declared name is echoed to API/GUI callers, so it is treated as
+# untrusted text, not as a label we own. Real values look like "meta-llama/
+# Llama-3-8B" or "gemma-3-4b-it": a short run of word characters with . _ - / in
+# between. Anything else (control characters, newlines, markup, a whole absolute
+# path, a paragraph) is a value we will not repeat back to a caller - we fall back
+# to the directory name, which we DO control. Kept as an allowlist, so a shape
+# nobody anticipated is refused rather than passed through.
+_SANE_DISPLAY_NAME = re.compile(r"^[\w.-]+(?:/[\w.-]+)*$")
+_MAX_DISPLAY_NAME = 96
+
+
+def _sane_display_name(value) -> Optional[str]:
+    """*value* if it is a plausible model name, else None."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v or len(v) > _MAX_DISPLAY_NAME:
+        return None
+    return v if _SANE_DISPLAY_NAME.match(v) else None
+
+
 def model_display_name(model_path: str) -> str:
-    """Human-readable model name from path."""
+    """Human-readable model name from path.
+
+    For an HF directory this prefers the model's own ``_name_or_path``, but only
+    after checking its shape: the directory may be one an untrusted caller named,
+    and this string is handed straight back to API and GUI callers (CodeQL 65-68).
+    A value that does not look like a model name is dropped in favour of the
+    directory name.
+    """
     p = Path(model_path)
     if p.is_dir():
         cfg_file = p / "config.json"
         if cfg_file.exists():
             try:
                 cfg = json.loads(cfg_file.read_text())
-                if "_name_or_path" in cfg and cfg["_name_or_path"]:
-                    return cfg["_name_or_path"]
+                declared = _sane_display_name(cfg.get("_name_or_path"))
+                if declared:
+                    return declared
+                if cfg.get("_name_or_path"):
+                    logger.debug(
+                        "model_display_name: ignoring implausible _name_or_path in "
+                        "%s; using the directory name instead", cfg_file)
             except Exception as exc:
                 # config.json is optional for the display name only; load() validates
                 # it later. Falling back to the dir name is fine, but surface the

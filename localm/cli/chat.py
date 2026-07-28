@@ -221,7 +221,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         _note = _attach_fallback_note(no_server, attach_error, autostart_attempted)
         if _note:
             console.print(f"[dim]{_note}[/dim]")
-        info = get_model_info(model)
+        # allow_direct_path: `localm run /full/path` is a documented feature (the
+        # help text right below advertises it), and *model* here is typed by the
+        # operator on their own command line, not received over the wire.
+        info = get_model_info(model, allow_direct_path=True)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
             console.print("  [dim]localm list[/dim]              - downloaded models")

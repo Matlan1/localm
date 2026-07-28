@@ -191,8 +191,12 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     # cors_origins names which browser origins may call the authenticated API -
     # the same class of trust-widening boundary - and must be owner-only too
     # (security-checkup finding 2026-07-23).
+    # hf_trust_remote_code lets a downloaded model directory run its OWN Python
+    # inside the localm process, i.e. arbitrary code execution on this machine.
+    # That is the widest boundary of the lot, so it is owner-only too (CodeQL 49).
     assert ss.admin_only_keys() == (
-        RAG_OWNER_KEYS | {"net_allow_private", "cors_origins"} | OUTBOUND_OWNER_KEYS)
+        RAG_OWNER_KEYS | {"net_allow_private", "cors_origins",
+                          "hf_trust_remote_code"} | OUTBOUND_OWNER_KEYS)
 
 
 def test_outbound_endpoint_keys_are_owner_only():
