@@ -18,6 +18,27 @@ bypass require_fs_host, and three path-integrity defects rode along:
       immediately in front of shutil.rmtree / unlink.
   (e) _snapshot_is_complete joined a remote HF listing's `rfilename` onto dest.
 
+PAYLOAD RULE FOR THIS FILE - READ BEFORE ADDING A CASE. Several tests here drive
+code that reaches shutil.rmtree / unlink, and this file is meant to be run against
+REVERTED source as a negative pass (proving the gate fails without the fix). A
+negative pass EXECUTES THE VULNERABLE PATH FOR REAL, so a payload naming a real
+location is a live deletion of that location, not a test of it. A sibling unit
+learned this the expensive way: a parametrized "C:/Users/Public" reached rmtree
+through exactly the escape its fix prevents and emptied that directory - no
+Recycle Bin, not recoverable - while a second payload was stopped only by
+filesystem permissions, which is luck, not design.
+
+So: every path that can reach a filesystem MUTATION is built from `tmp_path` (via
+the `home` fixture). tmp_path is itself absolute and drive-qualified on Windows,
+so a traversal like `home/models/../../victim` exercises the IDENTICAL escape
+mechanism with the blast radius inside the fixture. The absolute literals that do
+appear below ("C:/Windows/win.ini", "/etc/passwd", "C:evil", the UNC vectors)
+reach ONLY pure-function rejection paths - confined_under, _entry_path,
+_sanitize_name - which raise before any syscall, or an HTTP route that 403s before
+touching the filesystem. UNC vectors use 192.0.2.1 (RFC5737 TEST-NET-1), which is
+non-routable by definition, so a missed rejection cannot become a real outbound
+SMB connection either. Keep it that way.
+
 WHY EVERY TEST HERE MINTS A KEY: effective_fs_access() returns "host" for EVERY
 caller when no key is configured (open/dev mode is the trusted loopback owner).
 A fixture that skips create_key would therefore pass VACUOUSLY - every assertion
