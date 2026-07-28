@@ -52,6 +52,40 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it back on for a model you trust. `localm pull` now also tells you when a
   downloaded repository contains Python files.
 
+### Fixed
+- **Changing the embedding model no longer strands your knowledge collections.**
+  Switching from one embedding model to another left every existing collection
+  refusing new documents, and the only advice was to delete and re-add it. Both
+  advertised remedies failed with the same error, so there was no working way
+  out. There is now: `localm rag reembed <collection>`, and a matching API
+  action, rebuild a collection's vectors with the current model from the text
+  already stored - no original source files needed, nothing deleted, and an
+  interrupted run leaves the previous index untouched rather than a half-built
+  one. The error you get on a mismatch now names your collection and the exact
+  command instead of telling you to delete your data.
+- **Knowledge collections silently lost documents.** A chunk whose text contained
+  certain rarer separator characters was split in half when the collection was
+  read back, so those documents were dropped, the collection was reported as
+  damaged, semantic search quietly fell back to keyword-only matching, and the
+  next save wrote the collection back WITHOUT them. On a real 1192-chunk
+  collection this deleted 26 chunks every time it was opened and saved. Existing
+  collections recover on their next load; nothing needs re-importing. The same
+  fault is fixed in agent memory and in the coder's stored episodes.
+- **A damaged collection no longer floods the log or fills the disk.** The
+  "this index is unusable" warning was repeated on essentially every request
+  (25+ times in one session); it now appears once. Set-aside copies of a broken
+  index, which are kept so nothing is ever destroyed, are capped at the newest
+  three instead of accumulating without limit (88 MB on one install).
+- **Requests rejected for a bad value now say what is wrong.** Sending
+  `max_tokens: 0` returned a raw validation dump; it now reads "max_tokens must
+  be 1 or more - 0 is not 'no limit'. Omit max_tokens entirely to use the
+  model's default." The machine-readable form is still there for API clients.
+- **Semantic search no longer fails outright when numpy is unusable.** If numpy
+  is present but broken, localm falls back to its built-in maths instead of
+  erroring the query, and says which situation it hit - including naming the
+  path when something has put an empty stand-in numpy on the import path, which
+  is a broken environment rather than a missing optional dependency.
+
 ## [0.1.3] - 2026-07-23
 
 ### Added
