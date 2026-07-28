@@ -2746,9 +2746,54 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 return [_finite_safe(x) for x in v]
             return v
 
+        safe = _finite_safe(jsonable_encoder(exc.errors()))
+
+        def _field(err) -> str:
+            # Drop the "body"/"query" container so the user sees the name they
+            # actually typed ("max_tokens"), not pydantic's full path.
+            parts = [str(p) for p in (err.get("loc") or ())
+                     if p not in ("body", "query", "path", "header")]
+            return ".".join(parts) or "request"
+
+        def _one(err) -> str:
+            name = _field(err)
+            msg = (err.get("msg") or "is invalid").strip()
+            # pydantic phrases these as "Input should be X", which reads as
+            # "max_tokens input should be X" once the field name is prepended.
+            # "max_tokens must be X" is the same information, in English.
+            if msg.lower().startswith("input should be "):
+                msg = "must be " + msg[len("input should be "):]
+            elif msg[:1].isupper():
+                msg = msg[0].lower() + msg[1:]
+            # On a MISSING field pydantic reports the whole request body as
+            # `input`, so echoing it back is noise, not evidence.
+            got = ("" if err.get("type") == "missing" or "input" not in err
+                   else f" (got {err.get('input')!r})")
+            # max_tokens=0 is the one worth explaining rather than just reporting:
+            # it looks like a legitimate "no limit", and the reason it is refused
+            # (0 collides with the engine's internal unlimited sentinel, so it
+            # would silently become an unbounded generation) is not guessable from
+            # "greater than or equal to 1". Reported live by the maintainer as a
+            # raw pydantic dump with no idea what to do about it.
+            if name == "max_tokens" and err.get("input") in (0, "0"):
+                return ("max_tokens must be 1 or more - 0 is not 'no limit'. "
+                        "Omit max_tokens entirely to use the model's default")
+            return f"{name} {msg}{got}"
+
+        # `detail` is the human sentence, because every client in this repo does
+        # `data.detail || r.statusText` and stringifying pydantic's error LIST
+        # there is what produced the unreadable dump users were shown. The
+        # structured form is preserved verbatim under `errors` for anything that
+        # wants to parse it - nothing is lost, it just stops being the thing a
+        # person reads.
+        try:
+            summary = "; ".join(_one(e) for e in (safe or []))
+        except Exception:   # never let error FORMATTING turn a 422 into a 500
+            summary = ""
         return JSONResponse(
             status_code=422,
-            content={"detail": _finite_safe(jsonable_encoder(exc.errors()))})
+            content={"detail": summary or "Request validation failed",
+                     "errors": safe})
 
     # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
     # run on every /v1/chat/completions turn. Created here so it exists before

@@ -291,6 +291,60 @@ def test_cosine_does_not_swallow_a_real_numerical_failure(monkeypatch):
         store_mod._cosine([1.0, 2.0], [1.0, 2.0])
 
 
+def _api():
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+    return TestClient(create_app(None), raise_server_exceptions=False)
+
+
+def _post(client, body: str):
+    return client.post("/v1/chat/completions", content=body,
+                       headers={"content-type": "application/json"})
+
+
+_MSGS = '{"model":"localm","messages":[{"role":"user","content":"hi"}],'
+
+
+def test_max_tokens_zero_explains_itself_instead_of_dumping_pydantic():
+    """Reported verbatim by the maintainer as
+    `422: {"detail":[{"type":"greater_than_equal","loc":["body","max_tokens"],...}]}`.
+    0 looks like a legitimate "no limit"; the real reason it is refused (it
+    collides with the engine's internal unlimited sentinel) is not guessable."""
+    r = _post(_api(), _MSGS + '"max_tokens":0}')
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, str), "detail must be a readable sentence, not a raw error list"
+    assert "max_tokens" in detail and "no limit" in detail
+    assert "greater_than_equal" not in detail, "pydantic's machine type leaked into the message"
+
+
+def test_validation_errors_keep_the_structured_form_under_errors():
+    """Readability must not cost machine-readability."""
+    r = _post(_api(), _MSGS + '"max_tokens":-5}')
+    body = r.json()
+    assert isinstance(body["detail"], str)
+    assert isinstance(body["errors"], list) and body["errors"], "structured form was dropped"
+    assert body["errors"][0]["loc"][-1] == "max_tokens"
+
+
+def test_a_non_finite_number_still_renders_a_422_not_a_500():
+    """Regression guard on the existing protection: JSONResponse serializes with
+    allow_nan=False, so a NaN in the error detail used to crash the handler into
+    a 500. Reformatting the message must not reintroduce that."""
+    r = _post(_api(), _MSGS + '"temperature":NaN}')
+    assert r.status_code == 422, f"got {r.status_code}, the 422 handler crashed"
+    assert "temperature" in r.json()["detail"]
+
+
+def test_a_missing_field_does_not_echo_the_whole_request_body():
+    r = _post(_api(), '{"model":"localm"}')
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "messages" in detail
+    assert "localm" not in detail, "the whole body was echoed back as 'got ...'"
+
+
 def test_reembed_after_a_mismatch_lets_the_add_succeed(tmp_path):
     """End to end: hit the refusal, follow the advice, and the add now works -
     which is the whole user journey that was a dead end."""
