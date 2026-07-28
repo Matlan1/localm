@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
+from localm import pathsafe
 from localm import scopes
 from localm.debuglog import logger
 from localm.inference.http_server import (principal_id, require_fs_host,
@@ -29,6 +30,44 @@ from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
                                     RemoveModelRequest, ScanRequest,
                                     SetTypeRequest, UnloadModelRequest,
                                     consume_pull_grant)
+
+
+def _spec_names_a_host_path(spec: str) -> bool:
+    """True when *spec* TEXTUALLY names a path on the server's filesystem rather
+    than a remote HuggingFace/URL spec. Makes no filesystem call.
+
+    `localm pull` registers an existing local path IN PLACE rather than
+    downloading it (model_manager/pull.py's is_local_path branch -> add_local
+    with store=None), so naming one through POST /api/models/pull writes a
+    caller-chosen absolute path into registry.json. That is host filesystem
+    reach and belongs behind require_fs_host, not behind MODELS_WRITE alone.
+
+    Deliberately textual and existence-INDEPENDENT, for three reasons. It cannot
+    stall: a UNC spec is classified without the stat that would block in the SMB
+    redirector for minutes (see pathsafe.is_unc_or_device_path). It cannot become
+    an existence oracle: the authorisation answer is identical whether or not the
+    file is there. And it has no TOCTOU: "may this caller name a host path" is
+    not a question whose answer may change between the check and the pull. That
+    makes it deliberately BROADER than pull.py's own is_local_path (which also
+    requires the path to exist) - a non-existent absolute path is refused here
+    even though pull.py would have gone on to treat it as a remote spec, which is
+    the safe direction to differ in."""
+    s = spec.strip()
+    if not s:
+        return False
+    if pathsafe.is_unc_or_device_path(s):
+        return True
+    if s.startswith("~"):
+        return True
+    # Judge under BOTH flavours regardless of host OS: a drive-qualified spec, and
+    # the drive-RELATIVE form (a drive letter and colon with no separator), are
+    # host paths whoever is running the server, and a POSIX server must not
+    # mis-read a Windows-shaped spec as a HuggingFace repo id.
+    for flavour in (PureWindowsPath, PurePosixPath):
+        pure = flavour(s)
+        if pure.is_absolute() or pure.drive or pure.root:
+            return True
+    return False
 
 
 def _require_registered(model: str, registry: dict | None = None) -> dict:
@@ -75,27 +114,59 @@ def register(app: FastAPI, ctx) -> None:
         from localm.inference import embedder as _embedder_mod
         loop = asyncio.get_running_loop()
         emb_path = await loop.run_in_executor(get_plugin_executor(), _embedder_mod.loaded_path)
-        models = []
+        rows = []
         for name, entry in sorted(registry.items()):
             epath = _entry_path(entry)
             if epath is None:
-                # A hand-corrupted / cross-version registry entry (non-dict, or a
-                # null / non-string / empty path). Skip it so one bad row never
-                # 500s the whole Models page; the CLI `localm list` shows it as
-                # [corrupt] and `localm rm <name>` drops it. Mirrors #562, which
-                # routes every registry consumer through _entry_path.
+                # A hand-corrupted / cross-version registry entry (non-dict, a
+                # null / non-string / empty path, or one carrying a '..'
+                # component). Skip it so one bad row never 500s the whole Models
+                # page; the CLI `localm list` shows it as [corrupt] and
+                # `localm rm <name>` drops it. Mirrors #562, which routes every
+                # registry consumer through _entry_path.
                 logger.debug("skipping malformed registry entry %r in /api/models", name)
                 continue
             mtype = str(entry.get("model_type", "llm"))
             if type and mtype != type:
                 continue
-            path = Path(epath)
-            size = None
-            try:
-                if path.is_file():
-                    size = path.stat().st_size
-            except OSError:
-                pass
+            rows.append((name, entry, mtype, epath))
+
+        # Every row below needs a stat and a resolve of a path THIS HANDLER DID NOT
+        # CHOOSE - it came out of registry.json. Those are blocking syscalls, and
+        # this is an `async def`, so run inline they stall the entire server rather
+        # than just this request: a registered UNC path blocks in the Windows SMB
+        # redirector (minutes against an unroutable host, and a reachable one also
+        # draws an outbound authentication attempt from the server process). Do the
+        # whole filesystem pass in ONE executor hop, then build the response on the
+        # loop from its results. The embedder's own path is resolved in the same
+        # hop for the identity comparison below, for the same reason.
+        def _probe_rows() -> tuple:
+            sizes: dict = {}
+            resolved: dict = {}
+            for _n, _e, _m, ep in rows:
+                p = Path(ep)
+                try:
+                    sizes[ep] = p.stat().st_size if p.is_file() else None
+                except OSError:
+                    sizes[ep] = None
+                try:
+                    resolved[ep] = p.resolve()
+                except OSError:
+                    resolved[ep] = None
+            emb_resolved = None
+            if emb_path is not None:
+                try:
+                    emb_resolved = Path(emb_path).resolve()
+                except OSError:
+                    emb_resolved = None
+            return sizes, resolved, emb_resolved
+
+        sizes, resolved_paths, emb_resolved = await loop.run_in_executor(
+            get_plugin_executor(), _probe_rows)
+
+        models = []
+        for name, entry, mtype, epath in rows:
+            size = sizes.get(epath)
             engine = _hs._engines.get(name)
             loaded = engine.loaded if engine is not None else False
             # A registered model can also be the shared EMBEDDING model, loaded
@@ -104,11 +175,9 @@ def register(app: FastAPI, ctx) -> None:
             # shows up above. Recognise it by resolved PATH (not name/config)
             # so this row's "loaded" status - and its per-row Unload control,
             # gated on this flag - actually reflect a resident embedder.
-            if not loaded and emb_path is not None:
-                try:
-                    loaded = Path(emb_path).resolve() == path.resolve()
-                except OSError:
-                    loaded = False
+            if not loaded and emb_resolved is not None:
+                row_resolved = resolved_paths.get(epath)
+                loaded = row_resolved is not None and emb_resolved == row_resolved
             models.append({
                 "name": name,
                 "source": str(entry.get("source", "")),
@@ -138,25 +207,35 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_scan_models(request: Request, req: ScanRequest | None = None):
-        """Scan for ComfyUI models. With no `workdir` (the old button's
-        bodyless POST, or an explicit `{}`), this is unchanged: it scans
-        whatever `comfy_workdir` is configured, MODELS_WRITE-only. An explicit
+        """Scan for ComfyUI models and register what it finds. An explicit
         `workdir` is a one-off scan of an arbitrary folder for the guided
-        Import-from-ComfyUI flow - never written back to config - gated on
-        `require_fs_host` (called BEFORE the try/except below, so its 403
-        propagates as-is rather than getting reported as a generic 500): that
-        capability is equivalent to the host file/folder browser
-        (/api/fs/dirs), so a MODELS_WRITE-only key that lacks host filesystem
-        access cannot use this to enumerate or register arbitrary server
-        paths it could not otherwise browse. `dry_run` previews per-type
-        counts and registers nothing."""
+        Import-from-ComfyUI flow (never written back to config); with no
+        `workdir` (the old button's bodyless POST, or an explicit `{}`) it
+        scans whatever `comfy_workdir` is configured. `dry_run` previews
+        per-type counts and registers nothing.
+
+        BOTH forms require `require_fs_host` - called BEFORE the try/except
+        below, so its 403 propagates as-is rather than getting reported as a
+        generic 500. Either one walks a host directory and writes the resulting
+        absolute paths into registry.json, a capability equivalent to the host
+        file/folder browser (/api/fs/dirs), so a MODELS_WRITE-only key that
+        lacks host filesystem access must not reach it.
+
+        The gate used to be `if workdir:`, which made that guarantee false for
+        the exact case the paragraph above asserts: `comfy_workdir` is a plain
+        Widget.FOLDER settable by any config:write key, so a bodyless POST
+        scanned a caller-CHOSEN folder with no fs_access check at all. The
+        registered rows are permanent and every consumer re-stats them on each
+        launch, so a planted UNC row is a lasting event-loop stall plus
+        outbound SMB from the server process. Scanning is authorised by host
+        filesystem reach, not by where the folder name happened to come
+        from."""
         from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
         from functools import partial
+        require_fs_host(request)
         workdir = req.workdir if req else None
         dry_run = bool(req and req.dry_run)
-        if workdir:
-            require_fs_host(request)
         loop = asyncio.get_running_loop()
         try:
             if dry_run:
@@ -346,6 +425,32 @@ def register(app: FastAPI, ctx) -> None:
                 "Enter a model spec: owner/repo, owner/repo:file.gguf, "
                 "or an https URL.",
             )
+        # A local spec is REGISTERED IN PLACE, not downloaded (pull.py's
+        # is_local_path branch -> add_local with store=None), so it writes a
+        # caller-chosen server path into registry.json. Gate that on host
+        # filesystem reach: MODELS_WRITE alone must not let a key with
+        # fs_access="none" plant arbitrary absolute or UNC paths that every
+        # consumer then re-stats on every launch. Textual check first, so a UNC
+        # spec never reaches a stat (see _spec_names_a_host_path).
+        if _spec_names_a_host_path(spec):
+            require_fs_host(request)
+        else:
+            # A RELATIVE spec is ambiguous - "owner/repo" and "models/foo.gguf"
+            # are the same shape - so this one needs the filesystem to answer,
+            # and pull.py registers such a path in place too when it is an
+            # existing file. Probe in the executor rather than inline: this is an
+            # `async def`, and a stat on a caller-supplied string is exactly the
+            # blocking call that must not sit on the event loop.
+            loop = asyncio.get_running_loop()
+
+            def _is_existing_local_file() -> bool:
+                try:
+                    return Path(spec).expanduser().is_file()
+                except OSError:
+                    return False
+
+            if await loop.run_in_executor(get_plugin_executor(), _is_existing_local_file):
+                require_fs_host(request)
         # Pass the spec after "--" so a value like "-h" or "--help" is treated as
         # the model argument, not parsed by the CLI as an option/help flag.
         args = ["pull"]

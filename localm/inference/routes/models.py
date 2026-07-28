@@ -8,6 +8,7 @@ reassigns them is reflected here).
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.plugins.executor import get_plugin_executor
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -91,13 +93,25 @@ def register(app: FastAPI, ctx) -> None:
         # aggregate-size info leak plus a filesystem-walk DoS. The path field below
         # is already scrubbed to "" for an empty path; guard the size branch to match.
         if path:
-            try:
-                if p.is_file():
-                    size = p.stat().st_size
-                elif p.is_dir():
-                    size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-            except OSError:
-                pass
+            # Off the event loop. This is an `async def` and the path comes out of
+            # registry.json, not from this handler, so the syscalls below are
+            # unbounded in both directions: rglob("*") walks an entire directory
+            # tree, and a UNC path blocks in the Windows SMB redirector (minutes
+            # against an unroutable host, plus an outbound authentication attempt
+            # from the server process when it IS reachable). Inline, either one
+            # stalls every request this server is serving, not just this one.
+            def _measure() -> int | None:
+                try:
+                    if p.is_file():
+                        return p.stat().st_size
+                    if p.is_dir():
+                        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                except OSError:
+                    pass
+                return None
+
+            loop = asyncio.get_running_loop()
+            size = await loop.run_in_executor(get_plugin_executor(), _measure)
         aliases = sorted(
             n for n, e in registry.items()
             # Skip a malformed sibling: a non-dict entry's .get would AttributeError,

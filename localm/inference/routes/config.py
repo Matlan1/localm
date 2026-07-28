@@ -214,15 +214,20 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(404, f"unknown media plugin: {name}")
         # REC-MEDIA-CMD: launch_cmd is run through the shell and api_url redirects
         # the render target, so setting either is privilege-escalation for a
-        # non-owner config:write key. Require an ADMIN principal for those fields
-        # in protected mode. Open mode is the trusted local owner (already gated by
+        # non-owner config:write key. `workdir` joins them because it names a HOST
+        # FOLDER that localm reads and runs ComfyUI from: get_comfy_workdir()
+        # prefers this per-plugin value over the global comfy_workdir, and the
+        # model scanner walks whatever it returns and writes the absolute paths it
+        # finds into registry.json. Require an ADMIN principal for all three in
+        # protected mode. Open mode is the trusted local owner (already gated by
         # the origin / shell-token guard), so caller_scopes is None there.
-        if any(k in ("launch_cmd", "api_url") for k in (body or {})):
+        if any(k in ("launch_cmd", "api_url", "workdir") for k in (body or {})):
             held = _hs.caller_scopes(request)
             if held is not None and scopes.ADMIN not in held:
                 raise HTTPException(
-                    403, "Setting a media backend's launch_cmd or api_url requires "
-                    "an admin key (it configures a shell command / network target).")
+                    403, "Setting a media backend's launch_cmd, api_url or workdir "
+                    "requires an admin key (it configures a shell command, a network "
+                    "target, or a host folder the server reads).")
         try:
             merge = validate_media_block(name, body or {})
         except ValueError as e:

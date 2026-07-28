@@ -11,6 +11,8 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
+from pathlib import PureWindowsPath
 from typing import List
 from typing import NamedTuple
 from typing import Optional
@@ -69,8 +71,8 @@ def is_llm(entry: dict) -> bool:
 
 def _entry_path(entry) -> Optional[str]:
     """The stored file path of a registry *entry*, or None when the entry is
-    malformed (not a dict, or its ``path`` is missing / null / not a non-empty
-    string).
+    malformed (not a dict; its ``path`` missing / null / not a non-empty string;
+    or that path carrying a ``..`` component).
 
     registry.json is normally written only by localm and is always well-formed,
     but it is a real, user-visible file (``localm info`` names it) that can be
@@ -104,7 +106,23 @@ def _entry_path(entry) -> Optional[str]:
     if not isinstance(entry, dict):
         return None
     p = entry.get("path")
-    return p if isinstance(p, str) and p else None
+    if not (isinstance(p, str) and p):
+        return None
+    # A '..' segment is malformed too, and this is the choke point where every
+    # consumer can be made to agree on that. localm never WRITES one - _register
+    # stores str(path.resolve()) - so a stored '..' means the file was hand-edited,
+    # merged from another machine, or planted, and it is precisely the shape that
+    # defeats a lexical containment test downstream (remove_model's gate sits in
+    # front of shutil.rmtree). Rejecting it HERE means a foreign registry cannot
+    # smuggle one into any consumer at all, rather than each consumer having to
+    # remember to normalise. Checked under both path flavours because a registry
+    # travels between machines and its entries can carry either separator - the
+    # same reason inference/routes/models.py normalises them before taking a
+    # basename.
+    if any(part == ".." for part in PureWindowsPath(p).parts) or \
+       any(part == ".." for part in PurePosixPath(p).parts):
+        return None
+    return p
 
 
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
@@ -1358,9 +1376,24 @@ def remove_model(name: str) -> None:
         return
 
     # Only delete files that live inside <data dir>/models/ - never touch
-    # externally registered paths (Ollama blobs, user model dirs, etc.)
-    owned = path.is_relative_to(_mm.MODELS_DIR) if hasattr(path, "is_relative_to") else \
-            str(path).startswith(str(_mm.MODELS_DIR))
+    # externally registered paths (Ollama blobs, user model dirs, etc.).
+    #
+    # This gate stands immediately in front of shutil.rmtree / unlink, so it has to
+    # hold on a path that was NOT written by this process. Both halves of the old
+    # test failed that bar. `Path.is_relative_to` is purely LEXICAL - verified, it
+    # does not normalise '..' - so "<models>/../../victim" tested as owned and was
+    # deleted; and the `startswith` fallback compared raw strings, so the sibling
+    # "<data dir>/models-old" prefix-matched "<data dir>/models" and was deleted
+    # too. Resolve both sides and require a real parent relationship instead, the
+    # same test sync_models_dir._under_models_dir already uses. Using .parents
+    # (rather than an is_relative_to on the resolved path) also excludes MODELS_DIR
+    # ITSELF, so a registry row pointing at the models root can never rmtree it.
+    models_root = _mm.MODELS_DIR.resolve()
+    try:
+        owned = models_root in path.resolve().parents
+    except OSError:
+        # An unresolvable path is not a path we are willing to delete under.
+        owned = False
     if owned and path.exists():
         if path.is_dir():
             import shutil
@@ -1380,6 +1413,12 @@ def remove_model(name: str) -> None:
     console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")
 
 
+
+
+# The only legal shape of an Ollama blob filename, after ':' -> '-' normalisation.
+# Used to confine a remote-authored manifest digest before it becomes a path
+# component (see _resolve_ollama_manifest).
+_OLLAMA_BLOB_RE = re.compile(r"sha256-[0-9a-f]{64}")
 
 
 def _resolve_ollama_manifest(p: Path):
@@ -1411,14 +1450,47 @@ def _resolve_ollama_manifest(p: Path):
             manifest = _json.loads(tag_file.read_text())
         except Exception:
             continue
-        if "layers" not in manifest:
+        # A manifest is REMOTE-AUTHORED content that Ollama downloaded and wrote to
+        # disk, so nothing about its shape may be assumed: `layers` can be absent,
+        # a string (iterating one yields characters, and `"c".get` is an
+        # AttributeError), or a list of non-dicts, and `digest` can be missing or a
+        # non-string. Validate each step instead of indexing straight into it - a
+        # malformed manifest must read as "not an Ollama manifest", never as a
+        # traceback out of get_model_info.
+        if not isinstance(manifest, dict):
+            continue
+        layers = manifest.get("layers")
+        if not isinstance(layers, list):
             continue
 
-        for layer in manifest["layers"]:
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
             if layer.get("mediaType") != "application/vnd.ollama.image.model":
                 continue
 
-            blob_name = layer["digest"].replace(":", "-")  # sha256:abc -> sha256-abc
+            digest = layer.get("digest")
+            if not isinstance(digest, str):
+                continue
+            blob_name = digest.replace(":", "-")  # sha256:abc -> sha256-abc
+
+            # The digest becomes a PATH COMPONENT below, so it has to be confined
+            # before the join, not after: a value like "../../../../etc/passwd"
+            # walks straight out of <root>/blobs, and because the loop below
+            # reports its find only when maybe.exists(), an unconfined name is
+            # also a file-existence oracle - and any file it does hit is handed to
+            # the GGUF parser as a model. An Ollama blob name has exactly one legal
+            # shape, so require it rather than blocklisting bad ones.
+            if not _OLLAMA_BLOB_RE.fullmatch(blob_name):
+                # Rule 5: surface it. A silent `continue` here would report "not an
+                # Ollama manifest" for a manifest that IS one but carries a
+                # malformed or hostile digest, hiding the real reason.
+                console.print(
+                    f"[yellow]Ignoring an Ollama manifest layer with a malformed "
+                    f"digest:[/yellow] {digest!r} (expected sha256:<64 hex>)")
+                logger.debug("rejected non-conforming ollama digest %r in %s",
+                             digest, tag_file)
+                continue
 
             # Walk up from manifest dir to find <root>/blobs/
             candidate = p

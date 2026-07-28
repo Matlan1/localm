@@ -51,6 +51,53 @@ permanent public record of what shipped and are never rewritten; the in-progress
   owner-only "Allow model-bundled custom code" setting (Settings -> Security) turns
   it back on for a model you trust. `localm pull` now also tells you when a
   downloaded repository contains Python files.
+- **A restricted key can no longer plant arbitrary server paths in your model
+  registry.** Registering a model records an absolute path that localm re-reads
+  every time it lists models, so deciding who may write one is a filesystem
+  question, not just a models question. Two routes did not treat it that way.
+  "Scan ComfyUI models" only checked for host filesystem access when the request
+  named a folder explicitly, so the plain Scan button's request skipped the check
+  and scanned whatever folder was configured, and that folder was itself settable
+  without owner rights. Pulling a model forwarded its spec straight through, so
+  naming a path that already existed on the server registered it where it sat. A
+  key granted no filesystem access at all could use either one to add a path of
+  its choosing and read back the filename and exact byte size, and a network path
+  added that way made every later model listing hang while Windows tried to reach
+  it. Both now require host filesystem access, and a media plugin's ComfyUI
+  folder now needs an owner key to change, the way its launch command and API URL
+  already did.
+- **A malformed Ollama manifest can no longer send localm outside the blobs
+  folder.** The digest recorded inside a manifest became a filename with no check
+  on its shape, so a hand-written or hostile one could name a file anywhere on
+  disk and have it opened as a model. Digests must now actually look like
+  digests, and a manifest with any other unexpected shape is reported instead of
+  crashing the command that read it.
+- **`localm rm` no longer deletes outside your models folder.** The check
+  deciding whether a registered file was localm's to delete compared text, not
+  real locations, so an entry pointing above the models folder could be removed,
+  and so could a folder whose name merely started the same way (a `models-old`
+  sitting next to `models`). It now compares resolved locations, and the models
+  folder itself is never a deletion target. A registry entry containing `..` is
+  now treated as corrupt everywhere it is read, so `localm list` shows it and
+  `localm rm` clears it rather than any command acting on it.
+- **A HuggingFace repo can no longer make an empty download look finished.** The
+  check for "is this snapshot fully downloaded" trusted the filenames in the
+  repo's own listing, so a listing naming files elsewhere on the disk could be
+  satisfied by files localm never downloaded, and that half-present folder was
+  then registered as a ready model. Names that point outside the download folder
+  are refused and the snapshot is re-downloaded.
+
+### Changed
+- **Scanning for ComfyUI models now requires host filesystem access.** This
+  affects only additional keys you minted yourself without filesystem access.
+  Running localm normally, or using an owner key, is unchanged.
+
+### Fixed
+- **A model registered on an unreachable network path no longer freezes the whole
+  server.** The models list and a model's detail view measured each registered
+  file on the same thread that answers every other request, so one unreachable
+  path stalled everything until Windows gave up on it, which can take minutes.
+  Both now measure off that thread.
 
 ## [0.1.3] - 2026-07-23
 
