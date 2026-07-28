@@ -529,6 +529,21 @@ def _collection_lock(name: str):
 # Collection._quarantine_rejected_vectors.
 _REJECTED_VECTORS = "vectors.json.rejected"
 
+#: How many set-aside vector indexes to KEEP per collection. Each one is a full
+#: copy of the index (10 MB is ordinary, 68 MB was observed), and they accumulate
+#: with no upper bound in practice - a real install had three totalling 88 MB.
+#: Preserving the evidence is right (AGENTS rule 5); preserving EVERY generation
+#: of it forever is just an unbounded disk leak, and the oldest copies are the
+#: least useful ones. Keep the newest few, delete the rest LOUDLY.
+_MAX_REJECTED_KEPT = 3
+
+#: (collection dir, reason) pairs already logged in THIS process. _load() runs
+#: from __init__ and every request builds a fresh Collection, so an instance-level
+#: guard re-armed constantly and the same warning was emitted 25+ times a session.
+#: Process-scoped so the first occurrence is still loud and the rest are quiet.
+#: Never consulted for state - only for whether to LOG (see _note_vector_degrade).
+_WARNED_DEGRADES: set = set()
+
 
 class Collection:
     def __init__(self, name: str, base: Optional[Path] = None) -> None:
@@ -918,10 +933,51 @@ class Collection:
                          self.name, dest.name, e)
             return
         _log.warning("RAG collection %r: the unusable vectors.json was set aside "
-                     "as %s (%s). Nothing was deleted; rebuild the index with "
-                     "'localm rag repair %s --embed'.",
+                     "as %s (%s). Nothing was deleted; re-embed with "
+                     "'localm rag reembed %s' (no source files needed) or rebuild "
+                     "from source with 'localm rag repair %s --embed'.",
                      self.name, dest.name,
                      self.vector_degrade_reason or "unusable", self.name)
+        self._prune_rejected_vectors()
+
+    def _prune_rejected_vectors(self) -> None:
+        """Keep only the newest ``_MAX_REJECTED_KEPT`` set-aside indexes.
+
+        Each set-aside file is a full copy of the vector index, so an unbounded
+        pile is a disk leak: one real install had vectors.json.rejected,
+        .rejected.2 and .rejected.3 totalling 88 MB, and the allocator would have
+        gone on to twenty. Preserving the evidence is the rule; preserving every
+        generation of it forever is not what that rule asks for, and the OLDEST
+        copies are the least diagnostic.
+
+        Ordered by MTIME, deliberately not by name: ``_rejected_vector_files``
+        sorts lexicographically, which puts ``.rejected.20`` before ``.rejected.3``
+        and would make "oldest" wrong the moment a collection passed nine
+        rejections. Deletion is announced at WARNING level for the same reason
+        ``_discard_rejected_vectors`` announces its own - removing preserved
+        evidence must never happen quietly."""
+        files = self._rejected_vector_files()
+        if len(files) <= _MAX_REJECTED_KEPT:
+            return
+        try:
+            by_age = sorted(files, key=lambda p: p.stat().st_mtime)
+        except OSError as e:
+            _log.warning("RAG collection %r: could not order the set-aside vector "
+                         "indexes to prune them (%s); all are left in place",
+                         self.name, e)
+            return
+        for p in by_age[:-_MAX_REJECTED_KEPT]:
+            try:
+                size = p.stat().st_size
+                p.unlink()
+            except OSError as e:
+                _log.warning("RAG collection %r: could not prune %s (%s); it is "
+                             "left in place", self.name, p.name, e)
+                continue
+            _log.warning("RAG collection %r: pruned the oldest set-aside vector "
+                         "index %s (%.1f MB) - keeping the newest %d. The current "
+                         "index is unaffected.",
+                         self.name, p.name, size / 1048576.0, _MAX_REJECTED_KEPT)
 
     def _free_rejected_name(self):
         """An unused ``vectors.json.rejected[.N]`` path, or None if there is none.
@@ -1826,14 +1882,28 @@ class Collection:
 
         We do not hide problems (AGENTS rule 5): a corrupt, stale, or dimensionally
         mismatched vectors index must not silently vanish into BM25-only. Recording
-        the reason (exposed via ``stats()``) and logging genuine corruption once -
-        idempotent, so a per-query path does not spam the log - is the right
-        altitude: the lexical fallback still works, but the fault is discoverable."""
-        if self.vector_degrade_reason == reason:
-            return
+        the reason (exposed via ``stats()``) and logging genuine corruption once is
+        the right altitude: the lexical fallback still works, but the fault stays
+        discoverable.
+
+        "Once" has to mean once per PROCESS, not once per instance. This method was
+        already idempotent against ``self.vector_degrade_reason``, but ``_load``
+        runs from ``__init__`` and every request builds a FRESH Collection, so the
+        guard reset on each one and the same sentence was logged on essentially
+        every /api/rag call - measured at 25+ identical WARNING lines in one
+        session, several twice within a single request. The instance field is still
+        set unconditionally, so ``stats()`` and the GUI's "needs repair" state stay
+        exactly as accurate as before; only the duplicate LOG LINE is suppressed.
+        A genuinely NEW reason for the same collection still warns, so a fault that
+        changes shape is never hidden behind an earlier one."""
         self.vector_degrade_reason = reason
-        if warn:
-            _log.warning("RAG collection %r: %s", self.name, reason)
+        if not warn:
+            return
+        key = (str(self.dir), reason)
+        if key in _WARNED_DEGRADES:
+            return
+        _WARNED_DEGRADES.add(key)
+        _log.warning("RAG collection %r: %s", self.name, reason)
 
     def _vector_scores(self, text: str,
                        embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:

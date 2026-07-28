@@ -8,6 +8,7 @@ BEHAVIOUR (records survive, vectors get rebuilt) rather than the wording of a
 warning.
 """
 import json
+import os
 
 import pytest
 
@@ -160,6 +161,88 @@ def test_dimension_mismatch_error_names_the_collection_and_a_working_command(tmp
     assert "'kb'" in msg, "the error must name the collection"
     assert "localm rag reembed kb" in msg, "the error must give the command that works"
     assert "delete and re-add" not in msg, "must no longer tell the user to delete their data"
+
+
+def test_degrade_warning_fires_once_per_process_not_once_per_instance(tmp_path, caplog):
+    """_load() runs from __init__ and every request builds a FRESH Collection, so
+    the old instance-level guard re-armed constantly: 25+ identical WARNING lines
+    in one real session, several twice inside a single request."""
+    from localm.rag import store as store_mod
+
+    _collection(tmp_path, ["a", "b", "c"], dim=8)
+    (tmp_path / "kb" / "vectors.json").write_text(
+        json.dumps({"dim": 8, "vectors": [[0.1] * 8]}), encoding="utf-8")  # 1 vector, 3 chunks
+    store_mod._WARNED_DEGRADES.clear()
+
+    with caplog.at_level("WARNING"):
+        instances = [Collection("kb", base=tmp_path) for _ in range(6)]
+
+    degrade_lines = [r for r in caplog.records if "vectors" in r.getMessage()]
+    assert len(degrade_lines) == 1, (
+        f"expected ONE warning across 6 loads, got {len(degrade_lines)}")
+    # ...but every instance must still KNOW it is degraded, so stats()/the GUI
+    # badge stay accurate. Suppressing the log must not suppress the state.
+    assert all(i.vector_degrade_reason for i in instances), (
+        "deduping the log also hid the state from stats()")
+
+
+def test_a_new_degrade_reason_still_warns(tmp_path, caplog):
+    """Dedup must be per (collection, reason) - a fault that changes shape is a
+    new fault and must not hide behind an earlier one."""
+    from localm.rag import store as store_mod
+
+    _collection(tmp_path, ["a", "b"], dim=8)
+    store_mod._WARNED_DEGRADES.clear()
+    kb = tmp_path / "kb"
+
+    with caplog.at_level("WARNING"):
+        (kb / "vectors.json").write_text(json.dumps({"dim": 8, "vectors": [[0.1] * 8]}),
+                                         encoding="utf-8")
+        Collection("kb", base=tmp_path)
+        first = len([r for r in caplog.records if "vectors" in r.getMessage()])
+        (kb / "vectors.json").write_text("{not json", encoding="utf-8")
+        Collection("kb", base=tmp_path)
+        second = len([r for r in caplog.records if "vectors" in r.getMessage()])
+
+    assert first == 1, f"first fault should warn once, got {first}"
+    assert second > first, "a DIFFERENT fault must still warn, not be deduped away"
+
+
+def test_set_aside_vector_indexes_are_pruned_to_the_newest_few(tmp_path):
+    """Each set-aside file is a full copy of the index. A real install had three
+    totalling 88 MB and the allocator would have gone on to twenty."""
+    from localm.rag import store as store_mod
+
+    c = _collection(tmp_path, ["a", "b"], dim=8)
+    kb = tmp_path / "kb"
+    names = ["vectors.json.rejected"] + [f"vectors.json.rejected.{n}" for n in range(2, 8)]
+    for i, n in enumerate(names):
+        p = kb / n
+        p.write_text("x" * 1000, encoding="utf-8")
+        os.utime(p, (1_000_000 + i, 1_000_000 + i))     # oldest first
+    assert len(c._rejected_vector_files()) == 7
+
+    c._prune_rejected_vectors()
+
+    left = sorted(p.name for p in c._rejected_vector_files())
+    assert len(left) == store_mod._MAX_REJECTED_KEPT, f"kept {left}"
+    # the NEWEST must survive: pruning orders by mtime, never by name (a name sort
+    # puts .20 before .3 and would delete the wrong ones past nine rejections)
+    assert "vectors.json.rejected.7" in left
+    assert "vectors.json.rejected" not in left, "oldest should have been pruned"
+
+
+def test_pruning_never_touches_the_live_index(tmp_path):
+    c = _collection(tmp_path, ["a", "b"], dim=8)
+    kb = tmp_path / "kb"
+    live = (kb / "vectors.json").read_text(encoding="utf-8")
+    for n in ["vectors.json.rejected"] + [f"vectors.json.rejected.{i}" for i in range(2, 8)]:
+        (kb / n).write_text("x", encoding="utf-8")
+
+    c._prune_rejected_vectors()
+
+    assert (kb / "vectors.json").read_text(encoding="utf-8") == live
+    assert Collection("kb", base=tmp_path).vector_degrade_reason is None
 
 
 def test_reembed_after_a_mismatch_lets_the_add_succeed(tmp_path):
