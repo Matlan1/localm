@@ -541,23 +541,45 @@ def test_pull_is_quiet_for_an_ordinary_repo(tmp_path, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_pull_warning_cannot_be_forged_by_a_repo_filename(tmp_path, capsys):
-    """A REMOTE repo names these files, and they are interpolated into a Rich
-    markup string. Unescaped, '[/b]x.py' raises MarkupError (aborting the pull
-    between download and register) and '[red]x.py' is eaten as a style tag, so the
-    notice reports "1 Python file(s) ()" and names nothing. A repo must not be able
-    to blank or weaponise the warning that is about it."""
+def test_pull_warning_filename_cannot_blank_the_notice(tmp_path, capsys):
+    """A REMOTE repo names these files and they are interpolated into a Rich
+    markup string. Unescaped, '[red]x.py' parses as a STYLE TAG and vanishes, so a
+    security notice reports "1 Python file(s) ()" and names nothing - a warning a
+    hostile repo can blank by choosing a filename.
+
+    Brackets are legal in a filename on Windows and POSIX, so this vector is real.
+    A CLOSING tag like '[/b]x.py' is NOT reachable this way: '/' is the path
+    separator on every platform, so no such file can exist on disk. That vector
+    goes through repo_id instead - see the next test.
+    """
     from localm.model_manager.pull import _warn_if_repo_ships_code
     d = tmp_path / "hostile"
     d.mkdir()
     (d / "[red]hidden.py").write_bytes(b"x")
-    (d / "[/b]crash.py").write_bytes(b"x")
+    (d / "[bold]loud.py").write_bytes(b"x")
 
     _warn_if_repo_ships_code(d, "someone/hostile")     # must not raise
     out = capsys.readouterr().out
-    assert "hidden.py" in out and "crash.py" in out, (
+    assert "hidden.py" in out and "loud.py" in out, (
         f"filenames must survive escaping, got: {out!r}")
     assert "2 Python file(s)" in out
+
+
+def test_pull_warning_repo_id_cannot_crash_the_notice(tmp_path, capsys):
+    """The repo id is remote-supplied too, and unlike a filename it is NOT
+    constrained by the filesystem - so it CAN carry a closing tag. Unescaped,
+    '[/b]' raises MarkupError, and this call sits between the download and
+    _register, so the crash would leave the model on disk and UNREGISTERED while
+    the CLI aborts with a traceback."""
+    from localm.model_manager.pull import _warn_if_repo_ships_code
+    d = tmp_path / "repo"
+    d.mkdir()
+    (d / "mod.py").write_bytes(b"x")
+
+    _warn_if_repo_ships_code(d, "someone/[/b]evil[red]")   # must not raise
+    out = capsys.readouterr().out
+    assert "mod.py" in out
+    assert "1 Python file(s)" in out
 
 
 def test_custom_code_detected_in_preprocessor_config(home, tmp_path):
