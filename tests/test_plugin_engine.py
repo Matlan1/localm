@@ -712,7 +712,16 @@ def test_install_external_rejects_bad_input(env):
 
 def _traversal_roots(env):
     """store/, installed/ and a SENTINEL dir that `installed/../outside`
-    resolves to, so an escape is observable as damage to the sentinel."""
+    resolves to, so an escape is observable as damage to the sentinel.
+
+    PAYLOAD SAFETY (binding for every test below that reaches rmtree/copytree):
+    the escape payloads stay RELATIVE ('../outside') and every root derives from
+    tmp_path, so the blast radius is inside the fixture. This matters because a
+    NEGATIVE pass - revert the fix, prove the tests go red - deliberately runs
+    the unguarded code: nothing refuses the payload on that run, so a payload
+    naming a real location is a live deletion of it, not a test of it. tmp_path
+    is itself absolute and drive-qualified on Windows, so it exercises the
+    identical "an absolute component REPLACES the base" escape with no risk."""
     base = env / "roots"
     store = base / "store"
     store.mkdir(parents=True)
@@ -736,9 +745,16 @@ def test_is_valid_plugin_name_rule():
 
     for good in ("chat", "coder", "my-plugin", "_x", "a1"):
         assert ok(good), good
+    # PAYLOAD SAFETY: never name a REAL location in a test payload, even here.
+    # _is_valid_plugin_name is a pure string predicate and touches no
+    # filesystem, so these cannot delete anything - but a NEGATIVE pass runs the
+    # UNSAFE code for real, and this list is exactly what someone would reuse in
+    # a test that does reach the disk. A sibling lane emptied C:\Users\Public
+    # that way. Drive-qualified and absolute vectors use an unmounted letter and
+    # a synthetic root; they parse identically.
     for bad in ("", ".", "..", "../outside", "..\\outside", "a/b", "a\\b",
-                "C:/Windows", "/etc", "my plugin", "1abc", ".hidden",
-                "x.y", None, 7):
+                "Q:/nonexistent", "/nonexistent-root", "my plugin", "1abc",
+                ".hidden", "x.y", None, 7):
         assert not ok(bad), bad
 
 
