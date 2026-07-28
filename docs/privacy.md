@@ -59,9 +59,14 @@ or replies.
 | `0` / `false` / `off` | Off entirely. |
 | `1` / `true` / `on` | Forced on regardless of mode, plus verbose asyncio slow-callback logging. |
 
-`GET /debug/stacks` (loopback-only, gated on full host filesystem access - the
-owner key, open mode, or a key explicitly granted it) returns the current thread
-stacks and asyncio task list on demand, independent of the watchdog.
+`GET /debug/stacks` (loopback-only) returns the current thread stacks and
+asyncio task list on demand, independent of the watchdog. It needs full host
+filesystem access - the owner key, or a key explicitly granted it - and in open
+mode (no key configured) it additionally requires the per-process shell token
+the loopback GUI shell holds, because open mode grants every caller host access
+and so would otherwise leave this unauthenticated. Directory prefixes in the
+returned frames (your data directory, the install location, the Python
+environment) are redacted; the file, line and function are kept.
 
 ### The debug log (`--debug` / `LOCALM_DEBUG`)
 

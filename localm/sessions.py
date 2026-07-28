@@ -97,8 +97,12 @@ def _save(records: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(records, indent=2), encoding="utf-8")
+    # Restrict the TEMP file too, before the replace: it already holds the full
+    # digest payload with directory-inherited permissions, so a crash between
+    # these two lines would leave an unrestricted copy behind.
+    _restrict_perms(tmp)
     os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
-    _restrict_perms(path)
+    _restrict_perms(path)          # os.replace discards the destination ACL
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
     try:

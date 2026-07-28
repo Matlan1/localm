@@ -658,6 +658,20 @@ def ensure_dirs() -> None:
     _mkdir_or_explain(MODELS_DIR, is_home=False)
 
 
+def _perm_warn(path: Path, why: str) -> None:
+    """Record a failed permission tightening at debug level.
+
+    Discoverable rather than silent (AGENTS.md rule 5), but not escalated: the
+    data dir is already user-scoped, so a failure here degrades defence in depth,
+    it does not expose a plaintext secret."""
+    try:
+        from localm.debuglog import logger
+        logger.debug("could not restrict permissions on %s (%s); the data "
+                     "directory's own scoping still applies", path.name, why)
+    except Exception:
+        pass
+
+
 def restrict_file_perms(path: Path) -> None:
     """Best-effort: restrict *path* to the current user (POSIX chmod 0600, or
     Windows icacls). No-op on failure - the data dir is already user-scoped, so
@@ -680,14 +694,25 @@ def restrict_file_perms(path: Path) -> None:
         else:
             import subprocess
             user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-            if user:
-                # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al)
-                # and /grant:r replaces any existing grant for this user, so the
-                # result is an explicit, sole full-control ACE.
-                subprocess.run(
-                    ["icacls", str(path), "/inheritance:r",
-                     "/grant:r", f"{user}:F"],
-                    capture_output=True, check=False)
+            if not user:
+                _perm_warn(path, "no USERNAME/USER in the environment")
+                return
+            # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
+            # /grant:r replaces any existing grant for this user, so the result
+            # is an explicit, sole full-control ACE.
+            r = subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True, check=False)
+            if r.returncode != 0:
+                # icacls FAILS without raising (access denied, an unresolvable
+                # principal, a non-NTFS volume), so without this the function
+                # would return as though the file had been locked down. Rule 5:
+                # a security step that did not happen must not look like one
+                # that did. Still best-effort, so this reports rather than
+                # raising - breaking session persistence over a perms nicety
+                # would be the worse failure.
+                _perm_warn(path, (r.stderr or r.stdout or b"").decode(
+                    "utf-8", "replace").strip() or f"icacls exit {r.returncode}")
     except Exception:
         # Best-effort (see docstring): a failure (icacls missing, a filesystem
         # without per-file perms) leaves the home-dir scoping in effect, which is

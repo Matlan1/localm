@@ -254,6 +254,44 @@ class TestEmbeddingStatusScrub:
             assert body["gpu_fallback_reason"]
             assert "native GPU crash" in body["gpu_fallback_reason"]
 
+    def test_scrubs_a_data_dir_that_is_not_under_the_home_dir(self, tmp_path,
+                                                              monkeypatch):
+        """The two tests above cannot prove _machine_prefixes does anything.
+
+        Their fixture puts the data dir INSIDE the patched Path.home(), so
+        scrub_user_paths' home -> "~" replacement alone already removes the
+        asserted string - stubbing _machine_prefixes() to [] leaves them green.
+        A portable install puts LOCALM_HOME nowhere near the home dir, and that
+        is the case that needs the data-dir prefix."""
+        elsewhere = tmp_path / "portable" / "localm-data"
+        elsewhere.mkdir(parents=True)
+        monkeypatch.setenv("LOCALM_HOME", str(elsewhere))
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", elsewhere)
+        # Home is somewhere else entirely, so the username rule cannot cover this.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "hom"))
+        from localm.pathscrub import scrub_paths
+        text = f"failed to load embedding model: {elsewhere}/m.gguf: bad model"
+        out = scrub_paths(text)
+        _assert_absent(out, str(elsewhere))
+        assert "bad model" in out
+
+    def test_scrubs_the_interpreter_prefix_as_shipped(self):
+        """sys.prefix / sys.base_prefix must be scrubbed in the form the TEXT
+        carries, not only in resolved form.
+
+        localm provisions its interpreter with uv, whose directory is a
+        version-less alias that Path.resolve() follows to the versioned real
+        path. Registering only the resolved form matched nothing, so every
+        stdlib frame in /debug/stacks came back with a full absolute path while
+        the scrubber reported success."""
+        from localm.pathscrub import scrub_paths
+        for prefix in {sys.prefix, sys.base_prefix}:
+            frame = f'  File "{prefix}{os.sep}Lib{os.sep}threading.py", line 1, in x'
+            out = scrub_paths(frame)
+            _assert_absent(out, prefix)
+            assert "threading.py" in out and "line 1" in out
+
     def test_none_stays_none(self, rag_app, monkeypatch):
         """A scrubber that turns None into "" would break the GUI's
         "is there an error at all" check."""
@@ -293,6 +331,37 @@ class TestRagAddExistenceOracle:
         assert r_real.status_code == r_ghost.status_code, (
             f"existence leaked: {r_real.status_code} vs {r_ghost.status_code}")
         assert "not found" not in r_ghost.text.lower()
+
+    def test_secret_named_path_does_not_leak_existence_either(
+            self, rag_app, tmp_path_factory):
+        """The secret-material refusal used to consult is_file(), so an EXISTING
+        .pem answered 400 secret_file while a missing one fell through to the
+        whitelist branch (409/403) - the oracle survived for exactly the
+        interesting targets. Both must now answer the same."""
+        app, _ = rag_app
+        outside = tmp_path_factory.mktemp("ws9_secret")
+        real = outside / "server.key"
+        real.write_text("PRIVATE", encoding="utf-8")
+        ghost = outside / "absent.key"
+        with TestClient(app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            r_real = self._post(c, real)
+            r_ghost = self._post(c, ghost)
+        assert r_real.status_code == r_ghost.status_code, (
+            f"existence leaked: {r_real.status_code} vs {r_ghost.status_code}")
+
+    def test_secret_named_directory_is_still_walkable(self, rag_app):
+        """Not over-blocked: the is_file() guard existed so a real directory
+        NAMED like a secret stays indexable. Replacing it with is_dir() must
+        keep that true."""
+        app, home = rag_app
+        d = home / "credentials"
+        d.mkdir()
+        (d / "notes.md").write_text("just notes", encoding="utf-8")
+        with TestClient(app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            r = self._post(c, d)
+        assert r.status_code == 200, r.text
 
     def test_confinement_still_refuses_a_credential_dir(self, rag_app,
                                                         tmp_path_factory):

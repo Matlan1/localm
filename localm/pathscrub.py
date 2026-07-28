@@ -104,10 +104,33 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
     found: List[Tuple[str, str]] = []
 
     def add(value, label: str) -> None:
-        # Guarded per prefix: one unresolvable location must not cost the others.
+        """Register BOTH the raw value and its resolved form.
+
+        Registering only the resolved form silently no-ops whenever the two
+        differ, and they differ in the SHIPPED configuration: localm provisions
+        its interpreter with uv, whose directory is a version-less alias
+        (``cpython-3.12-windows-x86_64-none``) that ``resolve()`` follows to the
+        versioned real path. Frame text carries the alias, so a resolved-only
+        prefix matched nothing and every stdlib frame came back with a full
+        absolute path while this function reported success. The same trap
+        applies to a data dir reached through a junction or symlink, or to
+        macOS's /tmp -> /private/tmp, where the leak is the data dir and hence
+        the account name.
+
+        Guarded per prefix: one unresolvable location must not cost the others,
+        and a resolve() failure must still leave the raw form registered.
+        """
         try:
-            if value:
-                found.append((str(Path(value).resolve()), label))
+            if not value:
+                return
+            raw = str(value)
+            found.append((raw, label))
+        except Exception:
+            return
+        try:
+            resolved = str(Path(value).resolve())
+            if resolved != raw:
+                found.append((resolved, label))
         except Exception:
             pass
 
