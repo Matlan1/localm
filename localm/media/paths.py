@@ -81,6 +81,26 @@ def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+def is_unc_or_device_path(raw: str) -> bool:
+    """True for a Windows UNC (``\\\\host\\share``) or device (``\\\\.\\x``,
+    ``\\\\?\\x``) path STRING.
+
+    PURE STRING WORK - no filesystem access - so it is safe to run on
+    unsanitized caller input BEFORE any syscall, and that ordering is the entire
+    point. ``Path.resolve()`` on a UNC path to an unroutable host DIALS SMB and
+    blocks for minutes (measured here: a probe of ``\\\\192.0.2.1\\share`` did
+    not return inside 120s), and these routes are ``async``, so a single request
+    stalls the whole event loop. Against a REACHABLE attacker share, Windows
+    also auto-authenticates and surrenders the host net-NTLMv2 credential. The
+    refusal is worthless if it happens after the dial.
+
+    All four separator mixes are tested, not just ``\\\\``: ntpath treats them
+    alike, so ``//h/s``, ``\\/h/s`` and ``/\\h/s`` all parse to the drive
+    ``\\\\h\\s``. Checking only the canonical form is the bug this avoids."""
+    s = raw.strip()
+    return len(s) >= 2 and s[:2] in ("\\\\", "//", "\\/", "/\\")
+
+
 def allowed_input_roots() -> list[Path]:
     """Roots an ``input_image`` may live under.
 
@@ -128,15 +148,24 @@ def confined_input_image(raw: str) -> Path:
     now exactly four subdirectories OF the data dir, "no data dir" really does
     mean "nothing is permitted" - there is no wider root left to fall back to.
     """
-    try:
-        resolved = Path(raw).expanduser().resolve()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid input image path")
     home = _resolved_home()
     if home is None:
         raise HTTPException(
             500, "Cannot resolve the localm data directory, so no input image "
                  "can be authorised. See the server log for the cause.")
+    # BEFORE any syscall on the caller's string: a UNC path would be refused
+    # below anyway (it cannot be under a local data dir), but only AFTER
+    # .resolve() had already dialled SMB and stalled the event loop for minutes.
+    # Skipped only if the data dir is ITSELF a UNC path, where a UNC input can
+    # legitimately be under an allowed root.
+    if is_unc_or_device_path(raw) and not is_unc_or_device_path(str(home)):
+        raise HTTPException(
+            400, "Input image must be a local file you uploaded or a generated "
+                 "image; network (UNC) and device paths are not accepted.")
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "Invalid input image path")
     if not any(_under(resolved, h) for h in _home_input_roots(home)):
         raise HTTPException(
             400, "Input image must be a file you uploaded (the Settings page's "
@@ -168,11 +197,27 @@ def confined_move_dest(request: Request, raw: str) -> Path:
     """
     from localm.config import home_dir
     from localm.inference.http_server import effective_fs_access
+    # The credential check FIRST, because it costs no syscall, then the
+    # pure-string UNC/device check - both before .resolve() touches the caller's
+    # string. A non-host caller's UNC dest is refused below regardless (it is not
+    # under the data dir), but resolving it first would dial SMB and stall the
+    # event loop for minutes before saying so.
+    #
+    # A host-fs principal is deliberately NOT string-checked: moving a generated
+    # file to a network share is legitimate for the owner, who is not the threat
+    # this gate addresses. That path can still block the loop, which is the
+    # general "blocking fs work in an async handler" problem being fixed
+    # separately for the admin routes; it is noted here rather than half-solved.
+    fs_host = effective_fs_access(request) == "host"
+    if not fs_host and is_unc_or_device_path(raw):
+        raise HTTPException(
+            403, "This key cannot move media to a network (UNC) or device "
+                 "path; it has no host filesystem access.")
     try:
         resolved = Path(raw).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
         raise HTTPException(400, "Invalid destination path")
-    if effective_fs_access(request) == "host":
+    if fs_host:
         return resolved
     try:
         home = home_dir().resolve()

@@ -251,6 +251,66 @@ def test_unresolvable_data_dir_fails_closed_with_its_own_reason(tmp_path, monkey
     assert "data directory" in str(ei.value.detail)
 
 
+_UNC_FORMS = [
+    "\\\\192.0.2.1\\share\\x.png",     # canonical UNC (RFC5737 TEST-NET-1)
+    "//192.0.2.1/share/x.png",         # forward-slash UNC
+    "\\/192.0.2.1\\share\\x.png",      # mixed separators, form 1
+    "/\\192.0.2.1/share/x.png",        # mixed separators, form 2
+    "\\\\.\\PhysicalDrive0",           # device namespace
+    "\\\\?\\C:\\Windows\\win.ini",     # extended-length namespace
+]
+
+
+@pytest.mark.parametrize("raw", _UNC_FORMS)
+def test_unc_input_is_refused_without_ever_touching_the_filesystem(
+        tmp_path, monkeypatch, raw):
+    """A UNC dest would be refused by the allowlist anyway - but only AFTER
+    .resolve() had dialled SMB. Measured here: a probe of \\\\192.0.2.1\\share
+    did not return within 120 seconds, and these handlers are async, so that is
+    a whole-server stall per request; against a REACHABLE share Windows also
+    surrenders the host net-NTLMv2 credential. So the refusal must happen on the
+    STRING, before any syscall.
+
+    All four separator mixes are covered: ntpath parses //h/s, \\/h/s and /\\h/s
+    to the same drive, so a check that only looks for a leading \\\\ is bypassed
+    by typing the path a different way. No address here is routable."""
+    home = tmp_path / ".localm"
+    (home / "uploads").mkdir(parents=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+
+    # Fail the test rather than hang it if a syscall is ever attempted on the
+    # attacker-supplied path. Guarding Path.resolve directly (not sleeping or
+    # timing) keeps this deterministic and fast on every OS, including CI Linux
+    # where a UNC string is just an odd relative path and would never block.
+    real_resolve = Path.resolve
+
+    def _guard(self, *a, **k):
+        if media_paths.is_unc_or_device_path(str(self)):
+            raise AssertionError(f"resolve() was called on the UNC path {self}")
+        return real_resolve(self, *a, **k)
+    monkeypatch.setattr(Path, "resolve", _guard)
+
+    with pytest.raises(Exception) as ei:
+        media_paths.confined_input_image(raw)
+    assert getattr(ei.value, "status_code", None) == 400
+
+
+@pytest.mark.parametrize("raw", _UNC_FORMS)
+def test_is_unc_or_device_path_matches_every_separator_mix(raw):
+    assert media_paths.is_unc_or_device_path(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    "", " ", "x.png", "C:/Users/x/pic.png", "/tmp/pic.png", "./rel.png", "\\",
+])
+def test_is_unc_or_device_path_does_not_over_match(raw):
+    """The control for the detector above: it must NOT fire on ordinary local
+    paths, or every legitimate input would be refused as a network path."""
+    assert not media_paths.is_unc_or_device_path(raw)
+
+
 def test_a_symlink_out_of_an_allowed_root_is_rejected(tmp_path, monkeypatch):
     """confined_input_image's docstring promises symlinks are resolved first, so
     a link INSIDE an allowed root that targets outside it is still rejected.
@@ -312,6 +372,46 @@ def test_upload_image_refuses_a_non_image_before_transmitting(tmp_path, monkeypa
 
     with pytest.raises(ValueError, match="not an image"):
         cc._upload_image(secret, "http://127.0.0.1:8188")
+
+
+def test_upload_image_transmits_a_real_webp_end_to_end(tmp_path, monkeypatch):
+    """Drive _upload_image PAST the gate with a real file, not just the pure
+    signature function.
+
+    Without this, narrowing the read window at comfy_client.py (`head =
+    f.read(16)`) to 8 bytes would break every real WebP upload - WebP's second
+    signature window is at offset 8..12 - and the whole suite would stay green,
+    because every other test either asserts a REFUSAL or calls looks_like_image
+    directly. WebP is chosen precisely because it is the format that needs the
+    wider window."""
+    import localm.media.comfy_client as cc
+    img = tmp_path / "ref.webp"
+    img.write_bytes(b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 32)
+
+    sent = {}
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"name": "uploaded-ref.webp"}'
+
+    def _fake_request(url, data=None, headers=None, method=None):
+        sent["url"] = url
+        sent["body"] = data
+        return "REQ"
+
+    monkeypatch.setattr(cc.urllib.request, "Request", _fake_request)
+    monkeypatch.setattr(cc.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp())
+
+    assert cc._upload_image(img, "http://127.0.0.1:8188") == "uploaded-ref.webp"
+    assert sent["url"].endswith("/upload/image")
+    assert b"RIFF" in sent["body"], "the real image bytes were not transmitted"
 
 
 @pytest.mark.parametrize("head", [
