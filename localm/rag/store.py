@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
+from localm.jsonl import dumps_lines, split_jsonl
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
 from .collection_lock import (CollectionLockedError, collection_write_lock,
@@ -636,7 +637,17 @@ class Collection:
         chunks_file = self.dir / "chunks.jsonl"
         if chunks_file.is_file():
             bad_lines = 0
-            for line in chunks_file.read_text(encoding="utf-8").splitlines():
+            # split_jsonl, NOT str.splitlines(): JSONL is delimited by LINE FEED
+            # and nothing else, but splitlines() also breaks on U+0085/U+2028/
+            # U+2029, which json.dumps(ensure_ascii=False) writes RAW. That tore
+            # one record into two unparseable fragments, and the damage did not
+            # stop at a warning: the dropped records made the vector sidecar
+            # look stale (silent degrade to lexical), got it quarantined, and
+            # then _save() rewrote this file from the survivors - deleting the
+            # user's chunks. Measured on a real collection: 36 raw U+0085 turned
+            # 1192 records into 1228 lines, 62 unparseable, 26 chunks lost per
+            # load/save cycle. See localm/jsonl.py.
+            for line in split_jsonl(chunks_file.read_text(encoding="utf-8")):
                 if not line.strip():
                     continue
                 try:
@@ -768,8 +779,12 @@ class Collection:
     def _save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
-        self._atomic_write("chunks.jsonl", "\n".join(
-            json.dumps(c, ensure_ascii=False) for c in self._chunks))
+        # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
+        # would otherwise emit raw (U+0085/U+2028/U+2029), so a record can never
+        # again be split in half by a line-oriented reader - ours or anyone's.
+        # The reader above is fixed independently, so files written before this
+        # still load; this stops NEW ones being produced. See localm/jsonl.py.
+        self._atomic_write("chunks.jsonl", dumps_lines(self._chunks))
         # The fate of a REJECTED vectors.json is decided FIRST, before anything
         # below writes or unlinks that filename. Setting it aside from inside only
         # one branch loses the bytes on every other one, and the branch it lived in
@@ -1194,12 +1209,7 @@ class Collection:
                                 # would report just an error line while N-1 already-
                                 # embedded files vanish with no trace (AGENTS rule 5).
                                 self._save()
-                                raise ValueError(
-                                    f"Embedding dimension changed "
-                                    f"({self._vec_dim} -> {new_dim}): this "
-                                    f"collection was built with a different "
-                                    f"embedding model. Rebuild it (delete and "
-                                    f"re-add) or index with the original model.")
+                                raise ValueError(self._dim_mismatch_message(new_dim))
                             vectors = vecs
                             if self._vec_dim is None and new_dim is not None:
                                 self._vec_dim = new_dim
@@ -1624,12 +1634,7 @@ class Collection:
                                 # uploads before halting, so a mid-batch model switch
                                 # does not silently discard their work (AGENTS rule 5).
                                 self._save()
-                                raise ValueError(
-                                    f"Embedding dimension changed "
-                                    f"({self._vec_dim} -> {new_dim}): this collection "
-                                    f"was built with a different embedding model. "
-                                    f"Rebuild it (delete and re-add) or index with the "
-                                    f"original model.")
+                                raise ValueError(self._dim_mismatch_message(new_dim))
                             vectors = vecs
                             if self._vec_dim is None and new_dim is not None:
                                 self._vec_dim = new_dim
@@ -1656,6 +1661,107 @@ class Collection:
         self._save()
         return {"added": added, "updated": updated, "skipped": skipped,
                 "failed": failed, "chunks": len(self._chunks)}
+
+    def _dim_mismatch_message(self, new_dim: int) -> str:
+        """The refusal a user actually sees when they change embedding model.
+
+        It used to say "Rebuild it (delete and re-add)" - telling someone to DELETE
+        their collection, while naming neither the collection nor a command that
+        works. Worse, the two remedies it implied both failed: `rag repair --embed`
+        and the GUI reindex button hit this very guard, because neither reset
+        _vec_dim. Now it names the collection, both models where known, and the one
+        command that does the job without touching the source files.
+        """
+        was = self.embedding_model()
+        built = f" with {was}" if was else ""
+        return (
+            f"Embedding dimension changed ({self._vec_dim} -> {new_dim}): "
+            f"collection {self.name!r} was built{built} and its stored vectors "
+            f"cannot be mixed with a different model's. Re-embed it in place from "
+            f"the text already stored (no source files needed, nothing deleted):\n"
+            f"    localm rag reembed {self.name}\n"
+            f"or use 'Re-embed' on the Knowledge page. To keep the existing index "
+            f"instead, switch the embedding model back{built}.")
+
+    def reembed(self, *, embed_fn: EmbedFn, model_name: Optional[str] = None,
+                on_progress: Optional[ProgressFn] = None,
+                batch: int = 32) -> dict:
+        """Recompute EVERY vector from the stored chunk text, with a new model.
+
+        This is the answer to "I changed the embedding model, now my collection
+        refuses everything". The chunk text is already on disk in chunks.jsonl, so
+        nothing needs re-reading, re-chunking, or even to still exist: a collection
+        whose sources moved, were deleted, or arrived as uploads re-embeds exactly
+        the same as one whose files are all present. That is the difference from
+        ``rag repair --embed``, which re-indexes FROM THE ORIGINAL SOURCE FILES and
+        therefore cannot help when they are gone - and which could not help anyway,
+        because it never reset ``_vec_dim`` and so tripped the very dimension guard
+        it was supposed to resolve.
+
+        Crash-safe by construction: every vector is computed into a LOCAL list
+        first, and ``self._vectors`` is only replaced once the whole set is in hand
+        and validated. A failing embedder (model unloaded, VRAM gone, a bad batch)
+        therefore leaves the previous index exactly as it was, rather than a
+        half-dimension index that would mis-score every later query. The cost is
+        holding one full vector set in memory during the run, which is the same
+        order as the file it is about to write.
+        """
+        with _collection_lock(self.name), self._write_lock("reembed", on_progress):
+            self._load()
+            if not self._chunks:
+                return {"chunks": 0, "dim": None, "model": model_name,
+                        "note": "collection has no chunks; nothing to re-embed"}
+
+            texts = [c.get("text") or "" for c in self._chunks]
+            total = len(texts)
+            fresh: list = []
+            for i in range(0, total, max(1, batch)):
+                part = embed_fn(texts[i:i + max(1, batch)])
+                if part is None:
+                    raise RuntimeError(
+                        "the embedding function returned nothing for chunks "
+                        f"{i}-{i + len(texts[i:i + batch])} of {total}")
+                fresh.extend(part)
+                if on_progress:
+                    on_progress(f"re-embedding {min(i + batch, total)}/{total}")
+
+            # Validate BEFORE touching the live index. A short or ragged result is
+            # the failure mode that produces a silently mis-scoring collection, so
+            # it is refused loudly here rather than saved and discovered at query
+            # time (AGENTS rule 5).
+            if len(fresh) != total:
+                raise RuntimeError(
+                    f"embedder returned {len(fresh)} vectors for {total} chunks; "
+                    "the previous index has been left untouched")
+            dims = {len(v) for v in fresh if v is not None}
+            if len(dims) != 1 or not dims or next(iter(dims)) <= 0:
+                raise RuntimeError(
+                    f"embedder returned inconsistent vector sizes {sorted(dims)}; "
+                    "the previous index has been left untouched")
+
+            self._vectors = fresh
+            self._vec_dim = next(iter(dims))
+            # Record the model NAME, not only its dimension, so a later mismatch
+            # can say which model built this index instead of inferring it from a
+            # dimension count.
+            if model_name:
+                self._meta["embedding_model"] = str(model_name)
+            self._meta["embedding_dim"] = self._vec_dim
+            # A rebuilt full-coverage index makes any set-aside sidecar moot: this
+            # IS the rebuild those files were kept as evidence for.
+            self._vectors_file_rejected = False
+            self.vector_degrade_reason = None
+            self.corrupt = False
+            self._save()
+            self._discard_rejected_vectors(
+                f"re-embedded to {self._vec_dim} dimensions"
+                + (f" with {model_name}" if model_name else ""))
+            return {"chunks": total, "dim": self._vec_dim, "model": model_name}
+
+    def embedding_model(self) -> Optional[str]:
+        """The model NAME this collection's vectors were built with, if recorded."""
+        v = self._meta.get("embedding_model")
+        return str(v) if v else None
 
     def documents(self) -> list:
         """The source paths currently indexed in this collection (for repair)."""

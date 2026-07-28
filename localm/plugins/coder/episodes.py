@@ -54,6 +54,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.jsonl import split_jsonl
 from localm.storekit import NamespaceLockRegistry
 
 from .provenance import neutralise
@@ -430,7 +431,7 @@ class EpisodeStore:
             af = self.archive_path
             prior = []
             if af.is_file():
-                prior = [ln for ln in af.read_text(encoding="utf-8").splitlines()
+                prior = [ln for ln in split_jsonl(af.read_text(encoding="utf-8"))
                          if ln.strip()]
             now = time.time()
             new = [json.dumps({**e.to_dict(), "forgotten_at": now,
