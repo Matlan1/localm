@@ -182,6 +182,34 @@ class TestRegistrationRequiresHostFsAccess:
         assert r.status_code == 403, r.text
         assert _registry_bytes(home) == before
 
+    @pytest.mark.parametrize("spec", ["../../../etc/passwd", r"..\..\evil.gguf",
+                                      "models/../../../x.gguf"])
+    def test_pull_of_a_traversing_relative_spec_is_403(self, app, restricted_key, spec):
+        """A RELATIVE spec with a '..' reaches anywhere on the disk from the
+        server's working directory, so it is a host path in every sense that
+        matters. Classified textually - the answer must not depend on whether the
+        file exists, or the gate becomes an existence oracle for the very caller
+        it is withholding filesystem access from."""
+        with TestClient(app) as c:
+            r = c.post("/api/models/pull", headers=_hdr(restricted_key),
+                       json={"spec": spec})
+        assert r.status_code == 403, r.text
+
+    @pytest.mark.parametrize("spec", ["owner/repo", "owner/repo:file.gguf",
+                                      "https://example.invalid/m.gguf"])
+    def test_the_gate_answer_does_not_depend_on_the_filesystem(
+            self, app, restricted_key, captured_pull, spec):
+        """The property that keeps this from being an oracle: an ordinary remote
+        spec is allowed, and no stat is performed to decide. Path.is_file is
+        patched to blow up, so any filesystem probe on the auth path fails the
+        test loudly instead of silently reappearing in a later refactor."""
+        with TestClient(app) as c:
+            with patch.object(Path, "is_file",
+                              side_effect=AssertionError("stat'ed a spec to authorise it")):
+                r = c.post("/api/models/pull", headers=_hdr(restricted_key),
+                           json={"spec": spec})
+        assert r.status_code == 200, r.text
+
     def test_pull_of_an_EXISTING_local_path_is_403(self, app, tmp_path, restricted_key):
         """The exploitable shape: a real file, which pull.py's is_local_path
         branch would register in place."""

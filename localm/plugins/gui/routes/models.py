@@ -51,7 +51,23 @@ def _spec_names_a_host_path(spec: str) -> bool:
     makes it deliberately BROADER than pull.py's own is_local_path (which also
     requires the path to exist) - a non-existent absolute path is refused here
     even though pull.py would have gone on to treat it as a remote spec, which is
-    the safe direction to differ in."""
+    the safe direction to differ in.
+
+    An earlier revision ALSO probed the filesystem for a relative spec, since
+    "owner/repo" and "models/foo.gguf" are the same shape and only a stat can
+    tell them apart. That probe was removed: it made the 403-vs-200 answer depend
+    on whether the named file exists, i.e. it handed a caller WITHOUT host
+    filesystem access an existence oracle for any relative path - the very
+    capability this gate exists to withhold. Trading a narrow registration gap for
+    a general-purpose oracle is a bad trade, and it also reintroduced the stat
+    this function is built to avoid.
+
+    RESIDUAL, stated rather than papered over: a relative spec with no ".."
+    component that happens to name an existing FILE is still registered in place
+    without this gate firing. Its reach is bounded by the server's working
+    directory, it is unchanged from previous behaviour rather than something
+    introduced here, and closing it needs a filesystem answer - which is exactly
+    what cannot be spent here without rebuilding the oracle."""
     # Trimming here is deliberate and is NOT the over-match that _pathcheck's
     # predicate avoids: this value is USER-TYPED (a spec pasted into the GUI
     # arrives with a trailing newline routinely), the route already trimmed it
@@ -72,6 +88,11 @@ def _spec_names_a_host_path(spec: str) -> bool:
     for flavour in (PureWindowsPath, PurePosixPath):
         pure = flavour(s)
         if pure.is_absolute() or pure.drive or pure.root:
+            return True
+        # A '..' component makes a RELATIVE spec reach anywhere on the disk from
+        # the server's working directory, so it is a host path in every sense
+        # that matters here.
+        if any(part == ".." for part in pure.parts):
             return True
     return False
 
@@ -461,23 +482,6 @@ def register(app: FastAPI, ctx) -> None:
         # spec never reaches a stat (see _spec_names_a_host_path).
         if _spec_names_a_host_path(spec):
             require_fs_host(request)
-        else:
-            # A RELATIVE spec is ambiguous - "owner/repo" and "models/foo.gguf"
-            # are the same shape - so this one needs the filesystem to answer,
-            # and pull.py registers such a path in place too when it is an
-            # existing file. Probe in the executor rather than inline: this is an
-            # `async def`, and a stat on a caller-supplied string is exactly the
-            # blocking call that must not sit on the event loop.
-            loop = asyncio.get_running_loop()
-
-            def _is_existing_local_file() -> bool:
-                try:
-                    return Path(spec).expanduser().is_file()
-                except OSError:
-                    return False
-
-            if await loop.run_in_executor(get_plugin_executor(), _is_existing_local_file):
-                require_fs_host(request)
         # Pass the spec after "--" so a value like "-h" or "--help" is treated as
         # the model argument, not parsed by the CLI as an option/help flag.
         args = ["pull"]
