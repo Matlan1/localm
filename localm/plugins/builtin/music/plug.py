@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from localm.inference.http_server import principal_id
 from localm.media import gallery
+from localm.media import paths as media_paths
 from localm.pathsafe import confined_file
 from . import backend as _backend
 
@@ -54,8 +55,7 @@ class MoveFileRequest(BaseModel):
 
 
 def _music_dir() -> Path:
-    from localm.config import home_dir
-    return home_dir() / "gui_music"
+    return media_paths.gallery_dir(media_paths.MUSIC_DIR_NAME)
 
 
 def _music_path(name: str) -> Path:
@@ -200,9 +200,13 @@ async def music_delete(name: str):
 
 @_router.post("/api/music/file/{name}/move",
               dependencies=[Depends(gallery.require_owner("music"))])
-async def music_move(name: str, req: MoveFileRequest):
+async def music_move(name: str, req: MoveFileRequest, request: Request):
+    """Move a generated track (and its sidecar) to a folder on this machine.
+
+    The destination is checked BEFORE the mkdir: require_owner proves artifact
+    ownership, not authority over the host filesystem."""
     path = _music_path(name)
-    dest_dir = Path(req.dest).expanduser()
+    dest_dir = media_paths.confined_move_dest(request, req.dest)
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

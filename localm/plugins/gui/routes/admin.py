@@ -45,7 +45,9 @@ def _norm_path_str(s: str) -> str:
 
 def register(app: FastAPI, ctx) -> None:
 
-    @app.post("/api/logs/export", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    @app.post("/api/logs/export",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
+                            Depends(require_fs_host)])
     def export_logs(req: LogExportRequest):
         """R30: copy every log of this running instance into a user-chosen folder
         (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
@@ -56,7 +58,13 @@ def register(app: FastAPI, ctx) -> None:
         Plain `def`, NOT `async def`: this stats a caller-supplied directory and
         then runs a whole shutil.copy2 loop, all blocking. Starlette threadpools
         a sync handler; an async one would hold the event loop for the length of
-        the copy."""
+        the copy.
+
+        require_fs_host as well as CONFIG_WRITE: `dest` is an arbitrary host
+        directory that this route mkdir(parents=True)s and writes into, and the
+        is_dir check before it makes the 400-vs-200 split a directory-existence
+        oracle for the whole disk. It is the same dial the /api/fs/dirs picker
+        that SUPPLIES `dest` already requires, so the two now agree."""
         import shutil
         import time as _time
         from localm.config import home_dir
