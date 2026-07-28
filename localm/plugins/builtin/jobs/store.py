@@ -281,6 +281,13 @@ class JobStore:
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                        encoding="utf-8")
         os.replace(tmp, self._defs_file)
+        # Each job def records `owner` - the sha256 of the creating key, the SAME
+        # digest the keystore stores. Restrict the file to this account the way
+        # auth.key already is, or the digest is readable where the plaintext is
+        # not (CodeQL 88). Applied AFTER os.replace: the replace would otherwise
+        # discard the ACL along with the temp file's identity.
+        from localm.config import restrict_file_perms
+        restrict_file_perms(self._defs_file)
 
     # ---- CRUD --------------------------------------------------------------
     def list(self) -> list:

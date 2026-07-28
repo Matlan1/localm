@@ -658,6 +658,46 @@ def ensure_dirs() -> None:
     _mkdir_or_explain(MODELS_DIR, is_home=False)
 
 
+def restrict_file_perms(path: Path) -> None:
+    """Best-effort: restrict *path* to the current user (POSIX chmod 0600, or
+    Windows icacls). No-op on failure - the data dir is already user-scoped, so
+    this per-file tightening is defence in depth.
+
+    Lives here, not in auth.py, because THREE files need it and only one used to
+    get it (CodeQL 88). ``auth.key`` holds the owner key in PLAINTEXT and got the
+    full treatment; ``sessions.json`` and ``jobs.json`` hold the SAME sha256
+    digest the keystore stores (``http_server.principal_id`` returns
+    ``key_hash``) and had a POSIX-only chmod or nothing at all - so on Windows
+    the digest was readable by any local account while the plaintext was not.
+    An unsalted sha256 of a 256-bit ``secrets.token_urlsafe(32)`` is not
+    crackable, but a digest is still a credential artefact and the asymmetry was
+    the actual defect. One implementation so a fourth caller cannot get a
+    weaker fourth variant.
+    """
+    try:
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+        else:
+            import subprocess
+            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+            if user:
+                # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al)
+                # and /grant:r replaces any existing grant for this user, so the
+                # result is an explicit, sole full-control ACE.
+                subprocess.run(
+                    ["icacls", str(path), "/inheritance:r",
+                     "/grant:r", f"{user}:F"],
+                    capture_output=True, check=False)
+    except Exception:
+        # Best-effort (see docstring): a failure (icacls missing, a filesystem
+        # without per-file perms) leaves the home-dir scoping in effect, which is
+        # the real protection. A perms nicety must never raise and break session
+        # persistence or job storage. NOT a silenced privacy failure in the rule-5
+        # sense: nothing here reports a guarantee to the user, and the secret this
+        # protects is a digest whose plaintext is separately restricted.
+        pass
+
+
 # Registry and config are mutated from several places at once - the GUI server
 # threads, the `localm pull` subprocess the GUI spawns, and sync_models_dir on
 # every launch. A plain open("w")+json.dump truncates the file before writing,

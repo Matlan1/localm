@@ -111,15 +111,16 @@ def _save(records: list) -> None:
 
 
 def _restrict_perms(path: Path) -> None:
-    """Owner-only perms where the OS supports it (POSIX chmod; best-effort). The
-    data dir is already user-scoped, so this is defense-in-depth, never fatal."""
-    try:
-        if os.name == "posix":
-            os.chmod(path, 0o600)
-    except OSError:
-        # A usage/permissions nicety on a filesystem without per-file perms must
-        # never break session persistence; the home dir scoping is the real guard.
-        pass
+    """Owner-only perms where the OS supports it (best-effort, never fatal).
+
+    Was POSIX-ONLY, which was the actual defect behind CodeQL 88: this file
+    records ``key_hash``, the same sha256 the keystore stores, while auth.py ran
+    icacls on Windows for auth.key. So on Windows the key DIGEST inherited
+    BUILTIN\\Users from the data dir and was readable by any local account,
+    while the PLAINTEXT next to it was not. Now shares auth.key's exact
+    implementation."""
+    from localm.config import restrict_file_perms
+    restrict_file_perms(path)
 
 
 def _expired(rec: dict, now: float) -> bool:

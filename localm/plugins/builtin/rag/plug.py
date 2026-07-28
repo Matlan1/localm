@@ -438,9 +438,14 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         # within a directory tree, which is the same partial-mitigation shape as
         # /upload's per-item cap.
         raise HTTPException(400, "Too many paths in one request (max 50)")
-    missing = [str(p) for p in paths if not p.exists()]
-    if missing:
-        raise HTTPException(400, f"Not found: {', '.join(missing[:5])}")
+    # CONFINEMENT RUNS FIRST, before anything touches the filesystem (CodeQL 59).
+    # This used to start with an `p.exists()` sweep that 400'd "Not found: <path>"
+    # for an absent path while an existing one fell through to the confinement
+    # verdict below - so the two answers differed, and any rag-scoped caller could
+    # ask about ANY absolute path on the server (a system credential store, say)
+    # and read existence off the status code. Confining first makes an out-of-policy path
+    # get the SAME answer whether or not it is there, and the existence check
+    # below then only ever runs on paths the caller is already allowed to index.
     # Confine API-driven indexing under the owner's policy (whitelist/blacklist,
     # plus the always-denied localm data dir + credential folders), so a request
     # from a loopback browser page or a remote client cannot read system files or
@@ -478,6 +483,12 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
             403, "These folders are outside the allowed indexing folders, and "
             "only the owner can widen the list: "
             + ", ".join(sorted(set(addable))[:5]))
+    # Only now, on paths that PASSED confinement: a caller entitled to index
+    # here is entitled to know the file is not there, and rule 5 says tell them
+    # the real reason rather than failing vaguely later.
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise HTTPException(400, f"Not found: {', '.join(missing[:5])}")
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None

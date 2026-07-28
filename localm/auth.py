@@ -306,24 +306,14 @@ def require_auth_enabled() -> bool:
 
 def _restrict_perms(path: Path) -> None:
     """Best-effort: restrict the key file to the current user. No-op on failure
-    or unsupported platforms - the data dir is already user-scoped."""
-    try:
-        if os.name == "posix":
-            os.chmod(path, 0o600)
-        else:
-            import subprocess
-            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-            if user:
-                subprocess.run(
-                    ["icacls", str(path), "/inheritance:r",
-                     "/grant:r", f"{user}:F"],
-                    capture_output=True, check=False)
-    except Exception:
-        # Best-effort (see docstring): the data dir is already user-scoped, so this
-        # per-file tightening is defense-in-depth. A failure (icacls missing, an FS
-        # without perms) leaves the home-dir scoping in effect, which is the real
-        # protection; a perms nicety must never raise.
-        pass
+    or unsupported platforms - the data dir is already user-scoped.
+
+    The implementation moved to ``config.restrict_file_perms`` so sessions.json
+    and jobs.json (which hold the key DIGEST) get the identical treatment as
+    auth.key (which holds the PLAINTEXT); they previously did not on Windows.
+    Kept as a name here because it is referenced throughout this module."""
+    from localm.config import restrict_file_perms
+    restrict_file_perms(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +341,24 @@ def keystore_file() -> Path:
 
 
 def _hash_key(key: str) -> str:
+    # SHA-256 IS THE RIGHT PRIMITIVE HERE - do not "harden" this into bcrypt /
+    # scrypt / argon2. A static analyser flags unsalted SHA-256 of a credential
+    # (CodeQL py/weak-sensitive-data-hashing, alert 88), and that rule is correct
+    # for a USER-CHOSEN password, where a slow salted KDF defeats brute force and
+    # rainbow tables. Neither threat applies to this input:
+    #   * every key hashed here is secrets.token_urlsafe(32) - 256 bits of CSPRNG
+    #     output (see create_key). There is no dictionary to try and no rainbow
+    #     table to precompute against 2^256; a KDF's work factor buys nothing on
+    #     top of entropy that is already beyond brute force.
+    #   * this runs on the PER-REQUEST verify path (see _principal_from_token),
+    #     so a deliberately-slow KDF would add its cost to every authenticated
+    #     request - a latency regression and a cheap DoS lever, paid for no gain.
+    # The real defect the alert pointed at was NOT the algorithm: it was that the
+    # files storing this digest (sessions.json, jobs.json) were not permission-
+    # restricted on Windows while auth.key holding the PLAINTEXT was, so the
+    # digest was readable where the secret was not. That is fixed at the file
+    # ACL - see config.restrict_file_perms and its callers.
+    #
     # surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
     # UnicodeEncodeError on a lone surrogate, which would just move the crash here
     # from the compare. Byte-identical to encode("utf-8") for every key that

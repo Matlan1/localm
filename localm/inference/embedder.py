@@ -57,6 +57,7 @@ import threading
 from pathlib import Path
 from typing import List, Optional
 
+from localm import pathscrub
 from localm.debuglog import logger
 from localm.inference.backends.llamacpp._sizing import VramSizingMixin
 
@@ -1019,9 +1020,12 @@ def gpu_fallback_reason() -> Optional[str]:
     """Why the currently-loaded embedder dropped from GPU to CPU after a native
     crash (see IsolatedEmbedder.embed), or None when it hasn't (still on GPU,
     or configured for CPU from the start). Does NOT trigger a load - for the
-    GUI picker to surface this instead of leaving it as a log-only fact."""
+    GUI picker to surface this instead of leaving it as a log-only fact.
+
+    Path-scrubbed for the same reason as ``last_error`` below."""
     with _LOCK:
-        return _EMBEDDER.gpu_fallback_reason if _EMBEDDER is not None else None
+        raw = _EMBEDDER.gpu_fallback_reason if _EMBEDDER is not None else None
+    return pathscrub.scrub_paths(raw) if raw else raw
 
 
 def loaded_path() -> Optional[str]:
@@ -1049,9 +1053,24 @@ def active_requests() -> int:
 
 def last_error() -> Optional[str]:
     """Why the last embedding-model LOAD failed (e.g. the model is not an embedding
-    model), or None. For the GUI picker to tell the user what went wrong."""
+    model), or None. For the GUI picker to tell the user what went wrong.
+
+    PATH-SCRUBBED on the way out. The stored message is the raw exception text,
+    which for a load failure reads "failed to load embedding model:
+    <absolute path>" and crosses the isolated-child boundary intact - so it
+    carries the data dir, and with it the OS account name. Every caller of this
+    is an HTTP response (``GET /api/rag/embedding``, the 422 in routes/chat.py,
+    the rag job log), i.e. potentially a rag-scoped or non-owner reader, and
+    ``rag`` is deliberately NOT a privileged scope.
+
+    Scrubbed on READ, not at the assignment: the WARNING logged at the failure
+    site keeps the full path, so the local operator diagnosing this in the debug
+    log loses nothing. Per AGENTS.md rule 5 the CAUSE is preserved verbatim -
+    only the directory prefix is replaced - because muting the reason would
+    leave the user with a broken embedder and no way to find out why."""
     with _LOCK:
-        return _LAST_ERROR
+        raw = _LAST_ERROR
+    return pathscrub.scrub_paths(raw) if raw else raw
 
 
 def reset_embedder(*, force: bool = True) -> bool:
