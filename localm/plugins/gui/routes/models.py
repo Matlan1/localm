@@ -143,22 +143,32 @@ def register(app: FastAPI, ctx) -> None:
         def _probe_rows() -> tuple:
             sizes: dict = {}
             resolved: dict = {}
-            for _n, _e, _m, ep in rows:
-                p = Path(ep)
-                try:
-                    sizes[ep] = p.stat().st_size if p.is_file() else None
-                except OSError:
-                    sizes[ep] = None
-                try:
-                    resolved[ep] = p.resolve()
-                except OSError:
-                    resolved[ep] = None
+            # The per-row resolve() has exactly ONE consumer: the embedder
+            # identity comparison below. So it is skipped entirely when no
+            # embedder is loaded, rather than spent and dropped. That is not
+            # micro-optimisation - resolve() is a syscall, and on a registered
+            # UNC row it is a second full SMB-redirector timeout on top of the
+            # stat, plus a second outbound authentication attempt against a
+            # reachable share. Doing it only when its answer is used halves the
+            # cost of exactly the row that is most expensive.
             emb_resolved = None
             if emb_path is not None:
                 try:
                     emb_resolved = Path(emb_path).resolve()
-                except OSError:
+                except (OSError, ValueError):
                     emb_resolved = None
+            for _n, _e, _m, ep in rows:
+                p = Path(ep)
+                try:
+                    sizes[ep] = p.stat().st_size if p.is_file() else None
+                except (OSError, ValueError):
+                    sizes[ep] = None
+                if emb_resolved is None:
+                    continue
+                try:
+                    resolved[ep] = p.resolve()
+                except (OSError, ValueError):
+                    resolved[ep] = None
             return sizes, resolved, emb_resolved
 
         sizes, resolved_paths, emb_resolved = await loop.run_in_executor(
@@ -588,8 +598,27 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/models/pull-comfy-source",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull_comfy_source(req: ComfyPullRequest, request: Request):
+        """Download one CURATED ComfyUI model into the ComfyUI models folder.
+
+        Requires host filesystem access for the same reason /api/models/scan
+        does, and it is the same folder either way. When the managed ComfyUI
+        instance is not active - the DEFAULT state of a fresh install -
+        comfy_models_dest_dir() resolves to `<comfy_workdir>/models/<subfolder>`,
+        and comfy_workdir carries no admin_only flag, so a plain config:write key
+        chooses it. The download then mkdir -p's that directory and streams a
+        multi-gigabyte file into it from the server process. The curated table
+        fixes the filename and subfolder, so this is not arbitrary-path WRITE -
+        but choosing the parent directory is still host filesystem reach, and a
+        UNC value draws the same outbound SMB authentication from the server that
+        the scan gate exists to prevent.
+
+        This route was the inconsistent survivor when scan and pull were gated:
+        same invariant, same config value, same harm, no gate. Fixing one door
+        and leaving its neighbour open is how a boundary gets believed to be
+        closed when it is not."""
         from localm.media.managed_comfy import comfy_models_dest_dir
         from localm.model_manager.registry import resolve_comfy_model_source
+        require_fs_host(request)
         source = resolve_comfy_model_source(req.filename.strip())
         if source is None:
             raise HTTPException(400, f"Not a curated download source: {req.filename}")

@@ -72,10 +72,24 @@ def restricted_key(home):
     routes, and NO host filesystem reach. This is the configuration
     require_fs_host exists to constrain."""
     from localm import auth
+    # allow_privileged=True is REQUIRED, not incidental: config:write is in
+    # scopes.PRIVILEGED_SCOPES, so create_key raises PermissionError without it
+    # (auth.py:452-459) and every test requesting this fixture would ERROR at
+    # setup rather than run. That is what an owner does when deliberately minting
+    # such a key, and minting it is the whole point here - the threat model IS a
+    # key that legitimately holds config:write and models:write while holding no
+    # filesystem reach at all.
     created = auth.create_key(
         "restricted", [S.CONFIG_WRITE, S.MODELS_WRITE, S.MODELS_READ],
-        fs_access="none")
+        allow_privileged=True, fs_access="none")
+    # Assert the key really came out the way the threat model needs. Without
+    # these, a future change to create_key's defaults could silently hand back a
+    # key with different reach and every 403 below would still pass, for the
+    # wrong reason.
     assert created["fs_access"] == "none", "fixture must not grant host fs reach"
+    assert S.CONFIG_WRITE in created["scopes"], created["scopes"]
+    assert S.MODELS_WRITE in created["scopes"], created["scopes"]
+    assert S.ADMIN not in created["scopes"], "fixture must not be owner-equivalent"
     return created["key"]
 
 

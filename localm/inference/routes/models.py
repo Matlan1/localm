@@ -9,6 +9,7 @@ reassigns them is reflected here).
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -66,7 +67,19 @@ def register(app: FastAPI, ctx) -> None:
 
         # If it is the default startup model but not in registry, provide a virtual entry
         if entry is None and _hs._default_model_name == model_id:
-            entry = {"path": getattr(_hs._engine, "model_path", ""), "source": "startup"}
+            # abspath, because the startup path is whatever the operator typed on
+            # the command line and `localm serve ../models/foo.gguf` is a normal
+            # invocation. _entry_path (correctly) reads a stored path carrying a
+            # '..' component as malformed, which would blank this virtual entry's
+            # path and size for a perfectly good running model. Normalising here
+            # keeps that rule strict for the REGISTRY - where a '..' really does
+            # mean the file was hand-edited or planted - without punishing a
+            # relative CLI argument. os.path.abspath, not resolve(): it strips
+            # '..' against the cwd with no filesystem call and no symlink
+            # traversal, so this stays off the syscall path entirely.
+            _startup = getattr(_hs._engine, "model_path", "")
+            entry = {"path": os.path.abspath(_startup) if _startup else "",
+                     "source": "startup"}
 
         if entry is None:
             raise HTTPException(404, f"Model not registered: {model_id}")

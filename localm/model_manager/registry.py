@@ -1378,7 +1378,14 @@ def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
     root = models_root if models_root is not None else _mm.MODELS_DIR.resolve()
     try:
         return root in Path(path).resolve().parents
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError, not just OSError: a stored path containing an embedded NUL
+        # makes resolve() raise ValueError, and this gate is reached from the
+        # CORRUPT-REGISTRY RECOVERY path (`localm rm <name>` on a hand-edited or
+        # planted registry). An unhandled exception here would break the one
+        # command that can clear the bad entry, which is the opposite of what a
+        # recovery path is for. Either way an unresolvable path is not one we are
+        # willing to delete under, so it is reported as not owned.
         return False
 
 
