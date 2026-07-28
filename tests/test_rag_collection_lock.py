@@ -257,13 +257,39 @@ def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
         "a live holder's lock was stolen")
 
 
-def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(base, monkeypatch):
+def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
+        heavy_slot, base, monkeypatch):
     """The same property with the REAL heartbeat thread running, which is what
     makes an hours-long indexing run safe: hold across several staleness
-    windows, and a waiter must still refuse rather than steal it."""
+    windows, and a waiter must still refuse rather than steal it.
+
+    Takes ``heavy_slot`` even though it spawns no subprocess. It is the only test
+    here whose correctness depends on a THREAD being scheduled promptly, which
+    makes it the biggest victim of the starvation that fixture already documents
+    ("four such tests landing on different workers at once measurably starved a
+    neighbour"). Under ``-n 2`` on a 2-vCPU runner the neighbour starving it is a
+    sibling in this very file spawning real interpreters. Serialising against
+    them removes the dominant source; the widened window below covers the rest."""
+    # stale_after is TWELVE heartbeat intervals, the same ratio the shipped
+    # defaults use (HEARTBEAT_INTERVAL 5 s, STALE_AFTER 60 s - "STALE_AFTER is
+    # twelve of them" at collection_lock.py:386). It used to be six, i.e. the test
+    # ran on HALF the safety margin the product ships with, and failed on
+    # windows-latest with "DID NOT RAISE CollectionLockedError" (run 30363892424).
+    #
+    # Nothing was wrong with the lock: reclaim triggers on the age of the LAST
+    # beat, so a single contiguous starvation of the heartbeat thread longer than
+    # stale_after is enough, and 0.6 s of starvation is entirely ordinary on a
+    # 2-vCPU runner already running two xdist workers under coverage tracing.
+    # Raising the WINDOW is therefore the fix, not shrinking the interval: a
+    # shorter interval only makes beats more frequent, it does not survive a gap
+    # that already exceeds the window.
+    #
+    # This does not soften what the test proves - the fires-control below still
+    # requires a NON-beating record with this same stale_after to be reclaimed, so
+    # a heartbeat that stopped working entirely would still fail the test.
     monkeypatch.setattr(cl, "HEARTBEAT_INTERVAL", 0.1)
     lp = lock_path_for(base / "kb")
-    stale_after = 0.6
+    stale_after = 1.2
 
     with collection_write_lock(lp, collection="kb", op="a long index",
                                timeout=5.0):
