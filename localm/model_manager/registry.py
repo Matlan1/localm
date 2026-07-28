@@ -1436,17 +1436,30 @@ def remove_model(name: str) -> None:
     # a path that was NOT written by this process, so it goes through the single
     # resolving definition rather than a local test (see is_owned_model_path for
     # the two hand-rolled variants it replaces and why both were wrong).
-    owned = is_owned_model_path(path)
-    if owned and path.exists():
-        if path.is_dir():
+    #
+    # Every operation below runs on the RESOLVED path, because that is the path
+    # the ownership decision was made about. Deciding on one and deleting via the
+    # other is an escape: a registry entry naming a symlink OUTSIDE the models
+    # folder that points INTO it resolves as owned, and the split-GGUF branch then
+    # unlinks `path.parent / part` - siblings of the LINK, outside the folder the
+    # gate just authorised. Resolving once and using it throughout makes the
+    # decision and the action refer to the same file by construction, rather than
+    # by a reader noticing they agree.
+    try:
+        target = path.resolve()
+    except (OSError, ValueError):
+        target = path
+    owned = is_owned_model_path(target)
+    if owned and target.exists():
+        if target.is_dir():
             import shutil
-            shutil.rmtree(path)
-            console.print(f"[dim]Deleted {path}[/dim]")
+            shutil.rmtree(target)
+            console.print(f"[dim]Deleted {target}[/dim]")
         else:
             # Split GGUF: remove every sibling part, not just the registered one
-            siblings = split_gguf_parts(path.name) or [path.name]
+            siblings = split_gguf_parts(target.name) or [target.name]
             for part in siblings:
-                part_path = path.parent / part
+                part_path = target.parent / part
                 if part_path.exists():
                     part_path.unlink()
                     console.print(f"[dim]Deleted {part_path}[/dim]")
