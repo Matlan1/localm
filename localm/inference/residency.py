@@ -71,6 +71,19 @@ def model_footprint_bytes(model_path: Any) -> int:
         total = 0
         seen = 0
         for f in p.rglob("*"):
+            # Counted BEFORE the is_file()/stat() filters, so the bound is on
+            # ENTRIES WALKED, not on files successfully measured. Counting only
+            # measured files left the walk unbounded for the two trees that cost
+            # the most and measure the least: one made entirely of directories,
+            # and one whose entries all fail stat(). Both would `continue` forever
+            # without ever reaching the ceiling.
+            seen += 1
+            if seen > _FOOTPRINT_MAX_FILES:
+                logger.debug(
+                    "footprint: stopped after walking %d entries under %s; this "
+                    "does not look like a model directory, reporting the partial "
+                    "size", seen - 1, p)
+                break
             try:
                 if not f.is_file():
                     continue
@@ -81,13 +94,6 @@ def model_footprint_bytes(model_path: Any) -> int:
                 # is not silently ignored either (AGENTS.md rule 5).
                 logger.debug("footprint: skipping unreadable %s: %s", f, e)
                 continue
-            seen += 1
-            if seen >= _FOOTPRINT_MAX_FILES:
-                logger.debug(
-                    "footprint: stopped after %d files under %s; this does not "
-                    "look like a model directory, reporting the partial size",
-                    seen, p)
-                break
         return total
     return UNKNOWN_FOOTPRINT_BYTES
 

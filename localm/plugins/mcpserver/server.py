@@ -646,6 +646,26 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(
                 "'name' is required - pick a short registry name for this model",
                 is_error=True)
+        # A LOCAL PATH IS NOT A PULL, and letting a client "pull" one turns this
+        # tool into a registry-WRITE primitive: pull_model treats an existing path
+        # as a local add (see pull.py's is_local_path branch), registering an
+        # arbitrary directory under a client-chosen name. That name is then a
+        # registered model, so it sails through the membership check and resolves
+        # via the REGISTRY branch of get_model_info - around the direct-path gate
+        # entirely. It also works with net_mode=off, and even a REFUSED add still
+        # probes the path (config.json read, rglob, sha256), which is the sink set
+        # this gate exists to keep client input away from. An MCP client pulls from
+        # HuggingFace; registering something already on this disk is `localm add`,
+        # a deliberate local action.
+        try:
+            if Path(repo).expanduser().exists():
+                return _text_result(
+                    f"{repo!r} is a path on this machine, not a HuggingFace repo. "
+                    "pull_model downloads a model by repo id (e.g. "
+                    "'owner/name'). To register a model already on this disk, run "
+                    "'localm add <path>' on the host.", is_error=True)
+        except OSError:
+            pass          # unreadable/oversized path: not a local add, fall through
         spec = f"{repo}:{args['file']}" if args.get("file") else repo
 
         from localm.model_manager.pull import pull_model as _pull
@@ -761,6 +781,19 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         cmd = [sys.executable, "-m", "localm", "coder", task,
                "--cwd", str(cwd_path), "--output-format", "json"]
         if args.get("model"):
+            # A MODEL NAME FROM A CLIENT IS NOT OPERATOR INPUT, even though it is
+            # about to become argv. The coder CLI spawns `localm gui <model>` when
+            # no instance is attached for this cwd, and that positional reaches the
+            # startup resolver, which opts into allow_direct_path because a human
+            # typed it. Here a human did not: this string came from an MCP tool
+            # call, and the client also chooses `cwd`, so it can select the spawn
+            # branch at will. Without this check the gate is laundered through our
+            # own command line - "it is a command line" only implies "an operator
+            # typed it" when we are not the one building it.
+            from localm.model_manager import unregistered_model_error
+            bad = unregistered_model_error(args["model"])
+            if bad:
+                return _text_result(bad, is_error=True)
             cmd += ["--model", args["model"]]
         if args.get("max_turns") is not None:
             cmd += ["--max-turns", str(args["max_turns"])]

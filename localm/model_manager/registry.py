@@ -272,11 +272,18 @@ def unregistered_model_error(name) -> Optional[str]:
     reg = _mm.load_registry()
     if not reg or name in reg:
         return None
-    return (f"Model {name!r} is not registered. "
-            f"Registered models: {', '.join(sorted(reg))}. "
-            "Add one with 'localm pull <spec>', or register a local file with "
-            "'localm add <path>'. A filesystem path is not accepted here: only "
-            "a command-line run may name a model by path.")
+    # Deliberately does NOT list the registered models. An earlier version did,
+    # which was friendlier and wrong: this message is returned to callers holding
+    # only `jobs` or an MCP scope, while ENUMERATING models requires `models:read`
+    # (see inference/routes/models.py). That handed the full model inventory to any
+    # scoped key, and cut against the opacity discipline a few lines away in
+    # jobs/plug.py, where a foreign job id returns the same 404 as a missing one so
+    # a caller cannot even confirm it exists. Name only what the caller already
+    # told us, and point at the command that lists models for someone entitled to.
+    return (f"Model {name!r} is not registered. Run 'localm list' to see the "
+            "registered models, add one with 'localm pull <spec>', or register a "
+            "local file with 'localm add <path>'. A filesystem path is not "
+            "accepted here: only a command-line run may name a model by path.")
 
 
 def get_model_info(name: str, *, allow_direct_path: bool = False):

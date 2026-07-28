@@ -628,12 +628,20 @@ def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
         return
     if not py:
         return
-    shown = ", ".join(p.name for p in py[:5])
+    # escape(): these names come from a REMOTE repo and are interpolated into a
+    # Rich markup string. Unescaped, a file named '[/b]evil.py' raises MarkupError
+    # (which would abort the pull between the download and the _register call,
+    # leaving the model on disk and unregistered), and one named '[red]x.py' is
+    # parsed as a style tag and VANISHES - a security notice that reports "ships 1
+    # Python file(s) ()" and names nothing. A repo must not be able to edit, blank,
+    # or weaponise the warning that is about it.
+    from rich.markup import escape
+    shown = ", ".join(escape(p.name) for p in py[:5])
     if len(py) > 5:
         shown += f", and {len(py) - 5} more"
     console.print(
-        f"[yellow]Note:[/yellow] {repo_id} ships {len(py)} Python file(s) "
-        f"({shown}).")
+        f"[yellow]Note:[/yellow] {escape(str(repo_id))} ships {len(py)} "
+        f"Python file(s) ({shown}).")
     console.print(
         "[dim]  localm will NOT run them: model-bundled custom code is disabled "
         "by default. A model that requires it is refused with an explanation "

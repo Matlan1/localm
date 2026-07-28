@@ -64,12 +64,28 @@ def _declares_custom_code(model_path: str) -> bool:
     p = Path(model_path)
     if not p.is_dir():
         return False
-    for fname in ("config.json", "tokenizer_config.json", "processor_config.json"):
+    # Every file transformers actually consults for auto_map. NOTE the spelling:
+    # it is preprocessor_config.json (with the "pre"), which AutoProcessor reads -
+    # an earlier version of this list said "processor_config.json" and so missed
+    # the most common multimodal case entirely. A miss here is not an execution
+    # bypass (trust_remote_code is genuinely passed as False, so transformers still
+    # refuses), but it costs the user the clear message this function exists to
+    # give: transformers' own refusal for a processor gets caught by the broad
+    # handler in load() and relabelled "processor load failed ... falling back to
+    # text-only tokenizer", so the model quietly loads WITHOUT the capability and
+    # nobody is told it asked to run its own code.
+    for fname in ("config.json", "tokenizer_config.json",
+                  "preprocessor_config.json", "processor_config.json",
+                  "video_preprocessor_config.json"):
         f = p / fname
         if not f.is_file():
             continue
         try:
-            if isinstance(json.loads(f.read_text(encoding="utf-8")).get("auto_map"), dict):
+            # Any non-empty auto_map counts. transformers still accepts the legacy
+            # list/tuple form, so an isinstance(dict) test alone under-detects;
+            # this asks "does it declare one" rather than "is it the shape I
+            # expected", which is the safe direction for a refuse-gate.
+            if json.loads(f.read_text(encoding="utf-8")).get("auto_map"):
                 return True
         except Exception as e:
             # A malformed/unreadable file is NOT evidence of safety, but it is also
@@ -100,7 +116,7 @@ def _check_custom_code_allowed(model_path: str) -> None:
         "arbitrary code execution as the user running localm, so it is refused by "
         "default.\n"
         "If you trust the source of this model, enable it with:\n"
-        "  localm config set hf_trust_remote_code true\n"
+        "  localm config hf_trust_remote_code true\n"
         "Only do that for a model you obtained from a source you trust.")
 
 
