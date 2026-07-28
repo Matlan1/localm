@@ -228,6 +228,25 @@ markers = [
 target-version = "py310"
 
 [tool.ruff.lint]
+# Declare the rule set EXPLICITLY rather than inheriting ruff's default, because
+# that default is a MOVING target and CI installs the newest ruff (the dev extra
+# is a floor, `ruff>=...`, and the Install step uses pip, not `uv sync --locked`,
+# so the lockfile pin does not govern what CI runs). Measured: ruff 0.15.21 -> 0
+# errors, ruff 0.16.0 -> 3657 errors on the SAME commit, none of them E or F. The
+# 0.16 release widened the default selection to include I, UP, BLE, S, SIM, RUF,
+# PL, B, TRY and more, so master's lint step went red with no code change and no
+# actual regression. Pinning ruff would only defer that to the next bump; naming
+# the rules is what makes the gate mean the same thing across versions.
+#
+# E4 + E7 + E9 + F is exactly what ruff enabled here before 0.16, so this freezes
+# today's policy rather than quietly changing it: 55 rules, verified identical
+# under both 0.15.21 and 0.16.0 (`ruff check . --show-settings`).
+#
+# Adopting any of the newly-default families is a deliberate style decision with
+# a real backlog behind it (UP045 x1021, BLE001 x822, I001 x478), so it belongs
+# in its own change, not in a linter upgrade.
+select = ["E4", "E7", "E9", "F"]
+
 # The codebase deliberately uses a compact style: one-line guards (if x: return),
 # short local names, and a few intentional late module-level imports. Ignore those
 # stylistic rules; keep the pyflakes (F) checks that catch real dead code plus the
