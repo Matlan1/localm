@@ -88,6 +88,15 @@ def _check_plugin_name(name: str) -> str:
     return name
 
 
+# Reparse tags that make one path stand in for another. Resolved via getattr
+# because _stat exports these on Windows ONLY - they are absent on Linux
+# (verified), so naming them directly would AttributeError on the POSIX leg.
+_ALIASING_REPARSE_TAGS = frozenset((
+    getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+    getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003),
+))
+
+
 def _reject_source_links(src: Path) -> None:
     """Refuse an untrusted plugin source tree that contains ANY link (symlink or
     Windows directory junction). Raises ValueError.
@@ -126,12 +135,16 @@ def _reject_source_links(src: Path) -> None:
         p = Path(entry.path)
         try:
             st = entry.stat(follow_symlinks=False)
-            # A Windows junction reports is_symlink() False, so the reparse-point
-            # attribute is the only thing that sees it. st_file_attributes exists
-            # on Windows only; getattr keeps this one branch cross-platform.
-            reparse = bool(getattr(st, "st_file_attributes", 0)
-                           & stat.FILE_ATTRIBUTE_REPARSE_POINT)
-            is_link = entry.is_symlink() or reparse
+            # A Windows junction reports is_symlink() False, so its reparse TAG
+            # is the only thing that sees it. Test the two tags that actually
+            # alias another path, NOT the FILE_ATTRIBUTE_REPARSE_POINT bit:
+            # that bit is far broader, and a Windows Store AppExecLink
+            # (IO_REPARSE_TAG_APPEXECLINK) sets it while being neither a symlink
+            # nor a junction - every *.exe under %LOCALAPPDATA%\Microsoft\
+            # WindowsApps is one, so the broad test refuses ordinary source
+            # trees while claiming they contain something they do not.
+            tag = getattr(st, "st_reparse_tag", 0)
+            is_link = entry.is_symlink() or tag in _ALIASING_REPARSE_TAGS
         except OSError as e:          # unreadable/malformed reparse point
             raise ValueError(
                 f"plugin source entry cannot be inspected: {p.name} ({e})") from e

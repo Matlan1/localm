@@ -840,8 +840,11 @@ def test_http_plugin_routes_404_a_traversing_name(env, monkeypatch):
     broad Exception, so the guard has to run before their try block.
 
     On POSIX that id cannot traverse (a backslash is an ordinary character), so
-    there the assertion is the status code and the absence of any new
-    directory; on Windows the sentinel is the file-system proof."""
+    the sentinel is only file-system proof on Windows. The installed root is
+    therefore ALSO asserted unchanged, which is the POSIX-meaningful half: a
+    future change that hoisted a mkdir(parents=True) above the id check would
+    create '..\\x' there as a literal single-component directory and this test
+    would otherwise still pass."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     from localm.plugins.engine import attach_engine
     # attach_engine uses the default roots: installed_root = <home>/plugins,
@@ -851,6 +854,8 @@ def test_http_plugin_routes_404_a_traversing_name(env, monkeypatch):
 
     app = FastAPI()
     attach_engine(app)
+    installed_root = env / "plugins"
+    before = sorted(p.name for p in installed_root.iterdir())
     with TestClient(app) as c:
         for verb in ("install", "uninstall", "refresh", "enable", "disable"):
             r = c.post(f"/api/plugins/..%5Cx/{verb}")
@@ -858,6 +863,9 @@ def test_http_plugin_routes_404_a_traversing_name(env, monkeypatch):
         # a name that is not a path at all but still not a legal id
         assert c.post("/api/plugins/not%20an%20id/install").status_code == 404
     assert _sentinel_intact(sentinel)
+    # nothing was created under the installed root either (the POSIX assertion
+    # the docstring promises, which was previously not actually made)
+    assert sorted(p.name for p in installed_root.iterdir()) == before
 
 
 # ---------------------------------------------------------------------------
