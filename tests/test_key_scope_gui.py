@@ -150,12 +150,16 @@ class TestConfigTierRoutes:
         from localm import auth
         writer = auth.create_key("cfgwrite-nofs", [S.CONFIG_WRITE],
                                  allow_privileged=True)["key"]   # fs_access="none"
+        # dest must EXIST or the filesystem assertion is vacuous: export_logs
+        # 400s on a missing dest before it mkdirs anything, so "nothing was
+        # created" would hold with or without the gate.
         dest = tmp_path / "exfil"
+        dest.mkdir()
         with TestClient(scoped_app) as c:
             r = c.post("/api/logs/export", headers=_hdr(writer),
                        json={"dest": str(dest)})
             assert r.status_code == 403
-        assert not dest.exists(), "denied export must not have created the folder"
+        assert list(dest.iterdir()) == [], "denied export still wrote into dest"
 
 
 class TestBaselineRoutesStayOpen:

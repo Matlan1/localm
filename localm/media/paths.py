@@ -57,9 +57,13 @@ def _resolved_home() -> Path | None:
         return home_dir().resolve()
     except OSError as e:
         # Not silently swallowed (AGENTS rule 5): without the data dir there is
-        # no input root at all, so every legitimate input_image starts failing
-        # confinement, which reads as a bad path rather than an unresolvable
-        # data dir. Fail CLOSED, but say so where it can be found.
+        # no input root at all, so every input_image is refused until it
+        # resolves. That is genuinely fail-CLOSED now - every allowed root is a
+        # subdirectory OF the data dir, so there is no wider root left to fall
+        # back to. (It was NOT true while an install-directory root existed
+        # alongside: losing home then SKIPPED the data-dir re-deny and widened
+        # the policy on the failure path. Do not reintroduce a root that is not
+        # under home without revisiting this.)
         from localm.debuglog import logger
         logger.warning("cannot resolve the localm data directory (%s); no "
                        "input-image root is available, so every input_image "
@@ -71,22 +75,6 @@ def _home_input_roots(home: Path) -> list[Path]:
     """The subdirectories of the data dir an input_image may come from."""
     return [home / name for name in (UPLOADS_DIR_NAME, IMAGE_DIR_NAME,
                                      VIDEO_DIR_NAME, MUSIC_DIR_NAME)]
-
-
-def source_checkout_root() -> Path | None:
-    """The repo root when running from a SOURCE CHECKOUT, else None.
-
-    The previous copies of this check keyed on pyproject.toml alone, which does
-    not mean what it looks like it means: pyproject.toml is release-include
-    (release-manifest.toml - the updater's verify_zip requires it), so an
-    INSTALLED copy carries one too and the "source checkout only" allowance
-    never actually narrowed. build_release assembles the zip from git-TRACKED
-    files, so a release build can never carry a .git; that is the marker that
-    distinguishes them. Require both."""
-    root = Path(__file__).resolve().parents[2]
-    if (root / "pyproject.toml").is_file() and (root / ".git").exists():
-        return root
-    return None
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -103,24 +91,24 @@ def allowed_input_roots() -> list[Path]:
     real flows produce: a file uploaded on the Settings page, and the gallery's
     "use as input" button (it fills the field with a gui_images path).
 
+    The install directory is NOT a root either, source checkout or not. Earlier
+    versions allowed the repo root "for a reference image kept in the checkout",
+    guarded on pyproject.toml. That guard never worked (pyproject.toml is
+    release-include - release-manifest.toml, the updater's verify_zip requires
+    it - so an installed copy has one too), and more importantly the allowance
+    is wrong even when it works: README documents `git clone` as the install
+    path, so on the PRIMARY topology it admitted the entire tree, including the
+    gitignored `issues/` and `qa/` directories that hold bug-report screenshots
+    and test-instance data. That is the same read-and-transmit primitive this
+    module exists to remove, aimed at a different directory. A reference image
+    belongs in <home>/uploads; copying one there is a single command.
+
     The roots are NOT created here - a policy check must not have the side
     effect of making a directory. A root that does not exist simply matches
     nothing.
     """
-    return _input_roots(_resolved_home())
-
-
-def _input_roots(home: Path | None) -> list[Path]:
-    """allowed_input_roots() against an already-resolved *home*, so a caller that
-    needs the data dir too resolves it once (and cannot log the unresolvable
-    warning twice for one request)."""
-    roots: list[Path] = list(_home_input_roots(home)) if home is not None else []
-    # When running from a SOURCE CHECKOUT, the repo root is a legitimate place to
-    # keep a reference image (e.g. an examples/ asset).
-    repo_root = source_checkout_root()
-    if repo_root is not None:
-        roots.append(repo_root)
-    return roots
+    home = _resolved_home()
+    return list(_home_input_roots(home)) if home is not None else []
 
 
 def confined_input_image(raw: str) -> Path:
@@ -133,28 +121,29 @@ def confined_input_image(raw: str) -> Path:
     The rejection message names the allowed LOCATIONS but never an absolute
     path: the data dir contains the OS username, and this route is reachable by
     a non-owner key.
+
+    An unresolvable data dir FAILS CLOSED with its own distinct error, rather
+    than falling through to the ordinary refusal: a fault must not be reported
+    as a routine policy decision (AGENTS rule 5). Because the allowed roots are
+    now exactly four subdirectories OF the data dir, "no data dir" really does
+    mean "nothing is permitted" - there is no wider root left to fall back to.
     """
     try:
         resolved = Path(raw).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
         raise HTTPException(400, "Invalid input image path")
-    refused = HTTPException(
-        400, "Input image must be a file you uploaded (the Settings page's "
-             "uploads folder) or one of the generated-media galleries. "
-             "Other locations, including the localm data directory itself, "
-             "are not readable by this route.")
     home = _resolved_home()
-    if not any(_under(resolved, r) for r in _input_roots(home)):
-        raise refused
-    # The source-checkout allowance can CONTAIN the data dir: with no LOCALM_HOME
-    # set (and no localm-home.cfg), localm falls back to <repo>/home, so the repo
-    # root would re-admit auth.key through the back door - the exact thing the
-    # narrowing exists to stop. Re-deny anything under the data dir that is not
-    # in one of its four explicitly allowed subdirectories, whatever root let it
-    # through. Checked SECOND so the allowed subdirs still pass either way.
-    if home is not None and _under(resolved, home) \
-            and not any(_under(resolved, h) for h in _home_input_roots(home)):
-        raise refused
+    if home is None:
+        raise HTTPException(
+            500, "Cannot resolve the localm data directory, so no input image "
+                 "can be authorised. See the server log for the cause.")
+    if not any(_under(resolved, h) for h in _home_input_roots(home)):
+        raise HTTPException(
+            400, "Input image must be a file you uploaded (the Settings page's "
+                 "uploads folder) or one of the generated-media galleries. "
+                 "Other locations, including the localm data directory itself "
+                 "and the localm install directory, are not readable by this "
+                 "route.")
     if not resolved.is_file():
         raise HTTPException(400, f"Input image not found: {raw}")
     return resolved
@@ -187,13 +176,23 @@ def confined_move_dest(request: Request, raw: str) -> Path:
         return resolved
     try:
         home = home_dir().resolve()
-    except OSError as e:
+    except OSError:
         # The boundary itself is unavailable, so the destination cannot be
         # proven inside it. Deny - but with the REAL reason, not the ordinary
         # "outside the data directory" one, which would hide a fault behind a
         # routine-looking refusal (AGENTS rule 5).
+        #
+        # The exception is NOT interpolated: str(OSError) carries .filename, so
+        # it would hand the absolute data dir path - and hence the OS username -
+        # to the only principal that reaches this branch, a non-owner key that
+        # just failed the fs_access check. _resolved_home() already logs the
+        # real cause server-side, which is where the path belongs.
+        from localm.debuglog import logger
+        logger.warning("move destination refused: the localm data directory "
+                       "could not be resolved", exc_info=True)
         raise HTTPException(
-            500, f"Cannot resolve the localm data directory: {e}")
+            500, "Cannot resolve the localm data directory, so the destination "
+                 "could not be authorised. See the server log for the cause.")
     if not _under(resolved, home):
         raise HTTPException(
             403, "This key cannot move media outside the localm data "

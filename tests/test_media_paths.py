@@ -75,23 +75,42 @@ def _key(scope_list, fs_access="none", privileged=False):
 
 
 def _no_upload(monkeypatch):
-    """Make any ComfyUI image upload a hard test failure.
+    """Record any ComfyUI image upload.
 
     Patched on both generator modules, not on media.comfy_client: they do
     ``from ...comfy_client import _upload_image`` at import time, so the name is
     already bound in their own namespace and patching the source module would
-    silently miss."""
+    silently miss.
+
+    NOTE ON WHAT THIS CAN AND CANNOT PROVE. Generation is dispatched to a
+    JobManager worker thread (gui/jobs.py start_fn), and _upload_image is
+    reached only deep inside it, so an assertion on this list right after the
+    HTTP response returns is INERT - it would be empty even if confinement had
+    let the file through. It is kept as a cheap tripwire, not as the check.
+    ``_no_job_started`` below is the assertion that can actually fail."""
     calls = []
 
-    def _boom(image_path, api_url):
+    def _record(image_path, api_url):
         calls.append(str(image_path))
         raise AssertionError(f"_upload_image was called with {image_path}")
 
     import localm.image_gen.comfy as _img
     import localm.video_gen.comfy as _vid
-    monkeypatch.setattr(_img, "_upload_image", _boom)
-    monkeypatch.setattr(_vid, "_upload_image", _boom)
+    monkeypatch.setattr(_img, "_upload_image", _record)
+    monkeypatch.setattr(_vid, "_upload_image", _record)
     return calls
+
+
+def _job_count(app) -> int:
+    """How many jobs the GUI job manager holds.
+
+    The falsifiable half of the input_image tests: confinement runs BEFORE
+    ``jobs.start_fn``, so a refused request must leave the job list untouched.
+    If the confinement regressed, the route would 200 and a job WOULD appear
+    here - unlike the _upload_image tripwire, this is observable synchronously."""
+    jobs = getattr(app.state, "jobs", None)
+    assert jobs is not None, "harness bug: attach_gui did not publish app.state.jobs"
+    return len(jobs._jobs)          # gui/jobs.py:214 - the only job registry
 
 
 # --------------------------------------------------------------------------- #
@@ -114,10 +133,16 @@ def test_input_image_cannot_name_the_credential_store(
     key = _key([plugin])                       # media scope only, fs_access=none
 
     with TestClient(app) as c:
+        before = _job_count(app)
         r = c.post(route, headers=_h(key),
                    json={"prompt": "x", "input_image": str(secret), **body_extra})
+        after = _job_count(app)
     assert r.status_code == 400, r.text
-    assert not uploaded, "the file was handed to the ComfyUI upload path"
+    # The load-bearing assertion: confinement runs BEFORE jobs.start_fn, so a
+    # refusal must not have queued generation. This one can actually fail - the
+    # _upload_image tripwire below cannot, since generation is threaded.
+    assert after == before, "a generation job was queued for the credential file"
+    assert not uploaded
     assert str(home) not in r.text, "rejection must not disclose the data dir"
 
 
@@ -136,9 +161,12 @@ def test_input_image_outside_the_data_dir_still_rejected(tmp_path, monkeypatch,
     key = _key([plugin])
 
     with TestClient(app) as c:
+        before = _job_count(app)
         r = c.post(route, headers=_h(key),
                    json={"prompt": "x", "input_image": str(outside)})
+        after = _job_count(app)
     assert r.status_code == 400, r.text
+    assert after == before, "a generation job was queued for an out-of-root file"
     assert not uploaded
 
 
@@ -157,56 +185,61 @@ def test_allowed_input_roots_excludes_the_data_dir_root(tmp_path, monkeypatch):
         assert (home / name).resolve() in roots, name
 
 
-def test_repo_root_allowance_needs_a_real_checkout_not_just_pyproject():
-    """The source-checkout allowance must key on something a release build does
-    NOT have. pyproject.toml alone does not qualify: it is release-include (the
-    updater's verify_zip requires it), so an installed copy carries one and the
-    "source checkout only" guard would never actually narrow. A release zip is
-    assembled from git-TRACKED files, so .git is the distinguishing marker."""
-    real_root = Path(media_paths.__file__).resolve().parents[2]
-    assert (real_root / "pyproject.toml").is_file(), "test runs from a checkout"
-    assert media_paths.source_checkout_root() == real_root
+def test_the_install_directory_is_not_an_allowed_root():
+    """The localm install tree must NOT be readable through this route.
 
-    src = Path(media_paths.__file__).read_text(encoding="utf-8")
-    assert '(root / ".git").exists()' in src, \
-        "pyproject.toml alone would also match an installed copy"
+    An earlier version allowed the repo root "for a reference image kept in the
+    checkout", guarded on pyproject.toml. That guard never narrowed anything
+    (pyproject.toml is release-include, so an installed copy has one too), and
+    the allowance was wrong even when it worked: README documents `git clone` as
+    the install path, so on the primary topology it admitted the whole tree -
+    including the gitignored issues/ and qa/ directories that hold bug-report
+    screenshots. This test pins its removal; do not reintroduce it."""
+    install_root = Path(media_paths.__file__).resolve().parents[2]
+    assert (install_root / "pyproject.toml").is_file(), "test runs from a checkout"
+    roots = {p.resolve() for p in media_paths.allowed_input_roots()}
+    assert install_root not in roots
+    assert not any(media_paths._under(install_root, r) for r in roots)
+    assert not hasattr(media_paths, "source_checkout_root"), \
+        "the install-root allowance was reintroduced"
 
 
-def test_data_dir_is_refused_even_when_it_sits_inside_the_repo_root(tmp_path,
-                                                                   monkeypatch):
-    """The repo-root allowance can CONTAIN the data dir: with no LOCALM_HOME and
-    no localm-home.cfg, localm falls back to <repo>/home. Without an explicit
-    re-deny, the source-checkout root would readmit auth.key through the back
-    door - defeating the whole narrowing on every from-source install."""
-    fake_repo = tmp_path / "checkout"
-    home = fake_repo / "home"                 # the fallback layout, verbatim
+def test_unresolvable_data_dir_fails_closed_with_its_own_reason(tmp_path, monkeypatch):
+    """Rule 5: a security step that cannot RUN must not read as a routine policy
+    refusal, and must not widen the policy. With every allowed root a subdir OF
+    the data dir, losing the data dir means nothing is permitted."""
+    monkeypatch.setattr(media_paths, "_resolved_home", lambda: None)
+    assert media_paths.allowed_input_roots() == []
+    with pytest.raises(Exception) as ei:
+        media_paths.confined_input_image(str(tmp_path / "anything.png"))
+    # 500 (a fault), NOT the ordinary 400 refusal - the two must stay distinct.
+    assert getattr(ei.value, "status_code", None) == 500
+    assert "data directory" in str(ei.value.detail)
+
+
+def test_a_symlink_out_of_an_allowed_root_is_rejected(tmp_path, monkeypatch):
+    """confined_input_image's docstring promises symlinks are resolved first, so
+    a link INSIDE an allowed root that targets outside it is still rejected.
+    That property rests entirely on the single .resolve() call; nothing else in
+    the function would notice if it stopped resolving links, so pin it."""
+    home = tmp_path / ".localm"
     (home / "uploads").mkdir(parents=True)
     monkeypatch.setenv("LOCALM_HOME", str(home))
     import localm.config as _cfg
     monkeypatch.setattr(_cfg, "HOME_DIR", home)
-    monkeypatch.setattr(media_paths, "source_checkout_root", lambda: fake_repo)
 
-    secret = home / "auth.key"
-    secret.write_bytes(b"\x89PNG\r\n\x1a\nowner-key")
-    assert fake_repo in {p.resolve() for p in media_paths.allowed_input_roots()}, \
-        "precondition: the repo root really is an allowed root here"
+    secret = home / "auth.key"                     # the credential store itself
+    secret.write_bytes(b"\x89PNG\r\n\x1a\nowner-key-material")
+    link = home / "uploads" / "innocent.png"       # lexically inside an allowed root
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"this OS/account cannot create symlinks: {e}")
 
+    assert link.is_file(), "precondition: the link resolves to a real file"
     with pytest.raises(Exception) as ei:
-        media_paths.confined_input_image(str(secret))
+        media_paths.confined_input_image(str(link))
     assert getattr(ei.value, "status_code", None) == 400
-
-    # ...and a legitimate file in an allowed subdir of that same data dir still
-    # passes, so the re-deny did not over-reach.
-    ok = home / "uploads" / "ref.png"
-    ok.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
-    assert media_paths.confined_input_image(str(ok)) == ok.resolve()
-
-    # A non-data-dir file elsewhere in the checkout is still allowed (that is
-    # what the source-checkout allowance is FOR).
-    asset = fake_repo / "examples" / "cat.png"
-    asset.parent.mkdir(parents=True)
-    asset.write_bytes(b"\x89PNG\r\n\x1a\nASSET")
-    assert media_paths.confined_input_image(str(asset)) == asset.resolve()
 
 
 def test_input_image_from_the_gallery_and_uploads_still_accepted(tmp_path, monkeypatch):
@@ -350,14 +383,21 @@ def test_move_anywhere_still_allowed_for_a_host_fs_key(
 
 def test_logs_export_denied_without_fs_host(tmp_path, monkeypatch):
     from localm import scopes as S
-    app, _home = _media_app(tmp_path, monkeypatch, "image")
+    app, home = _media_app(tmp_path, monkeypatch, "image")
+    (home / "logs").mkdir(parents=True, exist_ok=True)
+    (home / "logs" / "server.log").write_text("secret-ish log content")
     key = _key([S.CONFIG_WRITE], privileged=True)          # fs_access="none"
+    # dest must EXIST. Pointing at a missing directory would make the
+    # nothing-was-written assertion vacuous: export_logs 400s on a missing dest
+    # before it ever mkdirs, so "the folder was not created" would hold with or
+    # without the gate. An existing dest is the only way to exercise the write.
     dest = tmp_path / "logsteal"
+    dest.mkdir()
 
     with TestClient(app) as c:
         r = c.post("/api/logs/export", headers=_h(key), json={"dest": str(dest)})
     assert r.status_code == 403, r.text
-    assert not dest.exists()
+    assert list(dest.iterdir()) == [], "denied export still wrote into dest"
 
 
 def test_logs_export_allowed_with_fs_host(tmp_path, monkeypatch):

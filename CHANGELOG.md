@@ -246,7 +246,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   live - and that file is uploaded to ComfyUI (which may legitimately be another
   machine, over plain http) before anything checks it is an image. It is now
   limited to the uploads folder and the generated-media galleries, and anything
-  without an image signature is refused before a byte leaves the machine.
+  without an image signature is refused before a byte leaves the machine. The
+  localm install folder is not readable through it either, which matters if you
+  installed with `git clone`: that folder holds more than the program.
   "Move to folder..." on an image, clip or track took the destination as given
   and created it; a key without host filesystem access is now confined to the
   data directory, while the owner keeps any folder on the machine as before.
