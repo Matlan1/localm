@@ -15,6 +15,10 @@ pure redirect/routing/throttle helpers are importable and testable on their own.
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
+import socket
+import sys
 
 import pytest
 
@@ -302,3 +306,378 @@ def test_host6_re_contract(host, ok):
 ])
 def test_path_re_contract(path, ok):
     assert bool(portmux._PATH_RE.match(path)) is ok
+
+
+# --------------------------------------------------------------------------- #
+#  _redirect_to_https: the readuntil exception branch (client disconnects or
+#  sends an oversized preamble mid-handshake) - the "partial bytes" contract
+# --------------------------------------------------------------------------- #
+
+def test_redirect_uses_partial_bytes_when_client_disconnects_before_crlfcrlf():
+    # A client that sends a Host header then dies mid-handshake (EOF before the
+    # blank line) must still get a best-effort redirect built from whatever
+    # arrived, not a hang or a bare reset: readuntil raises IncompleteReadError,
+    # whose .partial carries the bytes read so far - the except clause must use
+    # them, not discard them.
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"ET /x HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n")
+        reader.feed_eof()   # EOF strikes before the terminating blank line
+        writer = _FakeWriter()
+        await portmux._redirect_to_https(b"G", reader, writer, 8443)
+        return writer.data
+    resp = asyncio.run(go())
+    status, headers, _ = _split(resp)
+    assert "308" in status
+    assert _location(headers) == "https://127.0.0.1:8443/x"
+
+
+def test_redirect_falls_back_to_explain_page_on_oversized_preamble():
+    # A client that floods headers without ever sending the terminating blank
+    # line trips asyncio's LimitOverrunError (no .partial attribute at all, so
+    # the getattr fallback to b"" must be exercised) rather than hanging the
+    # connection forever. The result must still be a clean HTTP response, never
+    # an unhandled exception.
+    async def go():
+        reader = asyncio.StreamReader()
+        oversized = b"X-Pad: " + b"a" * 70000 + b"\r\n"
+        reader.feed_data(oversized)
+        reader.feed_eof()
+        writer = _FakeWriter()
+        await portmux._redirect_to_https(b"G", reader, writer, 8443)
+        return writer.data
+    resp = asyncio.run(go())
+    status, headers, body = _split(resp)
+    # No usable Host header was ever parsed (the flood pre-empted parsing), so
+    # this must be the safe explain page, never a Location built from garbage.
+    assert "400" in status
+    assert _location(headers) is None
+    assert "secure connection" in body
+
+
+# --------------------------------------------------------------------------- #
+#  _handle_conn / _handle_conn_plain: outer except after routing raises
+#  mid-stream (the client vanished while _relay/_redirect were mid-flight)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("exc", [ConnectionError, OSError, asyncio.IncompleteReadError])
+def test_handle_conn_closes_writer_even_when_redirect_raises_midstream(monkeypatch, exc):
+    async def boom(*a, **k):
+        if exc is asyncio.IncompleteReadError:
+            raise exc(partial=b"", expected=1)
+        raise exc("peer vanished")
+    monkeypatch.setattr(portmux, "_redirect_to_https", boom)
+
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"G")
+        reader.feed_eof()
+        writer = _FakeWriter()
+        await portmux._handle_conn(reader, writer, 50000, 8443)  # must not raise
+        return writer.closed
+    assert asyncio.run(go()) is True
+
+
+def test_handle_conn_closes_writer_even_when_relay_raises_midstream(monkeypatch):
+    async def boom(*a, **k):
+        raise OSError("connection reset mid-relay")
+    monkeypatch.setattr(portmux, "_relay", boom)
+
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"\x16")
+        reader.feed_eof()
+        writer = _FakeWriter()
+        await portmux._handle_conn(reader, writer, 50000, 8443)  # must not raise
+        return writer.closed
+    assert asyncio.run(go()) is True
+
+
+def test_handle_conn_plain_closes_writer_even_when_relay_raises_midstream(monkeypatch):
+    async def boom(*a, **k):
+        raise ConnectionError("peer vanished")
+    monkeypatch.setattr(portmux, "_relay", boom)
+
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"G")
+        reader.feed_eof()
+        writer = _FakeWriter()
+        await portmux._handle_conn_plain(reader, writer, 50000, 8443,
+                                         {"warned": False, "count": 0})
+        return writer.closed
+    assert asyncio.run(go()) is True   # must not raise
+
+
+def test_handle_conn_plain_first_byte_read_failure_closes_cleanly(monkeypatch):
+    # A raw connection-level failure (not just a graceful IncompleteReadError)
+    # while peeking the first byte must still close the writer, never crash.
+    class DyingReader:
+        async def readexactly(self, n):
+            raise ConnectionResetError("reset before first byte")
+
+    async def go():
+        writer = _FakeWriter()
+        await portmux._handle_conn_plain(DyingReader(), writer, 50000, 8443,
+                                         {"warned": False, "count": 0})
+        return writer.closed
+    assert asyncio.run(go()) is True
+
+
+# --------------------------------------------------------------------------- #
+#  _note_tls_on_http: best-effort debug logging must never crash the caller,
+#  on EITHER the first-notice path or the already-warned counting path
+# --------------------------------------------------------------------------- #
+
+def test_note_tls_on_http_survives_a_broken_debug_logger_on_first_notice(monkeypatch):
+    monkeypatch.setattr(portmux, "_safe_notice", lambda msg: None)
+
+    def broken_debug(*a, **k):
+        raise RuntimeError("logger broke")
+    monkeypatch.setattr(portmux._log, "debug", broken_debug)
+
+    state = {"warned": False, "count": 0}
+    portmux._note_tls_on_http(8443, state)   # must not raise
+    assert state["warned"] is True
+    assert state["count"] == 1
+
+
+def test_note_tls_on_http_survives_a_broken_debug_logger_on_repeat(monkeypatch):
+    def broken_debug(*a, **k):
+        raise RuntimeError("logger broke")
+    monkeypatch.setattr(portmux._log, "debug", broken_debug)
+
+    state = {"warned": True, "count": 0}
+    portmux._note_tls_on_http(8443, state)   # must not raise
+    assert state["count"] == 1
+
+
+# --------------------------------------------------------------------------- #
+#  _pump: the copy loop's failure/teardown branches
+# --------------------------------------------------------------------------- #
+
+def test_pump_swallows_a_connection_error_from_the_source():
+    class RaisingReader:
+        async def read(self, n):
+            raise ConnectionResetError("reset")
+
+    async def go():
+        writer = _FakeWriter()
+        await portmux._pump(RaisingReader(), writer)   # must not raise
+        return writer.data
+    assert asyncio.run(go()) == b""
+
+
+def test_pump_swallows_a_write_eof_failure_on_half_close():
+    class WriterEofRaises(_FakeWriter):
+        def write_eof(self):
+            raise OSError("half-close failed")
+
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        writer = WriterEofRaises()
+        await portmux._pump(reader, writer)   # must not raise
+    asyncio.run(go())
+
+
+def test_pump_skips_write_eof_when_the_writer_cannot_half_close():
+    class NoEofWriter(_FakeWriter):
+        def can_write_eof(self):
+            return False
+        def write_eof(self):
+            raise AssertionError("write_eof must not be called when unsupported")
+
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        writer = NoEofWriter()
+        await portmux._pump(reader, writer)   # must not raise / assert
+    asyncio.run(go())
+
+
+# --------------------------------------------------------------------------- #
+#  _relay: the OSError early-return when the internal backend is unreachable
+# --------------------------------------------------------------------------- #
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_relay_returns_cleanly_when_the_internal_backend_is_unreachable():
+    # If the internal uvicorn is not (yet, or no longer) listening, _relay must
+    # give up quietly rather than propagate a connection-refused error up into
+    # the caller's routing logic.
+    async def go():
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        writer = _FakeWriter()
+        dead_port = _free_port()   # bound then released: nothing listens here
+        await portmux._relay(b"X", reader, writer, dead_port)   # must not raise
+        return writer.data
+    assert asyncio.run(go()) == b""
+
+
+# --------------------------------------------------------------------------- #
+#  _safe_close
+# --------------------------------------------------------------------------- #
+
+def test_safe_close_with_none_writer_is_a_noop():
+    portmux._safe_close(None)   # must not raise
+
+
+def test_safe_close_swallows_close_errors():
+    class BadWriter:
+        def close(self):
+            raise OSError("already gone")
+    portmux._safe_close(BadWriter())   # must not raise
+
+
+def test_safe_close_closes_a_real_writer():
+    class GoodWriter:
+        def __init__(self):
+            self.closed = False
+        def close(self):
+            self.closed = True
+    w = GoodWriter()
+    portmux._safe_close(w)
+    assert w.closed is True
+
+
+# --------------------------------------------------------------------------- #
+#  _get_stable_stream: resolve-once caching (fires-control: without the cache
+#  guard, a broken resolver would be retried on every single connection)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def _cold_stable_stream(monkeypatch):
+    """Force _get_stable_stream's module-level cache back to its unresolved
+    state for the duration of one test, regardless of test order."""
+    monkeypatch.setattr(portmux, "_stable_resolved", False)
+    monkeypatch.setattr(portmux, "_stable_stream", None)
+
+
+def test_get_stable_stream_resolves_once_and_caches(monkeypatch, _cold_stable_stream):
+    sentinel = object()
+    calls = []
+
+    def fake_resolver():
+        calls.append(1)
+        return sentinel
+    monkeypatch.setattr("localm.debuglog._stable_console_stream", fake_resolver)
+
+    first = portmux._get_stable_stream()
+    second = portmux._get_stable_stream()
+    third = portmux._get_stable_stream()
+    assert first is sentinel and second is sentinel and third is sentinel
+    assert len(calls) == 1, "a resolved stream must be cached, not re-resolved per call"
+
+
+def test_get_stable_stream_caches_a_failed_resolution_as_none(monkeypatch, _cold_stable_stream):
+    calls = []
+
+    def broken_resolver():
+        calls.append(1)
+        raise RuntimeError("no duplicable fd")
+    monkeypatch.setattr("localm.debuglog._stable_console_stream", broken_resolver)
+
+    first = portmux._get_stable_stream()
+    second = portmux._get_stable_stream()
+    assert first is None and second is None
+    assert len(calls) == 1, "a failed resolution must not be retried on every connection"
+
+
+# --------------------------------------------------------------------------- #
+#  _safe_notice: an operational notice must NEVER be able to crash the caller
+# --------------------------------------------------------------------------- #
+
+def test_safe_notice_writes_through_the_stable_stream(monkeypatch):
+    written = []
+
+    class FakeStream:
+        def write(self, s):
+            written.append(s)
+        def flush(self):
+            pass
+    monkeypatch.setattr(portmux, "_get_stable_stream", lambda: FakeStream())
+
+    portmux._safe_notice("something happened")
+    assert any("something happened" in s for s in written)
+
+
+def test_safe_notice_falls_back_to_live_stderr_when_no_stable_stream(monkeypatch, capsys):
+    monkeypatch.setattr(portmux, "_get_stable_stream", lambda: None)
+    portmux._safe_notice("fallback-path-message")
+    captured = capsys.readouterr()
+    assert "fallback-path-message" in captured.err
+
+
+def test_safe_notice_never_raises_even_when_the_stream_write_fails(monkeypatch):
+    # Fires-control: remove the try/except in _safe_notice and this test fails
+    # with the OSError propagating - which is exactly the WinError-6 cascade
+    # this function exists to prevent (see the module docstring).
+    class BrokenStream:
+        def write(self, s):
+            raise OSError("[WinError 6] The handle is invalid")
+        def flush(self):
+            pass
+    monkeypatch.setattr(portmux, "_get_stable_stream", lambda: BrokenStream())
+    portmux._safe_notice("must not crash the caller")   # must not raise
+
+
+# --------------------------------------------------------------------------- #
+#  _harden_uvicorn_logging
+# --------------------------------------------------------------------------- #
+
+def test_harden_uvicorn_logging_is_a_noop_without_a_stable_stream(monkeypatch):
+    monkeypatch.setattr(portmux, "_get_stable_stream", lambda: None)
+    logger = logging.getLogger("uvicorn")
+    handler = logging.StreamHandler(sys.stdout)
+    logger.addHandler(handler)
+    try:
+        portmux._harden_uvicorn_logging()
+        assert handler.stream is sys.stdout   # untouched
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_harden_uvicorn_logging_redirects_stream_handlers_but_skips_file_handlers(
+        monkeypatch, tmp_path):
+    fake_stable = io.StringIO()
+    monkeypatch.setattr(portmux, "_get_stable_stream", lambda: fake_stable)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    file_handler = logging.FileHandler(str(tmp_path / "uv.log"))
+    logger = logging.getLogger("uvicorn.error")
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+    try:
+        portmux._harden_uvicorn_logging()
+        assert stream_handler.stream is fake_stable
+        # FileHandler IS a StreamHandler subclass; the explicit exclusion must
+        # hold or a log file would be silently repointed at the console dup.
+        assert file_handler.stream is not fake_stable
+    finally:
+        logger.removeHandler(stream_handler)
+        logger.removeHandler(file_handler)
+        file_handler.close()
+
+
+def test_harden_uvicorn_logging_swallows_a_setstream_failure(monkeypatch):
+    fake_stable = io.StringIO()
+    monkeypatch.setattr(portmux, "_get_stable_stream", lambda: fake_stable)
+
+    class BadHandler(logging.StreamHandler):
+        def setStream(self, stream):
+            raise RuntimeError("nope")
+    handler = BadHandler(sys.stdout)
+    logger = logging.getLogger("uvicorn.asgi")
+    logger.addHandler(handler)
+    try:
+        portmux._harden_uvicorn_logging()   # must not raise
+    finally:
+        logger.removeHandler(handler)
