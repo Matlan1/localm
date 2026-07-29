@@ -143,6 +143,7 @@ patterns = [
 
     # --- dev + release tooling ---
     "scripts/check_hygiene.py",
+    "scripts/check_coverage_floors.py",
     "scripts/check_llama_abi.py",
     "scripts/sign_release.py",
     "scripts/check_manifest.py",
