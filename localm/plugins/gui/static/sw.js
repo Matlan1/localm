@@ -115,7 +115,12 @@
 // owner-chosen path and the caller is not the owner. A stale-cached client would
 // fall through to the else-branch and tell that user the model is "not installed"
 // and to pick another one - both false, and the second one unactionable.
-const CACHE = "localm-shell-v83";
+// v84: app/models-sidebar.js's refreshModels() now refreshes the Settings "Live
+// tuning" VRAM estimate when its 30s poll finds the active model changed from
+// somewhere else (another tab/device, the CLI, an MCP client) - a stale-cached
+// client would keep the old poll and the estimate would stay stuck on whatever
+// model was active when Settings was opened.
+const CACHE = "localm-shell-v84";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
