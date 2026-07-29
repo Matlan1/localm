@@ -549,7 +549,7 @@ class _ExecutionMixin:
 
         # Incremental map refresh after file-mutating tools
         if result.ok and call.name in _MUTATING_TOOLS:
-            self._refresh_map_for_tool(call)
+            self._refresh_map_for_tool(call, result)
 
         self._post_tool_success(call, result, snapshots)
 
@@ -754,9 +754,20 @@ class _ExecutionMixin:
 
         return confirm(f"  Allow {call.name}?")
 
-    def _refresh_map_for_tool(self, call: ToolCall) -> None:
-        """Update the project map for files touched by a write/edit tool call."""
+    def _refresh_map_for_tool(self, call: ToolCall,
+                              result: "ToolResult | None" = None) -> None:
+        """Update the project map for files touched by a write/edit tool call.
+
+        *result* is optional (existing callers - and the test that drives
+        this directly - omit it) and consulted only for a tool whose targets
+        are not knowable from the call args alone: search_replace's paths
+        come from its own glob+regex sweep, reported post-call via
+        ToolResult.changes, not from a `path`-shaped arg _call_target_paths()
+        could resolve ahead of time."""
         paths = dict.fromkeys(_call_target_paths(call.name, call.args))
+        if result is not None and result.changes:
+            for rel, _old, _new in result.changes:
+                paths.setdefault(rel, None)
         if paths:
             for path_arg in paths:
                 abs_path = (self.cwd / path_arg).resolve()

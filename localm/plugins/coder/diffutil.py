@@ -132,6 +132,12 @@ def compute_search_replace_diff(cwd: Path, pattern: str, replacement: str,
         # a normalised read. Diffing raw CRLF against normalised LF would
         # flag every line's ending as changed on a CRLF file, even where the
         # sweep touched nothing on that line.
+        #
+        # SAME root cause as tool_search_replace's own two-reads split
+        # (files.py - old_bytes raw for tracking, read_text() for the
+        # substitution): one raw-vs-normalised mismatch, two symptoms in two
+        # subsystems. Removing this normalise step (or fixing files.py's
+        # split back to one read) will look correct on Linux and reopen both.
         old_text = old_text.replace("\r\n", "\n").replace("\r", "\n")
         diff_lines = list(difflib.unified_diff(
             old_text.splitlines(keepends=True),
