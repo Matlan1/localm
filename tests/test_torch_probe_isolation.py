@@ -74,32 +74,41 @@ class TestIsolatedProbeDegradesHonestly:
     debug rather than leaving "no GPU" indistinguishable from "could not ask"
     (AGENTS.md rule 5)."""
 
+    # caplog must name the "localm" logger, not just set a level. caplog's own
+    # level lands on the ROOT logger, and discover logs through the "localm"
+    # one, whose level a sibling test can leave above DEBUG (and whose
+    # isEnabledFor answer is memoised in Logger._cache until setLevel clears
+    # it - see test_deferred_import_log's fixture docstring). Without the
+    # logger= argument these assertions pass standalone and fail in a full-suite
+    # run, which is exactly how they first failed.
+    _LOGGER = "localm"
+
     def _run(self, monkeypatch, **kw):
         monkeypatch.setattr(subprocess, "run", MagicMock(**kw))
         return discover._torch_gpus_isolated()
 
     def test_timeout_falls_through_and_is_logged(self, monkeypatch, caplog):
-        caplog.set_level("DEBUG")
+        caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch,
                         side_effect=subprocess.TimeoutExpired("py", 20.0))
         assert out == []
         assert "did not answer" in caplog.text
 
     def test_spawn_failure_falls_through_and_is_logged(self, monkeypatch, caplog):
-        caplog.set_level("DEBUG")
+        caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, side_effect=OSError("no interpreter"))
         assert out == []
         assert "could not spawn" in caplog.text
 
     def test_malformed_reply_is_rejected(self, monkeypatch, caplog):
-        caplog.set_level("DEBUG")
+        caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout='[{"index": "zero", "total": 1, "free": 1}]', stderr=""))
         assert out == []
         assert "unusable" in caplog.text
 
     def test_non_json_reply_is_rejected(self, monkeypatch, caplog):
-        caplog.set_level("DEBUG")
+        caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout="Traceback (most recent call last):", stderr="boom"))
         assert out == []
@@ -112,7 +121,7 @@ class TestIsolatedProbeDegradesHonestly:
     def test_child_failure_cause_reaches_the_log(self, monkeypatch, caplog):
         """The child prints its cause to stderr before answering []; that reason
         must not die with the discarded stream."""
-        caplog.set_level("DEBUG")
+        caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout="[]", stderr="torch GPU probe failed: OSError: WinError 126"))
         assert out == []

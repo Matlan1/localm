@@ -165,7 +165,15 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         from localm import hwdetect
         det = hwdetect.detect()
         diag["gpu_vendors"] = det.vendors or []
-        diag["recommended_backend"] = det.recommended
+        # recommended_install_backend, NOT det.recommended. The latter is the
+        # blanket "vulkan whenever any GPU is present" value, so a report from an
+        # NVIDIA-on-Windows box said "Recommended backend: vulkan" while the
+        # installer's actual policy for it is cuda (#765) and the box was in fact
+        # running the CUDA runtime. A diagnostics field that contradicts what the
+        # installer would provision sends triage after the wrong thing; it did
+        # exactly that on #833. det.recommended keeps its own meaning for its
+        # other callers (updater, release_verify) and is untouched.
+        diag["recommended_backend"] = hwdetect.recommended_install_backend(det)
         diag["detect_source"] = det.source
     except Exception:
         diag["gpu_vendors"] = []

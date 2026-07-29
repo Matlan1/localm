@@ -439,3 +439,37 @@ def test_bug_report_command_send_flag_uploads_immediately(tmp_path, monkeypatch)
     assert res.exit_code == 0, res.output
     assert "Sent to the maintainer" in res.output
     assert "https://github.com/x/y/issues/3" in res.output
+
+
+class TestRecommendedBackendMatchesInstallPolicy:
+    """The report's "Recommended backend" must be the policy the INSTALLER would
+    apply, not the blanket "vulkan whenever a GPU exists" detection value.
+
+    A real report (#833) from an NVIDIA-on-Windows box said "Recommended backend:
+    vulkan" while that box's policy is cuda (#765) and it was in fact running the
+    CUDA runtime. A diagnostics field that contradicts what the installer would
+    provision sends triage after the wrong thing."""
+
+    def _diag_with(self, monkeypatch, vendors, platform):
+        from localm import hwdetect
+        det = hwdetect.Detection(vendors=vendors, recommended="vulkan",
+                                 source="test", gpu_names=" ".join(vendors))
+        monkeypatch.setattr(hwdetect, "detect", lambda: det)
+        monkeypatch.setattr(sys, "platform", platform)
+        return bugreport.collect_diagnostics({})
+
+    def test_nvidia_on_windows_reports_cuda_not_vulkan(self, monkeypatch):
+        diag = self._diag_with(monkeypatch, ["nvidia"], "win32")
+        assert diag["recommended_backend"] == "cuda", (
+            "an NVIDIA Windows box reported a backend the installer would not "
+            "provision - the #833 triage trap")
+
+    def test_no_gpu_still_reports_cpu(self, monkeypatch):
+        diag = self._diag_with(monkeypatch, [], "win32")
+        assert diag["recommended_backend"] == "cpu"
+
+    def test_nvidia_on_linux_stays_vulkan(self, monkeypatch):
+        """The Linux CUDA build needs a system toolkit localm cannot self-provide,
+        so vulkan genuinely IS the policy there - the fix must not overreach."""
+        diag = self._diag_with(monkeypatch, ["nvidia"], "linux")
+        assert diag["recommended_backend"] == "vulkan"
