@@ -20,6 +20,7 @@ from localm.plugins.coder.tools.tasks import (
     DONE, IN_PROGRESS, MAX_ITEMS, MAX_TEXT, PENDING,
     normalize_todos, render_todos, todos_summary,
 )
+from tests.conftest import final_answer as _final_answer
 
 
 class _Stub:
@@ -134,7 +135,7 @@ def test_a_real_agent_turn_writes_and_resumes_the_plan(tmp_path, monkeypatch):
                   mode=SessionMode.LOG)
         answer = a.run_task("Plan the parser fix.")
 
-    assert answer.strip() == "Plan written."
+    assert _final_answer(answer).strip() == "Plan written."
     assert [t["text"] for t in a.get_todos()] == [
         "read the failing test", "fix the parser", "run the suite"]
 

@@ -16,6 +16,7 @@ from localm.plugins.coder.reviewer import (
     parse_review,
     reviewer_for_agent,
 )
+from tests.conftest import final_answer as _final_answer
 
 
 # --------------------------------------------------------------------------- #
@@ -237,7 +238,7 @@ def test_review_gate_feeds_blocking_issues_back(tmp_path):
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
          patch.object(agent, "session_diff", return_value="some diff"):
         result = agent.run_task("change code")
-    assert result == "Fixed it, done."
+    assert _final_answer(result) == "Fixed it, done."
     fed = [m for m in agent._messages
            if m["role"] == "user" and "[review feedback]" in str(m.get("content", ""))]
     assert len(fed) == 1
@@ -251,7 +252,7 @@ def test_review_gate_skips_when_no_diff(tmp_path):
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
          patch.object(agent, "session_diff", return_value=""):
         result = agent.run_task("just answer")
-    assert result == "done"
+    assert _final_answer(result) == "done"
     fake_reviewer.review_feedback.assert_not_called()
 
 
@@ -260,7 +261,7 @@ def test_review_gate_absent_when_no_reviewer(tmp_path):
     assert agent._reviewer is None          # default config: review off
     with patch.object(agent, "_call_llm", return_value="done"), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
-        assert agent.run_task("x") == "done"
+        assert _final_answer(agent.run_task("x")) == "done"
 
 
 # --------------------------------------------------------------------------- #
@@ -310,7 +311,7 @@ def test_crashed_review_still_does_not_block_the_answer(tmp_path):
     """Fail-open is unchanged: visibility only. A flaky reviewer must never cost
     the user their answer."""
     result, _, _, _ = _run_with_crashing_reviewer(tmp_path)
-    assert result == "All done!"
+    assert _final_answer(result) == "All done!"
 
 
 def test_successful_approval_emits_no_failure_warning(tmp_path):
@@ -322,6 +323,6 @@ def test_successful_approval_emits_no_failure_warning(tmp_path):
          patch.object(agent, "_call_llm", return_value="All done!"), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]), \
          patch.object(agent, "session_diff", return_value="some diff"):
-        assert agent.run_task("change code") == "All done!"
+        assert _final_answer(agent.run_task("change code")) == "All done!"
     assert not [c for c in warn.call_args_list if "self-review" in str(c)]
     assert not agent._audit.notice.call_args_list

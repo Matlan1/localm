@@ -561,11 +561,49 @@ class _LoopMixin:
                             "feeding them back)")
                     return (False, "")
 
-        # No tool calls → this is the final answer
+        # No tool calls → this is the final answer. Ground it in what the
+        # session actually recorded (see _grounding_footer) rather than
+        # sending the model's own prose out unchallenged - that prose is
+        # exactly what every OTHER gate above has just failed to have an
+        # opinion on (nothing to verify, no unverified writes, no reviewer
+        # configured or nothing to review).
+        footer = self._grounding_footer()
+        final_text = response + footer if footer else response
         if not interactive and self.on_event is None:
-            print_assistant_response(response, name=self.name)
+            print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)
-        return (True, response)
+        return (True, final_text)
+
+    def _grounding_footer(self) -> str:
+        """A factual line grounding the final answer in the session's own
+        record, appended UNCONDITIONALLY - never gated on what the response
+        text itself claims.
+
+        The literature calls a model's own completion claim going unchecked
+        "false success" / "silent failure": up to 75.8% of failures in
+        agentic coding trajectories that emit an explicit completion signal
+        turn out to contradict the real environment state, and verifiability
+        of the environment - not the model's phrasing - is what predicts it.
+        Every approach that actually closes this gap grounds on the
+        observable artifact instead of the model's self-report (a diff, a
+        test exit code), never on parsing the claim itself - a keyword-gated
+        caveat would inherit the same unreliability being guarded against.
+
+        This reuses the exact facts loop.py already tracks for the self-
+        verify nudge and the exit-code oracle (changed_files(),
+        _last_verify_state) rather than re-deriving anything or reading the
+        response text, so it cannot be gamed by phrasing: it never looks at
+        what the model said, only at what the harness actually recorded.
+        """
+        changed = self.changed_files()
+        if changed:
+            names = ", ".join(sorted(f["path"] for f in changed))
+            parts = [f"{len(changed)} file(s) changed: {names}"]
+        else:
+            parts = ["no files changed"]
+        if self.verify_cmd is not None and self._last_verify_state:
+            parts.append(f"verify: {self._last_verify_state}")
+        return "\n\n[session record: " + "; ".join(parts) + "]"
 
     def _run_pre_done_review(self, diff: str) -> str:
         """Run the pre-done review over *diff* and return the feedback to feed
@@ -690,7 +728,12 @@ class _LoopMixin:
             "not a false success"))
         _agent.print_warning(notice.strip())
         self._add_assistant(response)
-        return (True, response + notice)
+        # The grounding footer is unconditional (see _grounding_footer) - this
+        # is the one path that used to return before reaching it, which made
+        # the worst case (a verified failure) the one case with no session
+        # record at all. _last_verify_state is already "failed" here, so the
+        # SAME call naturally includes it; no separate variant needed.
+        return (True, response + notice + self._grounding_footer())
 
     def _check_post_batch_breakers(self) -> "str | None":
         """After a tool batch, return a circuit-breaker message (and mark the run
