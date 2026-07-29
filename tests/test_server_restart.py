@@ -71,6 +71,12 @@ def test_do_restart_releases_embedder(monkeypatch):
     monkeypatch.setattr(emb, "release_for_exit", lambda: (calls.append(1), True)[1])
     monkeypatch.setattr(http_server, "_engine", None)
     monkeypatch.setattr(os, "execv", _fake_relaunch)
+    # release_for_exit() returning True makes _do_restart's own VRAM-release
+    # wait fire (see the NEW-CRASH-NOTICE-USELESS tests below) - unmeasurable
+    # here so it skips immediately instead of hitting the real GPU probe,
+    # which this test has nothing to do with.
+    import localm.discover as discover
+    monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: {})
 
     try:
         http_server._do_restart()
@@ -191,3 +197,224 @@ def test_request_restart_threads_update_watchdog_through(monkeypatch):
                "expect_version": "1.0.0"}
     http_server._request_restart(delay=0, update_watchdog=watchdog)
     assert captured == [watchdog]
+
+
+# ------------- NEW-CRASH-NOTICE-USELESS item C: VRAM-release wait ----------
+#
+# switch_engine's eviction loop already waits for a native free to land
+# (wait_for_vram_release, AUDIT-MED-11) before constructing the replacement
+# engine - but the restart path went straight from unload to os.execv with no
+# wait at all, so the re-exec'd process could spawn a fresh GGUF worker into
+# VRAM the driver had not finished reclaiming yet, matching this item's own
+# 2026-07-26 field crash (a fresh llama_context dying mid-construction right
+# after a restart, log going dark, empty native trace). These tests pin the
+# fix: the restart path now waits too, only when there is something ACTUALLY
+# loaded to wait for (not merely present in _engines - see the stale-entry
+# test below), and never blocks the restart on failure.
+
+def test_do_restart_waits_for_vram_release_when_engines_present(monkeypatch):
+    order = []
+
+    class _FakeEngine:
+        loaded = True
+
+        def unload(self):
+            order.append("unload")
+
+    def _fake_relaunch(exe, argv):
+        order.append("relaunch")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(http_server, "_engines", {"model-a": _FakeEngine()})
+    monkeypatch.setattr(http_server, "_engine", None)
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.discover as discover
+    import localm.vram as vram
+
+    monkeypatch.setattr(discover, "vram_capacity",
+                        lambda *a, **kw: {"free": 10_000_000_000})
+
+    calls = []
+
+    def fake_wait(read_free, before_bytes=None, **kw):
+        calls.append(before_bytes)
+        order.append("wait")
+        return (True, read_free())
+
+    monkeypatch.setattr(vram, "wait_for_vram_release", fake_wait)
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+
+    # Waits AFTER the native unload, BEFORE the re-exec, with the free-VRAM
+    # reading taken before teardown - the same before/after shape switch_engine
+    # already uses at its own wait_for_vram_release call sites.
+    assert order == ["unload", "wait", "relaunch"]
+    assert calls == [10_000_000_000]
+
+
+def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
+    """A model-less restart (no chat engine, no embedder loaded) must not pay
+    the wait's latency - there is nothing whose release needs confirming."""
+    monkeypatch.setattr(http_server, "_engines", {})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.vram as vram
+
+    def _must_not_be_called(*_a, **_kw):
+        raise AssertionError("wait_for_vram_release must not fire when nothing was unloaded")
+
+    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass   # no AssertionError means the wait was correctly skipped
+
+
+def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatch):
+    """unload_all_models/idle-unload deliberately KEEP a now-unloaded engine's
+    entry in _engines so a later request reloads it lazily (see their own
+    docstrings) - so _engines can be non-empty with nothing actually loaded.
+    A dict-non-emptiness check would make every restart on a server that ever
+    idle-unloaded a model pay the wait's full timeout for nothing freed."""
+    class _StaleEngine:
+        loaded = False   # present in _engines, but NOT resident - nothing to wait for
+
+        def unload(self):
+            pass   # already unloaded; a real GgufBackend.unload() is a no-op here too
+
+    monkeypatch.setattr(http_server, "_engines", {"model-a": _StaleEngine()})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.vram as vram
+
+    def _must_not_be_called(*_a, **_kw):
+        raise AssertionError("wait_for_vram_release must not fire for a stale, "
+                             "already-unloaded _engines entry")
+
+    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass   # no AssertionError means the wait was correctly skipped
+
+
+def test_do_restart_skips_vram_wait_when_unmeasurable(monkeypatch):
+    """Mirrors switch_engine's own 'measurable and free_before is not None'
+    guard: an unmeasurable box (no 'free' key) must not hang the restart
+    waiting for something it can never observe."""
+    class _FakeEngine:
+        loaded = True
+
+        def unload(self):
+            pass
+
+    monkeypatch.setattr(http_server, "_engines", {"model-a": _FakeEngine()})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.discover as discover
+    import localm.vram as vram
+
+    monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: {})
+
+    def _must_not_be_called(*_a, **_kw):
+        raise AssertionError("wait_for_vram_release must not fire when VRAM is unmeasurable")
+
+    monkeypatch.setattr(vram, "wait_for_vram_release", _must_not_be_called)
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+
+
+def test_do_restart_vram_wait_failure_does_not_block_restart(monkeypatch):
+    """A wedged/erroring VRAM probe during the wait must not prevent the
+    restart itself - best-effort, like every other teardown step here."""
+    class _FakeEngine:
+        loaded = True
+
+        def unload(self):
+            pass
+
+    monkeypatch.setattr(http_server, "_engines", {"model-a": _FakeEngine()})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    reached = []
+
+    def _fake_relaunch(exe, argv):
+        reached.append(True)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    import localm.discover as discover
+    import localm.vram as vram
+
+    monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: {"free": 123})
+
+    wait_calls = []
+
+    def _boom(*_a, **_kw):
+        wait_calls.append(1)
+        raise RuntimeError("driver wedged")
+
+    monkeypatch.setattr(vram, "wait_for_vram_release", _boom)
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    # The wait was actually INVOKED (not silently skipped) and its failure
+    # still let the restart proceed to execv.
+    assert wait_calls == [1]
+    assert reached == [True]   # execv still ran despite the wait raising
+
+
+def test_do_restart_waits_for_vram_release_when_only_embedder_was_loaded(monkeypatch):
+    """No chat engine, but the shared embedder WAS resident - its release also
+    needs the wait, not just a chat-engine eviction."""
+    monkeypatch.setattr(http_server, "_engines", {})
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    from localm.inference import embedder as emb
+    monkeypatch.setattr(emb, "release_for_exit", lambda: True)
+
+    import localm.discover as discover
+    import localm.vram as vram
+
+    monkeypatch.setattr(discover, "vram_capacity", lambda *a, **kw: {"free": 5})
+    calls = []
+    monkeypatch.setattr(vram, "wait_for_vram_release",
+                        lambda read_free, before_bytes=None, **kw: calls.append(1))
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+    assert calls == [1]
