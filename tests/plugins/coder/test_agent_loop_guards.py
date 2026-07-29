@@ -270,6 +270,13 @@ class TestPartialParseSurfacing:
             and "Part of this response looked like another tool call" in str(m.get("content", ""))
         ]
 
+    def _cap_announcements(self, agent):
+        return [
+            m for m in agent._messages
+            if m["role"] == "user"
+            and "further occurrences will not be reported individually" in str(m.get("content", ""))
+        ]
+
     def test_sibling_success_does_not_hide_an_unrecoverable_call(self, tmp_path):
         agent = _make_agent(tmp_path)
         broken_and_good = (
@@ -289,6 +296,102 @@ class TestPartialParseSurfacing:
         assert dispatched[0].name == "read_file"
         assert dispatched[0].args["path"] == "b.py"
         assert len(self._partial_notices(agent)) == 1
+
+    def test_partial_notice_is_capped_not_repeated_every_turn(self, tmp_path):
+        """The notice's own example text is itself tool-call-shaped (a literal
+        <tool_call> block with "name"/"args" keys) - a model that echoes it
+        back as commentary while also making one real call each turn would
+        otherwise re-trigger this notice forever, once per turn. Capped at
+        _MAX_TOOL_REPAIRS, the same bound and the same reasoning as the
+        repair-turn mechanism above."""
+        from localm.plugins.coder.agent.constants import _MAX_TOOL_REPAIRS
+
+        def _broken_and_good(i):
+            # Varied per turn (different path each time) so the UNRELATED
+            # identical-response circuit breaker (_REPEAT_RESPONSE_ABORT)
+            # does not fire first and mask what this test is checking.
+            return (
+                f'<tool_call>\n{{"name": 123, "args": {{"path": "a{i}.py"}}}}\n</tool_call>\n\n'
+                f'<tool_call>\n{{"name": "read_file", "args": {{"path": "b{i}.py"}}}}\n</tool_call>\n'
+            )
+
+        # More turns of the same shape than the cap allows, then a plain
+        # final answer so the task actually ends.
+        responses = iter([_broken_and_good(i) for i in range(_MAX_TOOL_REPAIRS + 3)]
+                         + ["Done."])
+        agent = _make_agent(tmp_path, max_turns=_MAX_TOOL_REPAIRS + 5)
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          # A FRESH list per call, not return_value=[...] -
+                          # MagicMock(return_value=[...]) hands back the SAME
+                          # list object every call, and loop.py appends the
+                          # notice onto it in place; across several turns
+                          # that shared, ever-growing list re-sends every
+                          # earlier turn's notice on every later turn too,
+                          # which once made this test pass at the right
+                          # NUMBER for the wrong reason (confirmed live by
+                          # instrumenting st.partial_notice_count directly:
+                          # the cap held at 2 while _messages still showed
+                          # 5, because the mock kept re-appending onto one
+                          # shared list rather than loop.py re-appending).
+                          side_effect=lambda *a, **k: ["<result>ok</result>"]), \
+             patch.object(agent, "_maybe_compact"):
+            # _maybe_compact is patched out: a MOCKED backend has no real
+            # token counts, so its fill-ratio estimate is unreliable here,
+            # and an auto-compaction mid-run would summarise away earlier
+            # notices - a second, independent confound with nothing to do
+            # with the cap this test exists to check.
+            result = agent.run_task("read two files repeatedly")
+        assert result == "Done."
+        assert len(self._partial_notices(agent)) == _MAX_TOOL_REPAIRS
+        # Rule 5 (AGENTS.md "we do not hide problems"): the cap bounds
+        # repetition, not visibility - exactly ONE final notice must tell
+        # the model further occurrences will not be individually reported,
+        # rather than the drops just stopping with no explanation.
+        assert len(self._cap_announcements(agent)) == 1
+
+    def test_partial_notice_cap_logs_every_drop_even_once_silent_to_the_model(self, tmp_path):
+        """The turns AFTER the one-time cap announcement must still leave a
+        durable trace - going fully silent (nothing in the fed-back message,
+        nothing logged) would be exactly the invisible-drop bug #920 fixed,
+        recurring inside the very mechanism built to surface it."""
+        from localm.plugins.coder.agent.constants import _MAX_TOOL_REPAIRS
+
+        def _broken_and_good(i):
+            return (
+                f'<tool_call>\n{{"name": 123, "args": {{"path": "a{i}.py"}}}}\n</tool_call>\n\n'
+                f'<tool_call>\n{{"name": "read_file", "args": {{"path": "b{i}.py"}}}}\n</tool_call>\n'
+            )
+
+        n_turns = _MAX_TOOL_REPAIRS + 3   # more than the cap
+        responses = iter([_broken_and_good(i) for i in range(n_turns)] + ["Done."])
+        agent = _make_agent(tmp_path, max_turns=n_turns + 2)
+        debug_calls = []
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          side_effect=lambda *a, **k: ["<result>ok</result>"]), \
+             patch.object(agent, "_maybe_compact"), \
+             patch("localm.debuglog.logger.debug",
+                   side_effect=lambda *a, **k: debug_calls.append(a)):
+            result = agent.run_task("read two files repeatedly")
+        assert result == "Done."
+        # Filtered to the PER-DROP trace specifically (its own distinct
+        # message), not "any debug call" - patch("...logger.debug") catches
+        # every debug line in the process, including the cap announcement's
+        # own line, so an unfiltered count could pass on a regression that
+        # logs only the first further drop and then goes quiet (1 + 1 == the
+        # loose >= 2 bound this replaced would still have accepted).
+        per_drop_traces = [
+            a for a in debug_calls
+            if "notice cap already reached" in str(a[0])
+        ]
+        still_silent_turns = n_turns - _MAX_TOOL_REPAIRS - 1
+        assert len(per_drop_traces) == still_silent_turns, (
+            f"expected exactly {still_silent_turns} per-drop debug trace(s) "
+            f"for the drops that stopped being reported to the model, got "
+            f"{len(per_drop_traces)} (out of {len(debug_calls)} total debug calls)")
 
     def test_no_partial_notice_when_everything_parsed(self, tmp_path):
         agent = _make_agent(tmp_path)

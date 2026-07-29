@@ -402,7 +402,17 @@ def _prependable_leaf(shown_cwd: str) -> str | None:
     # not a plain folder name: there is no name for the model to wrongly
     # prepend, so say nothing. A missing clause costs a little clarity in a
     # rare case; a wrong one would volunteer the account name.
-    if leaf in ("", ".", "..") or any(sep in leaf for sep in "\\/:"):
+    #
+    # "~" is UNREACHABLE today - _display_cwd renders the home directory as
+    # "~/.", never bare "~" - but it is guarded anyway: _prependable_leaf(cwd
+    # == home) is exactly the case this function exists to get right, and a
+    # future change to _display_cwd's home rendering (e.g. fixing the "~/.."
+    # it produces when a sentence period follows it - see dev-notes) would
+    # silently reopen this same leak class if this guard were not already
+    # here. A guard added for a reason not yet exercised is still load-
+    # bearing; removing it because the input "cannot happen" is how the
+    # reason gets lost.
+    if leaf in ("", ".", "..", "~") or any(sep in leaf for sep in "\\/:"):
         return None
     return leaf
 

@@ -258,3 +258,44 @@ def test_subagent_brief_names_the_folder_shown(tmp_path):
 ])
 def test_prependable_leaf_only_returns_a_plain_folder_name(shown, expected):
     assert _prependable_leaf(shown) == expected
+
+
+def test_prependable_leaf_guards_a_bare_tilde_even_though_unreachable_today(monkeypatch):
+    """_display_cwd never actually renders bare "~" today - the home
+    directory comes out as "~/." - so this branch is unreachable via any
+    currently-existing caller. Guarded anyway: a future change to how
+    _display_cwd renders the home directory (e.g. collapsing "~/." to "~"
+    to fix the "~/.." double-dot the sentence period after it produces,
+    see dev-notes/coder-changed-files-tracking-gaps-2026-07-29.md) would
+    silently reopen this exact leak class if the guard were not already
+    here to catch it.
+
+    Proven by simulating the alternate rendering (monkeypatching
+    _display_cwd to return "~"), not by asserting the guard works because
+    it is written: without "~" in _prependable_leaf's no-clause tuple,
+    THIS test fails and the clause appears."""
+    assert _prependable_leaf("~") is None
+
+    monkeypatch.setattr(
+        "localm.plugins.coder.prompts._display_cwd", lambda cwd: "~")
+    p = build_system_prompt(Path("/anything"), model_name="llama3-8b")
+    assert "do not repeat" not in p, (
+        'a simulated _display_cwd("~") rendering leaked a clause naming "~"')
+
+
+def test_clause_names_the_leaf_for_a_project_under_home(monkeypatch, tmp_path):
+    """The merged suite covers a cwd AT home (test_cwd_at_home_does_not_leak_
+    the_account_name) and the bare non-home form (test_clause_names_the_
+    folder_the_model_was_shown), plus the unit-level "~/projects/proj" ->
+    "proj" case - but nothing builds an end-to-end prompt for a cwd UNDER
+    the home directory and checks the clause names the right leaf there."""
+    home = tmp_path / "zz_account_name_zz"
+    home.mkdir()
+    _patch_home(monkeypatch, home)
+    proj = home / "projects" / "app"
+    proj.mkdir(parents=True)
+
+    p = build_system_prompt(proj, model_name="llama3-8b")
+    assert 'do not repeat "app"' in p
+    assert '"file.py" not "app/file.py"' in p
+    assert "zz_account_name_zz" not in p
