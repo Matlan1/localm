@@ -102,6 +102,80 @@ def test_clear_id_cannot_escape_inbox(share_client, tmp_path):
     assert len(share_client.get("/api/share/pending").json()["items"]) == 1
 
 
+def _raw_share_body(*names, boundary=b"BOUND"):
+    """A hand-built multipart body carrying *names* verbatim.
+
+    Needed because httpx percent-encodes a NUL in the Content-Disposition it
+    generates ("photo\\x00.png" goes out as "photo%00.png", an ordinary safe
+    name), so `files=` cannot deliver one and a test written with it would pass
+    while exercising nothing. A real client writes the header itself, and the
+    route parses the body itself, so this is the reachable shape.
+    """
+    out = b""
+    for nm in names:
+        out += (b"--" + boundary + b"\r\n"
+                b'Content-Disposition: form-data; name="files"; filename="'
+                + nm.encode() + b'"\r\n'
+                b"Content-Type: image/png\r\n\r\n" + _PNG + b"\r\n")
+    return out + b"--" + boundary + b"--\r\n"
+
+
+def _post_raw(client, *names):
+    return client.post(
+        "/share-target", content=_raw_share_body(*names),
+        headers={"Content-Type": "multipart/form-data; boundary=BOUND"},
+        follow_redirects=False)
+
+
+def _inbox():
+    from localm.plugins.gui.web import _share_inbox
+    return _share_inbox()
+
+
+class TestShareFilenameGuard:
+    """The shared name must clear the same lexical guard /api/upload applies.
+
+    Path().name alone leaves "photo:stream.png" untouched, so the write lands in
+    an NTFS alternate data stream: the listing shows a 0-byte "photo" and the
+    payload is invisible to /api/share/pending. Not traversal (a uuid4 prefix
+    bounds the path) - content smuggling.
+    """
+
+    def test_rejects_alternate_data_stream_name(self, share_client):
+        r = share_client.post(
+            "/share-target",
+            files={"files": ("photo:stream.png", _PNG, "image/png")},
+            follow_redirects=False)
+        assert r.status_code == 400
+        # Nothing on disk: an ADS write would still create a base directory
+        # entry, so an empty inbox proves no stream was opened either.
+        assert list(_inbox().iterdir()) == []
+        assert share_client.get("/api/share/pending").json()["items"] == []
+
+    def test_rejects_embedded_nul_name(self, share_client):
+        r = _post_raw(share_client, "photo\x00.png")
+        assert r.status_code == 400          # not a bare 500 out of write_bytes
+        assert list(_inbox().iterdir()) == []
+
+    def test_still_accepts_a_legitimate_name(self, share_client):
+        """Fires-control. Without it, a guard that refused everything would look
+        exactly as green as a correct one - and it also proves _post_raw builds
+        a request the route accepts, so the 400s above are the name, not the
+        hand-built body."""
+        r = _post_raw(share_client, "ok.png")
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?shared=1"
+        items = share_client.get("/api/share/pending").json()["items"]
+        assert [i["name"] for i in items] == ["ok.png"]
+
+    def test_one_bad_name_writes_none_of_the_batch(self, share_client):
+        """Names are checked before any write, so a refused share cannot leave
+        the good half of a multi-file share sitting in the inbox."""
+        r = _post_raw(share_client, "good.png", "photo:stream.png")
+        assert r.status_code == 400
+        assert list(_inbox().iterdir()) == []
+
+
 # ------------------------------------------------------------------ #
 #  Cross-principal ownership (HIGH-8 / #5 in CONSOLIDATED-FINDINGS)     #
 # ------------------------------------------------------------------ #
