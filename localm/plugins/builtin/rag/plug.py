@@ -44,7 +44,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from localm.debuglog import logger
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 from localm.textguard import neutralise
 
 _router = APIRouter()
