@@ -42,6 +42,37 @@ def _outside_scope(tmp_path: Path, name: str = "x.txt") -> str:
     return str(outside)
 
 
+def _called_by_coverage() -> bool:
+    """True when the caller chain is coverage.py's own bookkeeping.
+
+    coverage canonicalises a source file the FIRST time it traces it
+    (``coverage.files.abs_file`` -> ``os.path.realpath``), and on POSIX
+    ``realpath`` lstats EVERY component of the interpreter-anchored stdlib path
+    it is resolving. That is the TRACER's work, not the code under test.
+
+    Without this exemption the guard OVER-matches: it reports a purity violation
+    for a check that touched nothing, and which component it names tracks where
+    the interpreter lives - ``/opt`` on a CI runner whose toolchain is under
+    ``/opt/hostedtoolcache``, ``/usr`` on a distro python. That is also why it is
+    invisible on Windows and only appears with coverage enabled, so a green local
+    run can never rule it out. Exempting the tracer is not weakening the guard;
+    a guard that fails on something other than what it claims to measure gets
+    weakened later to compensate, and the real property is what gets lost.
+
+    Matched on the frame's MODULE name, never its path: a repo file that merely
+    has "coverage" somewhere in its path cannot spoof the exemption.
+    """
+    frame = sys._getframe()
+    for _ in range(12):     # bounded: this runs on every guarded syscall
+        if frame is None:
+            break
+        name = frame.f_globals.get("__name__", "")
+        if name == "coverage" or name.startswith("coverage."):
+            return True
+        frame = frame.f_back
+    return False
+
+
 @contextlib.contextmanager
 def _no_filesystem():
     """Turn any filesystem access inside the block into an immediate failure.
@@ -56,16 +87,18 @@ def _no_filesystem():
     targets = [(os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
                (os, "listdir"), (os.path, "realpath")]
 
-    def _forbid(label):
+    def _forbid(label, original):
         def _boom(path, *a, **kw):
+            if _called_by_coverage():
+                return original(path, *a, **kw)
             raise AssertionError(
                 f"filesystem access inside a purely lexical check: "
                 f"{label}({path!r})")
         return _boom
 
     saved = [(mod, name, getattr(mod, name)) for mod, name in targets]
-    for mod, name in targets:
-        setattr(mod, name, _forbid(f"{mod.__name__}.{name}"))
+    for mod, name, original in saved:
+        setattr(mod, name, _forbid(f"{mod.__name__}.{name}", original))
     try:
         yield
     finally:
@@ -798,6 +831,20 @@ class TestShellScopeCheckIsPurelyLexical:
                 (tmp_path / "anything.txt").resolve()
         # ...and it puts the real functions back.
         assert (tmp_path).exists()
+
+    def test_the_coverage_exemption_is_narrow(self, tmp_path):
+        """Control for `_called_by_coverage`. The exemption exists so the guard
+        does not fail on the TRACER's own filename canonicalisation, but an
+        exemption that answered True generally would silently disarm everything
+        above - and would do it invisibly, because these tests would still pass.
+
+        So assert both directions: it does NOT fire for an ordinary caller (this
+        test), and the guard consequently still raises on a real touch whether or
+        not coverage is running the suite."""
+        assert _called_by_coverage() is False
+        with pytest.raises(AssertionError, match="filesystem access"):
+            with _no_filesystem():
+                (tmp_path / "anything.txt").exists()
 
     def test_classifying_a_command_touches_no_files(self, agent, tmp_path_factory):
         outside = tmp_path_factory.mktemp("lexical_target") / "secrets.txt"
