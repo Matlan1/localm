@@ -19,8 +19,15 @@ GAP-MG-1 - the img2img / image-to-video ``input_image`` accepted ANY readable
          local path (only ``is_file()`` was checked) and uploaded it to
          ComfyUI's input/ dir. That is an arbitrary-file-read-into-ComfyUI
          primitive (e.g. /etc/passwd, a private key, another user's docs). The
-         path must be confined to the localm home (or the project checkout);
-         anything outside is rejected with a 400.
+         path must be confined; anything outside an allowed root is a 400.
+
+         The allowed set was NARROWED (CodeQL WS8, alerts 55/58): it used to be
+         the whole localm home, which is the credential store (auth.key,
+         auth.json, sessions.json, rag/, coder/, bug-reports/), so the original
+         confinement retargeted the primitive at localm's own secrets instead of
+         removing it. It is now the upload inbox plus the generated-media
+         galleries - see ``localm.media.paths.allowed_input_roots``. The
+         data-dir ROOT is therefore rejected now, which is asserted below.
 """
 
 from __future__ import annotations
@@ -230,14 +237,22 @@ def test_video_input_image_outside_root_rejected(tmp_path, monkeypatch):
     ],
     ids=["image", "video"],
 )
-def test_input_image_inside_home_accepted(tmp_path, monkeypatch, request_cls, handler_coro_fn):
-    """A file INSIDE the localm home passes confinement (it still 503s later for
-    lack of a job manager, which proves we got past the input check)."""
+@pytest.mark.parametrize("subdir", ["uploads", "gui_images", "gui_video"],
+                         ids=["uploads", "image-gallery", "video-gallery"])
+def test_input_image_in_an_allowed_root_accepted(tmp_path, monkeypatch, subdir,
+                                                 request_cls, handler_coro_fn):
+    """A file in the upload inbox or a gallery passes confinement (it still 503s
+    later for lack of a job manager, which proves we got past the input check).
+
+    Both plugins accept both galleries: the GUI's "use as input" button on the
+    image page fills the field with a gui_images path, and image-to-video takes
+    an image, so neither plugin may be restricted to its own directory."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("LOCALM_HOME", str(home))
 
-    inside = home / "ref.png"
+    inside = home / subdir / "ref.png"
+    inside.parent.mkdir(parents=True)
     inside.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
 
     req = request_cls(prompt="x", input_image=str(inside))
@@ -247,12 +262,50 @@ def test_input_image_inside_home_accepted(tmp_path, monkeypatch, request_cls, ha
     assert ei.value.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "request_cls,handler_coro_fn",
+    [
+        (image_plug.ImagineRequest, image_plug.imagine),
+        (video_plug.VideoRequest, video_plug.video),
+    ],
+    ids=["image", "video"],
+)
+@pytest.mark.parametrize("relname", ["ref.png", "auth.key", "rag/index.json"],
+                         ids=["data-root-file", "owner-key", "rag-store"])
+def test_input_image_in_the_data_dir_root_rejected(tmp_path, monkeypatch, relname,
+                                                   request_cls, handler_coro_fn):
+    """The data dir itself is NO LONGER an allowed root (CodeQL WS8).
+
+    It holds auth.key - the plaintext owner key - plus auth.json, sessions.json
+    and the rag/coder stores, and these routes are mounted under the
+    non-privileged image/video scopes, so "confined to the data dir" left a
+    scoped key able to have localm's own secrets uploaded to a ComfyUI that may
+    legitimately be a LAN or public host over plaintext http."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+
+    secret = home / relname
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_bytes(b"\x89PNG\r\n\x1a\nSECRET")   # readable, even image-shaped
+
+    req = request_cls(prompt="x", input_image=str(secret))
+    with pytest.raises(HTTPException) as ei:
+        _run(handler_coro_fn(req, _fake_request()))
+    assert ei.value.status_code == 400
+    assert "input" in str(ei.value.detail).lower()
+    # The rejection must not disclose the data dir (it carries the OS username)
+    # to a non-owner caller - see the disclosure workstream's same rule.
+    assert str(home) not in str(ei.value.detail)
+
+
 def test_image_nonexistent_input_image_still_400(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("LOCALM_HOME", str(home))
 
-    missing = home / "nope.png"     # inside root but does not exist
+    missing = home / "uploads" / "nope.png"    # inside a root but does not exist
+    missing.parent.mkdir(parents=True)
     req = image_plug.ImagineRequest(prompt="x", input_image=str(missing))
     with pytest.raises(HTTPException) as ei:
         _run(image_plug.imagine(req, _fake_request()))

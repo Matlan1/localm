@@ -585,17 +585,25 @@ def _media_generate_video():
     return generate_video
 
 
+# The gallery directory names come from localm.media.paths, which is also what
+# the image/music/video plugins and the input_image confinement policy use. They
+# were duplicated as literals here, so "the galleries" meant two independent
+# lists that a rename would silently split - and one of those lists decides which
+# directories an img2img input may be read from.
+from ..media import paths as _media_paths  # noqa: E402
+
+
 _MEDIA_REPL = {
     "generate-image": {
-        "subdir": "gui_images", "ext": ".png", "arg": "prompt",
+        "subdir": _media_paths.IMAGE_DIR_NAME, "ext": ".png", "arg": "prompt",
         "get_generate": _media_generate_image,
     },
     "generate-music": {
-        "subdir": "gui_music", "ext": ".flac", "arg": "tags",
+        "subdir": _media_paths.MUSIC_DIR_NAME, "ext": ".flac", "arg": "tags",
         "get_generate": _media_generate_music,
     },
     "generate-video": {
-        "subdir": "gui_video", "ext": ".mp4", "arg": "prompt",
+        "subdir": _media_paths.VIDEO_DIR_NAME, "ext": ".mp4", "arg": "prompt",
         "get_generate": _media_generate_video,
     },
 }
