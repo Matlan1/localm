@@ -117,7 +117,7 @@ Transform, do not merely validate.
 went **4 -> 6** across two rounds of trying to fix them. Both rounds found a real
 defect (a path component from a data file rather than argv; and resolving before
 validating, when `resolve()` performs filesystem I/O and a declared
-`\host\share` would dial SMB). Both are fixed. **The alert count still rose**,
+UNC path would dial SMB). Both are fixed. **The alert count still rose**,
 because each guard added is itself a path expression on tainted data and becomes
 a new sink.
 
