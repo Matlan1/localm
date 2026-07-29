@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared bounded thread pool for plugin/tool blocking work.
 
+WHY THIS LIVES AT THE ROOT and not under ``localm/plugins/``, where it began:
+it is a dependency-free leaf (stdlib only, zero localm imports) that BOTH the
+plugin layer and the inference layer consume. Under ``plugins/`` it was the sole
+cause of the only module-level import cycle in the package graph,
+``inference <-> plugins``, because of the deliberate carve-out described below.
+Moving it removed that cycle without changing a line of behaviour. The name still
+says "plugin executor" because it names the WORKLOAD it serves (plugin/tool
+blocking work), which is the split that actually matters here - not the directory
+it happens to sit in.
+
 Every plugin route that does blocking I/O or CPU work off the event loop -
 rag query/extract, web search/fetch, voice transcription, coder session
 management, GUI model-listing routes - offloads it with
@@ -8,8 +18,8 @@ management, GUI model-listing routes - offloads it with
 chat/completion generation (``localm/inference/``) are NOT routed through this
 pool; they stay on the asyncio loop's own default executor.
 
-ONE CARVE-OUT to that directory rule, because the rule is a shorthand for the
-workload split rather than the split itself: the REGISTRY METADATA reads in
+ONE CARVE-OUT to that workload rule, and it is the reason the old location
+created a cycle: the REGISTRY METADATA reads in
 ``localm/inference/routes/models.py`` (the per-model size probe behind
 ``GET /v1/models/{id}``) DO use this pool. They are blocking filesystem I/O on a
 path taken from registry.json, not inference: a registered UNC path can block in

@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from localm.inference.errors import route_errors
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 from localm.voice import VoiceError
 
 _router = APIRouter()

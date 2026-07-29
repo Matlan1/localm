@@ -37,7 +37,7 @@ from pydantic import BaseModel
 
 from localm.inference.errors import route_errors
 from localm.netpolicy import NetworkPolicyError
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 from localm.textguard import neutralise
 
 _router = APIRouter()

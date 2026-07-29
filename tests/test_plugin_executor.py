@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm/plugins/executor.py must give plugin/tool blocking work (rag, web,
+"""localm/executor.py must give plugin/tool blocking work (rag, web,
 voice, coder session management, GUI model routes) a pool that is completely
 isolated from the asyncio loop's own default executor - the one
 localm/inference/ uses for model load/unload and chat/completion generation.
@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 

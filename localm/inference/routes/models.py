@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 import localm.inference.http_server as _hs
 from localm import scopes
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 
 
 def register(app: FastAPI, ctx) -> None:
