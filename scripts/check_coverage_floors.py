@@ -36,6 +36,24 @@ structural platform split as a regression the first time CI's Linux leg ran
 this check. The floors below were measured and verified (both pass and fail)
 on Windows only; see .github/workflows/ci.yml for where this runs.
 
+MEASURED, so the size of that split is not left to imagination. From the CI run
+for 2cb9a0ae, the same commit on both matrix legs:
+
+    localm/portmux.py   Windows 97.8022% (2 of 223 stmts missed)
+                        Linux    94%     (12 missed)
+    localm/config.py    Windows 84.2466%
+                        Linux    83%
+
+**portmux.py is now the widest platform split of any floored module here, at
+about 4 points - wider than pathsafe.py or config.py, the two this section
+originally named.** Its floor of 96 therefore HOLDS ONLY ON WINDOWS. Enabling
+this check on the ubuntu leg would fail on portmux immediately, on correct code.
+
+The cause is structural, not a test gap: portmux.py has two `if sys.platform ==
+"win32":` blocks (the Ctrl+C wakeup task, SRV-6) that Linux can never execute.
+No amount of Linux testing raises that number. If per-platform floors are ever
+wanted, they need a per-platform TABLE, not one table run in more places.
+
 MEASURE FROM A WORKTREE OR A FRESH CLONE, NOT THE MAIN CHECKOUT. This is a
 SECOND environmental axis, separate from the platform one above, and it is
 easy to trip because nothing about it is visible in the diff.
