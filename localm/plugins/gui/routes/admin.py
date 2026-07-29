@@ -26,6 +26,14 @@ from localm.plugins.gui.web import LogExportRequest
 # test can lower it without creating thousands of files.
 _FS_LIST_CAP = 5000
 
+# The filesystem root the picker lists when given an empty path on POSIX (Windows
+# enumerates drive letters instead). Module-level for the same reason as
+# _FS_LIST_CAP above: a test can point it at a disposable fixture directory rather
+# than the machine's real "/", which a test must never read, stat or list.
+# Listing "/" stats every child - /opt, /etc, /usr - and that is a real
+# system-path touch, caught by the guard in tests/conftest.py.
+_POSIX_FS_ROOT = "/"
+
 
 def _norm_path_str(s: str) -> str:
     """Lexically normalize a path string for comparison. PURE STRING WORK - no
@@ -257,7 +265,7 @@ def register(app: FastAPI, ctx) -> None:
                         {"name": r, "is_dir": True, "size": None, "mtime": None}
                         for r in roots]
                 return result
-            path = "/"
+            path = _POSIX_FS_ROOT
         p = Path(path).expanduser()
         if not p.is_dir():
             raise HTTPException(404, f"Not a directory: {path}")

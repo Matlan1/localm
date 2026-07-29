@@ -188,11 +188,34 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         assert r.status_code == 200, r.text
         assert "sub" in r.json()["dirs"]
 
-    def test_empty_path_still_lists_roots(self, fs_app):
+    def test_empty_path_still_lists_roots(self, fs_app, tmp_path, monkeypatch):
+        """An empty path lists the roots - drive letters on Windows, the
+        filesystem root on POSIX.
+
+        The POSIX branch is pointed at a DISPOSABLE fixture root, never the
+        machine's real "/". Listing "/" stats every child (/opt, /etc, /usr),
+        which is a real system-path touch and is exactly what the guard in
+        tests/conftest.py fails a test for. An earlier revision of this test did
+        exactly that: it passed on Windows, where the roots are drive letters,
+        and reddened master on the ubuntu CI leg - a platform blind spot rather
+        than a logic error, and the reason single-platform local green is a
+        weaker gate than it looks."""
+        from localm.plugins.gui.routes import admin as admin_routes
+        fake_root = tmp_path / "fakeroot"
+        (fake_root / "alpha").mkdir(parents=True)
+        (fake_root / "beta").mkdir()
+        monkeypatch.setattr(admin_routes, "_POSIX_FS_ROOT", str(fake_root))
+
         with TestClient(fs_app) as c:
             r = c.get("/api/fs/dirs", headers=_hdr(_host_key()))
+
         assert r.status_code == 200, r.text
-        assert r.json()["dirs"]
+        dirs = r.json()["dirs"]
+        assert dirs, "empty path returned no roots"
+        if os.name != "nt":
+            # POSIX went through the injected root, so we know exactly what to
+            # expect - and nothing outside tmp_path was read.
+            assert sorted(dirs) == ["alpha", "beta"]
 
 
 # --------------------------------------------------------------------------- #
