@@ -221,7 +221,15 @@ def _top_level_objects(text: str):
                     break
             j += 1
         if not matched:
-            i += 1
+            # A real scan already ran from i through last_close (the guard
+            # above already ruled out "no closing brace ahead at all") and
+            # never balanced. Since that scan covered every position
+            # through last_close, no '{' before last_close can balance
+            # either - skip past it instead of retrying the identical scan
+            # from i + 1, i + 2, ...: that per-position re-scan is what made
+            # this quadratic on many-open-braces-one-far-away-close input
+            # (n=8,000 measured at 3+s pre-fix, vs near-instant fixed).
+            i = last_close + 1
 
 
 def _pair_scan(text: str, opener_re, closer_re):
