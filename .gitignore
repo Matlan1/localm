@@ -63,6 +63,9 @@ localm/video_gen/wan_workflow_local.json
 *.png
 # ...but ship the GUI PWA icons (rasterized from icon.svg for the manifest).
 !localm/plugins/gui/static/icon-*.png
+# ...and the README's own screenshots (GitHub-only - see release-manifest.toml,
+# excluded from the release build.zip via the .github/ pattern).
+!.github/images/*.png
 
 # Internal development / planning docs - not public documentation
 task.md
