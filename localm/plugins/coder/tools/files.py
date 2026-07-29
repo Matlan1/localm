@@ -227,6 +227,115 @@ _WS_FALLBACK_MAX_TOKENS = 400
 _WS_FALLBACK_MAX_TEXT = 512 * 1024
 
 
+# --------------------------------------------------------------------------- #
+#  Model-supplied regex: the one place the PATTERN is attacker-controlled       #
+# --------------------------------------------------------------------------- #
+#
+# Everywhere else in this codebase the pattern is ours and the TEXT is hostile,
+# which is fixed by de-ambiguating the pattern. `grep` and `search_replace` are
+# the inverse: the model hands us the regex. You cannot de-ambiguate a pattern
+# you did not write, so this is bounded instead - and it needs BOTH halves,
+# because neither alone is sufficient:
+#
+#   THE TIMEOUT is the only thing that can stop a match already running.
+#   Measured, end to end through tool_search_replace with dry_run=True, one file
+#   of n spaces and pattern `(\s*)*x`: 0.008 / 0.117 / 1.72s at n = 16 / 20 / 24.
+#   That is ~4x per two characters - EXPONENTIAL, extrapolating to ~31 hours at
+#   n=40, against a repo that really contains lines with 70 characters of
+#   leading whitespace. stdlib `re` cannot be interrupted once inside a match at
+#   any price, which is why the engine has to change.
+#
+#   THE CAPS keep the common path from ever reaching the timeout, and they are
+#   not redundant: a timeout still lets an attacker burn the full budget on
+#   every file in a glob.
+#
+# Switching engines is NOT itself the fix, and assuming it was would have moved
+# the vulnerability rather than closed it. The two engines have DIFFERENT
+# catastrophic sets, neither containing the other (measured):
+#     (\s*)*x   on 26 spaces   stdlib 7.0044s   regex 0.0001s
+#     (a|a)*$   on 30 a's      stdlib 2.3561s   regex 6.4100s   (both exponential)
+# `regex` is immune to the witness above and ~2.7x WORSE on the textbook
+# alternation shape - which a model writing a search for alternatives produces
+# by accident. So no engine choice is safe on a pattern we did not write, and
+# the timeout is load-bearing rather than belt-and-braces.
+_MODEL_REGEX_TIMEOUT = 2.0          # seconds per individual match operation
+_MODEL_REGEX_MAX_LINE = 64 * 1024   # a single line longer than this is not searched
+
+
+def _compile_model_pattern(pattern: str, flags):
+    """Compile an attacker-supplied pattern on the interruptible engine.
+
+    Deliberately NO fallback to stdlib ``re`` when ``regex`` is missing. A
+    fallback would silently restore the unbounded path while every caller
+    carried on believing it was bounded - a safety step that fails and reports
+    success, which AGENTS.md rule 5 forbids in as many words. If the engine is
+    absent the tool refuses and says why, which is recoverable; a silent
+    downgrade is not.
+
+    ``regex`` is a DECLARED core dependency for this reason. It was previously
+    present only transitively, via `transformers` under optional-dependencies,
+    so a base install had no `regex` at all and this guard would have been
+    absent exactly where nobody was looking.
+    """
+    try:
+        import regex
+    except ImportError as exc:      # pragma: no cover - declared dependency
+        raise _ModelRegexUnavailable(
+            "the 'regex' package is required to run a model-supplied pattern "
+            "safely (it is what makes a runaway match interruptible) and it is "
+            f"not installed: {exc}. Install localm's dependencies; this tool "
+            "will not fall back to an unbounded engine."
+        ) from exc
+    try:
+        return regex.compile(pattern, flags)
+    except Exception as exc:
+        raise _ModelRegexInvalid(str(exc)) from exc
+
+
+class _ModelRegexUnavailable(RuntimeError):
+    """The interruptible engine is missing, so the pattern will not be run."""
+
+
+class _ModelRegexInvalid(ValueError):
+    """The model supplied a pattern the engine could not compile."""
+
+
+class _ModelRegexTooSlow(RuntimeError):
+    """A model-supplied pattern exceeded its per-match time budget."""
+
+
+def _model_regex_flags(ignore_case: bool = False):
+    """Translate our flag intent into the `regex` engine's flags."""
+    import regex
+    flags = regex.MULTILINE
+    if ignore_case:
+        flags |= regex.IGNORECASE
+    return flags
+
+
+def _run_model_regex(op, *args, **kwargs):
+    """Run one match operation under the time budget, or raise _ModelRegexTooSlow.
+
+    The budget is PER OPERATION, so a glob of many files cannot each burn it
+    silently - the caps below bound how much text is offered in the first place,
+    and the first file to exceed the budget aborts the whole call rather than
+    letting the cost accumulate one file at a time.
+    """
+    import regex
+    try:
+        return op(*args, timeout=_MODEL_REGEX_TIMEOUT, **kwargs)
+    except regex.error as exc:
+        raise _ModelRegexInvalid(str(exc)) from exc
+    except TimeoutError as exc:
+        raise _ModelRegexTooSlow(
+            f"the search pattern took longer than {_MODEL_REGEX_TIMEOUT:g}s on a "
+            "single file and was stopped. Patterns with a nested quantifier "
+            r"(for example `(\s*)*` or `(a|a)*`) can cost time that doubles with "
+            "every extra character of input. Simplify the pattern - a plain "
+            "substring or a single quantifier is usually what was meant."
+        ) from exc
+
+
 def _resolve_edit(text: str, old: str):
     """Find the single region of `text` an edit should replace.
 
@@ -850,7 +959,13 @@ def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
                     else:
                         still.append(entry)
                 pending = still
-            if rx.search(line):
+            # A single absurdly long line is skipped rather than searched: the
+            # per-match budget below would stop a runaway, but only after paying
+            # it, and paying it once per line of a large file is the accumulation
+            # the caps exist to prevent.
+            if len(line) > _MODEL_REGEX_MAX_LINE:
+                continue
+            if _run_model_regex(rx.search, line):
                 total += 1
                 if cap <= 0 or len(hits) + len(pending) < cap:
                     window = list(before) + [line]
@@ -905,9 +1020,11 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     candidates = sorted(base.glob(file_glob)) if base.is_dir() else [base]
 
     try:
-        rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-    except re.error as e:
+        rx = _compile_model_pattern(pattern, _model_regex_flags(ignore_case=True))
+    except _ModelRegexInvalid as e:
         return ToolResult.error(f"Invalid regex: {e}")
+    except _ModelRegexUnavailable as e:
+        return ToolResult.error(str(e))
 
     # ---- Pre-filter: decide what to read BEFORE reading anything ----
     # Ordered cheapest-check-first, because on a real repo most candidates are
@@ -974,6 +1091,13 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     for file_idx, fp in enumerate(files):
         try:
             hits, hit_total = _grep_file_hits(fp, rx, context, per_file_cap)
+        except _ModelRegexTooSlow as e:
+            # BEFORE the generic handler on purpose. Falling through to it would
+            # file a runaway pattern under "could not read this file", which is
+            # both wrong and unactionable - the user would go looking at the file.
+            # A pattern too slow to run is a fact about the PATTERN, so it aborts
+            # the call and says so rather than degrading into a partial result.
+            return ToolResult.error(str(e))
         except Exception:
             # Record (do not silence) the skip so an incomplete match set is not reported as complete.
             try:
@@ -1083,9 +1207,20 @@ def tool_search_replace(
         When True, report what would change without modifying anything.
     """
     try:
-        rx = re.compile(pattern, re.MULTILINE)
-    except re.error as e:
+        rx = _compile_model_pattern(pattern, _model_regex_flags())
+    except _ModelRegexInvalid as e:
         return ToolResult.error(f"Invalid regex: {e}")
+    except _ModelRegexUnavailable as e:
+        return ToolResult.error(str(e))
+
+    # The same per-file size cap `grep` already honours. Its absence here was a
+    # bug on its own account, independent of the timeout: search_replace read
+    # every matched file whole with NO ceiling and ran the pattern over the full
+    # text, so it was strictly the worse of the two places to hand a hostile
+    # pattern. Reusing grep's configured value rather than inventing a second
+    # knob, so one setting still means one thing.
+    size_cap = _grep_cap(None, _grep_config(), "coder_grep_max_file_bytes",
+                         _GREP_MAX_FILE_BYTES)
 
     # Confine glob results to cwd: a traversal glob like '../*' makes
     # cwd.glob() climb above the project root and would rewrite files outside
@@ -1098,8 +1233,15 @@ def tool_search_replace(
     changes: list[tuple[Path, Path, str, int]] = []  # (abs, rel, new_text, count)
     unreadable: list[str] = []  # files we could not read; a replacement may be left partial
 
+    oversized: list[str] = []   # skipped by the size cap, reported not silenced
     for fp in candidates:
         try:
+            if size_cap > 0 and fp.stat().st_size > size_cap:
+                try:
+                    oversized.append(str(fp.relative_to(cwd)))
+                except ValueError:
+                    oversized.append(str(fp))
+                continue
             text = fp.read_text(encoding="utf-8", errors="replace")
         except Exception:
             # Record (do not silence) the skip so a partial mutation is not reported as complete.
@@ -1108,10 +1250,18 @@ def tool_search_replace(
             except ValueError:
                 unreadable.append(str(fp))
             continue
-        matches = rx.findall(text)
-        if not matches:
-            continue
-        new_text = rx.sub(replacement, text)
+        try:
+            matches = _run_model_regex(rx.findall, text)
+            if not matches:
+                continue
+            new_text = _run_model_regex(rx.sub, replacement, text)
+        except _ModelRegexTooSlow as e:
+            # Abort before writing anything. This tool MUTATES, so a partial
+            # sweep is worse than none: half the glob rewritten and the rest not
+            # is a state nobody asked for and the caller cannot tell from success.
+            # `changes` is applied after this loop, so returning here leaves the
+            # working tree untouched.
+            return ToolResult.error(str(e))
         try:
             rel = fp.relative_to(cwd)
         except ValueError:
