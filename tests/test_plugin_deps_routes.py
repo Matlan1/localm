@@ -7,6 +7,8 @@ server-side pip. The happy path (local operator) starts a background task and
 streams its progress over SSE.
 """
 
+import time
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -197,3 +199,25 @@ def test_start_dep_install_idempotent_while_running(app_mgr, monkeypatch):
     t2 = mgr.start_dep_install("voice")
     assert t1 is t2                         # no second pip launched
     gate.set()
+
+    # WAIT for the worker before returning. This is not tidiness: monkeypatch
+    # undoes the `blocking` stub at teardown, and run_dep_install resolves
+    # deps.install_plugin_extras at CALL time - so a thread still in flight when
+    # the stub is removed calls the REAL installer, i.e.
+    # `uv pip install --python <the venv running the suite> faster-whisper>=1.2.1`.
+    #
+    # Caught by the installer guard in conftest, which reported it against a
+    # LATER, unrelated test (test_plugin_config_is_confined_to_own_block) because
+    # the spawn landed after this test had already finished. That misattribution
+    # is inherent to a background thread and is exactly why the hit report names
+    # the thread and the call path as well as the current nodeid.
+    #
+    # start_dep_install keeps the TASK, not the thread, so there is no handle to
+    # join - poll the task's own status instead.
+    deadline = time.time() + 10
+    while t1.status == "running" and time.time() < deadline:
+        time.sleep(0.01)
+    assert t1.status != "running", (
+        "the dep-install worker outlived its stub; with the real "
+        "install_plugin_extras restored it would run a REAL pip install against "
+        "the interpreter running this suite")

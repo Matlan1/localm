@@ -26,6 +26,7 @@ import stat as _stat
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import shutil
 
@@ -537,34 +538,52 @@ def _stem(p: str) -> str:
     return os.path.splitext(os.path.basename(p))[0].lower()
 
 
+# pip, pip3, pip3.12 - but NOT pipx, which is a different tool entirely.
+_PIP_SHIM = re.compile(r"^pip[0-9.]*$")
+
+
 def _installs_into_this_interpreter(cmd):
     """The reason string when *cmd* installs into the running interpreter, else None.
 
-    Deliberately narrow. It must not fire on `pip cache dir`, `pip freeze` or
-    `pip list` (a real pip child with no install is fine and IS used by the
-    cache-containment tests), nor on an install aimed at another interpreter."""
+    Deliberately narrow. It must not fire on `pip cache dir`, `pip freeze`,
+    `pip list` or `pip --version` (a real pip child that installs NOTHING is fine,
+    and the cache-containment tests use exactly that), nor on an install aimed at
+    ANOTHER interpreter - installing into a disposable venv under tmp_path is
+    legitimate and the managed-ComfyUI tests do it.
+
+    The bare-name case is the one this originally missed, and it is the form
+    anyone would write by hand: `pip install x` has no directory component, so
+    resolving it as a path lands on the CWD and matches neither sys.executable nor
+    sys.prefix. But a bare `pip`/`uv` is found on PATH, and under the suite PATH
+    leads to the venv running it - so no explicit target means THIS interpreter,
+    not "some other one". (Gap and fix from local_7cb0d210, who hit the same class
+    in their own version of this guard.)"""
     argv = _installer_argv(cmd)
     if not argv or "install" not in [a.lower() for a in argv]:
         return None
 
     head = _stem(argv[0])
+    rest = [a.lower() for a in argv[1:]]
     target = None
-    if head == "uv" and [a.lower() for a in argv[1:3]] == ["pip", "install"]:
-        if "--python" in argv:
-            target = argv[argv.index("--python") + 1]
-        else:
-            # uv with no explicit target resolves to the ACTIVE environment,
-            # which under the suite is the one running it.
-            target = os.environ.get("VIRTUAL_ENV") or sys.executable
-    elif len(argv) >= 3 and argv[1] == "-m" and _stem(argv[2]) == "pip":
-        if "install" not in [a.lower() for a in argv[3:4]]:
-            return None                      # `-m pip cache dir`, `-m pip freeze`
-        target = argv[0]
-    elif head in ("pip", "pip3"):
-        target = argv[0]                     # a pip shim; judged by its location
+    bare = os.path.dirname(argv[0]) == ""     # found via PATH, not a real path
+
+    if head == "uv" and rest[:2] == ["pip", "install"]:
+        target = argv[argv.index("--python") + 1] if "--python" in argv else None
+    elif len(argv) >= 4 and argv[1] == "-m" and _stem(argv[2]) == "pip":
+        if rest[2] != "install":
+            return None                       # `-m pip cache dir`, `-m pip freeze`
+        target, bare = argv[0], False         # explicit interpreter, judge by path
+    elif _PIP_SHIM.match(head):
+        if not rest or rest[0] != "install":
+            return None                       # `pip list`, `pip --version`
+        target = None if bare else argv[0]
+    else:
+        return None
 
     if target is None:
-        return None
+        # No explicit target: `uv pip install` without --python, or a bare pip
+        # shim off PATH. Both resolve to the ACTIVE environment.
+        target = os.environ.get("VIRTUAL_ENV") or sys.executable
 
     t = _norm_path(target)
     if t == _norm_path(sys.executable) or t.startswith(_norm_path(sys.prefix)):
@@ -588,12 +607,29 @@ def _arm_installer_guard() -> bool:
         def __init__(self, args, *a, **kw):
             reason = _installs_into_this_interpreter(args)
             if reason:
-                origin = "unknown"
+                frames = []
                 for frame in reversed(traceback.extract_stack()[:-1]):
                     f = frame.filename.replace("\\", "/")
                     if "/tests/" in f or "/localm/" in f:
-                        origin = f"{os.path.basename(frame.filename)}:{frame.lineno}"
-                        break
+                        frames.append(
+                            f"{os.path.basename(frame.filename)}:{frame.lineno}")
+                        if len(frames) >= 5:
+                            break
+                origin = frames[0] if frames else "unknown"
+                # A spawn from a BACKGROUND THREAD may land while a different test
+                # is current, so the nodeid would blame the wrong one - the very
+                # misattribution this guard exists to remove, reproduced inside it.
+                # It cannot be prevented (start_dep_install keeps the task, not the
+                # thread), so it is made self-reporting: say so, and print the call
+                # path, which IS attributable. Design from local_7cb0d210.
+                thread = threading.current_thread()
+                if thread is not threading.main_thread():
+                    origin = (f"{origin}\n        NOT the main thread "
+                              f"(thread {thread.name!r}): the test named above is "
+                              f"whichever was CURRENT when this fired, not "
+                              f"necessarily the one that STARTED it - attribute it "
+                              f"from this call path instead:\n        "
+                              + " <- ".join(frames))
                 key = (reason, origin)
                 _INSTALLER_HITS[key] = _INSTALLER_HITS.get(key, 0) + 1
                 # BLOCK, do not merely record. Recording would still let the

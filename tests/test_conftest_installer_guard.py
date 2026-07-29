@@ -73,8 +73,16 @@ def test_it_blocks_an_install_into_this_interpreter():
     # the exact command captured from the CI process table when this was found
     ["uv", "pip", "install", "--python", sys.executable, "faster-whisper>=1.2.1"],
     [sys.executable, "-m", "pip", "install", "x>=1"],
-    # uv with no --python resolves to the ACTIVE environment, i.e. this one
+    # No explicit target: uv without --python, and the bare pip shims found on
+    # PATH. Under the suite, PATH leads to the venv running it. The bare forms are
+    # the ones the FIRST version of this guard missed - it matched the NAME but
+    # then resolved the target as a path, and a bare `pip` has no directory
+    # component, so it landed on the CWD and matched nothing. That made the
+    # original 4/4 fires-control a 4/4 on fully qualified commands only.
     ["uv", "pip", "install", "somepkg"],
+    ["pip", "install", "somepkg"],
+    ["pip3", "install", "somepkg"],
+    ["pip3.12", "install", "somepkg"],
 ])
 def test_the_oracle_catches_installs_aimed_at_this_interpreter(argv):
     assert _live()["_installs_into_this_interpreter"](argv), argv
@@ -86,13 +94,20 @@ def test_the_oracle_catches_installs_aimed_at_this_interpreter(argv):
     # draws its line at the TARGET, not at the act of installing.
     [_disposable_python(), "-m", "pip", "install", "--no-index", "localms2pkg"],
     ["uv", "pip", "install", "--python", _disposable_python(), "somepkg"],
+    # a path-qualified pip that is genuinely NOT this interpreter
+    ["/usr/bin/pip.exe", "install", "somepkg"],
     # real pip children that install NOTHING (the cache-containment tests)
     [_disposable_python(), "-m", "pip", "cache", "dir", "--disable-pip-version-check"],
     [sys.executable, "-m", "pip", "freeze"],
     [sys.executable, "-m", "pip", "list"],
+    ["pip", "list"],
+    ["pip", "--version"],
+    # pipx is a different tool and must not be swept up by the pip[0-9.]* shim match
+    ["pipx", "run", "somepkg"],
     # not an installer at all, and a stray 'install' word must not be enough
     ["git", "status"],
     ["git", "commit", "-m", "install docs"],
+    ["grep", "-rn", "pip install", "docs/"],
     [sys.executable, "-c", "print('hi')"],
 ])
 def test_the_oracle_stays_quiet_on_everything_else(argv):
