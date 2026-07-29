@@ -39,7 +39,7 @@ from pydantic import BaseModel
 
 from localm.pathsafe import confined_file as _confined_file
 from localm.plugins.coder.sessions import CoderSession
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 
 _router = APIRouter()
 

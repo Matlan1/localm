@@ -18,7 +18,7 @@ import localm.plugins.gui.web as _web
 from localm import scopes
 from localm.inference.http_server import (_require_auth, caller_scopes,
                                           effective_fs_access, require_scope)
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 
 
 def register(app: FastAPI, ctx) -> None:

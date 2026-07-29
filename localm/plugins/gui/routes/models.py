@@ -23,7 +23,7 @@ from localm.inference.http_server import (principal_id, require_fs_host,
                                           require_scope, unload_all_models,
                                           unload_one_model)
 import localm.inference.http_server as _hs
-from localm.plugins.executor import get_plugin_executor
+from localm.executor import get_plugin_executor
 from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
                                     LoadModelRequest, MediaPreflightRequest,
                                     PullRequest, PullTokenRedeemRequest,
