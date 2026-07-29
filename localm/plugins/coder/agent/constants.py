@@ -7,8 +7,28 @@ former single-file agent.py."""
 from __future__ import annotations
 
 # Tools that mutate files - trigger a project map refresh after they run
+# (execution.py's _refresh_map_for_tool, the only consumer of this set).
+#
+# patch_file and edit_notebook_cell were missing here despite having a real
+# `path` arg _call_target_paths() already resolves correctly (proven by their
+# _UNDOABLE_TOOLS membership, which depends on the same resolution) - a
+# pre-existing staleness gap unrelated to search_replace, found auditing this
+# set for the same root cause. search_replace is included too, but its paths
+# come from ToolResult.changes (post-call, its own dry_run-driven sweep), not
+# from this set membership alone - see _refresh_map_for_tool's *result* param.
+#
+# run_shell is a KNOWN NO-OP here, kept rather than removed so the gap stays
+# visible instead of looking merely forgotten: it has no `path`-shaped arg at
+# all (a `command` string only), so _call_target_paths() always returns []
+# for it and the refresh never fires. A shell command can write anything, so
+# fixing this needs the SAME git-diff-based detection already gated off the
+# live path elsewhere (persistence._detect_shell_changes, wired only to
+# episodic close-time reflection - see dev-notes/coder-changed-files-
+# tracking-gaps-2026-07-29.md item 2, deliberately deferred there: the same
+# blocking-subprocess-on-the-event-loop risk applies here, not a quick fix).
 _MUTATING_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "run_shell",
+    "patch_file", "edit_notebook_cell", "search_replace",
 })
 
 # Tools whose file changes can be undone via a PRE-call snapshot (we read the

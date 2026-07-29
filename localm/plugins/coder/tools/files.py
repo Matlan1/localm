@@ -1262,6 +1262,14 @@ def tool_search_replace(
             # every line ending post-substitution ("x = 2\r\n" -> disk bytes
             # "x = 2\r\r\n", which read_text() then reports as "x = 2\n\n" -
             # a spurious blank line on every line the sweep touched).
+            #
+            # ONE root cause, TWO symptoms in different subsystems: the exact
+            # same raw-vs-normalised mismatch, left unhandled, would also make
+            # diffutil.compute_search_replace_diff's patch-mode preview show
+            # spurious full-line noise on a CRLF file (it diffs this old_bytes
+            # against new_text, which is always LF-only) - see the matching
+            # normalise step there. Collapsing this back to one read will look
+            # correct on Linux (no CRLF to expose it) and silently reopen both.
             old_bytes = fp.read_bytes()
             text = fp.read_text(encoding="utf-8", errors="replace")
         except Exception:
