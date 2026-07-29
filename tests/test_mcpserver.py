@@ -4,6 +4,7 @@
 import io
 import json
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,59 @@ from localm.plugins.mcpserver.server import (
     MCPStdioServer,
     build_tools,
 )
+
+# A UNC path at a non-routable RFC5737 documentation address (TEST-NET-1), so
+# even a total failure of the fix cannot dial a real host - same address
+# test_admin_fs_routes.py uses for the same reason.
+_UNC = r"\\192.0.2.1\share"
+_UNC_FWD = "//192.0.2.1/share"
+_DEVICE = r"\\.\PhysicalDrive0"
+
+
+def _is_unc_or_device(s: str) -> bool:
+    """Kept identical to pathsafe.is_unc_or_device_path's forbidden-prefix
+    check: judged by Windows rules on every host, not gated on os.name - the
+    client-supplied strings these guards cover (pull_model's `repo`,
+    run_coder_task's `cwd`, generate_image's `output_path`) are refused
+    unconditionally, unlike the local-path (`reject_unsafe_path_string`)
+    policy which only checks `//` on Windows."""
+    return s[:2] in ("\\\\", "//", "\\/", "/\\")
+
+
+def _unc_calls(seen) -> list:
+    """Filter, don't assert `seen == []`: an unrelated legitimate fs call on
+    an ordinary path (made elsewhere during setup or the handler's own logic)
+    must not fail a test whose claim is only about the malicious string."""
+    return [s for s in seen if _is_unc_or_device(s)]
+
+
+def _install_fs_spy(monkeypatch, method_name):
+    """Record every path string that reaches Path.<method_name>(), and
+    hard-fail the call when the string is UNC/device syntax. Same discipline
+    as test_admin_fs_routes.py's fs_spy: assert on the absence of the syscall,
+    not merely on the returned message, since the defect is the syscall (an
+    SMB dial that auto-authenticates), not the response body."""
+    seen: list = []
+    real = getattr(Path, method_name)
+
+    def spy(self, *a, **kw):
+        s = str(self)
+        seen.append(s)
+        if _is_unc_or_device(s):
+            raise AssertionError(
+                f"Path.{method_name}() reached the filesystem with a UNC/device "
+                f"string: {s!r} - this is the SMB dial (and the net-NTLMv2 "
+                "leak), which happens before any status code is chosen")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, method_name, spy)
+    return seen
+
+
+@pytest.fixture
+def exists_spy(monkeypatch):
+    """pull_model's only fs sink on the UNC-rejection path."""
+    return _install_fs_spy(monkeypatch, "exists")
 
 
 def _stub_engine_factory(model_name):
@@ -907,6 +961,25 @@ class TestGenerateImageSafety:
             assert "data dir" in r["result"]["content"][0]["text"]
         mock_gen.assert_not_called()
 
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+    def test_output_path_unc_rejected_without_touching_the_filesystem(
+            self, monkeypatch, bad):
+        """Found during the sweep for pull_model's UNC fix: _confine() called
+        p.resolve() before checking home-dir containment. A UNC output_path is
+        ABSOLUTE on Windows, so it skipped the `home / p` join and resolved
+        the raw client string directly - same SMB-dial defect as pull_model's
+        `repo`, a different sink. check_input_image (input_image's own
+        confinement, in media/paths.py) already carried this guard; _confine
+        was the sibling that missed it."""
+        seen = _install_fs_spy(monkeypatch, "resolve")
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": bad})
+        assert r["result"]["isError"] is True
+        assert bad not in r["result"]["content"][0]["text"]
+        mock_gen.assert_not_called()
+        assert _unc_calls(seen) == []
+
     @pytest.mark.parametrize("secret_name",
                              ["auth.key", "auth.json", "sessions.json"])
     def test_input_image_cannot_name_the_credential_store(self, secret_name):
@@ -1148,6 +1221,42 @@ class TestModelDiscoveryTools:
         assert r["result"]["isError"] is True
         assert expected_missing in r["result"]["content"][0]["text"]
 
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE, _UNC + r"\sub"])
+    def test_pull_model_rejects_unc_and_device_repo_without_touching_the_filesystem(
+            self, exists_spy, bad):
+        server, _ = _server()
+        r = self._call(server, "pull_model", {"repo": bad, "name": "m"})
+        assert r["result"]["isError"] is True
+        assert bad not in r["result"]["content"][0]["text"], (
+            "the raw client string must not be echoed back unsanitised")
+        assert _unc_calls(exists_spy) == [], (
+            "the UNC/device string reached Path.exists() - the whole finding "
+            "is that this syscall happens before any status code is chosen")
+
+    def test_pull_model_existing_local_path_still_reports_the_add_message(
+            self, exists_spy, tmp_path):
+        """Control: an ordinary EXISTING local path is not UNC/device syntax,
+        so the fix must not over-reject it - it still falls through to
+        Path.exists() and the pre-existing 'run localm add' message."""
+        server, _ = _server()
+        r = self._call(server, "pull_model", {"repo": str(tmp_path), "name": "m"})
+        assert r["result"]["isError"] is True
+        assert "localm add" in r["result"]["content"][0]["text"]
+        assert str(tmp_path) in exists_spy
+
+    def test_pull_model_nonexistent_local_path_falls_through_to_pull(
+            self, exists_spy, tmp_path):
+        """Control: an ordinary NON-existent local path is not UNC/device
+        syntax either, so it still falls through past the local-add check to
+        the normal pull mechanics."""
+        server, _ = _server()
+        missing = str(tmp_path / "does-not-exist")
+        with patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
+            r = self._call(server, "pull_model", {"repo": missing, "name": "m"})
+        assert r["result"]["isError"] is False
+        mock_pull.assert_called_once_with(missing, name="m")
+        assert missing in exists_spy
+
     def test_pull_model_success_loads_by_default(self):
         server, engines = _server()
         with patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
@@ -1268,6 +1377,19 @@ class TestRunCoderTask:
         r = self._call(server, {"task": "x", "cwd": str(tmp_path / "nope")})
         assert r["result"]["isError"] is True
         assert "directory" in r["result"]["content"][0]["text"]
+
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+    def test_unc_and_device_cwd_rejected_without_touching_the_filesystem(
+            self, coder_active, monkeypatch, bad):
+        """Found during the sweep for pull_model's UNC fix: cwd_path.is_dir()
+        ran on the client-supplied cwd with no lexical check at all - the same
+        SMB-dial defect, a different sink (is_dir() instead of exists())."""
+        seen = _install_fs_spy(monkeypatch, "is_dir")
+        server, _ = _server()
+        r = self._call(server, {"task": "x", "cwd": bad})
+        assert r["result"]["isError"] is True
+        assert bad not in r["result"]["content"][0]["text"]
+        assert _unc_calls(seen) == []
 
     def test_successful_run_parses_json_payload(self, coder_active, tmp_path):
         # Real `--output-format json` pretty-prints (indent=2, multi-line) - a
