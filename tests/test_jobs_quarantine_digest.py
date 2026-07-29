@@ -28,7 +28,9 @@ name are what it exists to preserve, and only the access-control field goes.
 from __future__ import annotations
 
 import json
+import logging
 import re
+from pathlib import Path
 
 import pytest
 
@@ -182,3 +184,90 @@ class TestQuarantineStillDoesItsJob:
         assert _backups(store), "the copy must still be written"
         assert any("corrupt" in r.message.lower() for r in caplog.records), \
             "the corrupt-store warning was lost"
+
+
+class TestResidualDigestIsWarningVisible:
+    """Checkup finding #1: `_redact_owner_digests` only reports a surviving
+    digest-shaped value at DEBUG, so the operator never sees it - the outer
+    "backed up to ... your scheduled jobs are preserved" WARNING says nothing
+    about a residual credential. A digest that dodges the regex (odd key
+    casing/whitespace in an already-malformed file) must still surface at
+    WARNING, the level an operator is actually watching."""
+
+    def test_case_mismatched_owner_key_survives_and_warns(self, caplog):
+        from localm.plugins.builtin.jobs.store import _redact_owner_digests
+
+        digest = "c3" * 32  # 64 hex chars: valid digest shape
+        # "Owner" (capital O) does not match the regex's literal "owner", so
+        # this digest is NOT touched by the substitution - exactly the
+        # malformed-key-casing case the leftover check exists to catch.
+        raw = '{"version": 1, "jobs": [{"Owner": "%s", "name": "n"}]}' % digest
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            out = _redact_owner_digests(raw)
+
+        assert digest in out, (
+            "premise: the case-mismatched field must survive redaction "
+            "untouched, or this test proves nothing about the leftover check")
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings, (
+            "a digest-shaped value survived redaction but nothing was logged "
+            "at WARNING - it is only visible at DEBUG, which an operator "
+            "reading the outer 'backed up to ...' WARNING will never see")
+
+
+class TestQuarantineBackupPermsRetryOnFailure:
+    """Checkup finding #2: `restrict_file_perms(backup)` was a single
+    best-effort call with no return-value check, unlike `_write_all` which
+    checks the return and retries when the first attempt fails. The
+    quarantine copy holds the same owner digests as the live file and
+    deserves the same robustness."""
+
+    def test_first_failure_is_retried(self, store, monkeypatch):
+        import localm.config as cfg
+
+        calls = []
+
+        def flaky_restrict(path):
+            calls.append(Path(path))
+            return len(calls) > 1  # fail the first call, succeed on retry
+
+        monkeypatch.setattr(cfg, "restrict_file_perms", flaky_restrict)
+        _corrupt_keeping_content(store)
+        store._read_all()
+
+        backups = _backups(store)
+        assert backups, "no quarantine copy was written"
+        assert len(calls) >= 2, (
+            "restrict_file_perms was not retried after the first call "
+            "reported failure - the backup got only one best-effort attempt")
+        assert all(c == backups[0] for c in calls), (
+            "the retry targeted a different path than the original attempt")
+
+
+class TestQuarantineBackupFailureMessageStatesReality:
+    """Checkup finding #3: the "refusing to silently discard it" wording
+    claims a refusal that never happens - the code logs a WARNING and
+    returns normally, and the caller proceeds exactly as on success. The
+    message must describe what actually occurs instead."""
+
+    def test_message_does_not_claim_a_refusal_that_never_happens(
+            self, store, monkeypatch, caplog):
+        real_write_text = Path.write_text
+
+        def flaky_write_text(self, *a, **kw):
+            if self.name.startswith("jobs.json.corrupt-"):
+                raise OSError("disk full")
+            return real_write_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", flaky_write_text)
+        _corrupt_keeping_content(store)
+        with caplog.at_level("WARNING"):
+            jobs = store._read_all()
+
+        assert jobs == {}, "still starts empty on unbacked-up corruption"
+        messages = [r.message for r in caplog.records]
+        assert any("could not be backed" in m for m in messages), (
+            "the backup-failure warning was not emitted")
+        assert not any("refusing to silently discard" in m for m in messages), (
+            "the message still claims a refusal that never actually happens "
+            "(the caller proceeds with an empty job list exactly as on success)")
