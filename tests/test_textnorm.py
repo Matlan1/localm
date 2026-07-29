@@ -5,7 +5,7 @@ layer, so channel/harmony tokens never leak to the GUI regardless of backend.
 """
 
 from localm.inference.engine import Engine
-from localm.inference.textnorm import (
+from localm.textnorm import (
     ThinkSplitter, scrub_stream, scrub_text, split_think,
 )
 

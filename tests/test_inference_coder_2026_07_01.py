@@ -17,7 +17,7 @@ import pytest
 # --------------------------------------------------------------------------- #
 
 def test_split_think_basic_cases():
-    from localm.inference.textnorm import split_think
+    from localm.textnorm import split_think
     assert split_think("hello") == ("hello", "")
     assert split_think("a<think>b</think>c") == ("ac", "b")
     assert split_think("<think>only</think>") == ("", "only")
@@ -27,7 +27,7 @@ def test_split_think_basic_cases():
 
 
 def test_split_think_linear_on_pathological_input():
-    from localm.inference.textnorm import split_think
+    from localm.textnorm import split_think
     # 50k unmatched <think> openers: the old ThinkSplitter re-sliced its buffer
     # per tag (O(n^2)) and would take seconds+; the linear scan is near-instant.
     text = "<think>" * 50000 + "answer"

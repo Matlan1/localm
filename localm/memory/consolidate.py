@@ -34,7 +34,7 @@ import time
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
-from localm.inference.textnorm import strip_think
+from localm.textnorm import strip_think
 
 from .corrections import PendingCorrection
 from .gating import writes_allowed

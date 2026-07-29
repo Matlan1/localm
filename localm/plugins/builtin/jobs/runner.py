@@ -307,7 +307,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
 
-    from localm.inference.textnorm import strip_think
+    from localm.textnorm import strip_think
 
     # Track when a reply was ALL reasoning (empty after the strip): "no facts
     # found" then needs a caveat, or a truncated thinking model reads as a

@@ -285,7 +285,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 # textnorm.strip_think's docstring), so it must get the visible
                 # answer only, not the raw <think> scratchpad - matching what
                 # transcript.exchange already does via its own split_think() call.
-                from ..inference.textnorm import strip_think
+                from ..textnorm import strip_think
                 audit.llm(strip_think(response))
                 if transcript:
                     transcript.exchange(prompt, response)
@@ -346,7 +346,7 @@ class _ThinkPrinter:
 
     def __init__(self) -> None:
         import sys as _sys
-        from localm.inference.textnorm import ThinkSplitter
+        from localm.textnorm import ThinkSplitter
         tty = _sys.stdout.isatty()
         self._dim, self._reset = ("\033[2m", "\033[22m") if tty else ("", "")
         self._think = ThinkSplitter()
@@ -551,7 +551,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             # helper every INTERNAL consumer of model output must run before
             # storing"). transcript.exchange is exempt - it splits `response`
             # itself and keeps the reasoning in a collapsed block.
-            from ..inference.textnorm import strip_think
+            from ..textnorm import strip_think
             visible = strip_think(response)
             messages.append({"role": "assistant", "content": visible})
             if audit:

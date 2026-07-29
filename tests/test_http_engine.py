@@ -72,7 +72,7 @@ def test_chat_stream_surfaces_reasoning_content(monkeypatch):
         [{"role": "user", "content": "hi"}]))
     full = "".join(out)
     assert full == "<think>because </think><think>reasons</think>The answer."
-    from localm.inference.textnorm import ThinkSplitter
+    from localm.textnorm import ThinkSplitter
     splitter = ThinkSplitter()
     content, reasoning = "", ""
     for piece in out:

@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from localm.inference.textnorm import strip_think
+from localm.textnorm import strip_think
 from localm.memory import MemoryRecord, MemoryStore, run_consolidation
 from localm.memory.consolidate import (_parse_json_object, extract,
                                        summarize_session)

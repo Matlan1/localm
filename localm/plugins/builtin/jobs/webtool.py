@@ -345,7 +345,7 @@ def _final_answer(reply: str) -> str:
     unreadable scratchpad (memory-audit 2026-07-02). Uses the shared
     textnorm strip (handles UNCLOSED think blocks, unlike _THINK_RE above,
     which stays closed-tag-only for in-loop tool-call parsing)."""
-    from localm.inference.textnorm import strip_think
+    from localm.textnorm import strip_think
     text = strip_think(reply).strip()
     if reply.strip() and not text:
         # All reasoning, no answer (usually truncation). Say so rather than

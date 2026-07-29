@@ -186,7 +186,7 @@ def test_close_cascades_through_scrub_stream_releases_lock():
     wrapper generators. `engine.chat_stream` wraps the token stream in
     `textnorm.scrub_stream` (the outermost production wrapper); closing it must
     propagate GeneratorExit into the inner generator and release its lock."""
-    from localm.inference.textnorm import scrub_stream
+    from localm.textnorm import scrub_stream
 
     lock = threading.Lock()
     started = threading.Event()

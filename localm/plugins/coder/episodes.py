@@ -892,7 +892,7 @@ def consolidate(store: "EpisodeStore", *, complete: Callable[[str], str],
             logger.warning("episodic consolidation: model call failed (%s); "
                            "%d lesson(s) left untouched", e, len(members))
             continue
-        from localm.inference.textnorm import strip_think
+        from localm.textnorm import strip_think
         data = _extract_json(strip_think(raw))
         lesson = str(data.get("lesson", "")).strip()
         summary = str(data.get("summary", "")).strip()
@@ -1089,7 +1089,7 @@ def reflect_and_store(
     # Strip the reasoning channel before parsing: a thinking model's scratchpad
     # broke JSON extraction and could leak into stored lessons (audit C1).
     # Idempotent when the caller already stripped.
-    from localm.inference.textnorm import strip_think
+    from localm.textnorm import strip_think
     raw = strip_think(raw)
     data = _extract_json(raw)
     ep = Episode(

@@ -266,7 +266,7 @@ class _SessionMixin:
                 # old cap the JSON never arrived, so NO episode was ever
                 # stored on those models (memory-audit 2026-07-02, live).
                 # strip_think keeps the scratchpad out of the stored lesson.
-                from localm.inference.textnorm import strip_think
+                from localm.textnorm import strip_think
                 return strip_think(self.backend.chat(
                     [{"role": "user", "content": prompt}],
                     max_tokens=1024) or "")

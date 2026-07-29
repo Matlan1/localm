@@ -300,7 +300,7 @@ class MarkdownTranscript:
         written to a collapsed ``<details>`` block after it, so the transcript
         reads as the conversation while still preserving the reasoning instead of
         dumping the raw tags inline."""
-        from localm.inference.textnorm import split_think
+        from localm.textnorm import split_think
         answer, reasoning = split_think(assistant)
         try:
             with open(self._path, "a", encoding="utf-8") as fh:

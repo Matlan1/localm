@@ -362,7 +362,7 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 # same way and the engine can apply it once for all of them. It is re-imported
 # here (under the original private names) for the GGUF decode pipeline below; a
 # second pass at the engine layer is idempotent.
-from localm.inference.textnorm import scrub_stream as _scrub_stream  # noqa: E402
+from localm.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 
 
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
