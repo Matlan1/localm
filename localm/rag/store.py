@@ -90,15 +90,47 @@ _NUMPY_IS_STUB = _numpy is not None and getattr(_numpy, "__file__", None) is Non
 def _warn_numpy_degrade(exc: Exception, operation: str) -> None:
     """Announce the pure-Python fallback ONCE per process, saying which case it is.
 
+    THREE states, three branches, and the count is the point:
+
+    1. numpy ABSENT      - routine. The default install has no numpy, so this is
+                           the intended path. Debug level, no warning.
+    2. numpy is a STUB   - the install is BROKEN. Something put a bare 'numpy'
+                           directory on sys.path; it will equally break anything
+                           else here that imports numpy. Name the artefact so it
+                           can be deleted.
+    3. numpy present but
+       otherwise UNUSABLE - genuinely unexpected. Say so.
+
     "numpy unavailable, using the pure-Python path" reads as routine and would bury
-    the interesting case. An attribute-less numpy is NOT a missing dependency - it
-    means something has put a fake one on the import path, which will equally break
-    anything else in the environment that imports numpy. That deserves a message
-    naming the artefact so someone can go delete it, not a shrug.
+    case 2. But the reverse error is just as bad and is the one that shipped:
+    folding case 1 into case 3 told every ordinary user their install was broken.
+    Getting the hard case right is not the same as getting them all right.
     """
     if _NUMPY_DEGRADE_LOGGED:
         return
     _NUMPY_DEGRADE_LOGGED.add(True)
+    if _numpy is None:
+        # ABSENT, which is the ORDINARY case and not a fault: numpy is not a
+        # declared dependency (it appears nowhere in pyproject.toml), so a default
+        # install simply does not have it and the pure-Python path is the intended
+        # behaviour. Debug, never a warning.
+        #
+        # This branch is the point of this function. Without it, absence fell into
+        # the "present but unusable" arm below - because the callers signal it by
+        # raising ImportError("numpy is not installed"), which that arm then
+        # reported as a broken install. Every numpy-less user got
+        #
+        #     numpy is present but unusable (ImportError: numpy is not installed)
+        #
+        # on their first query: a message that contradicts itself in one line, and
+        # sends whoever debugs it hunting a machine fault that does not exist.
+        #
+        # Note WHERE the test is. It branches on the MODULE STATE, never on the
+        # exception's text, so no reworded sentinel can silently re-collapse the
+        # cases. That is the same reason _NUMPY_IS_STUB keys on ``__file__``.
+        _log.debug("numpy is not installed; using the pure-Python %s (%s: %s).",
+                   operation, type(exc).__name__, exc)
+        return
     if _NUMPY_IS_STUB:
         _log.warning(
             "numpy imported as an EMPTY NAMESPACE PACKAGE from %s - it is not a real "
