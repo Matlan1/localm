@@ -736,6 +736,16 @@ def _vulkan_split_configured() -> bool:
     return bool(os.environ.get("LOCALM_TEST_LAVAPIPE_ICD"))
 
 
+def _real_multi_gpu_hardware_configured() -> bool:
+    """True once opted into the Tier 2 real-hardware gate (a real rented 2-GPU
+    box - lavapipe cannot approximate real VRAM pressure/allocator/OOM behavior
+    or the amd-rocm/HIP backend at all). Same style as
+    _vulkan_split_configured(): the gate only checks opt-in, the real
+    assertions live in tests/test_gpu_split_real_hardware.py. See
+    scripts/tier2_gpu_split/README.md."""
+    return bool(os.environ.get("LOCALM_TEST_REAL_MULTI_GPU"))
+
+
 _RESOURCE_GATES = (
     ("real_gguf", _runtime_available,
      "native llama runtime not provisioned (run 'localm setup-llama')"),
@@ -746,6 +756,9 @@ _RESOURCE_GATES = (
     ("real_vulkan_split", _vulkan_split_configured,
      "set LOCALM_TEST_LAVAPIPE_ICD to a second Vulkan device's ICD manifest "
      "path (see dev-notes/split-gpu-testing-research-2026-07-13.md Tier 1)"),
+    ("real_multi_gpu_hardware", _real_multi_gpu_hardware_configured,
+     "set LOCALM_TEST_REAL_MULTI_GPU=1 on a real rented 2-GPU box (Tier 2 - "
+     "see scripts/tier2_gpu_split/README.md)"),
 )
 
 
