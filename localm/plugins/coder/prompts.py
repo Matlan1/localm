@@ -369,26 +369,42 @@ def _display_cwd(cwd) -> str:
         return p.name or str(p)
 
 
-def _cwd_leaf_name(cwd) -> str:
-    """The bare directory name a model could mistake for a path SEGMENT to
-    prepend, rather than the root it is already standing in.
+def _prependable_leaf(shown_cwd: str) -> str | None:
+    """The folder name a model could mistake for a path SEGMENT to prepend,
+    taken from the string the model was SHOWN, or None when that string holds
+    no plain folder name to warn about.
 
-    Any project outside the user's home directory (an entirely ordinary setup
-    - a separate drive, /opt, /srv, an external mount) hits _display_cwd's
-    fallback and is shown as JUST this name, with no leading path context at
-    all. Measured live: qwen2.5-coder-1.5b-instruct AND qwen2.5-coder-7b-
-    instruct BOTH, independently, read a bare "Working directory: proj" and
-    then wrote tool-call paths like "proj/strings_utils.py" - which resolves
-    to ".../proj/proj/strings_utils.py" and does not exist. Every read_file /
-    edit_file against the real file then fails on that doubled path,
-    repeatedly, until the circuit breaker stops the run - not a model-
-    capability gap, a prompt ambiguity reproduced identically across two very
-    different model sizes.
+    Why the clause exists at all: any project outside the user's home directory
+    (an entirely ordinary setup - a separate drive, /opt, /srv, an external
+    mount) hits _display_cwd's fallback and is shown as JUST a bare name, with
+    no leading path context. Measured live: qwen2.5-coder-1.5b-instruct AND
+    qwen2.5-coder-7b-instruct BOTH, independently, read a bare "Working
+    directory: proj" and then wrote tool-call paths like
+    "proj/strings_utils.py" - which resolves to ".../proj/proj/strings_utils.py"
+    and does not exist. Every read_file / edit_file against the real file then
+    fails on that doubled path, repeatedly, until the circuit breaker stops the
+    run - not a model-capability gap, a prompt ambiguity reproduced identically
+    across two very different model sizes.
+
+    Why it derives from *shown_cwd* rather than resolving the cwd a SECOND
+    time: the clause's whole job is "do not repeat the name I JUST SHOWED YOU",
+    so any independently-derived name is answering an adjacent question - and
+    the two diverge exactly where it hurts. For cwd == the user's home
+    directory, _display_cwd yields "~/." (the account name withheld on purpose,
+    REC-CODER-GUI-PATH) while Path(cwd).resolve().name yields the ACCOUNT NAME
+    itself, so the clause meant to clarify the path would have printed the
+    username into every prompt - defeating the one thing _display_cwd exists to
+    do. Deriving from the shown string makes that divergence unrepresentable
+    rather than merely fixed.
     """
-    try:
-        return Path(cwd).resolve().name or "."
-    except Exception:
-        return "."
+    leaf = shown_cwd.rsplit("/", 1)[-1]
+    # "~/." (the home directory itself), a bare drive root, or anything that is
+    # not a plain folder name: there is no name for the model to wrongly
+    # prepend, so say nothing. A missing clause costs a little clarity in a
+    # rare case; a wrong one would volunteer the account name.
+    if leaf in ("", ".", "..") or any(sep in leaf for sep in "\\/:"):
+        return None
+    return leaf
 
 
 def build_system_prompt(
@@ -464,14 +480,16 @@ def build_system_prompt(
     # that echoes it back. The tools still operate on the real cwd; the RULES tell
     # the model to use relative paths (REC-CODER-GUI-PATH).
     #
-    # The disambiguating clause below is not decoration: see _cwd_leaf_name's
+    # The disambiguating clause below is not decoration: see _prependable_leaf's
     # docstring for the live, cross-model-size failure it closes - a bare
     # "Working directory: proj" with no clarification is read as a name to
     # prepend, not a root already stood in, and it happens whether the model
-    # is 1.5B or 7B parameters.
+    # is 1.5B or 7B parameters. It names the leaf OF shown_cwd, never a
+    # separately-resolved one, so it can never reveal what shown_cwd withheld.
     shown_cwd = _display_cwd(cwd)
-    leaf = _cwd_leaf_name(cwd)
-    cwd_note = (f' (paths are relative to here - do not repeat "{leaf}", '
+    leaf = _prependable_leaf(shown_cwd)
+    cwd_note = ("" if leaf is None else
+                f' (paths are relative to here - do not repeat "{leaf}", '
                 f'e.g. "file.py" not "{leaf}/file.py")')
     if family == "small":
         identity = (
@@ -543,6 +561,14 @@ def build_subagent_system_prompt(
              "run_shell", "list_dir", "search_files", "grep"]
     tools_line = ", ".join(t for t in _core if t not in disabled_tools)
 
+    # Resolved once: _display_cwd hits the filesystem (Path.resolve), and the
+    # clause must name the leaf of THIS string, not a separate resolution.
+    shown_cwd = _display_cwd(cwd)
+    _leaf = _prependable_leaf(shown_cwd)
+    sub_cwd_note = ("" if _leaf is None else
+                    f' (paths are relative to there - do not repeat "{_leaf}" '
+                    f'in a path)')
+
     mission_line = f"{mission}\n\n" if mission else ""
     tools_sentence = (
         f"Tools available to you here: {tools_line}.\n"
@@ -553,9 +579,7 @@ def build_subagent_system_prompt(
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"YOUR ROLE: {role}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"You are a sub-agent spawned for one focused task in {_display_cwd(cwd)} "
-        f"(paths are relative to there - do not repeat \"{_cwd_leaf_name(cwd)}\" "
-        f"in a path).\n"
+        f"You are a sub-agent spawned for one focused task in {shown_cwd}{sub_cwd_note}.\n"
         f"{mission_line}"
         f"{tools_sentence}"
         f"Your toolset is deliberately narrowed for this role. If the task seems "
