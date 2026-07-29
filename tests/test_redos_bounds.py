@@ -748,3 +748,32 @@ def test_brace_matched_variant_pass_stays_linear(witness, size):
     hostile = witness * size
     _, elapsed = _timed(parse_tool_calls, hostile)
     assert elapsed < BUDGET, f"{witness!r}*{size} took {elapsed:.2f}s"
+
+
+def test_marker_variant_stays_linear_when_none_of_many_markers_balance():
+    """The gap none of the witnesses above actually exercise.
+
+    Every witness in ``test_brace_matched_variant_pass_stays_linear`` hits
+    ``_object_end_from``'s O(1) short-circuit: ``"<tool_call>{{" * n`` and
+    ``"<tool_call>" * n`` both have NO closing brace anywhere, so
+    ``last_close == -1`` and every marker's check returns instantly
+    (``last_close < i``); ``"{" * n`` has no marker at all. None of them ever
+    runs the real per-character balance scan more than once.
+
+    This witness forces exactly that: many markers, each opening an object that
+    never balances, with a single stray ``}`` far away at the very end so
+    ``last_close`` is a large, real value. Each marker's balance scan then runs
+    all the way through ``last_close`` and fails, and the pre-fix recovery
+    (``pos = opener.end()``) retried the SAME scan from the very next marker -
+    O(n) work per marker, O(n^2) overall. Measured pre-fix on this project's
+    venv: 0.09s at n=500, 6.4s at n=4000 (~4x per doubling, i.e. quadratic).
+    The fixed version should complete in roughly 0.02-0.05s, so 2.0s leaves a
+    two-orders-of-magnitude margin against box load while still catching the
+    6+s regression."""
+    hostile = ("<tool_call>{" * 4_000) + "}"
+    calls, elapsed = _timed(parse_tool_calls, hostile)
+    assert elapsed < 2.0, (
+        f"parse_tool_calls took {elapsed:.2f}s on 4,000 unbalanced markers "
+        "plus one stray closing brace - the per-marker balance rescan is "
+        "quadratic again")
+    assert calls == []

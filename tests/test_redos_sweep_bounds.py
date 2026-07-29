@@ -108,6 +108,34 @@ def test_top_level_objects_still_finds_real_objects():
     assert list(_top_level_objects('{"a": 1} then {')) == ['{"a": 1}']
 
 
+def test_top_level_objects_stays_linear_when_many_opens_never_balance():
+    """The gap ``unmatched_braces`` above does NOT cover.
+
+    ``"{" * 16_000`` (the existing witness) has NO closing brace anywhere, so
+    the fast path (``if i > last_close: return``) fires on the very first
+    unmatched opener and nothing after it is ever scanned - O(1) per
+    remaining character. That never exercises the OTHER failure path: a scan
+    from ``i`` that runs all the way through ``last_close`` and never
+    balances, even though a closing brace exists somewhere ahead.
+
+    ``"{" * n + "}"`` forces exactly that: n opens, one stray close far away.
+    ``last_close`` sits at the very end, so every one of the n opens passes
+    the ``i > last_close`` guard and pays a real scan through last_close that
+    fails, and the pre-fix recovery (``i += 1``) retried the SAME scan from
+    the very next character - O(n) per position, O(n^2) overall. Measured
+    pre-fix on this project's venv: 0.01s at n=500, 3.1s at n=8000 (~4x per
+    doubling, i.e. quadratic). Fixed, this should be near-instant, so 2.0s
+    leaves a wide margin against box load while still catching the 3+s
+    regression."""
+    hostile = ("{" * 8_000) + "}"
+    result, elapsed = _timed(parse_web_call, hostile)
+    assert elapsed < 2.0, (
+        f"parse_web_call took {elapsed:.2f}s on 8,000 unbalanced opens plus "
+        "one stray closing brace - the per-position balance rescan is "
+        "quadratic again")
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 #  rag/extract.py - reached by a crafted .docx, not by model output
 # ---------------------------------------------------------------------------
