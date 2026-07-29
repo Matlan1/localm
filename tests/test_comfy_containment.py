@@ -233,6 +233,131 @@ def test_contain_without_dir_warns_but_still_clears_history(stub, monkeypatch):
     assert "pidY" in stub.history_deleted          # but history WAS cleared
 
 
+class TestContainmentRejectsOutOfBoundsNames:
+    """CodeQL 116-119: every name below is parsed straight out of ComfyUI's own
+    HTTP JSON (/history outputs, the /upload/image reply), so a remote or
+    compromised ComfyUI - which sanitize_comfy_url permits over plaintext http on
+    a LAN or public api_url - controls it. pathlib gives full escape: an ABSOLUTE
+    component REPLACES the base, and a traversing subfolder walks out of it.
+
+    Two properties per vector, and BOTH matter:
+      1. the file outside the ComfyUI dirs SURVIVES (containment held), and
+      2. a WARNING is returned (AGENTS rule 5: a rejected name is never silently
+         skipped - containment must not report a success it did not achieve).
+
+    The pre-existing tests above all use well-formed names, so they cannot see
+    any of this.
+    """
+
+    @staticmethod
+    def _victim(tmp_path):
+        """A file OUTSIDE ComfyUI's output/ and input/ dirs. The stub's dirs are
+        tmp_path/comfy/{output,input}, so tmp_path/victim.txt is two levels up
+        from output/ - exactly what '../../victim.txt' reaches."""
+        v = tmp_path / "victim.txt"
+        v.write_text("do not delete me", encoding="utf-8")
+        return v
+
+    # EVERY vector resolves INSIDE tmp_path. A negative run of this file executes
+    # the deliberately-unconfined code for real, so a payload naming a REAL system
+    # path is a live deletion of that path, not a test. An earlier revision used
+    # the literals "C:/Windows/win.ini" and "/etc/passwd"; the absolute vector is
+    # now BUILT from tmp_path, which is itself absolute AND drive-qualified on
+    # Windows, so it exercises the identical escape (an absolute component
+    # REPLACES the base under pathlib) with the blast radius inside the fixture.
+    ABS = "<ABS_OUTSIDE>"
+
+    @pytest.mark.parametrize("subfolder,filename", [
+        ("", "../../victim.txt"),          # traversal in the filename
+        ("../..", "victim.txt"),           # traversal in the subfolder
+        ("", ABS),                         # absolute + drive-qualified
+        ("", ""),                          # collapses to the output dir itself
+    ])
+    def test_output_name_escape_is_refused_and_warned(
+            self, stub, tmp_path, subfolder, filename):
+        victim = self._victim(tmp_path)
+        if filename == self.ABS:
+            filename = str(victim)
+
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidEsc",
+            {"filename": filename, "subfolder": subfolder, "type": "output"},
+            comfy_output_dir=str(stub.output_dir),
+            delete_outputs=True,
+        )
+
+        assert victim.exists(), f"containment escaped: {subfolder}/{filename}"
+        assert victim.read_text(encoding="utf-8") == "do not delete me"
+        assert "WARNING" in warn, "a refused name must be surfaced, not skipped"
+        # The output dir itself must survive the '' case.
+        assert stub.output_dir.is_dir()
+
+    @pytest.mark.parametrize("uploaded", [
+        "../../victim.txt",
+        ABS,                               # absolute + drive-qualified, in tmp
+        "sub/../../../victim.txt",
+    ])
+    def test_uploaded_input_escape_is_refused_and_warned(
+            self, stub, tmp_path, uploaded):
+        victim = self._victim(tmp_path)
+        if uploaded == self.ABS:
+            uploaded = str(victim)
+
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidEsc2",
+            {"filename": "ok.png", "subfolder": "", "type": "output"},
+            comfy_output_dir=str(stub.output_dir),
+            uploaded_input=uploaded,
+            delete_outputs=True,
+        )
+
+        assert victim.exists(), f"containment escaped via uploaded_input: {uploaded}"
+        assert victim.read_text(encoding="utf-8") == "do not delete me"
+        assert "WARNING" in warn, "a refused name must be surfaced, not skipped"
+
+    def test_legitimate_nesting_still_deletes(self, stub):
+        """The fix must NOT break ComfyUI's normal nested output: `subfolder` is
+        a real feature, so confinement has to permit depth and reject only
+        escape. A regression here would silently stop containing real outputs."""
+        nested = stub.output_dir / "batch01"
+        nested.mkdir()
+        (nested / "ComfyUI_00007_.png").write_bytes(b"X")
+
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidNest",
+            {"filename": "ComfyUI_00007_.png", "subfolder": "batch01",
+             "type": "output"},
+            comfy_output_dir=str(stub.output_dir),
+            delete_outputs=True,
+        )
+
+        assert warn == "", f"legitimate nested output warned: {warn!r}"
+        assert not (nested / "ComfyUI_00007_.png").exists()
+
+    def test_symlinked_subfolder_pointing_outside_is_refused(self, stub, tmp_path):
+        """Lexical checks alone are not enough: a symlink INSIDE output/ that
+        points out of it turns a perfectly well-formed name into an escape. This
+        is why the helper asserts on the RESOLVED path, not just the string."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "victim.txt"
+        target.write_text("do not delete me", encoding="utf-8")
+        try:
+            (stub.output_dir / "link").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"symlink creation not permitted here: {e}")
+
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidLink",
+            {"filename": "victim.txt", "subfolder": "link", "type": "output"},
+            comfy_output_dir=str(stub.output_dir),
+            delete_outputs=True,
+        )
+
+        assert target.exists(), "symlinked subfolder escaped containment"
+        assert "WARNING" in warn
+
+
 def test_contain_skips_delete_for_temp_artifacts(stub):
     # type "temp" is auto-purged by ComfyUI; even when delete is requested we must
     # not error, and no warning.
