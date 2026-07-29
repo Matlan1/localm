@@ -4,7 +4,12 @@
 import pytest
 from pathlib import Path
 
-from localm.plugins.coder.prompts import detect_model_family, build_system_prompt
+from localm.plugins.coder.prompts import (
+    detect_model_family,
+    build_system_prompt,
+    build_subagent_system_prompt,
+    _prependable_leaf,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -166,3 +171,90 @@ def test_untrusted_content_rule_in_small_family():
     p = _prompt("phi3-mini")
     assert "UNTRUSTED CONTENT" in p
     assert "untrusted-external" in p
+
+
+# ---------------------------------------------------------------------------
+#  The "do not prepend the cwd folder name" clause (REC-CODER-GUI-PATH)
+#
+#  The clause tells the model not to repeat the folder name it was just shown.
+#  Two properties matter and neither was covered when it shipped: it must be
+#  PRESENT and name the right folder, and it must never name something the
+#  displayed cwd deliberately withheld. The second one has teeth: every other
+#  prompt test uses tmp_path, which can never be the home directory, so the
+#  account-name leak below was structurally invisible to the suite.
+# ---------------------------------------------------------------------------
+
+def _patch_home(monkeypatch, path):
+    """Point Path.home() at *path*. USERPROFILE is what expanduser reads on
+    Windows, HOME on POSIX; set both so the test is not platform-conditional."""
+    monkeypatch.setenv("USERPROFILE", str(path))
+    monkeypatch.setenv("HOME", str(path))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+
+
+def test_clause_names_the_folder_the_model_was_shown(tmp_path):
+    """A project outside the user's home is shown as a bare folder name, which
+    is the case the clause exists for: it must name that exact folder."""
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    p = build_system_prompt(proj, model_name="llama3-8b")
+    assert 'do not repeat "myproj"' in p
+    assert '"file.py" not "myproj/file.py"' in p
+
+
+def test_clause_present_for_small_family_too(tmp_path):
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    assert 'do not repeat "myproj"' in build_system_prompt(proj, model_name="phi3-mini")
+
+
+def test_cwd_at_home_does_not_leak_the_account_name(monkeypatch, tmp_path):
+    """cwd == the user's home directory. _display_cwd renders that as "~/.",
+    withholding the account name on purpose. The clause must not put it back.
+
+    Regression test: the original helper re-resolved the cwd independently and
+    returned Path(cwd).resolve().name, which for the home directory IS the
+    account name - so every prompt built from the home directory carried the
+    username. Running the coder from your own home directory is ordinary."""
+    home = tmp_path / "zz_account_name_zz"
+    home.mkdir()
+    _patch_home(monkeypatch, home)
+
+    p = build_system_prompt(home, model_name="llama3-8b")
+
+    assert "zz_account_name_zz" not in p
+    # The withholding is real, not an artifact of the folder simply being absent.
+    assert "Working directory: ~/." in p
+
+
+def test_subagent_brief_at_home_does_not_leak_the_account_name(monkeypatch, tmp_path):
+    """Same property on the sub-agent brief, which built the clause the same way."""
+    home = tmp_path / "zz_account_name_zz"
+    home.mkdir()
+    _patch_home(monkeypatch, home)
+
+    brief = build_subagent_system_prompt(home, role="explorer")
+
+    assert "zz_account_name_zz" not in brief
+
+
+def test_subagent_brief_names_the_folder_shown(tmp_path):
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    brief = build_subagent_system_prompt(proj, role="explorer")
+    assert 'do not repeat "myproj"' in brief
+
+
+@pytest.mark.parametrize("shown,expected", [
+    ("~/projects/proj", "proj"),   # under home: the leaf is a real folder
+    ("proj",            "proj"),   # outside home: shown as a bare name
+    ("~/.",             None),     # home itself: nothing to prepend, say nothing
+    ("",                None),
+    (".",               None),
+    ("..",              None),
+    ("D:\\",            None),     # bare drive root
+    ("/",               None),
+])
+def test_prependable_leaf_only_returns_a_plain_folder_name(shown, expected):
+    assert _prependable_leaf(shown) == expected
