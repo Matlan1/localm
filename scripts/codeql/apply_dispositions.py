@@ -12,6 +12,11 @@ sink line, so keying on either is how a dismissal silently detaches from the
 thing it was about; a function name survives that, but only if it is read from
 the revision the line number belongs to.
 
+What is POSTED is the group's `short` text (GitHub caps a dismissal comment at
+280 characters). The full reasoning stays in `justifications` in this repo,
+under version control where it can be reviewed and corrected; the short text
+names its group so an alert can be tied back to it.
+
 THE IMPORTANT PROPERTY: an alert whose function is not in the table is NEVER
 dismissed. It is listed as UNADJUDICATED and the exit code is non-zero. A tool
 that closed whatever it did not recognise would be the exact failure this whole
@@ -28,6 +33,8 @@ import sys
 from pathlib import Path
 
 REPO = "Matlan1/localm"
+# GitHub's hard cap on dismissed_comment; over it the PATCH 422s.
+COMMENT_LIMIT = 280
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
@@ -116,10 +123,22 @@ def main() -> int:
     dispositions = table["dispositions"]
     justifications = table["justifications"]
     reasons = table["reasons"]
+    short = table["short"]
 
-    missing = sorted(set(dispositions.values()) - (set(justifications) & set(reasons)))
+    missing = sorted(set(dispositions.values())
+                     - (set(justifications) & set(reasons) & set(short)))
     if missing:
-        print(f"BROKEN TABLE: no justification/reason for {missing}", file=sys.stderr)
+        print(f"BROKEN TABLE: no justification/reason/short for {missing}",
+              file=sys.stderr)
+        return 2
+    # GitHub rejects a dismissed_comment over 280 characters with a 422 (measured,
+    # not read off the docs). Checked for EVERY group up front rather than
+    # discovering it per alert mid-run: a partial sweep that dismissed some alerts
+    # and 422'd the rest is the state that is hardest to reason about afterwards.
+    too_long = {g: len(t) for g, t in short.items() if len(t) > COMMENT_LIMIT}
+    if too_long:
+        print(f"BROKEN TABLE: short text over {COMMENT_LIMIT} chars: {too_long}",
+              file=sys.stderr)
         return 2
     # GitHub accepts only these three. A typo would otherwise surface as a 422
     # per alert, mid-run, after some had already been dismissed.
@@ -144,7 +163,7 @@ def main() -> int:
         if group is None:
             unadjudicated.append(a)
         else:
-            planned.append((a, group, justifications[group], reasons[group]))
+            planned.append((a, group, short[group], reasons[group]))
 
     by_group: dict[str, int] = {}
     for _a, g, _c, _r in planned:

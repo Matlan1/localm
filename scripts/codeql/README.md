@@ -144,6 +144,14 @@ reported as UNADJUDICATED and the exit code is non-zero. A tool that closed
 whatever it did not recognise would defeat the point, which is that every closed
 alert had someone look at it.
 
+**GitHub caps `dismissed_comment` at 280 characters** and 422s above it (measured
+against the live API, not read off the docs: a 429-character comment was
+refused). So each group carries two texts. `short` is what gets POSTED and is
+length-checked for EVERY group before the first network call, so a table error
+cannot leave half the alerts dismissed and half 422'd. `justifications` is the
+full reasoning and stays here, in version control, where it can be reviewed and
+corrected; the short text names its group so an alert ties back to it.
+
 Each group's text is the justification posted to the alert, so it has to be true
 of every alert in that function. A function holding sinks of two kinds gets a
 comment covering both rather than the tidier of the two labels. Two groups are

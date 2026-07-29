@@ -111,5 +111,21 @@
     "plugin-swap-invariant": "false positive",
     "confinement-fixed-2026-07-29": "false positive",
     "weak-hash-generated-token": "false positive"
+  },
+  "_limit": "GitHub caps dismissed_comment at 280 characters (422 above it, measured). 'short' is what gets POSTED; 'justifications' is the full reasoning and lives here, in version control, where it can be reviewed and corrected. The short text must name its group so the two can be tied together from the alert.",
+  "short": {
+    "registry-path-chain": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+    "plugin-id-choke": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+    "inline-dominating": "False positive: the guard is inline in the sink's own function and dominates it (runs first on every path, no branch around it, raises). No cross-function traversal exists for a barrier to observe. See scripts/codeql/dispositions.json, group inline-dominating.",
+    "choke-point": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+    "confined-under": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
+    "authorization-gated": "Won't fix, by design: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. NOTE: keyless open mode passes those gates by construction. See scripts/codeql/dispositions.json, group authorization-gated.",
+    "operator-env": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+    "guarded-delete-model": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+    "guarded-delete-plugin": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
+    "model-lookup-gate": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
+    "plugin-swap-invariant": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+    "confinement-fixed-2026-07-29": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
+    "weak-hash-generated-token": "False positive: the only human-chosen secret, the owner key, goes through scrypt and its record declares that construction. Everything else hashed here is a generated 256-bit token or a failed guess. See scripts/codeql/dispositions.json, group weak-hash-generated-token."
   }
 }
