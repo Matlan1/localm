@@ -5,6 +5,31 @@ Out of the box only chat is active; setup lets the user (or the installer, or a
 script via --plugins/--all/--defaults) turn on the first-party plugins they want.
 Driven through Click's CliRunner against the real bundled store, with a throwaway
 LOCALM_HOME so installs land in tmp.
+
+EVERY setup invocation here passes --no-deps (or with_deps=False when calling the
+callback directly), and that is load-bearing, not tidiness.
+
+A throwaway LOCALM_HOME isolates the DATA dir. It does not isolate the
+INTERPRETER, and a plugin's pip extras go to the interpreter: `--all` includes
+voice, whose extra is faster-whisper, so this file used to run a real
+`uv pip install --python <the venv running the suite> faster-whisper>=1.2.1`.
+That is the isolation blind spot - the author isolated the obvious thing and the
+install went somewhere else entirely.
+
+The damage was not "a slow test". numpy arrives as a transitive dependency of
+faster-whisper, and WHILE THE WHEEL UNPACKS, site-packages/numpy exists with no
+__init__.py yet - a PEP 420 namespace package, so `import numpy` SUCCEEDS and
+hands back a module with no attributes. Any test in any other xdist worker that
+touched numpy inside that window died with
+`AttributeError: module 'numpy' has no attribute 'asarray'` from rag/store.py,
+hundreds of lines from the cause, and the install then completed and erased the
+evidence. It reddened windows CI at roughly 1 in 3 across unrelated branches for
+a day. Run locally, the same line installs into the developer's shared venv.
+
+The deps orchestration itself is covered in tests/test_plugin_deps_cli.py with
+_run_pip mocked, so nothing is lost by disabling it here. tests/conftest.py now
+BLOCKS an install aimed at the running interpreter, so a regression fails
+immediately, in the test that caused it, instead of somewhere else an hour later.
 """
 
 import pytest
@@ -30,7 +55,7 @@ def _installed():
 
 def test_setup_installs_named_plugins(home_env):
     from localm.cli import main
-    r = CliRunner().invoke(main, ["plugin", "setup", "--plugins", "web,rag"])
+    r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--plugins", "web,rag"])
     assert r.exit_code == 0, r.output
     inst = _installed()
     assert "web" in inst and "rag" in inst
@@ -39,7 +64,7 @@ def test_setup_installs_named_plugins(home_env):
 
 def test_setup_defaults_installs_recommended_set(home_env):
     from localm.cli import main
-    r = CliRunner().invoke(main, ["plugin", "setup", "--defaults"])
+    r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--defaults"])
     assert r.exit_code == 0, r.output
     inst = _installed()
     for n in ("coder", "rag", "web", "tts"):
@@ -49,7 +74,7 @@ def test_setup_defaults_installs_recommended_set(home_env):
 
 def test_setup_all_installs_every_first_party_plugin(home_env):
     from localm.cli import main
-    r = CliRunner().invoke(main, ["plugin", "setup", "--all"])
+    r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--all"])
     assert r.exit_code == 0, r.output
     inst = _installed()
     for n in ("coder", "image", "music", "video", "rag", "web", "voice", "tts", "mcp"):
@@ -68,7 +93,7 @@ def test_setup_non_interactive_shell_skips_without_flags(home_env):
 
 def test_setup_unknown_name_is_skipped_not_fatal(home_env):
     from localm.cli import main
-    r = CliRunner().invoke(main, ["plugin", "setup", "--plugins", "web,bogusplugin"])
+    r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--plugins", "web,bogusplugin"])
     assert r.exit_code == 0, r.output
     inst = _installed()
     assert "web" in inst
@@ -124,7 +149,7 @@ def test_interactive_reprompts_on_junk_then_installs(home_env, monkeypatch):
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     answers = iter(["ewew", "1"])   # junk, then the first plugin by index
     monkeypatch.setattr(cli.click, "prompt", lambda *a, **k: next(answers))
-    cli.plugin_setup.callback(None, False, False)
+    cli.plugin_setup.callback(None, False, False, with_deps=False)
     first = _available()[0].name
     assert first in _installed()
 
@@ -136,5 +161,5 @@ def test_interactive_blank_skips_without_reprompt(home_env, monkeypatch):
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     answers = iter([""])            # a single blank; a re-prompt would StopIteration
     monkeypatch.setattr(cli.click, "prompt", lambda *a, **k: next(answers))
-    cli.plugin_setup.callback(None, False, False)
+    cli.plugin_setup.callback(None, False, False, with_deps=False)
     assert _installed() in (set(), {"chat"})
