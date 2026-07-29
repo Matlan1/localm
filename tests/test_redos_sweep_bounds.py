@@ -47,22 +47,29 @@ def _timed(fn, *a, **kw):
 #  jobs/webtool.py - the second copy of the coder's tool-call patterns
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name, witness", [
+# The witnesses are built by a FACTORY and the params are named. Parametrizing
+# over the literal 50,000-character strings puts them in the pytest node id,
+# which pytest then exports as PYTEST_CURRENT_TEST - and Windows refuses an
+# environment variable over 32,767 characters, so every case ERRORS in teardown
+# with its assertions never evaluated. Caught by CI on both legs after I had
+# already fixed the identical thing in tests/test_redos_bounds.py and then
+# reintroduced it here.
+@pytest.mark.parametrize("name, make_witness", [
     # _THINK_RE: openers that never close. Pre-fix 1.22s.
-    ("think_openers", "<r >" * 8_000),
+    ("think_openers", lambda: "<r >" * 8_000),
     # _WRAP_RE: the adjacent-quantifier cubic. Pre-fix 30.0s at 4,000.
-    ("wrap_spaces", "<tool_call>" + " " * 4_000),
+    ("wrap_spaces", lambda: "<tool_call>" + " " * 4_000),
     # _top_level_objects: unmatched braces, one full scan each. Pre-fix 2.84s.
-    ("unmatched_braces", "{" * 16_000),
+    ("unmatched_braces", lambda: "{" * 16_000),
     # _FENCE_RE: the two adjacent [ \t]* quantifiers.
-    ("fence_tabs", "```" + "\t" * 50_000),
+    ("fence_tabs", lambda: "```" + "\t" * 50_000),
     # Wrapper markers with no closer anywhere.
-    ("wrap_openers", "<|tool_call>" * 5_000),
+    ("wrap_openers", lambda: "<|tool_call>" * 5_000),
 ])
-def test_parse_web_call_is_bounded_on_hostile_model_output(name, witness):
+def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
     """This runs on RAW MODEL OUTPUT in the jobs plugin, so every quantifier is
     reachable by whatever a poisoned page persuaded the model to emit."""
-    _, elapsed = _timed(parse_web_call, witness)
+    _, elapsed = _timed(parse_web_call, make_witness())
     assert elapsed < BUDGET, f"parse_web_call took {elapsed:.2f}s on {name}"
 
 
@@ -109,15 +116,16 @@ _DOCX_ATTR_SUB = re.compile(r"<w:(?:tab|br|cr)\b[^<>]*/?>")
 _DOCX_RUN_FIND = re.compile(r"<w:t\b[^<>]*>([^<]*)</w:t>")
 
 
-@pytest.mark.parametrize("pattern, witness, label", [
-    (_DOCX_ATTR_SUB, "<w:br" * 20_000, "unclosed <w:br openers (97 KB)"),
-    (_DOCX_RUN_FIND, "<w:t" * 20_000, "unclosed <w:t openers (78 KB)"),
+@pytest.mark.parametrize("label, pattern, make_witness", [
+    ("attr_sub_unclosed_br", _DOCX_ATTR_SUB, lambda: "<w:br" * 20_000),
+    ("run_find_unclosed_t", _DOCX_RUN_FIND, lambda: "<w:t" * 20_000),
 ])
-def test_docx_tag_scans_are_bounded(pattern, witness, label):
+def test_docx_tag_scans_are_bounded(label, pattern, make_witness):
     """Pre-fix 16.21s and 1.69s. The attribute class was ``[^>]*``: bounded only
     by ``>``, so a document with no ``>`` after an opener ran to end-of-text and
     backtracked once per opener. Excluding ``<`` as well stops each attempt at
     the next tag, which XML guarantees is where an attribute value ends."""
+    witness = make_witness()
     _, elapsed = _timed(lambda: pattern.findall(witness))
     assert elapsed < BUDGET, f"{label} took {elapsed:.2f}s"
 

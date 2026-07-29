@@ -41,7 +41,8 @@ import time
 import pytest
 
 from localm.plugins.coder.parser import (
-    _RE_FENCE_CLOSE, _RE_FENCE_OPEN, _RE_TOOL_MARKER, _iter_marker_variant_calls, _RE_VARIANT, _RE_XML_CLOSE, _RE_XML_OPEN,
+    _RE_FENCE_CLOSE, _RE_FENCE_OPEN, _RE_TOOL_MARKER, _RE_XML_CLOSE, _RE_XML_OPEN,
+    _iter_marker_variant_calls,
     _iter_fenced_blocks, _iter_xml_tool_calls, _pair_delimited, _parse_gemma_args,
     _try_parse_body,
     parse_tool_calls, strip_xml_tool_calls)
@@ -129,8 +130,8 @@ def test_xml_witnesses_do_not_grow_superlinearly(prefix):
     passed a 41ms quadratic. 0.005s is below both.
 
     Deliberately NO absolute budget assertion here. At these sizes ordinary LINEAR
-    work legitimately approaches 0.1s - _RE_VARIANT's greedy ``\\s*`` backtracks
-    once per space when the body never starts, which is linear but not free - so an
+    work legitimately approaches 0.1s - the marker-variant pass still walks every
+    marker and every space once, which is linear but not free - so an
     absolute bound would go red on correct code. BUDGET belongs at the witness
     sizes, where the other tests apply it; superlinearity is what this test is for,
     and a ratio is the only thing that measures it.
@@ -283,13 +284,24 @@ def test_frame_marker_defanging_is_unchanged_from_the_prefix_pattern():
                 == _LEGACY_FRAME.sub(r"&lt;\1", text)), f"diverged on {text!r}"
 
 
-def test_variant_body_cannot_span_a_marker():
-    """The tempering, stated structurally: the body of a marker-variant call is
-    the JSON BETWEEN two markers, so it can never swallow one. That is what stops
-    a failed attempt scanning to end-of-text."""
-    assert _RE_VARIANT.search('<|tool_call>{"a": 1}<tool_call|>') is not None
-    # A marker inside the body: no match, rather than a scan across it.
-    assert _RE_VARIANT.search('<|tool_call>{"a":"<|tool_call>"}<tool_call|>') is None
+def test_variant_body_is_brace_matched_not_pattern_matched():
+    """The marker-variant body is delimited by BRACE BALANCE, not by a pattern.
+
+    This assertion is the reverse of the one it replaces, deliberately. The first
+    fix tempered a regex so the body could not span a marker - which bounded the
+    cost and silently dropped a real case, since the coder editing its own parser
+    docs emits a write_file whose CONTENT contains ``<tool_call>``. A
+    string-aware brace scan has no such trade: it knows the marker is inside a
+    JSON string, so the call is recovered AND the scan stays bounded.
+    """
+    ordinary = list(_iter_marker_variant_calls('<|tool_call>{"a": 1}<tool_call|>'))
+    assert len(ordinary) == 1 and ordinary[0][3] == '{"a": 1}'
+
+    # A marker inside a JSON STRING is part of the body, not a delimiter.
+    with_marker = list(_iter_marker_variant_calls(
+        '<|tool_call>{"a":"<|tool_call>"}<tool_call|>'))
+    assert len(with_marker) == 1, "a marker inside a string value must not end the body"
+    assert with_marker[0][3] == '{"a":"<|tool_call>"}'
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +353,9 @@ _RE_FENCE_LEGACY = re.compile(
      lambda s: [m.span() for m in _RE_XML_LEGACY.finditer(s)],
      lambda s: list(_iter_xml_tool_calls(s)),
      lambda n: "<tool_call>a" + " " * n, 1_500, 200_000),
-    ("parser._RE_VARIANT",
+    ("parser marker-variant",
      lambda s: [m.span() for m in _LEGACY_VARIANT.finditer(s)],
-     lambda s: [m.span() for m in _RE_VARIANT.finditer(s)],
+     lambda s: list(_iter_marker_variant_calls(s)),
      lambda n: "<tool_call>{{" * n, 6_000, 96_000),
     ("parser._RE_FENCE",
      lambda s: [m.span() for m in _RE_FENCE_LEGACY.finditer(s)],
