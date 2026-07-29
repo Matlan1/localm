@@ -943,28 +943,116 @@ def _torch_gpu_probe_known_doomed() -> bool:
     return True
 
 
+# How long the out-of-process torch enumeration may take before it is abandoned
+# and the probe falls through to nvidia-smi. A cold torch import is MEASURED at
+# ~2.7s on a healthy box; the ceiling is generous because overrunning costs the
+# caller a real reading, but finite because an unbounded wait is what the old
+# in-process import effectively had. A box whose torch CUDA init genuinely wedges
+# (an arch the bundled build has no kernels for has been seen taking 73s) now
+# degrades to nvidia-smi after this instead of hanging startup.
+_ISOLATED_TORCH_PROBE_TIMEOUT = 20.0
+
+
+def _torch_is_resident() -> bool:
+    """True when torch is ALREADY imported in this process, so enumerating here
+    is a free ``sys.modules`` cache hit that takes no OS loader lock."""
+    import sys
+    return "torch" in sys.modules
+
+
+def _torch_gpus_resident() -> list:
+    """torch's device list, read IN THIS PROCESS. Only safe to call when
+    :func:`_torch_is_resident` - see :mod:`localm._torch_gpu_probe` for why a
+    COLD import here freezes every thread in the process."""
+    import torch
+    if not torch.cuda.is_available():
+        return []
+    out = []
+    for i in range(torch.cuda.device_count()):
+        try:
+            free, total = torch.cuda.mem_get_info(i)
+        except Exception:
+            continue   # one device failing to report never hides the rest
+        try:
+            name = torch.cuda.get_device_name(i)
+        except Exception:
+            name = f"GPU {i}"
+        out.append({"index": i, "name": name,
+                    "total": int(total), "free": int(free)})
+    return out
+
+
+def _torch_gpus_isolated() -> list:
+    """torch's device list read from a CHILD process, for the case where torch
+    is not yet resident and importing it HERE would take the Windows OS loader
+    lock and block thread creation process-wide, stalling the event loop
+    (issue #833; full mechanism and measurements in
+    :mod:`localm._torch_gpu_probe`).
+
+    Returns the device list, or ``[]`` when the child cannot answer - identical
+    to what an in-process failure produced, so the caller falls through to
+    nvidia-smi exactly as before. The child inherits this process's environment,
+    so ``CUDA_VISIBLE_DEVICES`` selects and orders devices identically and the
+    TORCH index space :func:`list_gpus` promises is preserved.
+
+    Spawned via ``interpreter_for_localm_children()``, NOT bare
+    ``sys.executable``: inside a Windows multiprocessing-spawn worker the latter
+    is the BASE interpreter, whose children get no venv context and so cannot
+    import torch or localm at all (the same trap documented on
+    ``_loader._spawn_probe_daemon``)."""
+    import json
+    import subprocess
+    from localm._mp_spawn import interpreter_for_localm_children
+    try:
+        proc = subprocess.run(
+            [interpreter_for_localm_children(), "-u", "-m",
+             "localm._torch_gpu_probe"],
+            capture_output=True, text=True,
+            timeout=_ISOLATED_TORCH_PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # Surfaced, not silenced (rule 5): this is the wedged-driver case, and a
+        # silent [] here is indistinguishable from "this box has no GPU".
+        logger.debug("list_gpus: out-of-process torch probe did not answer "
+                     "within %.1fs; falling through to nvidia-smi",
+                     _ISOLATED_TORCH_PROBE_TIMEOUT)
+        return []
+    except Exception as e:
+        logger.debug("list_gpus: could not spawn the out-of-process torch probe "
+                     "(%s); falling through to nvidia-smi", type(e).__name__)
+        return []
+    err = (proc.stderr or "").strip()
+    try:
+        devices = json.loads((proc.stdout or "").strip() or "[]")
+        if not isinstance(devices, list) or not all(
+                isinstance(d, dict) and isinstance(d.get("index"), int)
+                and isinstance(d.get("total"), int)
+                and isinstance(d.get("free"), int)
+                for d in devices):
+            raise ValueError("torch probe reply has the wrong shape")
+    except Exception as e:
+        logger.debug("list_gpus: out-of-process torch probe reply unusable "
+                     "(%s)%s; falling through to nvidia-smi", e,
+                     f"; child said: {err[:200]}" if err else "")
+        return []
+    if err:
+        # The child prints its own failure cause here before answering []. That
+        # is the reason the reading is missing, so it must not die with the
+        # discarded stream.
+        logger.debug("list_gpus: out-of-process torch probe reported: %s",
+                     err[:200])
+    return devices
+
+
 def _list_gpus_probe() -> list:
     """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
     this one has no timeout and can wedge on a busy/broken driver."""
     if not _torch_gpu_probe_known_doomed():
         try:
-            import torch
-            if torch.cuda.is_available():
-                out = []
-                for i in range(torch.cuda.device_count()):
-                    try:
-                        free, total = torch.cuda.mem_get_info(i)
-                    except Exception:
-                        continue   # one device failing to report never hides the rest
-                    try:
-                        name = torch.cuda.get_device_name(i)
-                    except Exception:
-                        name = f"GPU {i}"
-                    out.append({"index": i, "name": name,
-                                "total": int(total), "free": int(free)})
-                if out:
-                    _apply_device_global_free(out)
-                    return out
+            out = _torch_gpus_resident() if _torch_is_resident() \
+                else _torch_gpus_isolated()
+            if out:
+                _apply_device_global_free(out)
+                return out
         except Exception:
             pass
 
