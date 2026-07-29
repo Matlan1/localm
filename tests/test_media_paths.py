@@ -370,8 +370,17 @@ def test_upload_image_refuses_a_non_image_before_transmitting(tmp_path, monkeypa
     monkeypatch.setattr(cc.urllib.request, "urlopen", _no_socket)
     monkeypatch.setattr(cc.urllib.request, "Request", _no_socket)
 
-    with pytest.raises(ValueError, match="not an image"):
+    with pytest.raises(ValueError, match="not in a format this upload supports"):
         cc._upload_image(secret, "http://127.0.0.1:8188")
+
+    # The refusal must NOT claim the file "is not an image". This allowlist is
+    # narrower than "image" - localm accepts .heic/.heif elsewhere (gui/web.py
+    # _SHARE_IMAGE_EXTS, an ordinary iPhone photo), and those land here too. A
+    # user told their photo is not an image debugs the wrong thing. Asserted
+    # rather than left to the wording, because the wording is the defect.
+    with pytest.raises(ValueError) as ei:
+        cc._upload_image(secret, "http://127.0.0.1:8188")
+    assert "is not an image" not in str(ei.value)
 
 
 def test_upload_image_transmits_a_real_webp_end_to_end(tmp_path, monkeypatch):
