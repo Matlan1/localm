@@ -276,6 +276,40 @@ def revoke_by_key_hash(key_hash: Optional[str]) -> int:
         return 0
 
 
+def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
+    """Repoint every session recorded under *old_hash* to *new_hash*. Returns the
+    count changed. Never raises on a missing/unreadable store.
+
+    Used once when the owner key's identity moves from the legacy unsalted digest
+    to its salted KDF derivation (CodeQL 88): without this, a session minted
+    before the upgrade would keep reporting the OLD identity, so a job created
+    from that cookie would stop being recognised as the same principal presenting
+    the key as a bearer - the job-ownership parity ``create``'s docstring
+    promises. Re-linking is the transparent half of that upgrade: the session
+    stays valid and the user is never signed out.
+
+    This changes an IDENTIFIER, never a credential: ``id_hash`` (what actually
+    authenticates a cookie) is untouched, and an ADMIN session is exempt from
+    ``key_hash_live`` anyway, so a session's validity does not depend on it."""
+    if not old_hash or not new_hash or old_hash == new_hash:
+        return 0
+    try:
+        with _LOCK:
+            records = _load()
+            changed = 0
+            for r in records:
+                if r.get("key_hash") == old_hash:
+                    r["key_hash"] = new_hash
+                    changed += 1
+            if changed:
+                _save(records)
+            return changed
+    except (OSError, ValueError) as e:
+        # Surfaced by the caller, which explains the user-visible consequence.
+        logger.warning("could not re-link sessions to a new key identity (%s)", e)
+        return 0
+
+
 def revoke_all() -> int:
     """Delete EVERY session (log out all devices). Returns the count removed. Used
     by the explicit 'clear owner key' / 'sign out everywhere' flows."""
