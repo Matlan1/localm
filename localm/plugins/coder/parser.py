@@ -86,28 +86,16 @@ _RE_XML_CLOSE = re.compile(r"</tool_call>", re.IGNORECASE)
 # the wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or
 # <|/tool_call>, an optional "call:NAME" prefix (sometimes the literal
 # "call:tool_call"), and whitespace before the JSON. The JSON body itself is
-# usually valid - only the wrapper is broken - so accept any delimiter
-# variant and recover the call from the body.
-# ``_MARKER`` is shared with the body's tempered dot below: the body may not span
-# a marker, so a failed attempt stops at the NEXT marker instead of scanning to
-# end-of-text. Without that, every marker in the text starts an O(n) scan and the
-# whole pass is quadratic - measured 0.16 / 0.59 / 2.08s at 1250 / 2500 / 5000
-# repetitions of ``'<tool_call>{{'`` (65 KB at 5000), which never completes a
-# match because no ``}`` is ever reached; tempered, the same input is 0.0016s.
-# The tempering
-# also states the format's real rule: the body is the JSON BETWEEN two markers.
-# It does drop one exotic case the old pattern accepted by accident, a marker
-# literal inside a JSON string value (``<|tool_call>{"x":"<|tool_call>"}...``);
-# that stays visible to looks_like_tool_attempt(), which fires the repair turn.
-_MARKER = r"<\|?/?tool_call\|?>"
-_RE_VARIANT = re.compile(
-    _MARKER + r"\s*"
-    r"(?:call:(?P<name>\w+)\s*)?"
-    r"(?P<body>\{(?:(?!" + _MARKER + r").)*?\})"
-    r"\s*" + _MARKER,
-    re.DOTALL,
-)
-
+# usually valid - only the wrapper is broken - so accept any delimiter variant
+# and recover the call from the body.
+#
+# There is deliberately NO regex for this any more. Every regex form of it was
+# either quadratic (a lazy `\{.*?\}` body scans to end-of-text from every marker
+# when no closing brace follows: measured 2.08s on 5,000 repetitions of
+# `'<tool_call>{{'`) or, once tempered to stop at the next marker, unable to
+# accept a body that legitimately CONTAINS one. The two cannot be reconciled in
+# a pattern that treats the body as opaque text, so the body is brace-matched
+# instead - see _iter_marker_variant_calls.
 # Fenced code block, matched as an OPENER paired with the next CLOSER rather than
 # as one opener-body-closer regex. The optional language tag tells an explicit
 # tool fence (```tool_call / ```tool_code) from an ambiguous one (```json or a
@@ -138,6 +126,8 @@ _EXPLICIT_FENCE_LANGS = frozenset({"tool_call", "tool_code", "tool"})
 # to fire a one-shot "reformat your tool call" repair turn instead of printing
 # the broken call as the final answer.
 _RE_TOOL_MARKER = re.compile(r"<\|?/?tool_call\|?>", re.IGNORECASE)
+# The optional "call:NAME" prefix some finetunes put before the JSON body.
+_RE_CALL_PREFIX = re.compile(r"call:(\w+)")
 _RE_TOOL_FENCE = re.compile(r"```[ \t]*(?:tool_call|tool_code)\b", re.IGNORECASE)
 _RE_NAME_KEY = re.compile(r"""["']name["']\s*:""")
 _RE_ARGS_KEY = re.compile(r"""["'](?:args|arguments)["']\s*:""")
@@ -358,40 +348,120 @@ def _iter_fenced_blocks(text: str):
                text[opener.end():closer.start()])
 
 
-def _iter_top_level_json_objects(text: str):
+def _object_end_from(text: str, i: int, last_close: int) -> int:
+    r"""Index just past the brace-balanced ``{...}`` starting at *i*, or -1.
+
+    Scanned LOCALLY from *i*, with string state local to this object. A global
+    brace map was tried first and is wrong: the text around a tool call is model
+    PROSE, and an unmatched ``{`` in prose (``use { to open``) leaves the map's
+    depth non-zero, so a later stray quote enters string mode and silently voids
+    every brace after it. A differential fuzz caught that - it lost calls the old
+    pattern found, on exactly that shape.
+
+    *last_close* is the index of the final ``}`` in the whole text, computed once
+    by the caller. Without it, a body that never balances costs a scan to
+    end-of-text FROM EVERY MARKER, which is the quadratic this whole change
+    exists to remove (measured 19.3s on 5,000 repetitions of ``'<tool_call>{{'``,
+    worse than the 2.08s regex it replaced). With it, a text containing no
+    closing brace after *i* costs nothing at all.
+    """
+    if i >= len(text) or text[i] != "{" or last_close < i:
+        return -1
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(i, last_close + 1):
+        c = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            elif c == chr(10):
+                # JSON forbids a raw newline inside a string, so this was never a
+                # string - recover rather than swallowing the rest of the text.
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+def _iter_top_level_json_objects(text: str, last_close: int = None):
     """Yield ``(start, end, substring)`` for each brace-balanced top-level
-    ``{...}`` region. String literals are tracked so braces inside strings do
-    not confuse the depth count. Used to recover a bare JSON tool call written
-    with no wrapper at all."""
+    ``{...}`` region. Used to recover a bare JSON tool call written with no
+    wrapper at all."""
+    if last_close is None:
+        last_close = text.rfind("}")
     i, n = 0, len(text)
     while i < n:
         if text[i] != "{":
             i += 1
             continue
-        depth = 0
-        in_str = False
-        esc = False
-        j = i
-        while j < n:
-            c = text[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    yield i, j + 1, text[i:j + 1]
-                    break
+        end = _object_end_from(text, i, last_close)
+        if end < 0:
+            # Unbalanced from here: the old scan-based form advanced past the
+            # end of text at this point, so stopping matches it exactly.
+            return
+        yield i, end, text[i:end]
+        i = end
+
+
+def _iter_marker_variant_calls(text: str, last_close: int = None):
+    r"""Yield ``(start, end, name, body)`` for the mangled ``<|tool_call>`` dialects.
+
+    Finetunes emit ``<|tool_call>``, ``<tool_call|>``, ``<|/tool_call>`` and an
+    optional ``call:NAME`` prefix. Structured as marker -> balanced body ->
+    marker rather than one regex, for two reasons that pull the same way:
+
+    COST. The regex form ``MARKER \s* (call:\w+)? \{.*?\} \s* MARKER`` scans to
+    end-of-text from EVERY marker when no closing brace follows - quadratic, and
+    measured at 2.08s on 5,000 repetitions of ``'<tool_call>{{'``. Here each
+    marker is visited once and the body scan is bounded by the object itself.
+
+    CORRECTNESS. The regex could not allow a marker inside the body without
+    reintroducing that scan, so the shipped fix forbade it - which silently
+    dropped a real case: the coder editing its own parser docs or test fixtures
+    emits a write_file whose CONTENT contains ``<tool_call>``. A brace-balanced,
+    string-aware scan has no such trade: it knows the marker is inside a string.
+    """
+    if last_close is None:
+        last_close = text.rfind("}")
+    pos = 0
+    while True:
+        opener = _RE_TOOL_MARKER.search(text, pos)
+        if opener is None:
+            return
+        i = opener.end()
+        while i < len(text) and text[i].isspace():
+            i += 1
+        name = None
+        prefix = _RE_CALL_PREFIX.match(text, i)
+        if prefix is not None:
+            name = prefix.group(1)
+            i = prefix.end()
+            while i < len(text) and text[i].isspace():
+                i += 1
+        body_end = _object_end_from(text, i, last_close)
+        if body_end < 0:
+            pos = opener.end()
+            continue
+        j = body_end
+        while j < len(text) and text[j].isspace():
             j += 1
-        i = j + 1
+        closer = _RE_TOOL_MARKER.match(text, j)
+        if closer is None:
+            pos = opener.end()
+            continue
+        yield opener.start(), closer.end(), name, text[i:body_end]
+        pos = closer.end()
 
 
 def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCall]:
@@ -442,27 +512,29 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         if explicit or (tool_names is not None and parsed[0] in tool_names):
             _accept(parsed[0], parsed[1], text[start:end], start, end)
 
+    # The final "}" in the response, computed once and shared by passes 3 and 4:
+    # it bounds every body scan, so text with no closing brace costs nothing.
+    _last_close = text.rfind("}")
+
     # 3. Marker-variant wrappers (mangled <|tool_call> dialects)
-    for m in _RE_VARIANT.finditer(text):
-        start, end = m.span()
+    for start, end, prefix_name, raw_body in _iter_marker_variant_calls(text, _last_close):
         if _overlaps(start, end):
             continue
-        prefix_name = m.group("name")
         # "call:tool_call" is wrapper noise, not a tool name
         if prefix_name and prefix_name.lower() == "tool_call":
             prefix_name = None
-        body = m.group("body").replace('<|"|>', '"')   # Gemma quote tokens
+        body = raw_body.replace('<|"|>', '"')          # Gemma quote tokens
         parsed = _try_parse_body(body, prefix_name)
         if parsed is None and prefix_name:
             # Bare-key args form: {path: "x"} with the name in the prefix
             args = _parse_gemma_args(body)
             parsed = (prefix_name, args) if args is not None else None
         if parsed is not None:
-            _accept(parsed[0], parsed[1], m.group(0), start, end)
+            _accept(parsed[0], parsed[1], text[start:end], start, end)
 
     # 4. Bare top-level JSON object - name-gated, opt-in via tool_names
     if tool_names is not None:
-        for start, end, chunk in _iter_top_level_json_objects(text):
+        for start, end, chunk in _iter_top_level_json_objects(text, _last_close):
             if _overlaps(start, end):
                 continue
             parsed = _try_parse_body(chunk, None)

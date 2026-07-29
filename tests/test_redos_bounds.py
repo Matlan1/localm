@@ -41,8 +41,9 @@ import time
 import pytest
 
 from localm.plugins.coder.parser import (
-    _RE_FENCE_CLOSE, _RE_FENCE_OPEN, _RE_VARIANT, _RE_XML_CLOSE, _RE_XML_OPEN,
-    _iter_fenced_blocks, _iter_xml_tool_calls, _pair_delimited, _try_parse_body,
+    _RE_FENCE_CLOSE, _RE_FENCE_OPEN, _RE_TOOL_MARKER, _iter_marker_variant_calls, _RE_VARIANT, _RE_XML_CLOSE, _RE_XML_OPEN,
+    _iter_fenced_blocks, _iter_xml_tool_calls, _pair_delimited, _parse_gemma_args,
+    _try_parse_body,
     parse_tool_calls, strip_xml_tool_calls)
 from localm.textguard import _FRAME_RE, neutralise
 
@@ -636,3 +637,102 @@ def test_pairing_halves_are_individually_linear(
     _, elapsed = _timed(lambda: list(pattern.finditer(hostile)))
     assert elapsed < BUDGET, (
         f"{pattern_name} on {witness_name} took {elapsed:.2f}s")
+
+
+# ---------------------------------------------------------------------------
+#  The marker-variant body: brace-matched, not pattern-matched
+# ---------------------------------------------------------------------------
+#
+# The `<|tool_call>` finetune dialect used to be one regex. Every regex form of
+# it forced a choice between two failures, which is why it is now a scan:
+#   - a lazy `\{.*?\}` body scans to end-of-text from EVERY marker when no
+#     closing brace follows (quadratic: 2.08s on 5,000 reps of '<tool_call>{{'),
+#   - and tempering it to stop at the next marker fixes that but silently drops
+#     a body that legitimately CONTAINS a marker.
+# A brace-matched, string-aware scan has neither problem: it knows the marker is
+# inside a JSON string. The first attempt at that scan was ALSO quadratic (19.3s,
+# worse than the regex) because it walked forward per marker; the single-pass
+# brace map is what makes it linear.
+
+_LEGACY_VARIANT = re.compile(
+    r"<\|?/?tool_call\|?>\s*(?:call:(?P<name>\w+)\s*)?(?P<body>\{.*?\})"
+    r"\s*<\|?/?tool_call\|?>", re.DOTALL)
+
+
+@pytest.mark.parametrize("content", [
+    "docs: open with <tool_call> and close with </tool_call>",
+    "the |-dialect looks like <|tool_call> in the wild",
+    "a closing marker alone: <tool_call|>",
+])
+def test_variant_body_may_contain_a_tool_call_marker(content):
+    """The case the tempered regex dropped, and the reason it matters here.
+
+    Ask the coder to edit parser.py's own module docstring - which really does
+    carry these markers - or its test fixtures, and it emits a write_file whose
+    CONTENT contains one. That is ordinary work in this repo, not an exotic
+    input, so the parser has to survive it."""
+    import json as _json
+    body = _json.dumps({"path": "parser.py", "content": content})
+    calls = parse_tool_calls(f"<|tool_call>call:write_file{body}<tool_call|>")
+    assert len(calls) == 1, f"lost the call when the body contained a marker: {content!r}"
+    assert calls[0].name == "write_file"
+    assert calls[0].args["content"] == content
+
+
+def test_variant_scan_never_loses_a_call_the_legacy_regex_recovered():
+    r"""Differential fuzz against the pre-fix pattern, compared on ACCEPTED CALLS.
+
+    Not on raw spans, and the difference is the finding rather than a convenience:
+    the old regex's "body" was never a balanced object. Its lazy ``\{.*?\}`` ran
+    from a ``{`` to whatever ``}`` happened to precede a marker, so it produced
+    bodies like ``{"b": {"c": 2}}}`` (an extra brace) and ``{"a": 1} {"b": 2}``
+    (two objects). Those never parsed as JSON, so they were never calls. Holding
+    the replacement to span-equality would be demanding bug-compatibility with
+    text the old code could not use either.
+
+    The property that actually matters is that nothing REAL is lost, so that is
+    what is asserted. The alphabet deliberately includes ``use {`` to open: an
+    unmatched brace in prose is what broke an earlier global-brace-map attempt,
+    and without that token the fuzz reported clean while losing calls.
+    """
+    rnd = random.Random(20260729)
+    alphabet = ["<|tool_call>", "<tool_call|>", "<tool_call>", "</tool_call>",
+                "call:write_file", "call:read_file", ' {"a": 1} ', '{"b": {"c": 2}}',
+                "{", "}", " ", chr(10), "prose", '"', "{{", "use { to open"]
+
+    def accepted(name, body):
+        body = body.replace('<|"|>', '"')
+        parsed = _try_parse_body(body, name)
+        if parsed is None and name:
+            args = _parse_gemma_args(body)
+            parsed = (name, args) if args is not None else None
+        return parsed
+
+    compared = 0
+    for _ in range(20_000):
+        text = "".join(rnd.choice(alphabet) for _ in range(rnd.randint(1, 10)))
+        legacy = [(m.group("name"), m.group("body"))
+                  for m in _LEGACY_VARIANT.finditer(text)]
+        if any(_RE_TOOL_MARKER.search(b or "") for _n, b in legacy):
+            continue          # marker-in-body: the intended change, tested above
+        legacy_calls = [c for c in (accepted(n, b) for n, b in legacy) if c]
+        got_calls = [c for c in (accepted(n, b)
+                                 for _s, _e, n, b in _iter_marker_variant_calls(text)) if c]
+        for call in legacy_calls:
+            assert call in got_calls, f"lost a real call on {text!r}: {call}"
+        compared += 1
+    assert compared > 1_000, f"fuzz compared only {compared} cases - alphabet is wrong"
+
+
+@pytest.mark.parametrize("witness, size", [
+    ("<tool_call>{{", 5_000),
+    ("<tool_call>", 5_000),
+    ("{", 200_000),
+])
+def test_brace_matched_variant_pass_stays_linear(witness, size):
+    """The first brace-matched attempt was 19.3s here - WORSE than the 2.08s
+    regex it replaced - because it walked forward from every marker. Guarding the
+    property, not the implementation: a per-marker scan reintroduces it."""
+    hostile = witness * size
+    _, elapsed = _timed(parse_tool_calls, hostile)
+    assert elapsed < BUDGET, f"{witness!r}*{size} took {elapsed:.2f}s"
