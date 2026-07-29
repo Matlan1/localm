@@ -274,7 +274,7 @@ class TestPartialParseSurfacing:
         return [
             m for m in agent._messages
             if m["role"] == "user"
-            and "further occurrences this task will not be reported individually" in str(m.get("content", ""))
+            and "further occurrences will not be reported individually" in str(m.get("content", ""))
         ]
 
     def test_sibling_success_does_not_hide_an_unrecoverable_call(self, tmp_path):
@@ -377,13 +377,21 @@ class TestPartialParseSurfacing:
                    side_effect=lambda *a, **k: debug_calls.append(a)):
             result = agent.run_task("read two files repeatedly")
         assert result == "Done."
-        # 1 announcement + (n_turns - cap - 1) further silent-to-the-model
-        # turns must each still produce a debug trace - that is the whole
-        # point being tested, not just "some logging happened somewhere".
+        # Filtered to the PER-DROP trace specifically (its own distinct
+        # message), not "any debug call" - patch("...logger.debug") catches
+        # every debug line in the process, including the cap announcement's
+        # own line, so an unfiltered count could pass on a regression that
+        # logs only the first further drop and then goes quiet (1 + 1 == the
+        # loose >= 2 bound this replaced would still have accepted).
+        per_drop_traces = [
+            a for a in debug_calls
+            if "notice cap already reached" in str(a[0])
+        ]
         still_silent_turns = n_turns - _MAX_TOOL_REPAIRS - 1
-        assert len(debug_calls) >= still_silent_turns >= 1, (
-            f"expected at least {still_silent_turns} debug trace(s) for the "
-            f"drops that stopped being reported to the model, got {len(debug_calls)}")
+        assert len(per_drop_traces) == still_silent_turns, (
+            f"expected exactly {still_silent_turns} per-drop debug trace(s) "
+            f"for the drops that stopped being reported to the model, got "
+            f"{len(per_drop_traces)} (out of {len(debug_calls)} total debug calls)")
 
     def test_no_partial_notice_when_everything_parsed(self, tmp_path):
         agent = _make_agent(tmp_path)

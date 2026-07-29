@@ -358,9 +358,9 @@ class _LoopMixin:
                         result_blocks.append(
                             "[tool-call format] Another part of this response "
                             "looked like an unparseable tool call, same as "
-                            "the earlier notice(s) this turn - further "
-                            "occurrences this task will not be reported "
-                            "individually, but each one is still a call that "
+                            "the earlier notice(s) this task - further "
+                            "occurrences will not be reported individually "
+                            "from here on, but each one is still a call that "
                             "did NOT run."
                         )
                         from localm.debuglog import logger
