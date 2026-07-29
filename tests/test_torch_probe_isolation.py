@@ -87,36 +87,146 @@ class TestIsolatedProbeDegradesHonestly:
         monkeypatch.setattr(subprocess, "run", MagicMock(**kw))
         return discover._torch_gpus_isolated()
 
-    def test_timeout_falls_through_and_is_logged(self, monkeypatch, caplog):
+    def test_timeout_raises_wedged_not_a_plain_cannot_ask(self, monkeypatch, caplog):
+        """A timeout means TORCH is wedging, which must never be retried
+        in-process. It is signalled distinctly for that reason."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
-        out = self._run(monkeypatch,
-                        side_effect=subprocess.TimeoutExpired("py", 20.0))
-        assert out == []
+        monkeypatch.setattr(subprocess, "run", MagicMock(
+            side_effect=subprocess.TimeoutExpired("py", 10.0)))
+        with pytest.raises(discover._IsolatedTorchWedged):
+            discover._torch_gpus_isolated()
         assert "did not answer" in caplog.text
 
     def test_spawn_failure_falls_through_and_is_logged(self, monkeypatch, caplog):
         caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, side_effect=OSError("no interpreter"))
-        assert out == []
+        assert out is None
         assert "could not spawn" in caplog.text
 
     def test_malformed_reply_is_rejected(self, monkeypatch, caplog):
         caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout='[{"index": "zero", "total": 1, "free": 1}]', stderr=""))
-        assert out == []
+        assert out is None
         assert "unusable" in caplog.text
 
     def test_non_json_reply_is_rejected(self, monkeypatch, caplog):
         caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout="Traceback (most recent call last):", stderr="boom"))
-        assert out == []
+        assert out is None
         assert "unusable" in caplog.text
 
     def test_empty_reply_is_an_empty_list_not_a_crash(self, monkeypatch):
         assert self._run(monkeypatch,
                          return_value=MagicMock(stdout="", stderr="")) == []
+
+
+class TestWedgedTorchIsNotRetriedForever:
+    """`list_gpus` re-probes on every call by design (no TTL). So a box whose
+    torch cannot answer must not pay the full timeout every single probe, or it
+    never reaches the nvidia-smi fallback inside the caller's 15s deadline - the
+    sm_120 case in the report this came from."""
+
+    def setup_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def teardown_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def test_a_cannot_answer_latches_and_the_child_is_not_respawned(self, monkeypatch):
+        spawns = []
+
+        def _fail():
+            spawns.append(1)
+            raise discover._IsolatedTorchWedged()
+
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", _fail)
+        assert discover._torch_gpus_isolated_once() == []
+        assert discover._torch_gpus_isolated_once() == []
+        assert discover._torch_gpus_isolated_once() == []
+        assert len(spawns) == 1, (
+            f"respawned a known-unanswerable child {len(spawns)} times - that is "
+            "the full timeout on every probe, forever")
+
+    def test_wedged_torch_is_never_retried_in_process(self, monkeypatch):
+        """The in-process import IS the multi-minute hang. A wedged torch must
+        fall through to nvidia-smi, never back to importing here."""
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident",
+            lambda: pytest.fail("retried a WEDGED torch in-process - that is the "
+                                "73s startup hang coming straight back"))
+        assert discover._torch_gpus_isolated_once() == []
+
+    def test_broken_isolation_degrades_in_process_rather_than_losing_the_gpu(
+            self, monkeypatch, caplog):
+        """Cannot-spawn tells us nothing about torch. Falling through to
+        nvidia-smi would report "no GPU" on every AMD and Intel box."""
+        caplog.set_level("WARNING", logger="localm")
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(discover, "_torch_gpus_resident",
+                            lambda: [{"index": 0, "name": "Radeon",
+                                      "total": 8, "free": 4}])
+        out = discover._torch_gpus_isolated_once()
+        assert out and out[0]["name"] == "Radeon", (
+            "broken isolation silently lost a real GPU that torch could see")
+        assert "falling back to importing torch" in caplog.text, (
+            "degraded silently - rule 5 requires saying so")
+
+    def test_the_degrade_warning_is_emitted_once_not_per_probe(
+            self, monkeypatch, caplog):
+        """The live VRAM meter drives a probe about every 2.5s. An unconditional
+        warning here would emit ~24 lines a minute for the life of the server."""
+        caplog.set_level("WARNING", logger="localm")
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(discover, "_torch_gpus_resident", lambda: [])
+        for _ in range(5):
+            discover._torch_gpus_isolated_once()
+        warnings = [r for r in caplog.records
+                    if "could not run the isolated GPU probe" in r.message]
+        assert len(warnings) == 1, (
+            f"emitted the degrade warning {len(warnings)} times across 5 probes")
+
+    def test_broken_isolation_does_NOT_latch(self, monkeypatch):
+        """Latching on a cannot-spawn would disable the torch path permanently
+        on a box where torch works fine."""
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(discover, "_torch_gpus_resident", lambda: [])
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unavailable is False
+
+    def test_a_real_empty_answer_does_NOT_latch(self, monkeypatch):
+        """[] means torch answered and sees no device. That is not a failure, and
+        latching on it would disable the torch path on a box where it works."""
+        spawns = []
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            lambda: spawns.append(1) or [])
+        discover._torch_gpus_isolated_once()
+        discover._torch_gpus_isolated_once()
+        assert len(spawns) == 2, "an honest [] answer must not disable the probe"
+
+    def test_the_latch_is_cleared_by_the_probe_cache_reset(self, monkeypatch):
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
+        discover._reset_gpu_probe_cache()
+        spawns = []
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            lambda: spawns.append(1) or [{"index": 0, "name": "G",
+                                                          "total": 8, "free": 4}])
+        assert discover._torch_gpus_isolated_once()[0]["name"] == "G"
+        assert spawns == [1], "reset must re-enable the torch path"
+
+    def test_the_timeout_fits_inside_the_caller_deadline(self):
+        """A ceiling ABOVE the caller's deadline means a wedged box never reaches
+        the fallback within the caller's window at all."""
+        assert (discover._ISOLATED_TORCH_PROBE_TIMEOUT + 5.0
+                <= discover._GPU_PROBE_DEADLINE), (
+            "the child timeout plus nvidia-smi's own timeout=5 must fit inside "
+            "_GPU_PROBE_DEADLINE")
 
     def test_child_failure_cause_reaches_the_log(self, monkeypatch, caplog):
         """The child prints its cause to stderr before answering []; that reason
@@ -124,7 +234,7 @@ class TestIsolatedProbeDegradesHonestly:
         caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout="[]", stderr="torch GPU probe failed: OSError: WinError 126"))
-        assert out == []
+        assert out == [], "the child ANSWERED (with []); that is not a cannot-ask"
         assert "WinError 126" in caplog.text
 
     def test_good_reply_is_passed_through(self, monkeypatch):
