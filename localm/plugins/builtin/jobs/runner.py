@@ -513,9 +513,19 @@ def _shell_still_authorized(job: Job) -> bool:
         return True
     if getattr(job, "owner_is_owner_key", False):
         return True
-    from localm.auth import _hash_key, get_api_key, key_hash_live
+    from localm.auth import _hash_key, _legacy_owner_identity, get_api_key, key_hash_live
     owner_key = get_api_key()
-    if owner_key and _hash_key(owner_key) == job.owner:
+    # Both the CURRENT derived identity and the LEGACY unsalted digest count as a
+    # match. The owner key's identity moved to a salted KDF derivation (CodeQL 88,
+    # py/weak-sensitive-data-hashing): a job stamped before that upgrade holds the
+    # old digest, and without accepting it here an existing scheduled job would
+    # silently lose shell on the upgrade - REG-509 by a new route. Matching either
+    # is safe because this is an IDENTITY comparison against an already-resolved
+    # owner key, not an authentication step: knowing a digest grants nothing, the
+    # owner key is verified by plaintext compare against auth.key. The match then
+    # stamps owner_is_owner_key below, so each job pays this exactly once.
+    if owner_key and job.owner in (_hash_key(owner_key),
+                                   _legacy_owner_identity(owner_key)):
         # This run PROVES the job is the owner's, because the owner key still has
         # the value it was stamped with. Record that now, while it is still
         # provable: a job created before this field existed would otherwise lose

@@ -157,7 +157,7 @@ def _caller_is_owner_key(request: Request) -> bool:
     Closing that needs the session to record at MINT time that the owner key
     minted it (sessions.create), which is outside this change's blast radius.
     """
-    from localm.auth import _hash_key, ct_equal, get_api_key
+    from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
     from localm.inference.http_server import principal_id
     owner_key = get_api_key()
     if not owner_key:
@@ -166,10 +166,20 @@ def _caller_is_owner_key(request: Request) -> bool:
     if h is None:
         return False
     # ct_equal is the house idiom for every secret compare (see auth.ct_equal).
-    # Both sides here are computed sha256 hexdigests, so bare compare_digest could
-    # not actually raise on them - this is for uniformity, so no compare_digest-on-
-    # str remains anywhere to be copied to a site where the operand IS a raw header.
-    return ct_equal(h, _hash_key(owner_key))
+    # Both sides here are computed hexdigests, so bare compare_digest could not
+    # actually raise on them - this is for uniformity, so no compare_digest-on-str
+    # remains anywhere to be copied to a site where the operand IS a raw header.
+    #
+    # The LEGACY unsalted digest is accepted alongside the current derived one for
+    # the same reason as in the runner: the owner key's identity moved to a salted
+    # KDF (CodeQL 88). Without it there is a window where a COOKIE request is the
+    # first thing to touch the owner key after the upgrade - principal_id() reads
+    # the session's still-legacy key_hash a few lines above, while _hash_key()
+    # below is what triggers the derivation and re-link - so that one request
+    # would fail to stamp a job as the owner's. This is an identity comparison
+    # against an already-authenticated principal, not an authentication step.
+    return (ct_equal(h, _hash_key(owner_key))
+            or ct_equal(h, _legacy_owner_identity(owner_key)))
 
 
 def _store() -> JobStore:
