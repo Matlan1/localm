@@ -11,6 +11,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Run a Mixture-of-Experts model in a fraction of the VRAM.** A new
+  "MoE expert layers on CPU" setting (`n_cpu_moe`, off by default) keeps the
+  expert weights of the first N layers in system RAM while the rest of the model
+  still runs on the GPU. Measured on a 7B MoE: the GPU footprint dropped from
+  3961 MiB to 241 MiB with all 16 layers set. It is a FOOTPRINT dial rather than
+  a speed-up - at the same VRAM it runs at about the same speed - so it is worth
+  reaching for when something else needs the card, or when a model would
+  otherwise not fit at all. It has no effect on a normal (dense) model, and says
+  so instead of silently doing nothing.
+
 ### Security
 - **An owner key you chose yourself is no longer stored as a fast, unsalted
   fingerprint.** localm lets you pick your own key (`localm key set`, the

@@ -54,11 +54,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         ctx_auto: bool = False,
         n_gpu_layers_auto: bool = False,
         vram_overhead_bytes: Optional[int] = None,
+        n_cpu_moe: int = 0,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
+        # Opt-in MoE expert placement: keep the expert weights of the first N
+        # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
+        self.n_cpu_moe = n_cpu_moe
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -259,6 +263,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # override here would otherwise silently not reach the child process.
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
             gpu_split_ratios=auto_ratios,
+            n_cpu_moe=self.n_cpu_moe,
         )
         timeout = self._load_timeout_seconds()
 
