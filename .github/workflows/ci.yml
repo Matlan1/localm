@@ -30,6 +30,25 @@ on:
   # catching a newly introduced alert BEFORE it lands on master.
   push:
     branches: [master]
+  # RESTORED after #839 removed it, deliberately and only for the two matrix
+  # jobs (abi-check stays dispatch/schedule-only via its own `if`, which is the
+  # expensive, moving-target half #839 was really avoiding).
+  #
+  # #839's reasoning was sound on cost and wrong on consequence: it made each
+  # lane's LOCAL suite the gate, and a local suite diverges from this one along
+  # THREE independent axes, none visible from the local run.
+  #   PLATFORM       contributors run Windows; this matrix runs Windows AND Linux.
+  #                  A Linux-only regression reached master exactly this way
+  #                  (#845), and took four sessions to diagnose.
+  #   DEPENDENCY SET this job installs `.[dev,rag]`, which has no numpy; a dev
+  #                  venv usually does. A failure needing numpy ABSENT cannot
+  #                  appear locally at all.
+  #   DEPENDENCY VER CI resolves the newest allowed dev tool; a venv lags. ruff
+  #                  0.16 reddened master while every local venv on 0.15 was green.
+  # A trigger does not depend on every contributor remembering to run something.
+  # That is the whole argument: the previous arrangement worked only while nobody
+  # forgot, and the failure mode was silent.
+  pull_request:
   workflow_dispatch:
     inputs:
       run_abi:
@@ -48,8 +67,26 @@ on:
         default: false
   schedule:
     # Weekly drift check of the hand-written llama.cpp ctypes binding against the
-    # MOVING upstream release the cpu/vulkan/cuda backends track. Mon 06:00 UTC.
-    - cron: "0 6 * * 1"
+    # MOVING upstream release the cpu/vulkan/cuda backends track.
+    #
+    # Moved OFF the top of the hour, which is not cosmetic. Measured: this cron
+    # has been present since 2026-06-21 and the workflow state is `active` (not
+    # disabled manually, not disabled for inactivity), yet exactly ONE
+    # schedule-event run exists in the entire history (2026-07-06). Five of the
+    # six eligible Mondays never fired at all - so the ABI drift job has had
+    # essentially no automatic coverage for its whole life.
+    #
+    # GitHub queues scheduled workflows globally and drops or delays them under
+    # load; :00 is the single most contended minute of the hour, because it is
+    # what everyone writes. An odd off-peak minute is the standard mitigation and
+    # costs nothing. This is a MITIGATION, not a proven fix: if schedule runs are
+    # still missing several Mondays from now, the cron is not the cause and the
+    # next suspect is repository-level scheduling being throttled - check
+    # `gh run list --workflow=CI` filtered to event=schedule before assuming.
+    #
+    # This matters more since the run_abi input landed: a plain dispatch no longer
+    # runs abi-check, so THIS CRON IS NOW ITS ONLY AUTOMATIC PATH.
+    - cron: "37 6 * * 1"
 
 permissions:
   contents: read
