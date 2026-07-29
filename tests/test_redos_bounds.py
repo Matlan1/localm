@@ -988,7 +988,7 @@ def test_tool_call_trigger_does_not_backtrack_on_long_untriggered_output():
         f"TOOL_CALL_TRIGGER took {cpu:.3f}s CPU on {len(haystack):,} chars of "
         "untriggered output. llama.cpp re-runs this on EVERY token against an "
         "uncapped buffer, so a superlinear pattern here hangs or crashes the "
-        "worker mid-generation (#928). A leading `[\s\S]*?` is the usual cause "
+        r"worker mid-generation (#928). A leading `[\s\S]*?` is the usual cause "
         "and is never needed - the native side matches with a search."
     )
 
