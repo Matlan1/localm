@@ -219,6 +219,14 @@ def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
     return result
 
 
+# Bounds for the whitespace-tolerant edit fallback below. Generous on purpose:
+# they are meant to exclude only inputs whose cost is already pathological, not
+# to police ordinary edits. A 400-token `old` is a ~40-line snippet and a 512 KB
+# file is far past what a model edits in one call.
+_WS_FALLBACK_MAX_TOKENS = 400
+_WS_FALLBACK_MAX_TEXT = 512 * 1024
+
+
 def _resolve_edit(text: str, old: str):
     """Find the single region of `text` an edit should replace.
 
@@ -246,7 +254,18 @@ def _resolve_edit(text: str, old: str):
     stripped = old.strip()
     if not stripped:
         return None
-    pattern = r"\s+".join(re.escape(tok) for tok in re.split(r"\s+", stripped))
+    tokens = re.split(r"\s+", stripped)
+    # Both `text` and `old` are model-supplied, and this search is O(len(text) x
+    # len(pattern)): every start position can match a long prefix before failing.
+    # Measured 0.646s for a 16 KB file against an 8 KB `old`, which squares - a
+    # 160 KB file would be about a minute of pinned CPU on ONE edit_file call.
+    # The exact-match path above (str.find, linear) is unaffected; this is only
+    # the whitespace-tolerant FALLBACK, so declining it on a pathological input
+    # loses a convenience, not a capability - the caller gets the same "no unique
+    # match" answer it already gets whenever the fallback finds none or many.
+    if len(tokens) > _WS_FALLBACK_MAX_TOKENS or len(text) > _WS_FALLBACK_MAX_TEXT:
+        return None
+    pattern = r"\s+".join(re.escape(tok) for tok in tokens)
     matches = list(re.finditer(pattern, text))
     if len(matches) == 1:
         return matches[0].start(), matches[0].end(), 1, True
