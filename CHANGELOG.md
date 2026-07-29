@@ -334,6 +334,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unaffected and keeps using the same 12.x build as before. If your driver is
   not new enough for the line your GPU needs, setup falls back to Vulkan and
   explains why, exactly as it already did for an old driver.
+- **The MCP `pull_model` tool now actually loads the model before saying so.**
+  Its default reply promised "load it - blocks until ready", but the load step
+  only registered the model as available and reserved room for it; the real
+  load only happened later, lazily, on the next chat or embed call. An MCP
+  client that checked whether the model was resident right after `pull_model`
+  returned could find it was not, despite the "ready to use" reply. `pull_model`
+  now performs the real load itself before replying, matching what it says.
 
 ### Fixed
 - **The Settings "Live tuning" VRAM estimate could get stuck on the previous
