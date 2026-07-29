@@ -27,6 +27,7 @@ from .gguf import _has_gguf_magic
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_embedding_signal
+from .gguf import gguf_is_mmproj
 
 MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
 
@@ -137,16 +138,19 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     """Deterministically classify a LOCAL model's type from HARD metadata only.
 
     A .gguf file or Ollama blob (the same GGUF byte format under a renamed file)
-    is first checked for an embedding/pooling signal in its OWN GGUF metadata
-    (``gguf_embedding_signal`` - architecture or a ``*.pooling_type`` key; see
-    gguf.py) -> 'embedding'; otherwise it is a llama.cpp text model -> 'llm'. An
-    HF directory is classified from config.json: a LoRA/adapter dir -> 'lora'; an
-    ``architectures`` class ending in ForCausalLM / LMHeadModel /
-    ForConditionalGeneration -> 'llm'; anything we cannot resolve -> 'unknown'
-    (never a silent 'llm').
+    is first checked for a vision-projector signal in its OWN GGUF metadata
+    (``gguf_is_mmproj`` - ``general.architecture == "clip"``; see gguf.py) ->
+    'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
+    architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
+    llama.cpp text model -> 'llm'. An HF directory is classified from
+    config.json: a LoRA/adapter dir -> 'lora'; an ``architectures`` class ending
+    in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
+    cannot resolve -> 'unknown' (never a silent 'llm').
     """
     try:
         if is_gguf or is_blob:
+            if gguf_is_mmproj(path):
+                return "mmproj"
             if gguf_embedding_signal(path):
                 return "embedding"
             return "llm"
