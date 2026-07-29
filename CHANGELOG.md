@@ -144,7 +144,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   memory is enumerated, and is unrelated to the separate GPU-enumeration freeze
   fixed elsewhere.
 
-### Fixed
 - **Changing the embedding model no longer strands your knowledge collections.**
   Switching from one embedding model to another left every existing collection
   refusing new documents, and the only advice was to delete and re-add it. Both
@@ -252,7 +251,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   from somewhere other than the bundled one, so an override you did not intend is
   visible instead of silent.
 
-### Fixed
 - **`localm rm` no longer offers to delete a file it will only unregister.** The
   confirmation prompt picked its wording with a weaker path check than the
   deletion itself used, so a model registered from a folder that merely shares a
@@ -320,7 +318,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it into the `uploads` subfolder (or upload it from the Settings page) and it
   will work again; images already in a gallery are unaffected.
 
-### Fixed
 - **Mixture-of-Experts models now use the GPU they actually fit in.** Deciding how
   many layers to put on the GPU needs to know what the context cache costs, and
   localm estimated that from the model file's SIZE. That works for an ordinary
@@ -351,7 +348,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   returned could find it was not, despite the "ready to use" reply. `pull_model`
   now performs the real load itself before replying, matching what it says.
 
-### Fixed
 - **The Settings "Live tuning" VRAM estimate could get stuck on the previous
   model.** Switching the active model from the sidebar dropdown or the Models
   page always refreshed the live estimate right away. Switching it from
@@ -362,7 +358,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   sync the same way the dropdown always was, picked up automatically within
   about 30 seconds regardless of where the switch came from.
 
-### Fixed
 - **Loading a model that only partly fits your GPU no longer reports plain
   success.** A model too large for free VRAM still loads deliberately,
   offloading as many layers as fit and running the rest on CPU - but the load
