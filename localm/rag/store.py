@@ -41,6 +41,7 @@ from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines, split_jsonl
+from localm.pathsafe import is_unc_or_device_path
 
 # numpy is optional here: it is NOT in pyproject.toml, and CI installs from
 # pyproject rather than uv.lock, so on those runners it is simply absent and the
@@ -367,8 +368,8 @@ class ConfinementError(ValueError):
     """A path may not be indexed. ``reason`` tells the caller WHY, so the API can
     offer 'add and continue' for a fixable whitelist miss (``outside_allowed``)
     but hard-refuse the rest (``credential`` / ``secret_file`` / ``denied`` /
-    ``invalid``). Subclasses ``ValueError`` so existing ``except ValueError``
-    sites keep catching it."""
+    ``invalid`` / ``unc_or_device``). Subclasses ``ValueError`` so existing
+    ``except ValueError`` sites keep catching it."""
 
     def __init__(self, message: str, *, path: Path, reason: str):
         super().__init__(message)
@@ -467,7 +468,27 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     read their own files, is otherwise unconfined.
     """
     try:
-        rp = Path(p).expanduser().resolve()
+        rp = Path(p).expanduser()
+    except (OSError, ValueError):
+        raise ConfinementError(f"Invalid path: {p}",
+                               path=Path(str(p)), reason="invalid")
+    # `p` is HTTP-API-reachable (the whitelist/blacklist policy branches below
+    # are only meaningful for that caller; CLI/policy=None call sites are the
+    # local operator). Refuse UNC/device syntax unconditionally, BEFORE the
+    # .resolve() below - the actual filesystem syscall - ever runs: a UNC
+    # target dials SMB and auto-authenticates before any of the checks below
+    # get a chance to refuse it. Checked on the EXPANDED string (expanduser()
+    # is pure string/env-var work, no syscall, so it is safe to call first) -
+    # not the raw one, so a `~` whose configured home is itself a UNC path
+    # cannot slip past a pre-expansion check. Raised OUTSIDE the try/except
+    # above: ConfinementError is a ValueError, so raising it INSIDE that
+    # block would be caught by the same `except (OSError, ValueError)` and
+    # relabelled "invalid", losing this reason.
+    if is_unc_or_device_path(str(rp)):
+        raise ConfinementError(f"Refusing to index a UNC or device path: {p}",
+                               path=Path(str(p)), reason="unc_or_device")
+    try:
+        rp = rp.resolve()
     except (OSError, ValueError):
         raise ConfinementError(f"Invalid path: {p}",
                                path=Path(str(p)), reason="invalid")
