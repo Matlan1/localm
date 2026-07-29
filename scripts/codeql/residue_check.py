@@ -162,6 +162,31 @@ def _returns_a_value(fn_node) -> bool:
     return False
 
 
+def _unsafe_declared_path(rel: str) -> str:
+    """Reason a declared barrier path is unusable, or "" if it is fine.
+
+    LEXICAL ONLY, and it runs BEFORE any filesystem call. That ordering is the
+    point, not a style choice: `Path(...).resolve()` performs real I/O, so
+    resolving an unvalidated component is itself the hazard. A declared file of
+    `\\\\host\\share` makes resolve() dial SMB - measured elsewhere in this repo
+    at 271 seconds against a non-routable host before it gave up, and on Windows
+    an auto-authenticated dial leaks the host credential. Validate the STRING,
+    then touch the disk."""
+    s = (rel or "").strip()
+    if not s:
+        return "is empty"
+    n = s.replace("\\", "/")
+    if n.startswith("//"):
+        return "is a UNC path"
+    if n.startswith("/"):
+        return "is absolute"
+    if len(n) >= 2 and n[1] == ":":
+        return "is drive-qualified"
+    if any(part == ".." for part in n.split("/")):
+        return "contains a '..' component"
+    return ""
+
+
 def barrier_spans(declared, repo_root="."):
     """Resolve each declared barrier to (file, first_line, last_line, name) by AST.
 
@@ -180,10 +205,15 @@ def barrier_spans(declared, repo_root="."):
         # the repo. Confine it, and SAY SO when it escapes rather than silently
         # skipping - a barrier that was declared but never resolved must never
         # look the same as one that verified nothing.
+        why = _unsafe_declared_path(b["file"])
+        if why:
+            print(f"  WARNING: barrier {b['name']!r} declares file {b['file']!r} "
+                  f"which {why} - REFUSED, and it will not verify anything")
+            continue
         try:
             path = (root / b["file"]).resolve()
             if root != path and root not in path.parents:
-                raise ValueError("escapes the repo root")
+                raise ValueError("resolves outside the repo root")
         except (OSError, ValueError) as e:
             print(f"  WARNING: barrier {b['name']!r} declares file {b['file']!r} "
                   f"which {e if isinstance(e, ValueError) else 'cannot be resolved'}"
