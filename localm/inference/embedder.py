@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import atexit
 import math
+import re
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -247,6 +248,40 @@ def _embeddings_dir() -> Path:
     return home_dir() / "models" / "embeddings"
 
 
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+://")
+
+
+def _nonlocal_spec_reason(spec: str) -> Optional[str]:
+    """Why *spec* is not something this module may hand to the filesystem, or
+    None if it is fine. Purely LEXICAL - no syscall - so it can run first.
+
+    ``embedding_model`` accepts exactly three shapes: a KNOWN_EMBEDDING_MODELS
+    key, a registered model name, or a LOCAL GGUF path. A UNC/device path and a
+    URL are none of those, so refusing them here loses no documented behaviour
+    while keeping the string away from the SMB redirector.
+
+    The UNC/device half is pathsafe's shared predicate - CALLED, never
+    reimplemented, so a fix there reaches this call site. It covers the mixed
+    separator spellings (``\\/host\\share``) too, which Windows resolves as UNC;
+    a test here asserts that delegation so this policy cannot drift into a fork.
+
+    The URL-scheme half is deliberately LOCAL, and belongs here rather than in
+    pathsafe: "is this string a locator rather than a path at all" is a question
+    about what this SETTING accepts, not about path syntax, and a scheme rule
+    inside a path-confinement primitive is a second concern that the next caller
+    would bend or fork. The regex requires TWO or more scheme characters so a
+    Windows drive letter can never match - a drive is exactly one letter, so
+    ``C://models/x.gguf`` stays a path while ``http://``, ``file://`` and
+    ``smb://`` are caught."""
+    from localm.pathsafe import is_unc_or_device_path
+    if is_unc_or_device_path(spec):
+        return ("it is a UNC or device path; only a local filesystem path, a "
+                "known key, or a registered model name is allowed")
+    if _URL_SCHEME_RE.match(spec):
+        return "it is a URL, not a local file path"
+    return None
+
+
 def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Optional[str]:
     """Resolve the configured embedding model to a GGUF path, or None.
 
@@ -257,6 +292,23 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     from localm.config import load_config
     spec = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
     if not spec:
+        return None
+
+    # 0. Refuse a non-local spec BEFORE any filesystem call. Ordering is the
+    #    whole point: a single is_file() on a UNC path hands the string to the
+    #    Windows SMB redirector, which blocks for minutes on an unroutable host
+    #    and auto-authenticates against a reachable one, leaking the host's
+    #    net-NTLMv2 credential outbound. That happens before any of the three
+    #    lookups below could reject the value, so the check cannot go after them.
+    #    Returning None rather than raising keeps the documented contract ("not
+    #    resolvable -> None -> lexical fallback"), but the reason is logged at
+    #    WARNING, never swallowed: a silently ignored setting otherwise looks
+    #    identical to a model that is merely not downloaded yet (rule 5).
+    bad = _nonlocal_spec_reason(spec)
+    if bad:
+        logger.warning("ignoring embedding_model %r: %s. Use a known key %s, a "
+                       "registered model name, or a local GGUF path.",
+                       spec, bad, tuple(KNOWN_EMBEDDING_MODELS))
         return None
 
     # 1. An explicit path to a GGUF.

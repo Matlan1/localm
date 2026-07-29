@@ -192,6 +192,16 @@ export async function refreshEmbeddingPanel() {
       : `Ready: ${st.model} is installed - semantic search is on for new `
         + `indexing. Existing collections may need "reindex" below.`;
     statusEl.style.color = "var(--green)";
+  } else if (st.status === "unknown") {
+    // The owner pointed embedding_model at a filesystem path. That path (and
+    // whether it exists) is owner-only information, so the server withheld it
+    // rather than answering - saying "not installed" here would be a guess
+    // presented as a fact, and the "pick a model" advice would be wrong too,
+    // since this key cannot change the setting.
+    statusEl.textContent =
+      "The embedding model is set to a file chosen by the owner. Its status is " +
+      "not shown for this key, and only the owner can change it.";
+    statusEl.style.color = "var(--text-dim)";
   } else {
     statusEl.textContent =
       `Not set up: '${st.model}' is not installed - indexing is BM25 (lexical) ` +

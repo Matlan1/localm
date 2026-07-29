@@ -681,27 +681,52 @@ async def rag_reembed(name: str, request: Request):
 
 
 @_router.get("/api/rag/embedding")
-async def rag_embedding_status():
+async def rag_embedding_status(request: Request):
     """Current embedding-model config + availability, for the Knowledge page's
     embedding picker. Cheap: it never loads a model - `dim` is reported only if one
     is already loaded, `error` carries why the last load failed (if any), and
     `gpu_fallback_reason` carries why the loaded embedder dropped to CPU after a
-    native GPU crash (if it did)."""
-    from localm.config import load_config
+    native GPU crash (if it did).
+
+    `installed` is a FILE-EXISTENCE answer, so a NON-OWNER caller only gets it for
+    a localm-managed identity: a KNOWN_EMBEDDING_MODELS key or a registered model
+    name. When `embedding_model` is a bare filesystem path, this reports
+    `installed: null` / `status: "unknown"` and withholds the path, because both
+    the boolean and the path itself are owner-only information: `embedding_model`
+    is admin_only, so GET /v1/config already strips its value for a non-owner, and
+    an absolute path also discloses the OS user's directory layout. The owner
+    (open mode, or an ADMIN key) sees everything, unchanged."""
+    import localm.inference.http_server as _hs
+    from localm import scopes
+    from localm.config import load_config, load_registry
     from localm.inference.embedder import (
         DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, gpu_fallback_reason,
         last_error, loaded_dim, resolve_embedding_model_path)
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
-    installed = bool(resolve_embedding_model_path(allow_download=False))
+    held = _hs.caller_scopes(request)
+    is_owner = held is None or scopes.ADMIN in held
+    # A known key is a dict lookup and a registered name is a registry lookup -
+    # neither probes a caller-influenced path, so resolving those is safe to
+    # answer. Anything else is a raw path: do not stat it for a non-owner.
+    may_answer = is_owner or model in KNOWN_EMBEDDING_MODELS or model in load_registry()
+    if may_answer:
+        installed = bool(resolve_embedding_model_path(allow_download=False))
+        status = "ready" if installed else "not_installed"
+    else:
+        # No stat, no path, and no last_error either - a load failure message
+        # quotes the spec it failed on, so it would re-leak what is withheld here.
+        installed = None
+        status = "unknown"
+        model = "(set by the owner)"
     return {
         "model": model,
         "default": DEFAULT_EMBEDDING_MODEL,
         "internal": list(KNOWN_EMBEDDING_MODELS),
         "installed": installed,
         "dim": loaded_dim(),
-        "error": last_error(),
+        "error": last_error() if may_answer else None,
         "gpu_fallback_reason": gpu_fallback_reason(),
-        "status": "ready" if installed else "not_installed",
+        "status": status,
     }
 
 
@@ -712,10 +737,27 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     clear answer: ready with its dimension, or a SPECIFIC reason it failed (e.g. it
     is not an embedding model). Runs as a job so a download shows progress. Never
     silently swaps the user's choice - on failure the selection stands and the UI
-    offers the internal default."""
+    offers the internal default.
+
+    OWNER-ONLY. This writes the `embedding_model` config key, which names a FILE
+    THIS PROCESS OPENS and is flagged admin_only in the schema. The route's own
+    mount gate is the plugin's `rag` scope, and `rag` is NOT in
+    scopes.PRIVILEGED_SCOPES - `--scope chat --scope rag` is offered in
+    docs/cli.md as the canonical restricted key - so without this check the
+    plugin route is a back door around the owner gate on PATCH /v1/config. Same
+    shape and placement as the rag_allowed_roots widening check above: open mode
+    is the trusted local owner (caller_scopes None) and passes."""
     model = req.model.strip()
     if not model:
         raise HTTPException(400, "No model given")
+    import localm.inference.http_server as _hs
+    from localm import scopes
+    held = _hs.caller_scopes(request)
+    if held is not None and scopes.ADMIN not in held:
+        raise HTTPException(
+            403, "Changing the embedding model requires an owner (admin) key: it "
+            "selects a file this process loads, so it widens a trust boundary. "
+            "The rag scope alone is not enough.")
     jobs = _require_jobs(request, needs="Embedding model setup")
 
     def _setup(job):

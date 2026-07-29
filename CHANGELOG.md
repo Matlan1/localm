@@ -189,6 +189,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (the coder still notices and asks the model to reformat), and the session
   transcript now recognises the `<tool_call name="...">` form it previously
   printed as raw XML.
+- **Only the owner can change the embedding model now.** The Knowledge page's
+  "Set up / apply" button wrote that setting under the RAG plugin's own
+  permission, so a deliberately restricted key (`--scope chat --scope rag`) could
+  repoint localm at a file of its choosing, which is then opened and parsed by
+  the native GGUF reader. That endpoint now requires the owner. Nothing changes
+  for you: you are the owner, and the picker works exactly as before.
+- Pointing the embedding model at a network location (a `\\server\share` path, a
+  Windows device path, or a URL) is refused up front instead of being handed to
+  the filesystem, and the reason is logged rather than silently ignored. On
+  Windows, merely testing such a path could hang localm for minutes and send your
+  Windows credentials to whatever machine was named.
+- The Knowledge page no longer tells a non-owner key whether the owner's chosen
+  embedding file exists, and no longer shows it that file's path.
+- `localm mcp`'s `setup_embeddings` tool now only accepts a known embedding key
+  or a model you already registered, not an arbitrary file path, since the caller
+  driving it is usually a model acting on instructions it read somewhere. Use
+  `localm setup-embeddings <path>` or the GUI to point it at a GGUF of your own.
+- localm now logs a warning naming the folder when the native runtime is loaded
+  from somewhere other than the bundled one, so an override you did not intend is
+  visible instead of silent.
 
 ### Fixed
 - **`localm rm` no longer offers to delete a file it will only unregister.** The
