@@ -42,7 +42,7 @@
  "251": {
   "rule": "py/path-injection",
   "file": "scripts/check_coverage_floors.py",
-  "line": 217,
+  "line": 235,
   "lineHash": "5d6a88fe0293d106:1",
   "comment": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
   "reason": "won't fix"
@@ -50,7 +50,7 @@
  "250": {
   "rule": "py/path-injection",
   "file": "scripts/check_coverage_floors.py",
-  "line": 211,
+  "line": 229,
   "lineHash": "f7a37db04ded0efd:1",
   "comment": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
   "reason": "won't fix"
@@ -866,7 +866,7 @@
  "87": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 511,
+  "line": 527,
   "lineHash": "621d263e46574fca:1",
   "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -874,7 +874,7 @@
  "86": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 509,
+  "line": 525,
   "lineHash": "8203dbe5f0f0e605:1",
   "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -882,7 +882,7 @@
  "85": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 469,
+  "line": 485,
   "lineHash": "8366a931db1e049:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -890,7 +890,7 @@
  "84": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 464,
+  "line": 480,
   "lineHash": "cbcc642963671e4d:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -898,7 +898,7 @@
  "83": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 458,
+  "line": 474,
   "lineHash": "1b79d2b060a96cc4:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -930,7 +930,7 @@
  "79": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 446,
+  "line": 462,
   "lineHash": "41cededfeae3c062:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -938,7 +938,7 @@
  "78": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 445,
+  "line": 461,
   "lineHash": "ec446e423e429900:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -946,7 +946,7 @@
  "77": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 250,
+  "line": 266,
   "lineHash": "9b71a181e4f0fbcc:1",
   "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
