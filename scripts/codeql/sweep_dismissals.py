@@ -94,6 +94,13 @@ def capture(dismissed, idx):
                 "rule": a["rule"]["id"], "file": loc["path"],
                 "line": loc["start_line"], "lineHash": h,
                 "comment": a.get("dismissed_comment") or "",
+                # Captured so a restore re-posts the reason the alert was
+                # ACTUALLY dismissed under. Defaulting to "false positive" (what
+                # this script used to hardcode) silently downgrades a "won't fix"
+                # - the label that says the taint flow is real and only the
+                # exposure is absent. Losing that distinction on a restore is how
+                # a genuine finding ends up hiding behind a plausible word.
+                "reason": a.get("dismissed_reason") or "false positive",
             }
         else:
             missed.append((a["number"], a["rule"]["id"], loc["path"]))
@@ -143,12 +150,14 @@ def main():
         if evaporated and args.restore:
             for old, a, r in evaporated:
                 c = r.get("comment") or ""
+                # 280 is GitHub's hard cap on dismissed_comment (422 above it,
+                # measured); leave room for the suffix.
                 c = (c[:200] + f" [restored from #{old}]")[:280]
                 ok = subprocess.run(
                     ["gh", "api", "--method", "PATCH",
                      f"repos/{REPO}/code-scanning/alerts/{a['number']}",
                      "-f", "state=dismissed",
-                     "-f", "dismissed_reason=false positive",
+                     "-f", f"dismissed_reason={r.get('reason') or 'false positive'}",
                      "-f", f"dismissed_comment={c}"],
                     capture_output=True, text=True).returncode == 0
                 print(f"   {'restored' if ok else 'FAILED  '} #{a['number']}")

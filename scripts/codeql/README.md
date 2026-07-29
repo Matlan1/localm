@@ -18,8 +18,19 @@ Three measured failures, all on this codebase:
    **10 / 16** - about 69 were pure noise.
 3. **A good fix can ADD alerts.** A shared helper introduced to centralise
    confinement becomes a sink in its own right.
+4. **Genuine hardening moves the number not at all.** Four real defects were
+   fixed on 2026-07-29 (a discarded confinement return in the RAG walk, a raw
+   registry `["path"]` read that decided an `unlink()`, an unguarded `mmproj`
+   path reaching the native loader, an eager unsalted hash of a possibly
+   user-chosen key). Measured on the same local database before and after:
+   **168 -> 168** path-injection, **1 -> 1** weak-hashing. Zero alerts closed.
 
-So alert COUNT is not a measure of progress in either direction.
+So alert COUNT is not a measure of progress in either direction. Four separate
+mechanisms move it, and NONE of them is code quality: a line shift, a relocation
+into a helper, a threat-model or config change, and - per (4) - nothing at all.
+Conversely `state: fixed` is never on its own evidence that a flow closed; check
+that no new alert covers the same STATEMENT, and compare alert NUMBERS, never
+counts.
 
 ## `residue_check.py`
 
@@ -110,6 +121,68 @@ itself, and an EXTRACTED but NON-TRANSFORMING guard that returns no value (the
 tainted value passes to it, not through it). Hence the design rule that is worth
 more than the tooling: **the sink must consume the barrier's RETURN VALUE.**
 Transform, do not merely validate.
+
+## `dispositions.json` + `apply_dispositions.py`
+
+The adjudication of every open alert, and the script that posts it.
+
+    python apply_dispositions.py            # report only, changes nothing
+    python apply_dispositions.py --apply    # post the dismissals
+
+Keyed on `(file, enclosing function)`, parsed from **the commit the alert was
+raised against** (`git show <sha>:<path>`), never from the working tree. Both
+halves of that matter and both were learned by getting them wrong:
+
+- an alert NUMBER and a LINE both move when a fix edits a sink line, so a
+  dismissal keyed on either silently detaches from what it was about;
+- a function name survives that, but only if it is read from the revision the
+  line number belongs to. Resolving against whatever happens to be checked out
+  misfiled 8 of 125 on this script's first run, every one of them plausibly.
+
+An alert whose function is not in the table is **never** dismissed. It is
+reported as UNADJUDICATED and the exit code is non-zero. A tool that closed
+whatever it did not recognise would defeat the point, which is that every closed
+alert had someone look at it.
+
+**GitHub caps `dismissed_comment` at 280 characters** and 422s above it (measured
+against the live API, not read off the docs: a 429-character comment was
+refused). So each group carries two texts. `short` is what gets POSTED and is
+length-checked for EVERY group before the first network call, so a table error
+cannot leave half the alerts dismissed and half 422'd. `justifications` is the
+full reasoning and stays here, in version control, where it can be reviewed and
+corrected; the short text names its group so an alert ties back to it.
+
+Each group's text is the justification posted to the alert, so it has to be true
+of every alert in that function. A function holding sinks of two kinds gets a
+comment covering both rather than the tidier of the two labels. Two groups are
+filed `won't fix` rather than `false positive` on purpose: for the
+authorization-gated routes and the `LLAMA_CPP_LIB` loader the taint flow is
+REAL, and only the exposure is absent. Calling those "barriered" would file a
+genuine finding under a label that hides it.
+
+## Why there is no models-as-data barrier pack
+
+The obvious idea is to declare this repo's confinement helpers as barriers via
+CodeQL's supported models-as-data extension, so correct code stops being
+reported. It works, and it is not worth it here. Measured offline against
+`9fde2813`:
+
+| declared barrier | path-injection alerts |
+|---|---|
+| none (baseline) | 168 |
+| `_entry_path` | 167 |
+| + `_check_plugin_name`, `confined_name/_file/_under` | 163 |
+
+**5 of 168**, and the 5 are among the safest in the set. The reason is a real
+limitation worth writing down: a models-as-data model resolves through the API
+graph, which reaches a function through an IMPORT. `registry.py:547` calls
+`_entry_path` in its own module, so the graph never reaches it and the declared
+barrier is simply not applied. This repo's guards are overwhelmingly same-module
+calls or inline `if ...: raise`, and neither shape is expressible.
+
+So the mechanism is sound and the codebase is the wrong shape for it. Recorded
+because "add a sanitizer pack" is the first thing anyone proposes here, and the
+answer is now measured rather than argued.
 
 ## This tooling is a specimen of its own third finding
 

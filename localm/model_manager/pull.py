@@ -1109,11 +1109,28 @@ def _pull_url(
                 default="a", show_choices=False,
             )
             if choice.lower() == "a":
-                existing_path = Path(_mm.load_registry()[dups[0]]["path"])
-                if dest.resolve() != existing_path.resolve():
-                    dest.unlink()
-                alias_model(dups[0], name)
-                return True
+                # Route through _entry_path like every other registry consumer
+                # (the invariant documented on it). The raw ``["path"]`` read this
+                # replaces raised TypeError on a null/int path - the exact crash
+                # the choke point exists to prevent - and skipped its ``..``
+                # rejection. That matters more here than at a read-only consumer:
+                # the value decides an unlink().
+                epath = _mm._entry_path(_mm.load_registry().get(dups[0]))
+                if epath is None:
+                    # Say so rather than silently keeping both: an unreadable
+                    # sibling entry is a real registry problem the user should
+                    # see, and it must never license deleting a file.
+                    console.print(
+                        f"[yellow]Registry entry for {dups[0]!r} is malformed - "
+                        "keeping both copies rather than deleting a file on the "
+                        "strength of an unreadable path.[/yellow]"
+                    )
+                else:
+                    existing_path = Path(epath)
+                    if dest.resolve() != existing_path.resolve():
+                        dest.unlink()
+                    alias_model(dups[0], name)
+                    return True
 
     _mm._register(name, dest, url, sha256=actual, model_type=model_type)
     console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
