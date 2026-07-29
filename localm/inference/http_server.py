@@ -2371,8 +2371,34 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     it polls the restarted instance's own /whoami and auto-rolls back if the
     expected version never comes up healthy within its timeout. The plain
     "restart the server" button (/v1/server/restart) calls this with no
-    update_watchdog, so it is entirely unaffected."""
+    update_watchdog, so it is entirely unaffected.
+
+    NEW-CRASH-NOTICE-USELESS item C: capture free VRAM BEFORE the teardown
+    below so the wait after it (once every native free has been issued) can
+    confirm the releases actually landed before re-exec spawns a fresh worker
+    into them - see that wait's own comment further down for the full
+    rationale. Best-effort: an unmeasurable/wedged probe must not block a
+    restart the user asked for - vram_capacity() is itself deadline-bounded."""
+    free_before = None
+    try:
+        from localm.discover import vram_capacity
+        free_before = vram_capacity().get("free")
+    except Exception:
+        _dbg_swallow("free-VRAM read before restart failed (non-fatal)")
+
     # Unload all engines in the multi-model dictionary
+    # had_engines asks "is anything ACTUALLY loaded" (worth waiting on), not
+    # merely "is the dict non-empty": unload_all_models/idle-unload both KEEP a
+    # now-unloaded engine's entry in _engines so a later request reloads it
+    # lazily (see their own docstrings), so a dict-non-emptiness check would
+    # make EVERY restart on a server that ever idle-unloaded a model pay the
+    # wait's full timeout for nothing - the exact "no delay in the common
+    # case" claim below would be false. getattr defaults to False so a test
+    # double that does not define .loaded (never holding real VRAM) is
+    # correctly treated as nothing-to-wait-for.
+    had_engines = any(getattr(e, "loaded", False) for e in _engines.values())
+    if not had_engines and _engine is not None and _engine not in _engines.values():
+        had_engines = bool(getattr(_engine, "loaded", False))
     for engine in list(_engines.values()):
         try:
             engine.unload()
@@ -2392,6 +2418,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # frees ALL resident VRAM before re-exec, not just the chat engines. Same
     # swallow-but-log pattern as the engine unload above: restart must proceed
     # regardless, but a failure stays discoverable (rule 5).
+    released_embedder = False
     try:
         from localm.inference import embedder as _embedder_mod
         # Lock-free release - see the matching comment in _do_shutdown above for
@@ -2399,9 +2426,40 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         # this process image but does NOT touch the separate worker child, and
         # bypasses atexit, so without this the old worker survives the restart
         # holding VRAM while the restarted server spawns a second one (REG-650).
-        _embedder_mod.release_for_exit()
+        released_embedder = _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during restart failed (non-fatal)")
+
+    # Wait for the frees above to actually land before re-exec. The re-exec'd
+    # process spawns a brand-new GGUF worker that constructs a fresh
+    # llama_context on startup (plugins/gui/cli.py's preload thread) with no
+    # idea a restart just freed anything - unlike switch_engine's in-process
+    # model swap, which already waits here (its own wait_for_vram_release call,
+    # AUDIT-MED-11) before constructing the replacement, this path used to go
+    # straight from unload to os.execv with no wait at all. If the GPU driver
+    # has not finished reclaiming the just-freed VRAM by the time the fresh
+    # worker allocates, that construction races the still-reclaiming driver.
+    # NEW-CRASH-NOTICE-USELESS item C: a real 2026-07-26 crash matched exactly
+    # this signature (a fresh llama_context dying mid-construction right after
+    # a restart, log going dark, empty native trace). Attempts to force the
+    # SAME race live (20+ restart cycles, full-VRAM model, idle and under
+    # deliberate concurrent GPU contention) did not reproduce a failure on
+    # this box/driver - VRAM reclaim measured near-instant here, and the
+    # driver's support components were upgraded a few hours before testing, a
+    # plausible reason the window is narrower now than on 2026-07-26. It did
+    # not need to be observed to be worth closing: switch_engine already
+    # treats the identical native free as unsafe to skip this wait for.
+    # Skipped when nothing was actually unloaded (a model-less restart), so
+    # the common case pays no delay.
+    if (had_engines or released_embedder) and free_before is not None:
+        try:
+            from localm.discover import vram_capacity
+            from localm.vram import wait_for_vram_release
+            wait_for_vram_release(lambda: vram_capacity().get("free"),
+                                  before_bytes=free_before)
+        except Exception:
+            _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
+
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
