@@ -339,8 +339,15 @@ def test_schema_json_hides_admin_only_for_non_owner():
     guest = {f["key"] for f in ss.schema_json(is_owner=False)}
     assert RAG_OWNER_KEYS <= owner, "owner must see the owner-only fields"
     assert not (RAG_OWNER_KEYS & guest), "non-owner must NOT see any of them"
-    # A normal (non-admin_only) field is unaffected by the owner filter.
-    assert "mode" in owner and "mode" in guest
+    # A normal (non-admin_only) field is unaffected by the owner filter. This is
+    # the OVER-GATING control: without it the test would pass just as happily if
+    # the guest view were empty. `mode` used to play this role and no longer can -
+    # the REC-MEDIA-CMD sweep gated it (it is the privacy master switch, and
+    # flipping it to "full" makes the server start writing conversation content).
+    # `temperature` is a plain sampling knob a delegated key legitimately sets, so
+    # it is a durable choice for this control rather than another field a later
+    # sweep is likely to gate.
+    assert "temperature" in owner and "temperature" in guest
     # The owner view advertises the admin_only flag so the client/UI can label it.
     by_key = {f["key"]: f for f in ss.schema_json(is_owner=True)}
     assert by_key["rag_indexing_mode"].get("admin_only") is True
