@@ -316,6 +316,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   accurately, and a model whose file cannot be read falls back to the old
   estimate, so nothing that worked before stops working.
 
+### Fixed
+- **The Settings "Live tuning" VRAM estimate could get stuck on the previous
+  model.** Switching the active model from the sidebar dropdown or the Models
+  page always refreshed the live estimate right away. Switching it from
+  somewhere else - another browser tab, another device, the CLI, an MCP
+  client - did not: the model dropdown and status line caught up within
+  seconds, but the VRAM estimate kept showing the model that was active when
+  Settings was opened, with no way to tell it was stale. It is now kept in
+  sync the same way the dropdown always was, picked up automatically within
+  about 30 seconds regardless of where the switch came from.
+
 ## [0.1.3] - 2026-07-23
 
 ### Added
