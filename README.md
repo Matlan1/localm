@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/images/logo.svg" width="96" alt="LocaLM logo">
+  <img src=".github/images/logo.svg" width="420" alt="LocaLM">
 </p>
 
 # LocaLM
