@@ -43,6 +43,19 @@ dependencies = [
     # directly, so it is declared directly: never rely on a transitive package
     # staying present. See localm/setup_llama.py _ssl_context.
     "certifi>=2026.7.22",
+    # The coder's `grep` and `search_replace` tools compile a regex the MODEL
+    # supplies, so the pattern is attacker-influenced and a nested quantifier
+    # costs time that doubles per input character. stdlib `re` cannot be
+    # interrupted once inside a match at any price; `regex` takes a `timeout=`
+    # and is the only thing that can stop a runaway one. Core, not an extra: the
+    # coder ships enabled and this is a DoS bound, so it must never be opt-in.
+    #
+    # Declared directly even though it already arrives transitively (via
+    # transformers, which is OPTIONAL) - exactly the certifi lesson above. A base
+    # install has no transformers, so relying on the transitive path would leave
+    # this guard absent precisely where nobody would think to look for it. See
+    # localm/plugins/coder/tools/files.py _compile_model_pattern.
+    "regex>=2024.5.15",
     "huggingface-hub>=1.25.1",
     "pydantic>=2.13.4",
     "fastapi>=0.140.7",
