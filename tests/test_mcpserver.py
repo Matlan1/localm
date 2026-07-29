@@ -1495,6 +1495,41 @@ class TestNewToolCalls:
         assert "installed" in resp["result"]["content"][0]["text"]
         mock_install.assert_called_once_with("coder", True)
 
+    def test_install_plugin_with_deps_installed_ok_is_success(self):
+        from localm.plugins.deps import InstallResult
+        server, _ = _server()
+        ok_result = InstallResult(ok=True, installed=["voice-lib>=1.0"])
+        with patch("localm.plugins.engine.PluginManager.set_installed_state"), \
+             patch("localm.plugins.engine.PluginManager.plugin_missing_deps", return_value=True), \
+             patch("localm.plugins.engine.PluginManager.install_plugin_deps",
+                   return_value=ok_result):
+            resp = _req(server, "tools/call",
+                        {"name": "install_plugin", "arguments": {"plugin": "voice"}})
+        assert resp["result"]["isError"] is False
+        assert "successfully installed and enabled" in resp["result"]["content"][0]["text"]
+
+    def test_install_plugin_reports_dependency_install_failure(self):
+        # Same defect class as pull_model's load-failure distinction: the tool
+        # must not report a blanket "successfully installed" when the plugin's
+        # declared pip extras actually failed to install (AGENTS.md rule 5 - a
+        # failed step must never be reported as success).
+        from localm.plugins.deps import InstallResult
+        server, _ = _server()
+        fail_result = InstallResult(ok=False, failed=["voice-lib>=1.0"],
+                                    error="network down")
+        with patch("localm.plugins.engine.PluginManager.set_installed_state"), \
+             patch("localm.plugins.engine.PluginManager.plugin_missing_deps", return_value=True), \
+             patch("localm.plugins.engine.PluginManager.install_plugin_deps",
+                   return_value=fail_result) as mock_deps:
+            resp = _req(server, "tools/call",
+                        {"name": "install_plugin", "arguments": {"plugin": "voice"}})
+        assert resp["result"]["isError"] is True
+        text = resp["result"]["content"][0]["text"]
+        assert "installed and enabled" in text
+        assert "voice-lib>=1.0" in text
+        assert "network down" in text
+        mock_deps.assert_called_once_with("voice")
+
     @pytest.mark.parametrize("tool_name,expected_bool,expected_substring", [
         ("enable_plugin", True, "enabled"),
         ("disable_plugin", False, "disabled"),
