@@ -15,6 +15,7 @@ would be flaky on a loaded runner; this one is deterministic.
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 import sys
 from unittest.mock import MagicMock
@@ -275,6 +276,88 @@ class TestWedgedTorchIsNotRetriedForever:
 class TestChildProbeContract:
     """The child must mirror the in-process branch field for field, so a caller
     cannot tell which path produced a reading."""
+
+    # A STUB torch, so the enumeration contract is covered on EVERY platform
+    # rather than only where a real torch happens to be installed. CI installs
+    # `.[dev,rag]`, which has no torch, so the importorskip test below skips
+    # there - and a skip looks identical to a pass in a green job. This one runs
+    # the child's real _enumerate() against a fake torch, so the JSON contract,
+    # the field set and the int coercion are all exercised on the Linux runner
+    # that the isolated-spawn change most needs covering.
+    _STUB_TORCH = """
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return True
+    @staticmethod
+    def device_count():
+        return 2
+    @staticmethod
+    def mem_get_info(i):
+        return (1000 + i, 4000 + i)      # (free, total), deliberately not round
+    @staticmethod
+    def get_device_name(i):
+        return "STUB GPU %d" % i
+cuda = _Cuda()
+"""
+
+    def _run_child_with_stub_torch(self, tmp_path, stub=None):
+        """Spawn the real child module with *stub* shadowing torch on sys.path."""
+        import os
+        from localm._mp_spawn import interpreter_for_localm_children
+        stub_dir = tmp_path / "stub"
+        stub_dir.mkdir()
+        (stub_dir / "torch.py").write_text(
+            self._STUB_TORCH if stub is None else stub, encoding="utf-8")
+        env = dict(os.environ)
+        repo = str(pathlib.Path(discover.__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join([str(stub_dir), repo])
+        return subprocess.run(
+            [interpreter_for_localm_children(), "-u", "-m",
+             "localm._torch_gpu_probe"],
+            capture_output=True, text=True, timeout=120, env=env)
+
+    def test_child_enumerates_against_a_stub_torch_on_any_platform(self, tmp_path):
+        proc = self._run_child_with_stub_torch(tmp_path)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1, f"child printed {len(lines)} lines: {proc.stdout!r}"
+        devices = json.loads(lines[0])
+        assert devices == [
+            {"index": 0, "name": "STUB GPU 0", "total": 4000, "free": 1000},
+            {"index": 1, "name": "STUB GPU 1", "total": 4001, "free": 1001},
+        ], f"enumeration contract drifted: {devices!r}"
+
+    def test_child_skips_a_device_that_cannot_report_memory(self, tmp_path):
+        """One device failing must never hide the rest - the in-process branch
+        has always had that property and the child must match it."""
+        stub = """
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return True
+    @staticmethod
+    def device_count():
+        return 2
+    @staticmethod
+    def mem_get_info(i):
+        if i == 0:
+            raise RuntimeError("device 0 is sulking")
+        return (1000 + i, 4000 + i)
+    @staticmethod
+    def get_device_name(i):
+        return "STUB GPU %d" % i
+cuda = _Cuda()
+"""
+        proc = self._run_child_with_stub_torch(tmp_path, stub=stub)
+        devices = json.loads(proc.stdout.strip())
+        assert [d["index"] for d in devices] == [1], (
+            f"a failing device hid the healthy one: {devices!r}")
+
+    def test_child_reports_no_device_when_stub_torch_has_none(self, tmp_path):
+        stub = self._STUB_TORCH.replace("return True", "return False")
+        proc = self._run_child_with_stub_torch(tmp_path, stub=stub)
+        assert proc.stdout.strip() == "[]"
+        assert proc.returncode == 0
 
     def test_child_emits_one_json_line_and_nothing_else(self):
         torch = pytest.importorskip("torch")
