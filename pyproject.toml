@@ -268,9 +268,8 @@ select = ["E4", "E7", "E9", "F"]
 # cleared and CI's ruff step is now blocking (.github/workflows/ci.yml).
 ignore = ["E741", "E701", "E702", "E402"]
 
-# Coverage measurement (TEST-1). This is for VISIBILITY: CI prints a number and
-# uploads coverage.xml; there is intentionally no --cov-fail-under gate yet, so a
-# low number never fails a build. Run locally with:
+# Coverage measurement (TEST-1). CI prints a number and uploads coverage.xml/
+# coverage.json. Run locally with:
 #   pytest -m "not integration" --cov=localm --cov-report=term-missing
 [tool.coverage.run]
 source = ["localm"]
@@ -294,3 +293,35 @@ exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
+
+# Coverage RATCHET (added after the "there is intentionally no gate yet" era
+# above). Measured on merged master (d62b244b, 2026-07-29) with
+# `pytest -m "not integration" -n auto --cov=localm`: TOTAL was 79% (branch
+# coverage, 40167 statements, 13022 branches). This floor is 78 - deliberately
+# ONE POINT BELOW that measurement, not at it and not above it. A gate that
+# fails spuriously on ordering noise or a couple of skipped/platform-gated
+# tests gets disabled by the first person it inconveniences, and then
+# protects nothing; a point of headroom keeps it meaningful. It exists to
+# catch a REGRESSION, not to express an aspiration - raise it deliberately
+# (in the same PR as the work that earns the higher number), never lower it
+# without saying why.
+#
+# pytest-cov reads `fail_under` from this coverage config automatically (see
+# pytest_cov/plugin.py: `cov_config.fail_under` is used whenever
+# --cov-fail-under is not passed on the command line), so the existing CI
+# "Tests" step (.github/workflows/ci.yml) enforces this without any extra
+# wiring. Per-module floors for the trust-boundary modules (pathsafe, auth,
+# netpolicy, scopes, tls, bindhost, config, portmux) are NOT expressible here
+# - coverage.py has no per-file fail_under - so they live in
+# scripts/check_coverage_floors.py instead; see that file for what it checks
+# and why it is a separate script rather than a plugin.
+#
+# WHAT THIS IS AND IS NOT. This is DRIFT PROTECTION, not defect prevention.
+# Measured the same day this floor was added: all nine real defects found in
+# this repo that week lived in code sitting at 85-96% coverage. Not one was an
+# uncovered line - the lines executed and the tests asserted the wrong thing,
+# or nothing at all. Coverage measures execution, not verification. Do not
+# read a green run of this gate as "regressions are unlikely" - it only means
+# the EXECUTED fraction of the code did not shrink; whether what runs is
+# actually checked is a question this number cannot answer.
+fail_under = 78
