@@ -8,6 +8,8 @@ reassigns them is reflected here).
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.plugins.executor import get_plugin_executor
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -64,7 +67,19 @@ def register(app: FastAPI, ctx) -> None:
 
         # If it is the default startup model but not in registry, provide a virtual entry
         if entry is None and _hs._default_model_name == model_id:
-            entry = {"path": getattr(_hs._engine, "model_path", ""), "source": "startup"}
+            # abspath, because the startup path is whatever the operator typed on
+            # the command line and `localm serve ../models/foo.gguf` is a normal
+            # invocation. _entry_path (correctly) reads a stored path carrying a
+            # '..' component as malformed, which would blank this virtual entry's
+            # path and size for a perfectly good running model. Normalising here
+            # keeps that rule strict for the REGISTRY - where a '..' really does
+            # mean the file was hand-edited or planted - without punishing a
+            # relative CLI argument. os.path.abspath, not resolve(): it strips
+            # '..' against the cwd with no filesystem call and no symlink
+            # traversal, so this stays off the syscall path entirely.
+            _startup = getattr(_hs._engine, "model_path", "")
+            entry = {"path": os.path.abspath(_startup) if _startup else "",
+                     "source": "startup"}
 
         if entry is None:
             raise HTTPException(404, f"Model not registered: {model_id}")
@@ -91,13 +106,25 @@ def register(app: FastAPI, ctx) -> None:
         # aggregate-size info leak plus a filesystem-walk DoS. The path field below
         # is already scrubbed to "" for an empty path; guard the size branch to match.
         if path:
-            try:
-                if p.is_file():
-                    size = p.stat().st_size
-                elif p.is_dir():
-                    size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-            except OSError:
-                pass
+            # Off the event loop. This is an `async def` and the path comes out of
+            # registry.json, not from this handler, so the syscalls below are
+            # unbounded in both directions: rglob("*") walks an entire directory
+            # tree, and a UNC path blocks in the Windows SMB redirector (minutes
+            # against an unroutable host, plus an outbound authentication attempt
+            # from the server process when it IS reachable). Inline, either one
+            # stalls every request this server is serving, not just this one.
+            def _measure() -> int | None:
+                try:
+                    if p.is_file():
+                        return p.stat().st_size
+                    if p.is_dir():
+                        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                except OSError:
+                    pass
+                return None
+
+            loop = asyncio.get_running_loop()
+            size = await loop.run_in_executor(get_plugin_executor(), _measure)
         aliases = sorted(
             n for n, e in registry.items()
             # Skip a malformed sibling: a non-dict entry's .get would AttributeError,

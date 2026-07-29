@@ -8,6 +8,17 @@ management, GUI model-listing routes - offloads it with
 chat/completion generation (``localm/inference/``) are NOT routed through this
 pool; they stay on the asyncio loop's own default executor.
 
+ONE CARVE-OUT to that directory rule, because the rule is a shorthand for the
+workload split rather than the split itself: the REGISTRY METADATA reads in
+``localm/inference/routes/models.py`` (the per-model size probe behind
+``GET /v1/models/{id}``) DO use this pool. They are blocking filesystem I/O on a
+path taken from registry.json, not inference: a registered UNC path can block in
+the Windows SMB redirector for minutes. Putting that on the default executor is
+exactly the cross-boundary starvation described below - a caller repeating a cheap
+metadata GET could occupy the same workers chat generation waits on. Sorting by
+WORKLOAD (blocking tool/IO work here, model work on the default pool) is what the
+directory rule is approximating, so where the two disagree, workload wins.
+
 Why the split: before it existed, every ``loop.run_in_executor(None, ...)``
 call anywhere in the server drew from the SAME process-wide default pool
 (``min(32, cpu_count+4)`` workers) - including chat generation, which holds

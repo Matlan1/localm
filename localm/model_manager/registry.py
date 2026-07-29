@@ -11,6 +11,8 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
+from pathlib import PureWindowsPath
 from typing import List
 from typing import NamedTuple
 from typing import Optional
@@ -69,8 +71,8 @@ def is_llm(entry: dict) -> bool:
 
 def _entry_path(entry) -> Optional[str]:
     """The stored file path of a registry *entry*, or None when the entry is
-    malformed (not a dict, or its ``path`` is missing / null / not a non-empty
-    string).
+    malformed (not a dict; its ``path`` missing / null / not a non-empty string;
+    or that path carrying a ``..`` component).
 
     registry.json is normally written only by localm and is always well-formed,
     but it is a real, user-visible file (``localm info`` names it) that can be
@@ -104,7 +106,23 @@ def _entry_path(entry) -> Optional[str]:
     if not isinstance(entry, dict):
         return None
     p = entry.get("path")
-    return p if isinstance(p, str) and p else None
+    if not (isinstance(p, str) and p):
+        return None
+    # A '..' segment is malformed too, and this is the choke point where every
+    # consumer can be made to agree on that. localm never WRITES one - _register
+    # stores str(path.resolve()) - so a stored '..' means the file was hand-edited,
+    # merged from another machine, or planted, and it is precisely the shape that
+    # defeats a lexical containment test downstream (remove_model's gate sits in
+    # front of shutil.rmtree). Rejecting it HERE means a foreign registry cannot
+    # smuggle one into any consumer at all, rather than each consumer having to
+    # remember to normalise. Checked under both path flavours because a registry
+    # travels between machines and its entries can carry either separator - the
+    # same reason inference/routes/models.py normalises them before taking a
+    # basename.
+    if any(part == ".." for part in PureWindowsPath(p).parts) or \
+       any(part == ".." for part in PurePosixPath(p).parts):
+        return None
+    return p
 
 
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
@@ -991,7 +1009,11 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     models_root = _mm.MODELS_DIR.resolve()
 
     def _under_models_dir(p: Path) -> bool:
-        return models_root in p.resolve().parents
+        # Same predicate as everywhere else, with the root hoisted out of the
+        # per-entry loop below (see is_owned_model_path). This one was already
+        # correct; it is routed through the shared helper so a future edit cannot
+        # leave the repo with two definitions that disagree again.
+        return is_owned_model_path(p, models_root)
 
     flagged = restored = pruned = 0
     note = ""
@@ -1326,6 +1348,57 @@ def _register_with_dedup(
 
 
 
+def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
+    """THE definition of "this file is localm's to delete": it lives strictly
+    inside ``<data dir>/models``.
+
+    Every caller that decides whether a registered file is managed MUST route
+    through this. Today that is the deletion in :func:`remove_model` and the
+    managed/external split in :func:`sync_models_dir`.
+
+    NOT YET ROUTED THROUGH IT: the "PERMANENTLY deletes" wording in the
+    ``localm rm`` confirmation prompt (``cli/models.py``), which still uses the
+    weakest of the three variants below. So the prompt and the deletion can
+    currently DISAGREE - the prompt says a sibling like ``<data dir>/models-old``
+    will be permanently deleted while this gate correctly declines to delete it.
+    That mismatch errs toward OVER-warning and can never cause an unexpected
+    deletion, and converting the prompt is a separate change. Stated here rather
+    than implied, because a docstring claiming the prompt already routes through
+    this would make the disagreement look impossible.
+
+    Three hand-rolled variants had drifted apart, and two of them were wrong in a
+    way that reaches ``shutil.rmtree``:
+
+    * ``path.is_relative_to(MODELS_DIR)`` is purely LEXICAL. Measured:
+      ``<models>/../models-old/x.gguf`` tests True while resolving to a file
+      OUTSIDE the models folder entirely.
+    * ``str(path).startswith(str(MODELS_DIR))`` is a raw string prefix, so the
+      sibling directory ``<data dir>/models-old`` matches ``<data dir>/models``.
+
+    Both are answered by resolving first, which is what
+    ``sync_models_dir._under_models_dir`` already did correctly. Using
+    ``.parents`` rather than an ``is_relative_to`` on the resolved path also
+    excludes the models root ITSELF, so a registry row pointing at the models
+    folder can never become an rmtree of the whole library.
+
+    *models_root* lets a caller hoist an already-resolved root out of a loop
+    (sync_models_dir walks the whole registry); it must be a RESOLVED path.
+    An unresolvable path is not one we are willing to delete under, so it is
+    reported as not owned rather than raising at the call site."""
+    root = models_root if models_root is not None else _mm.MODELS_DIR.resolve()
+    try:
+        return root in Path(path).resolve().parents
+    except (OSError, ValueError):
+        # ValueError, not just OSError: a stored path containing an embedded NUL
+        # makes resolve() raise ValueError, and this gate is reached from the
+        # CORRUPT-REGISTRY RECOVERY path (`localm rm <name>` on a hand-edited or
+        # planted registry). An unhandled exception here would break the one
+        # command that can clear the bad entry, which is the opposite of what a
+        # recovery path is for. Either way an unresolvable path is not one we are
+        # willing to delete under, so it is reported as not owned.
+        return False
+
+
 def remove_model(name: str) -> None:
     reg = _mm.load_registry()
     if name not in reg:
@@ -1358,19 +1431,35 @@ def remove_model(name: str) -> None:
         return
 
     # Only delete files that live inside <data dir>/models/ - never touch
-    # externally registered paths (Ollama blobs, user model dirs, etc.)
-    owned = path.is_relative_to(_mm.MODELS_DIR) if hasattr(path, "is_relative_to") else \
-            str(path).startswith(str(_mm.MODELS_DIR))
-    if owned and path.exists():
-        if path.is_dir():
+    # externally registered paths (Ollama blobs, user model dirs, etc.). This gate
+    # stands immediately in front of shutil.rmtree / unlink, and it has to hold on
+    # a path that was NOT written by this process, so it goes through the single
+    # resolving definition rather than a local test (see is_owned_model_path for
+    # the two hand-rolled variants it replaces and why both were wrong).
+    #
+    # Every operation below runs on the RESOLVED path, because that is the path
+    # the ownership decision was made about. Deciding on one and deleting via the
+    # other is an escape: a registry entry naming a symlink OUTSIDE the models
+    # folder that points INTO it resolves as owned, and the split-GGUF branch then
+    # unlinks `path.parent / part` - siblings of the LINK, outside the folder the
+    # gate just authorised. Resolving once and using it throughout makes the
+    # decision and the action refer to the same file by construction, rather than
+    # by a reader noticing they agree.
+    try:
+        target = path.resolve()
+    except (OSError, ValueError):
+        target = path
+    owned = is_owned_model_path(target)
+    if owned and target.exists():
+        if target.is_dir():
             import shutil
-            shutil.rmtree(path)
-            console.print(f"[dim]Deleted {path}[/dim]")
+            shutil.rmtree(target)
+            console.print(f"[dim]Deleted {target}[/dim]")
         else:
             # Split GGUF: remove every sibling part, not just the registered one
-            siblings = split_gguf_parts(path.name) or [path.name]
+            siblings = split_gguf_parts(target.name) or [target.name]
             for part in siblings:
-                part_path = path.parent / part
+                part_path = target.parent / part
                 if part_path.exists():
                     part_path.unlink()
                     console.print(f"[dim]Deleted {part_path}[/dim]")
@@ -1380,6 +1469,12 @@ def remove_model(name: str) -> None:
     console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")
 
 
+
+
+# The only legal shape of an Ollama blob filename, after ':' -> '-' normalisation.
+# Used to confine a remote-authored manifest digest before it becomes a path
+# component (see _resolve_ollama_manifest).
+_OLLAMA_BLOB_RE = re.compile(r"sha256-[0-9a-f]{64}")
 
 
 def _resolve_ollama_manifest(p: Path):
@@ -1411,14 +1506,61 @@ def _resolve_ollama_manifest(p: Path):
             manifest = _json.loads(tag_file.read_text())
         except Exception:
             continue
-        if "layers" not in manifest:
+        # A manifest is REMOTE-AUTHORED content that Ollama downloaded and wrote to
+        # disk, so nothing about its shape may be assumed: `layers` can be absent,
+        # a string (iterating one yields characters, and `"c".get` is an
+        # AttributeError), or a list of non-dicts, and `digest` can be missing or a
+        # non-string. Validate each step instead of indexing straight into it - a
+        # malformed manifest must read as "not an Ollama manifest", never as a
+        # traceback out of get_model_info.
+        if not isinstance(manifest, dict):
+            continue
+        layers = manifest.get("layers")
+        if layers is None:
+            # The ORDINARY "this JSON file is not an Ollama manifest" case - any
+            # directory can hold a config.json. Silent by design: warning here
+            # would fire on every `localm add <some dir>`. Distinguished from the
+            # ANOMALOUS shapes below, which mean the file IS manifest-shaped but
+            # malformed, and which are worth surfacing (rule 5: do not collapse
+            # "absent" and "corrupt" into one silent path).
+            continue
+        if not isinstance(layers, list):
+            logger.debug("ollama manifest %s has a non-list 'layers' (%s); "
+                         "treating as not-a-manifest", tag_file, type(layers).__name__)
             continue
 
-        for layer in manifest["layers"]:
+        for layer in layers:
+            if not isinstance(layer, dict):
+                logger.debug("ollama manifest %s has a non-dict layer (%s); skipping",
+                             tag_file, type(layer).__name__)
+                continue
             if layer.get("mediaType") != "application/vnd.ollama.image.model":
                 continue
 
-            blob_name = layer["digest"].replace(":", "-")  # sha256:abc -> sha256-abc
+            digest = layer.get("digest")
+            if not isinstance(digest, str):
+                logger.debug("ollama manifest %s has a model layer whose digest is "
+                             "%s, not a string; skipping", tag_file, type(digest).__name__)
+                continue
+            blob_name = digest.replace(":", "-")  # sha256:abc -> sha256-abc
+
+            # The digest becomes a PATH COMPONENT below, so it has to be confined
+            # before the join, not after: a value like "../../../../etc/passwd"
+            # walks straight out of <root>/blobs, and because the loop below
+            # reports its find only when maybe.exists(), an unconfined name is
+            # also a file-existence oracle - and any file it does hit is handed to
+            # the GGUF parser as a model. An Ollama blob name has exactly one legal
+            # shape, so require it rather than blocklisting bad ones.
+            if not _OLLAMA_BLOB_RE.fullmatch(blob_name):
+                # Rule 5: surface it. A silent `continue` here would report "not an
+                # Ollama manifest" for a manifest that IS one but carries a
+                # malformed or hostile digest, hiding the real reason.
+                console.print(
+                    f"[yellow]Ignoring an Ollama manifest layer with a malformed "
+                    f"digest:[/yellow] {digest!r} (expected sha256:<64 hex>)")
+                logger.debug("rejected non-conforming ollama digest %r in %s",
+                             digest, tag_file)
+                continue
 
             # Walk up from manifest dir to find <root>/blobs/
             candidate = p

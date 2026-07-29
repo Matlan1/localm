@@ -681,6 +681,51 @@ def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     return detected
 
 
+def _snapshot_is_complete(dest: Path, repo_siblings, repo_id: str) -> bool:
+    """True when every file the remote repo listing names is present under *dest*
+    at its stated size.
+
+    A disk-full mid-download can leave config.json - usually one of the smallest,
+    earliest files - on disk while weight shards are still missing, so an
+    existence check on config.json alone would register a broken snapshot as a
+    ready model on the very next retry. *repo_siblings* is None when the listing
+    could not be fetched (offline / API error), which degrades to exactly that
+    weaker check.
+
+    Module-level rather than a closure so the confinement below is directly
+    testable (tests/test_registry_confinement.py)."""
+    # TODO(#843): switch to localm.pathsafe once the shared helper lands there -
+    # see localm/_pathcheck.py's module docstring for why it is temporarily
+    # separate, and issue #843 for the properties that must survive the move.
+    from localm import _pathcheck
+    if not (dest / "config.json").exists():
+        return False
+    if repo_siblings is None:
+        return True
+    for sib in repo_siblings:
+        # rfilename comes from the remote model_info response, so it is not a
+        # trusted path component: pathlib lets an absolute or drive-qualified
+        # value REPLACE dest entirely (any Windows path naming a drive does), and
+        # a '..' walks out of it. Unconfined, this check would stat files anywhere
+        # on disk - and a repo listing names that happen to exist off-tree could
+        # make an EMPTY download look complete and get registered as ready.
+        # Confine before the stat, never after.
+        try:
+            fp = _pathcheck.confined_under(dest, str(sib.rfilename))
+        except ValueError as e:
+            # Rule 5: an out-of-bounds name is a real signal about the repo, so
+            # say so. Reporting the snapshot INCOMPLETE is the safe direction - it
+            # re-downloads rather than registering a half-present tree.
+            logger.warning("repo %s lists an out-of-bounds filename (%s); "
+                           "treating the local snapshot as incomplete", repo_id, e)
+            return False
+        if not fp.is_file():
+            return False
+        if sib.size is not None and fp.stat().st_size != sib.size:
+            return False
+    return True
+
+
 def _pull_hf_snapshot(
     repo_id: str,
     name: Optional[str],
@@ -731,20 +776,7 @@ def _pull_hf_snapshot(
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
-    def _snapshot_is_complete() -> bool:
-        if not (dest / "config.json").exists():
-            return False
-        if repo_siblings is None:
-            return True
-        for sib in repo_siblings:
-            fp = dest / sib.rfilename
-            if not fp.is_file():
-                return False
-            if sib.size is not None and fp.stat().st_size != sib.size:
-                return False
-        return True
-
-    if dest.exists() and _snapshot_is_complete():
+    if dest.exists() and _snapshot_is_complete(dest, repo_siblings, repo_id):
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
         _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  model_type=_resolve_snapshot_type(dest, model_type))
