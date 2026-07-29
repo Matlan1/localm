@@ -415,7 +415,18 @@ def _warn_if_not_bundled(binary_dir: Path) -> None:
     try:
         import localm_llama_runtime
         bundled = localm_llama_runtime.lib_dir()
-        if bundled and Path(bundled).resolve() == binary_dir.resolve():
+        # Compared WITHOUT Path.resolve(). resolve() touches the filesystem (on
+        # Windows it calls _getfinalpathname), and this function only decides
+        # whether to emit a log line - it has no business making a syscall on a
+        # config-supplied directory, least of all in a unit whose whole point is
+        # that a path check must not hand a caller-named path to the OS. normcase
+        # + abspath is pure string work.
+        # The cost is that a symlinked-but-equivalent directory now compares
+        # UNEQUAL and warns spuriously. That is the harmless direction: an extra
+        # line saying where the runtime came from, versus a missing warning about
+        # an override nobody intended.
+        if bundled and (os.path.normcase(os.path.abspath(bundled))
+                        == os.path.normcase(os.path.abspath(binary_dir))):
             return                       # the normal, self-contained case
         why = ("the bundled runtime is overridden" if bundled
                else "the wheel is installed but not provisioned")
