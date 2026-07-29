@@ -321,6 +321,55 @@ def test_uninstall_builtin_stays_in_catalog(env):
     assert (builtins / "b1").exists()
 
 
+def test_uninstall_reports_degraded_result_when_rmtree_fails(env, caplog, monkeypatch):
+    """A locked/permission-denied installed dir must not be silently swallowed
+    (AGENTS.md rule 5): _remove_installed_dir's ``except OSError: pass`` used to
+    log nothing and uninstall() unconditionally returned ``was_installed`` (True)
+    regardless of whether the directory was actually removed. Real failure mode:
+    an AV hold or a still-open file handle on Windows leaves shutil.rmtree
+    raising OSError while the directory (and its code/data) stays on disk - the
+    caller must be told, both via a WARNING log and via the return value."""
+    import logging
+    import shutil
+    from pathlib import Path
+
+    from localm.config import load_config
+    from localm.plugins.engine import PluginManager
+
+    plugins = env / "plugins"
+    _make_plugin(plugins, "p1", _ping("p1"))
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.install("p1")
+    installed_dir = Path(mgr._installed_root) / "p1"
+    assert installed_dir.is_dir()
+
+    real_rmtree = shutil.rmtree
+
+    def _boom(path, *a, **k):
+        if Path(path) == installed_dir:
+            raise OSError(13, "Permission denied", str(path))
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(shutil, "rmtree", _boom)
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        result = mgr.uninstall("p1")
+
+    # The directory genuinely could not be removed: prove it, don't assume it.
+    assert installed_dir.is_dir()
+    # A bare "was it installed before" answer of True would be a false success
+    # report; the outcome must reflect that the removal did not complete.
+    assert result is not True
+    assert any("p1" in rec.message and "Permission denied" in rec.message
+                for rec in caplog.records), (
+        "expected a WARNING naming the plugin and the real OSError; got: "
+        f"{[rec.message for rec in caplog.records]}")
+
+    # Config state is still updated (disabled/unloaded) even though the files
+    # remain - the degraded report is about the directory, not a full no-op.
+    cfg = load_config()
+    assert "p1" not in cfg.get("plugins_enabled", [])
+
+
 # ---------------------------------------------------------------------------
 #  _delete_plugin_data: data_subdir is taken verbatim from a (possibly
 #  third-party) manifest. It must NEVER let rmtree escape the data dir via
