@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.jsonl import split_jsonl
 from localm.rag import BM25
 from localm.rag.bm25 import tokenize as _tokenize
 from localm.rag.store import _cosine
@@ -310,7 +311,11 @@ class MemoryStore:
         self._records = []
         skipped = 0
         if self._file.is_file():
-            for line in self._file.read_text(encoding="utf-8").splitlines():
+            # split_jsonl, not splitlines(): see localm/jsonl.py - splitlines()
+            # also breaks on U+0085/U+2028/U+2029, which json.dumps(ensure_ascii=
+            # False) writes RAW, so a memory whose text contains one was torn in
+            # half and silently dropped on load (same defect measured in RAG).
+            for line in split_jsonl(self._file.read_text(encoding="utf-8")):
                 line = line.strip()
                 if not line:
                     continue
@@ -887,7 +892,7 @@ class MemoryStore:
             ff = self._forgotten_file()
             prior = []
             if ff.is_file():
-                prior = [ln for ln in ff.read_text(encoding="utf-8").splitlines()
+                prior = [ln for ln in split_jsonl(ff.read_text(encoding="utf-8"))
                          if ln.strip()]
             # "v": FORMAT_VERSION mirrors the main record store's stamp (LM-DA-025) -
             # same forward-tolerant from_dict pattern, so a future schema change has a

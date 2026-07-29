@@ -617,6 +617,55 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     return {"collection": name, "query": req.query, "hits": _neutralise_hits(hits)}
 
 
+@_router.post("/api/rag/collections/{name}/reembed")
+async def rag_reembed(name: str, request: Request):
+    """Recompute this collection's vectors with the CURRENT embedding model.
+
+    The GUI answer to "I changed the embedding model and now my collection refuses
+    everything". Works from the chunk text already in chunks.jsonl, so no source
+    file has to still exist - which is what separates it from the reindex button
+    (add with force=True), that re-reads the originals AND trips the very dimension
+    guard the user is trying to get past.
+
+    A background job like add/upload: re-embedding a large collection is minutes of
+    model work, so it streams progress rather than blocking the request.
+    """
+    coll = _get_collection(name)
+    jobs = _require_jobs(request, needs="Re-embedding")
+    self_embed, _, _ = _self_services(request)
+    if self_embed is None:
+        raise HTTPException(
+            400, "No embedding model is available, so there is nothing to "
+                 "re-embed with. Set one on the Knowledge page, or run "
+                 "'localm setup-embeddings'.")
+
+    from localm.config import load_config
+    from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+    from localm.rag import CollectionLockedError
+    model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
+
+    def _run(job):
+        try:
+            result = coll.reembed(
+                embed_fn=self_embed, model_name=model,
+                on_progress=lambda t: job.push({"type": "line", "text": t}))
+        except (ValueError, RuntimeError, CollectionLockedError) as e:
+            # reembed only swaps the index in after the whole set is computed and
+            # validated, so the previous one is intact - say so, because the user's
+            # next question is always whether they just lost the collection.
+            job.push({"type": "line",
+                      "text": f"error: {e} - the previous index was left untouched"})
+            return False
+        job.push({"type": "line",
+                  "text": (f"done: {result['chunks']} chunks re-embedded at "
+                           f"{result['dim']} dimensions with {model}")})
+        return True
+
+    from localm.inference.http_server import principal_id
+    job = jobs.start_fn("rag-reembed", _run, owner=principal_id(request))
+    return {"job_id": job.id}
+
+
 @_router.get("/api/rag/embedding")
 async def rag_embedding_status():
     """Current embedding-model config + availability, for the Knowledge page's
