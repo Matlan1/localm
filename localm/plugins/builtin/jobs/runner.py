@@ -562,6 +562,24 @@ def _run_coder(job: Job, *, engine=None) -> str:
     needs a localm server (``self_url``) reachable; without one this raises and
     the run is recorded as an error (never crashing the tick)."""
     from localm.audit import effective_mode
+    from localm.plugins.builtin.jobs.store import cwd_unc_error
+
+    # AUTHORITATIVE check: re-validated at RUN time, not only at the write
+    # (plug.py's _check_cwd, the CLI's own check) - a row persisted by a build
+    # that predates those gates is still on disk, and the autonomous scheduler
+    # tick runs it unattended with no caller in sight to have gated it at all.
+    # Shares cwd_unc_error's wording with the write-time checks (see its
+    # docstring), the same way _load_engine's model-name re-check below
+    # reuses unregistered_model_error. Checked on the RAW string, before any
+    # Path object is built: Path.is_dir()/.resolve() below dial SMB and
+    # auto-authenticate for a UNC target on Windows, before any status or
+    # error is chosen (see pathsafe.is_unc_or_device_path's docstring, and PR
+    # #893 which fixed the identical gap in the MCP server's
+    # pull_model/run_coder_task/generate_image tools - this closes the same
+    # class of gap in the scheduler's own coder path).
+    _bad_cwd = cwd_unc_error(job.cwd)
+    if _bad_cwd:
+        raise RuntimeError(_bad_cwd)
 
     cwd = Path(job.cwd or ".").expanduser()
     if not cwd.is_dir():
