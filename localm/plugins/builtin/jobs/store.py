@@ -48,6 +48,57 @@ SCHEDULE_KINDS = ("interval", "cron")
 # a single path segment when it is used to build a results directory.
 _ID_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
+# --------------------------------------------------------------------------- #
+#  Quarantine copies of a corrupt jobs.json (issue #859)                       #
+# --------------------------------------------------------------------------- #
+# How many corrupt-copies to keep. See JobStore._prune_quarantine.
+_QUARANTINE_KEEP = 3
+
+# `owner` holds the sha256 of the creating key - the SAME digest the keystore
+# stores (http_server.principal_id returns key_hash). A quarantine copy is made
+# from a file that FAILED to parse, so it cannot be re-serialised through json:
+# the redaction has to work on raw text, which is why this is a regex over the
+# field rather than a structural edit. It matches the digest SHAPE (64 hex) so a
+# mangled or truncated value is left alone rather than being replaced blind.
+_OWNER_DIGEST_RE = re.compile(r'("owner"\s*:\s*)"[0-9a-fA-F]{64}"')
+
+# What the digest is replaced WITH, and this is the load-bearing detail:
+# `job_owner_ok` (inference/http_server.py) returns True when owner is None -
+# "a job with NO recorded owner (created in open mode) is unrestricted". So
+# DROPPING the field, or nulling it, would make every job in a restored copy
+# streamable/cancellable/runnable by ANY caller, trading a digest that is
+# already owner-only on disk for an open ACL on the recovery path - strictly
+# worse than leaving it alone. A non-null, non-hex sentinel can never equal a
+# principal_id() (always 64 hex), so a restored job resolves to NOBODY and
+# fails CLOSED: unreachable to a scoped key, still reachable to an admin/owner
+# key, which is the right principal to be re-homing recovered jobs anyway.
+_REDACTED_OWNER = "redacted-on-quarantine"
+
+
+def _redact_owner_digests(raw: str) -> str:
+    """Strip owner key digests out of a corrupt jobs.json before it is copied
+    aside, keeping everything the copy exists to preserve.
+
+    The copy's whole purpose is that a corrupt store does not silently lose the
+    user's scheduled jobs, so only the ACCESS-CONTROL field goes: schedule,
+    prompt, model, cwd and name are left exactly as they were. Scrubbing more
+    would protect the artefact by destroying the recovery data it exists to be.
+
+    Reports at debug when a digest-shaped value survives - a partially corrupt
+    file can hold one in a position this does not match, and a redaction that
+    silently half-happened must not look like one that fully did (rule 5)."""
+    if not raw:
+        return raw
+    out, n = _OWNER_DIGEST_RE.subn(rf'\1"{_REDACTED_OWNER}"', raw)
+    leftover = re.search(r"\b[0-9a-fA-F]{64}\b", out)
+    if leftover:
+        from localm.debuglog import logger
+        logger.debug(
+            "jobs store: quarantine copy still holds a digest-shaped value "
+            "after redacting %d owner field(s); the file is corrupt, so it may "
+            "carry one in a form this cannot match", n)
+    return out
+
 
 @dataclass
 class Job:
@@ -252,28 +303,62 @@ class JobStore:
 
     def _quarantine_corrupt(self, raw, err) -> None:
         """Copy a corrupt defs file aside before anything overwrites it, and
-        warn (rule 5: a data-loss risk must be visible, never silent)."""
+        warn (rule 5: a data-loss risk must be visible, never silent).
+
+        The copy is redacted and the older copies pruned - see
+        ``_redact_owner_digests`` and ``_prune_quarantine`` for why each is
+        needed and why neither replaces the other (issue #859)."""
         from localm.debuglog import logger
         try:
             stamp = int(time.time())
             backup = self._defs_file.with_name(
                 f"{self._defs_file.name}.corrupt-{stamp}")
             if raw is not None:
-                backup.write_text(raw, encoding="utf-8")
-                # The backup is a verbatim copy of jobs.json, so it carries the
-                # same `owner` key digests - restrict it too, or the quarantine
-                # path quietly reintroduces exactly the exposure the ACL on the
-                # live file closes (CodeQL 88), and it PERSISTS because nothing
-                # ever cleans these up.
+                backup.write_text(_redact_owner_digests(raw), encoding="utf-8")
+                # The backup still describes the user's jobs, so restrict it the
+                # way the live file is - the ACL and the redaction address
+                # different halves and neither makes the other unnecessary
+                # (CodeQL 88, issue #859).
                 from localm.config import restrict_file_perms
                 restrict_file_perms(backup)
             logger.warning(
                 "jobs store %s is corrupt (%s); backed up to %s and starting "
                 "with an empty job list - your scheduled jobs are preserved in "
                 "the backup, not lost", self._defs_file, err, backup.name)
+            self._prune_quarantine()
         except OSError as e:
             logger.warning("jobs store: corrupt defs file could not be backed "
                            "up (%s); refusing to silently discard it", e)
+
+    def _prune_quarantine(self) -> None:
+        """Keep only the newest ``_QUARANTINE_KEEP`` corrupt-copies.
+
+        Redaction only reaches copies written from now on. Copies already on
+        disk from before it keep their digests forever, because nothing ever
+        deleted these - that durability, not the permissions, is what made a
+        legacy digest able to outlive the alert-88 migration. A cap bounds them
+        without needing to understand what is inside, so it stays correct for
+        any future credential-shaped field rather than going stale the next time
+        the digest scheme changes.
+
+        Best-effort by design: failing to delete an old backup must never break
+        the recovery path that just successfully wrote a new one. Reported at
+        debug rather than silently, so a directory that never prunes is
+        discoverable."""
+        from localm.debuglog import logger
+        try:
+            backups = sorted(
+                self._defs_file.parent.glob(f"{self._defs_file.name}.corrupt-*"))
+        except OSError as e:
+            logger.debug("jobs store: could not list quarantine copies (%s)", e)
+            return
+        # Names are <file>.corrupt-<unix-ts>, so lexical order is chronological
+        # for any timestamp of the same width - true until the year 2286.
+        for old in backups[:-_QUARANTINE_KEEP] if _QUARANTINE_KEEP else backups:
+            try:
+                old.unlink()
+            except OSError as e:
+                logger.debug("jobs store: could not prune %s (%s)", old.name, e)
 
     def _write_all(self, jobs: dict) -> None:
         """Atomically write the whole defs file (temp + os.replace)."""
