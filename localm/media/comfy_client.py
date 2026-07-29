@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from localm.pathsafe import confined_under
+from localm.pathsafe import confined_under, is_unc_or_device_path
 
 
 # ---------------------------------------------------------------------------
@@ -1782,7 +1782,21 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]
     """ComfyUI's output/ directory, or None when it cannot be resolved.
 
     Order: explicit arg, COMFY_OUTPUT_DIR env, the ``comfy_output_dir`` config
-    key, then a derived ``<comfy_workdir>/output`` when that exists."""
+    key, then a derived ``<comfy_workdir>/output`` when that exists.
+
+    ``comfy_output_dir`` (the arg, env var, and config key alike) is settable
+    by a caller holding only the config:write scope - privileged, but NOT
+    ADMIN (inference/routes/config.py's set_media_config ADMIN-gates
+    launch_cmd/api_url/workdir but deliberately not this key). This is the
+    READ-TIME choke point every caller of this function goes through, so the
+    UNC/device guard belongs HERE rather than at each call site or only at
+    the config-write boundary: confined_under() (used downstream by
+    contain_comfy_artifacts) validates the RELATIVE path handed to it, never
+    the base it is confined under, so a UNC-shaped base reaches its
+    .resolve() call - the SMB dial - before any containment check can refuse
+    it. A write-side check alone would also leave an ALREADY-PERSISTED config
+    value from before this fix unguarded, which is why read time is
+    authoritative here, not a backup for a config-write-side check."""
     cand = comfy_output_dir or os.environ.get("COMFY_OUTPUT_DIR")
     if not cand:
         try:
@@ -1797,7 +1811,20 @@ def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]
                         return derived
         except Exception:
             return None
-    return Path(cand) if cand else None
+    if not cand:
+        return None
+    if is_unc_or_device_path(cand):
+        # Fail safe, like the "cannot be resolved" case this function already
+        # documents - but SURFACE it (AGENTS.md rule 5), since the caller's
+        # own "set the ComfyUI output dir" warning would otherwise read as
+        # nothing being configured, when something dangerous was.
+        from localm.debuglog import logger
+        logger.warning(
+            "comfy_output_dir is a UNC or device path (%r) - refusing to use "
+            "it as the ComfyUI output root; containment/cleanup will report "
+            "it as unresolvable rather than dial it", cand)
+        return None
+    return Path(cand)
 
 
 def clear_comfy_history(api_url: str, prompt_id: str) -> bool:

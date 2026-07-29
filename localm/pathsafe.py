@@ -84,6 +84,13 @@ def confined_under(base: Path, relpath: str) -> Path:
     is rejected on every platform for uniform behavior), any ``..`` component,
     and anything whose RESOLVED location is not strictly below *base* (which is
     what catches a symlink inside *base* pointing out of it).
+
+    CONTRACT: *base* itself must ALREADY be trusted before it reaches this
+    function. Only *relpath* is lexically validated here - *base* is resolved
+    directly (see below), so a caller that hands this an unvalidated,
+    attacker-influenced *base* (a UNC path dials SMB before the containment
+    check below can refuse it) has to guard *base* itself first; this
+    function cannot do it for them without widening its own contract.
     """
     norm = (relpath or "").strip().replace("\\", "/")
     if not norm:
