@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.plugins.coder.tools import ToolResult
+from tests.conftest import final_answer as _final_answer
 
 
 def _make_agent(tmp_path: Path, **kwargs) -> object:
@@ -135,7 +136,7 @@ class TestSelfVerificationNudge:
              patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
             result = agent.run_task("change something")
 
-        assert result == "Verified, all done!"
+        assert _final_answer(result) == "Verified, all done!"
         # The nudge message must be in history
         nudges = [
             m for m in agent._messages
@@ -152,7 +153,7 @@ class TestSelfVerificationNudge:
              patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
             result = agent.run_task("task")
 
-        assert result == "done"
+        assert _final_answer(result) == "done"
         nudges = [
             m for m in agent._messages
             if m["role"] == "user" and "[self-verification]" in str(m.get("content", ""))
@@ -164,7 +165,7 @@ class TestSelfVerificationNudge:
         with patch.object(agent, "_call_llm", return_value="done"), \
              patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
             result = agent.run_task("task")
-        assert result == "done"
+        assert _final_answer(result) == "done"
         assert not any(
             "[self-verification]" in str(m.get("content", ""))
             for m in agent._messages
@@ -176,7 +177,7 @@ class TestSelfVerificationNudge:
         with patch.object(agent, "_call_llm", return_value="done"), \
              patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
             result = agent.run_task("task")
-        assert result == "done"
+        assert _final_answer(result) == "done"
         assert not any(
             "[self-verification]" in str(m.get("content", ""))
             for m in agent._messages
@@ -202,7 +203,7 @@ class TestRepairTurn:
         with patch.object(agent, "_call_llm",
                           side_effect=lambda *a, **k: next(responses)):
             result = agent.run_task("read a file")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         assert len(self._repairs(agent)) == 1
 
     def test_repair_capped_then_surfaces_raw_attempt(self, tmp_path):
@@ -221,7 +222,7 @@ class TestRepairTurn:
         agent = _make_agent(tmp_path)
         with patch.object(agent, "_call_llm", return_value="Here is the answer."):
             result = agent.run_task("task")
-        assert result == "Here is the answer."
+        assert _final_answer(result) == "Here is the answer."
         assert self._repairs(agent) == []
 
     def test_bare_json_call_parses_without_repair(self, tmp_path):
@@ -236,7 +237,7 @@ class TestRepairTurn:
              patch.object(agent, "_execute_tools",
                           return_value=["<result>ok</result>"]) as ex:
             result = agent.run_task("read a.py")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         ex.assert_called_once()          # the bare JSON was dispatched as a call
         assert self._repairs(agent) == []
 
@@ -289,7 +290,7 @@ class TestPartialParseSurfacing:
              patch.object(agent, "_execute_tools",
                           return_value=["<result>ok</result>"]) as ex:
             result = agent.run_task("read two files")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         ex.assert_called_once()
         (dispatched,), _ = ex.call_args
         assert len(dispatched) == 1
@@ -343,7 +344,7 @@ class TestPartialParseSurfacing:
             # notices - a second, independent confound with nothing to do
             # with the cap this test exists to check.
             result = agent.run_task("read two files repeatedly")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         assert len(self._partial_notices(agent)) == _MAX_TOOL_REPAIRS
         # Rule 5 (AGENTS.md "we do not hide problems"): the cap bounds
         # repetition, not visibility - exactly ONE final notice must tell
@@ -376,7 +377,7 @@ class TestPartialParseSurfacing:
              patch("localm.debuglog.logger.debug",
                    side_effect=lambda *a, **k: debug_calls.append(a)):
             result = agent.run_task("read two files repeatedly")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         # Filtered to the PER-DROP trace specifically (its own distinct
         # message), not "any debug call" - patch("...logger.debug") catches
         # every debug line in the process, including the cap announcement's
@@ -404,7 +405,7 @@ class TestPartialParseSurfacing:
              patch.object(agent, "_execute_tools",
                           return_value=["<result>ok</result>"]):
             result = agent.run_task("read a file")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         assert self._partial_notices(agent) == []
 
     def test_no_partial_notice_when_leftover_is_plain_prose(self, tmp_path):
@@ -420,8 +421,186 @@ class TestPartialParseSurfacing:
              patch.object(agent, "_execute_tools",
                           return_value=["<result>ok</result>"]):
             result = agent.run_task("read a file")
-        assert result == "Done."
+        assert _final_answer(result) == "Done."
         assert self._partial_notices(agent) == []
+
+
+class TestGroundingFooter:
+    """The final answer must carry a factual "what actually happened" line
+    from the session's own record, unconditionally - never gated on what the
+    response text itself claims.
+
+    Researched before implementing (not invented from scratch): every
+    coding-agent tool that actually closes this gap grounds on the
+    observable artifact (a diff, an exit code) rather than the model's own
+    self-report - a model confirming its own claim, or a keyword scan over
+    its prose, inherits the same unreliability being guarded against. This
+    reuses changed_files() and _last_verify_state (already tracked for the
+    self-verify nudge and the exit-code oracle), never reads the response
+    text, so it cannot be gamed by phrasing.
+    """
+
+    def test_footer_reports_no_files_changed_when_nothing_was_written(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        with patch.object(agent, "_call_llm", return_value="Here is the answer."):
+            result = agent.run_task("what does this function do?")
+        assert result == (
+            "Here is the answer.\n\n[session record: no files changed]")
+
+    def test_footer_reports_the_real_changed_files(self, tmp_path):
+        # self_verify=False: writing a .py file populates _unverified_writes
+        # (TestUnverifiedWriteTracking), which would otherwise insert an
+        # extra self-verify-nudge turn this test does not need - it is
+        # checking the changed-files readout, not that interaction.
+        agent = _make_agent(tmp_path, auto_approve=True, self_verify=False)
+        responses = iter([
+            '<tool_call>\n{"name": "write_file", "args": '
+            '{"path": "app.py", "content": "x = 1\\n"}}\n</tool_call>\n',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("write app.py")
+        assert result == (
+            "Done.\n\n[session record: 1 file(s) changed: app.py]")
+        assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+
+    def test_footer_names_multiple_changed_files_sorted(self, tmp_path):
+        """The single-file test above cannot catch a count/join/sort bug -
+        "1 file(s)" is right whether or not pluralization, joining, and
+        sorting are implemented at all. Writes b.py then a.py, in that
+        order, so a footer that just echoed write order (instead of
+        sorting) would also be caught."""
+        agent = _make_agent(tmp_path, auto_approve=True, self_verify=False)
+        responses = iter([
+            '<tool_call>\n{"name": "write_file", "args": '
+            '{"path": "b.py", "content": "b = 1\\n"}}\n</tool_call>\n',
+            '<tool_call>\n{"name": "write_file", "args": '
+            '{"path": "a.py", "content": "a = 1\\n"}}\n</tool_call>\n',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("write two files")
+        assert result == (
+            "Done.\n\n[session record: 2 file(s) changed: a.py, b.py]")
+
+    def test_footer_not_stored_in_assistant_history(self, tmp_path):
+        """The stored conversation history must stay an ACCURATE record of
+        what the model actually said - the footer is harness commentary
+        appended to what is shown/returned, not something the model said,
+        and must not be replayed back to the model as its own prior turn on
+        a later call in the same session.
+
+        Asserts BOTH halves, not just the negative one: the footer IS in the
+        returned text (proves the feature exists and this test would fail if
+        it silently stopped appending anything at all) AND is NOT in stored
+        history (the actual property under test). A test that only checked
+        history-is-clean would pass identically whether the footer feature
+        works, is broken, or was never implemented - which is exactly what
+        this test's own first draft did, caught red/green: reverting to the
+        pre-footer code left this one green while the other four correctly
+        went red."""
+        agent = _make_agent(tmp_path)
+        with patch.object(agent, "_call_llm", return_value="Here is the answer."):
+            result = agent.run_task("what does this function do?")
+        assert "[session record:" in result   # the positive half
+        assistant_msgs = [m for m in agent._messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Here is the answer."
+        assert "session record" not in assistant_msgs[0]["content"]   # the negative half
+
+    def test_footer_includes_verify_state_when_verify_cmd_configured(self, tmp_path):
+        """_last_verify_state is reset at the start of every _loop() call (it
+        is per-RUN, deliberately - "this run has not been verified until its
+        own gate says so"), so it cannot be pre-set before run_task() and
+        must instead be earned for real within the same run: write a file
+        (so _write_total() moves), then let the REAL exit-code oracle run a
+        trivially-passing command on the next no-tool-calls turn - the exit-
+        code oracle runs BEFORE the self-verify nudge, so no self_verify=False
+        is needed here."""
+        import sys
+        agent = _make_agent(tmp_path, auto_approve=True)
+        agent.verify_cmd = [sys.executable, "-c", "pass"]
+        responses = iter([
+            '<tool_call>\n{"name": "write_file", "args": '
+            '{"path": "app.py", "content": "x = 1\\n"}}\n</tool_call>\n',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("write and verify app.py")
+        assert result == (
+            "Done.\n\n[session record: 1 file(s) changed: app.py; verify: passed]")
+        assert agent._last_verify_state == "passed"
+
+    def test_footer_reports_an_inconclusive_verify_state(self, tmp_path):
+        """The passing-case test above cannot catch a footer that always
+        prints "passed" regardless of the real oracle result - inconclusive
+        is a materially different code path (a command that never started).
+        A nonexistent executable is the simplest way to earn a REAL
+        "inconclusive" verdict without a real failing check.
+
+        self_verify=False for the same reason as the multi-file test above,
+        but load-bearing here in a way it wasn't there: unlike a PASS
+        (loop.py clears _unverified_writes only on code == 0), an
+        inconclusive verdict leaves _unverified_writes populated, so
+        without this the self-verify nudge gate would also fire and this
+        script would need a third scripted turn to reach the footer."""
+        agent = _make_agent(tmp_path, auto_approve=True, self_verify=False)
+        agent.verify_cmd = ["definitely-not-a-real-executable-xyz"]
+        responses = iter([
+            '<tool_call>\n{"name": "write_file", "args": '
+            '{"path": "app.py", "content": "x = 1\\n"}}\n</tool_call>\n',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("write app.py")
+        assert result == (
+            "Done.\n\n[session record: 1 file(s) changed: app.py; "
+            "verify: inconclusive]")
+        assert agent._last_verify_state == "inconclusive"
+
+    def test_a_failed_verify_still_gets_the_footer(self, tmp_path):
+        """_run_verify_gate's exhausted-retries branch (loop.py, the
+        "Retries exhausted" block) used to return its own explicit
+        "[verification FAILED] ... NOT verified" notice directly, bypassing
+        _handle_no_tool_calls's later fall-through entirely - making a
+        verified FAILURE the one case with no session record at all, which
+        is backwards: it is the case where a user most needs the file facts
+        alongside the verdict. Fixed to append the footer there too.
+        _last_verify_state is already "failed" by this point, so the SAME
+        _grounding_footer() call naturally includes "verify: failed" - no
+        separate "footer without the verify clause" variant needed."""
+        import sys
+        agent = _make_agent(tmp_path, auto_approve=True, verify_max_retries=0)
+        agent.verify_cmd = [sys.executable, "-c", "import sys; sys.exit(1)"]
+        responses = iter([
+            '<tool_call>\n{"name": "write_file", "args": '
+            '{"path": "app.py", "content": "x = 1\\n"}}\n</tool_call>\n',
+            # A second turn is required: verification only runs inside
+            # _handle_no_tool_calls, which only sees a turn AFTER the write
+            # (the write's own turn just dispatches the tool call). This
+            # text is never shown to the user - the FAILED branch replaces
+            # it before returning.
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("write app.py")
+        assert "[verification FAILED]" in result
+        assert result.endswith(
+            "[session record: 1 file(s) changed: app.py; verify: failed]")
+        assert agent._last_verify_state == "failed"
+
+    def test_no_verify_state_omitted_when_verify_cmd_not_configured(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        assert agent.verify_cmd is None
+        with patch.object(agent, "_call_llm", return_value="Done."):
+            result = agent.run_task("task")
+        assert result == "Done.\n\n[session record: no files changed]"
+        assert "verify" not in result
 
 
 class TestNoProgressBreaker:

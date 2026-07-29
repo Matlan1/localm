@@ -1038,3 +1038,21 @@ def probe_double(reading, *, status=None):
         return value
 
     return _double
+
+
+def final_answer(result: str) -> str:
+    """Strip the unconditional grounding footer (loop.py's Agent._grounding_footer)
+    that run_task/chat/continue_task now append to every final answer, for tests
+    that check the scripted text verbatim - see
+    tests/plugins/coder/test_agent_loop_guards.py::TestGroundingFooter for the
+    dedicated coverage of the footer itself.
+
+    rfind, not find: the footer is always appended LAST, so the real footer is
+    the LAST occurrence of the marker - find (first occurrence) would wrongly
+    truncate a legitimate multi-paragraph answer that happens to mention this
+    literal marker text earlier in its own prose. A missing footer (idx == -1)
+    returns the string unchanged, which is deliberate: presence/absence of the
+    footer is TestGroundingFooter's job, not this helper's."""
+    marker = "\n\n[session record:"
+    idx = result.rfind(marker)
+    return result[:idx] if idx != -1 else result

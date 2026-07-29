@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.tools import ToolDef, ToolResult
+from tests.conftest import final_answer as _final_answer
 
 
 # ---------------------------------------------------------------------------
@@ -351,14 +352,14 @@ class TestStopMidstream:
         agent.backend.chat = chat_then_stop
 
         final = agent.run_task("long thing")
-        assert final == "partial answer"
+        assert _final_answer(final) == "partial answer"
         assert agent.last_run_ok is False
 
     def test_stale_stop_does_not_kill_next_task(self, tmp_path):
         agent = _make_agent(tmp_path, ["Done."])
         agent.request_stop()              # stale - set before the task starts
         final = agent.run_task("new task")
-        assert final == "Done."
+        assert _final_answer(final) == "Done."
         assert agent.last_run_ok is True
 
 

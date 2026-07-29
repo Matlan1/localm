@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from localm.plugins.coder.sessions import CoderSession, SessionManager
 from localm.plugins.gui.web import attach_gui
-from tests.conftest import probe_double
+from tests.conftest import final_answer as _final_answer, probe_double
 
 
 # ------------------------------------------------------------------ #
@@ -2723,7 +2723,7 @@ class TestAgentHooks:
             on_event=events.append,
         )
         out = agent.run_task("hello")
-        assert out == "Short answer."
+        assert _final_answer(out) == "Short answer."
         tokens = [e for e in events if e["type"] == "token"]
         assert "".join(t["text"] for t in tokens) == "Short answer."
 
@@ -2738,14 +2738,14 @@ class TestAgentHooks:
             cwd=tmp_path,
             on_event=explode,
         )
-        assert agent.run_task("hello") == "Still fine."
+        assert _final_answer(agent.run_task("hello")) == "Still fine."
 
     def test_request_stop_before_run(self, tmp_path):
         from localm.plugins.coder.agent import Agent
         agent = Agent(ScriptedBackend(["unused"]), cwd=tmp_path)
         agent.request_stop()
         # A stale stop request must not kill the next task
-        assert agent.run_task("hello") == "unused"
+        assert _final_answer(agent.run_task("hello")) == "unused"
 
 
 # ------------------------------------------------------------------ #
