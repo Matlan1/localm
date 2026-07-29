@@ -620,12 +620,15 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     k = max(1, min(req.k, 20))
     self_embed, _, _ = _self_services(request)
     loop = asyncio.get_running_loop()
-    hits = await loop.run_in_executor(
-        get_plugin_executor(),
-        lambda: coll.query(req.query, k=k, embed_fn=self_embed))
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt (indirect prompt injection - LM-DA-SEC-03).
-    return {"collection": name, "query": req.query, "hits": _neutralise_hits(hits)}
+    # Done INSIDE the executor, with the query: the chunk text is attacker-
+    # authored (a crafted indexed document), and unbounded CPU over hostile text
+    # on the event loop stalls the whole server rather than one request.
+    hits = await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed)))
+    return {"collection": name, "query": req.query, "hits": hits}
 
 
 @_router.post("/api/rag/collections/{name}/reembed")

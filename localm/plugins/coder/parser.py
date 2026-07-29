@@ -55,13 +55,32 @@ class ToolCall:
 #  Patterns
 # ---------------------------------------------------------------------------
 
-# Primary: <tool_call>…</tool_call>
-_RE_XML = re.compile(
-    r"<tool_call(?:\s+name=['\"](?P<name_attr>[^'\"]+)['\"])?>\s*"
-    r"(?P<body>.+?)"
-    r"\s*</tool_call>",
-    re.DOTALL | re.IGNORECASE,
+# Primary: <tool_call>…</tool_call>, matched as an OPENER paired with the next
+# CLOSER rather than as one opener-body-closer regex (same shape as the fence
+# below; see _iter_xml_tool_calls for why the pairing is linear).
+#
+# The single-regex form ``>\s*(?P<body>.+?)\s*</tool_call>`` was superlinear two
+# independent ways, and BOTH had to go. All figures below are min-of-3 on this
+# project's venv, quiet box.
+# (1) The ``\s*`` either side of a lazy body are two ambiguous quantifiers around
+#     it: CUBIC, 0.08 / 0.62 / 7.03s on 500 / 1000 / 2000 trailing spaces after a
+#     bare ``<tool_call>``, i.e. a few hundred BPE tokens of hostile model output.
+# (2) Independently of that, a lazy ``.+?`` scans to end-of-text whenever no
+#     closer follows, and it does so from EVERY opener position. Folding the
+#     whitespace into the body group does NOT fix this: that intermediate form
+#     still cost 2.33s on ``'<tool_call>{{' * 5000`` and 2.21s on
+#     ``'<tool_call>' * 5000``. Only the pairing fixes (2), and it takes both to
+#     0.0000s.
+# CodeQL alert 189 reports two witnesses for this pattern and they are wildly
+# different in cost: at n=2000, ``'<tool_call>'`` + spaces is 7.03s while
+# ``'<tool_call>a'`` + spaces is 0.0095s. Both are genuinely superlinear; the
+# second just needs n=24,000 to become painful. Fixing only the loud one would
+# have left a real alert open.
+_RE_XML_OPEN = re.compile(
+    r"<tool_call(?:\s+name=['\"](?P<name_attr>[^'\"]+)['\"])?>",
+    re.IGNORECASE,
 )
+_RE_XML_CLOSE = re.compile(r"</tool_call>", re.IGNORECASE)
 
 # Marker-variant wrapper. Finetunes mangle the canonical <tool_call> tags in
 # the wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or
@@ -69,24 +88,48 @@ _RE_XML = re.compile(
 # "call:tool_call"), and whitespace before the JSON. The JSON body itself is
 # usually valid - only the wrapper is broken - so accept any delimiter
 # variant and recover the call from the body.
+# ``_MARKER`` is shared with the body's tempered dot below: the body may not span
+# a marker, so a failed attempt stops at the NEXT marker instead of scanning to
+# end-of-text. Without that, every marker in the text starts an O(n) scan and the
+# whole pass is quadratic - measured 0.16 / 0.59 / 2.08s at 1250 / 2500 / 5000
+# repetitions of ``'<tool_call>{{'`` (65 KB at 5000), which never completes a
+# match because no ``}`` is ever reached; tempered, the same input is 0.0016s.
+# The tempering
+# also states the format's real rule: the body is the JSON BETWEEN two markers.
+# It does drop one exotic case the old pattern accepted by accident, a marker
+# literal inside a JSON string value (``<|tool_call>{"x":"<|tool_call>"}...``);
+# that stays visible to looks_like_tool_attempt(), which fires the repair turn.
+_MARKER = r"<\|?/?tool_call\|?>"
 _RE_VARIANT = re.compile(
-    r"<\|?/?tool_call\|?>\s*"
+    _MARKER + r"\s*"
     r"(?:call:(?P<name>\w+)\s*)?"
-    r"(?P<body>\{.*?\})"
-    r"\s*<\|?/?tool_call\|?>",
+    r"(?P<body>\{(?:(?!" + _MARKER + r").)*?\})"
+    r"\s*" + _MARKER,
     re.DOTALL,
 )
 
-# Fenced code block. The optional language tag tells an explicit tool fence
-# (```tool_call / ```tool_code) from an ambiguous one (```json or a bare ```),
-# which is only treated as a call when its name matches a real tool (the
-# tool_names gate in parse_tool_calls).
-_RE_FENCE = re.compile(
-    r"```[ \t]*(?P<lang>[A-Za-z_][\w+.-]*)?[ \t]*\r?\n"
-    r"(?P<body>.+?)"
-    r"\r?\n[ \t]*```",
-    re.DOTALL,
-)
+# Fenced code block, matched as an OPENER paired with the next CLOSER rather than
+# as one opener-body-closer regex. The optional language tag tells an explicit
+# tool fence (```tool_call / ```tool_code) from an ambiguous one (```json or a
+# bare ```), which is only treated as a call when its name matches a real tool
+# (the tool_names gate in parse_tool_calls).
+#
+# The single-regex form was superlinear two independent ways, and CodeQL alert 190
+# reports one witness for each. All figures min-of-1 to min-of-3, quiet box.
+# (1) Its opener was ``[ \t]*(?P<lang>...)?[ \t]*``, two adjacent ambiguous
+#     quantifiers: 1.36 / 7.22 / 26.74s at 12.5k / 25k / 50k tabs after ``` and
+#     95.9s at 100,000. Wrapping the trailing ``[ \t]*`` inside the lang group
+#     fixes that, and is kept below.
+# (2) A lazy ``.+?`` body scans to end-of-text whenever no closer follows, and it
+#     does that from EVERY opener position, which is quadratic INDEPENDENTLY of
+#     (1): 0.08 / 0.28 / 1.10 / 5.03s at 1k / 2k / 4k / 8k repetitions of
+#     ``'```\na'``. De-ambiguating the lang group does not touch it. Only the
+#     pairing below fixes it.
+# Fixed, those same two inputs cost 0.0051s and 0.0009s. Tempering the body
+# against ``` instead would have been a regression: a write_file call whose JSON
+# content contains an inline code fence is ordinary coder traffic.
+_RE_FENCE_OPEN = re.compile(r"```[ \t]*(?:(?P<lang>[A-Za-z_][\w+.-]*)[ \t]*)?\r?\n")
+_RE_FENCE_CLOSE = re.compile(r"\r?\n[ \t]*```")
 
 # Fence languages that explicitly signal a tool call (no name gate needed).
 _EXPLICIT_FENCE_LANGS = frozenset({"tool_call", "tool_code", "tool"})
@@ -231,6 +274,90 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
     return None
 
 
+def _pair_delimited(text: str, opener_re, closer_re, min_body: int = 1):
+    """Yield ``(opener_match, closer_match)`` for each opener paired with the next
+    closer after it, left to right and non-overlapping - exactly the spans a
+    single ``OPEN (?P<body>.+?) CLOSE`` regex would have matched, at linear cost
+    instead of quadratic.
+
+    The cost fix is the second ``return``: a closer search that fails from one
+    opener can never succeed from a LATER one (a later opener ends further right,
+    so it would search a suffix of the range that just came up empty), so the
+    scan stops instead of re-walking the tail once per opener. That is the whole
+    defect - with a lazy ``.+?`` body, an unterminated opener costs a scan to
+    end-of-text, and hostile text can plant thousands of them.
+
+    ``pos = closer.end()`` reproduces finditer's non-overlapping advance.
+
+    ``min_body`` is the minimum body length the replaced regex allowed, and it is
+    a parameter because the callers do NOT agree on it. The two patterns behind
+    parse_tool_calls used ``.+?`` (at least one character, so min_body=1), but the
+    transcript splitter stands in for a regex that used ``.*?`` (min_body=0). With
+    the wrong value a zero-length ``<tool_call></tool_call>`` is skipped, the
+    opener pairs with a LATER closer, and everything between - prose and any real
+    tool call - is swallowed into one unparseable body. Equivalence to the regexes
+    these replaced is pinned by differential fuzzes in tests/test_redos_bounds.py,
+    one per replaced pattern, not by inspection.
+    """
+    pos = 0
+    while True:
+        opener = opener_re.search(text, pos)
+        if opener is None:
+            return
+        closer = closer_re.search(text, opener.end() + min_body)
+        if closer is None:
+            return
+        yield opener, closer
+        pos = closer.end()
+
+
+def _iter_xml_tool_calls(text: str):
+    """Yield ``(start, end, name_attr, body)`` for each ``<tool_call>`` block."""
+    for opener, closer in _pair_delimited(text, _RE_XML_OPEN, _RE_XML_CLOSE):
+        yield (opener.start(), closer.end(), opener.group("name_attr"),
+               text[opener.end():closer.start()])
+
+
+def strip_xml_tool_calls(text: str) -> tuple[list[tuple[Optional[str], str]], str]:
+    """Split *text* into its ``<tool_call>`` calls and the text around them.
+
+    Returns ``([(name_attr, body), ...], text_without_the_blocks)``. The coder's
+    session transcript and the resume recap both need those halves, and each used
+    to carry its OWN copy of the regex - agent/session.py had
+    ``<tool_call>\\s*(.*?)\\s*</tool_call>`` and sessions.py an inline
+    ``<tool_call>.*?</tool_call>``. Both had a superlinear shape, and the
+    transcript one re-ran over EVERY stored assistant message at teardown, so one
+    poisoned response re-hung the Markdown export on every later close, forever.
+    One implementation, one place to fix.
+
+    ``min_body=0`` because both replaced regexes used ``.*?``: an empty
+    ``<tool_call></tool_call>`` is a real match for them and must stay one here.
+
+    ``name_attr`` is returned, not discarded: the replaced regexes did not match
+    the ``name=`` attribute form at all, so those blocks used to survive into the
+    transcript as raw XML that at least NAMED the tool. Now they are stripped, so
+    the name has to come back out this way or the transcript renders a bare "?".
+    """
+    calls: list[tuple[Optional[str], str]] = []
+    kept: list[str] = []
+    pos = 0
+    for opener, closer in _pair_delimited(text, _RE_XML_OPEN, _RE_XML_CLOSE,
+                                          min_body=0):
+        calls.append((opener.group("name_attr"),
+                      text[opener.end():closer.start()].strip()))
+        kept.append(text[pos:opener.start()])
+        pos = closer.end()
+    kept.append(text[pos:])
+    return calls, "".join(kept)
+
+
+def _iter_fenced_blocks(text: str):
+    """Yield ``(start, end, lang, body)`` for each fenced block."""
+    for opener, closer in _pair_delimited(text, _RE_FENCE_OPEN, _RE_FENCE_CLOSE):
+        yield (opener.start(), closer.end(), opener.group("lang"),
+               text[opener.end():closer.start()])
+
+
 def _iter_top_level_json_objects(text: str):
     """Yield ``(start, end, substring)`` for each brace-balanced top-level
     ``{...}`` region. String literals are tracked so braces inside strings do
@@ -296,26 +423,24 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         seen_spans.append((start, end))
 
     # 1. Canonical XML wrapper
-    for m in _RE_XML.finditer(text):
-        start, end = m.span()
+    for start, end, name_attr, body in _iter_xml_tool_calls(text):
         if _overlaps(start, end):
             continue
-        parsed = _try_parse_body(m.group("body"), m.groupdict().get("name_attr"))
+        parsed = _try_parse_body(body, name_attr)
         if parsed is not None:
-            _accept(parsed[0], parsed[1], m.group(0), start, end)
+            _accept(parsed[0], parsed[1], text[start:end], start, end)
 
     # 2. Fenced blocks: ```tool_call/```tool_code are explicit; ```json and a
     #    bare ``` are accepted only when the name matches a real tool.
-    for m in _RE_FENCE.finditer(text):
-        start, end = m.span()
+    for start, end, lang, body in _iter_fenced_blocks(text):
         if _overlaps(start, end):
             continue
-        parsed = _try_parse_body(m.group("body"), None)
+        parsed = _try_parse_body(body, None)
         if parsed is None:
             continue
-        explicit = (m.group("lang") or "").lower() in _EXPLICIT_FENCE_LANGS
+        explicit = (lang or "").lower() in _EXPLICIT_FENCE_LANGS
         if explicit or (tool_names is not None and parsed[0] in tool_names):
-            _accept(parsed[0], parsed[1], m.group(0), start, end)
+            _accept(parsed[0], parsed[1], text[start:end], start, end)
 
     # 3. Marker-variant wrappers (mangled <|tool_call> dialects)
     for m in _RE_VARIANT.finditer(text):

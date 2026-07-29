@@ -167,6 +167,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   models and chat history. Those names are now validated, and a rejected one
   fails the rollback loudly with the backup left intact, rather than being
   quietly skipped.
+- **A hostile web page or document can no longer freeze the server by being
+  awkwardly punctuated.** The patterns that defang untrusted text and that pick
+  tool calls out of a model's reply all backtracked badly on input crafted to
+  make them. A fetched page that was nothing but a "<" and 60,000 spaces, exactly
+  the size the fetch endpoint itself allows, took the better part of a minute to
+  clean, and it was
+  cleaned on the thread that answers every other request, so the whole server sat
+  still for that minute. The tool-call patterns were worse per character: an
+  unfinished `<tool_call>` followed by 2,000 spaces, a few hundred tokens of model
+  output, cost 7 seconds, and because the coder re-reads every stored reply when
+  it writes a session transcript, one such reply re-froze the export every time
+  you closed a session from then on. A code fence followed by a long run of tabs
+  reached 96 seconds. All of those patterns are now restructured, and the
+  defanging happens on a worker thread, so a slow page is a slow request instead
+  of a stalled server. On the same inputs the new code takes between 0.0001 and
+  0.005 seconds, and it defangs exactly the same markers as before, including
+  ones separated by arbitrarily long runs of whitespace. Two deliberate changes
+  to what counts as a tool call come with it: a mangled `<|tool_call>` wrapper
+  whose JSON body itself contains a `<tool_call>` marker is no longer recovered
+  (the coder still notices and asks the model to reformat), and the session
+  transcript now recognises the `<tool_call name="...">` form it previously
+  printed as raw XML.
 
 ### Fixed
 - **`localm rm` no longer offers to delete a file it will only unregister.** The
