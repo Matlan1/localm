@@ -8,10 +8,11 @@ broken or not there yet. It depends ONLY on the Python standard library and on
 sitting inside a localm clone: it reads the bug-report proxy URL + token straight
 out of ``localm/config.py`` (no duplicated secret, picks up any rotation), collects
 a minimal, username-scrubbed diagnostic snapshot, asks for a one-line description,
-PREVIEWS the exact text, and only files it - as an account-less GitHub issue via
-the proxy - after the user confirms. A failed or declined send never reports
-success: it saves the report to a file and points at the maintainer email
-(AGENTS.md rule 5, "we do not hide problems").
+PREVIEWS the exact text alongside the destination host, and only files it - as an
+account-less GitHub issue via the proxy - after the user confirms. Only http/https
+endpoints are accepted, so an overridden proxy is visible rather than silent. A
+failed or declined send never reports success: it saves the report to a file and
+points at the maintainer email (AGENTS.md rule 5, "we do not hide problems").
 
 What it NEVER collects: environment variables (which can hold a key), config
 secrets, or chat/transcript content. Only OS / arch / Python, a few version
@@ -34,6 +35,7 @@ import platform
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -47,6 +49,38 @@ MAINTAINER_EMAIL = "theilige@gmail.com"
 # --------------------------------------------------------------------------- #
 #  Proxy config: read the shipped constants from localm/config.py             #
 # --------------------------------------------------------------------------- #
+
+#: The only schemes that may ever reach urlopen(). The documented purpose of the
+#: LOCALM_BUGREPORT_URL override is pointing the standalone reporter at your own
+#: proxy or a test double (see read_proxy), which http/https covers completely,
+#: while file://, ftp:// and friends have no legitimate use for POSTing a report.
+ALLOWED_ENDPOINT_SCHEMES = ("http", "https")
+
+
+def endpoint_is_allowed(url: str | None) -> bool:
+    """True if *url* is a POST-able http(s) endpoint with a host.
+
+    Defence in depth, not a remote-attack fix: the URL's only producers are the
+    process environment and localm's own source (read_proxy), so reaching it
+    already means controlling the process or the code. It is cheap to make the
+    scheme explicit rather than trusting whatever urlopen() would dispatch on.
+    """
+    if not url:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:      # malformed authority, e.g. a bad IPv6 literal
+        return False
+    return parts.scheme.lower() in ALLOWED_ENDPOINT_SCHEMES and bool(parts.netloc)
+
+
+def endpoint_host(url: str) -> str:
+    """The 'host:port' of *url*, for showing the user where a report is going."""
+    try:
+        return urllib.parse.urlsplit(url.strip()).netloc or url
+    except ValueError:
+        return url
+
 
 def read_proxy(config_path: Path | None = None) -> tuple:
     """(url, token) for the bug-report proxy. LOCALM_BUGREPORT_URL /
@@ -70,6 +104,18 @@ def read_proxy(config_path: Path | None = None) -> tuple:
         url_cfg, token_cfg = _grab("bugreport_upload_url"), _grab("bugreport_upload_token")
     url = os.environ.get("LOCALM_BUGREPORT_URL") or url_cfg
     token = os.environ.get("LOCALM_BUGREPORT_TOKEN") or token_cfg
+    if url:
+        url = url.strip()
+        if not endpoint_is_allowed(url):
+            # Rule 5: SAY it was rejected. Silently falling back to the shipped
+            # URL would override an explicit choice without telling anyone, and
+            # passing it through would hand a non-http scheme straight to
+            # urlopen. Drop the endpoint instead, so main() saves the report
+            # locally and never sends it.
+            print(f"  Ignoring bug-report endpoint {scrub(str(url))!r}: only "
+                  f"{' and '.join(s + '://' for s in ALLOWED_ENDPOINT_SCHEMES)} "
+                  f"are allowed. Nothing will be sent.")
+            url = None
     return url, token
 
 
@@ -235,6 +281,15 @@ def post_report(url: str, token: str | None, title: str, body: str,
     """POST the report to the proxy and return its JSON response (e.g.
     {"url": "<issue url>"}). Raises RuntimeError on any non-2xx / network error so a
     failed send is never mistaken for success. *opener* is injectable for tests."""
+    # Gate the scheme at the sink itself, before anything is built or opened, so
+    # a caller that obtained the URL some other way cannot reach urlopen with a
+    # file:// or ftp:// endpoint. read_proxy() screens it too; this is the layer
+    # that holds regardless of who called.
+    if not endpoint_is_allowed(url):
+        raise RuntimeError(
+            f"refusing to send to {scrub(str(url))!r}: only "
+            f"{' and '.join(s + '://' for s in ALLOWED_ENDPOINT_SCHEMES)} "
+            f"endpoints are allowed")
     payload = json.dumps({"title": (title or "localm bug report")[:200],
                           "body": body or ""}).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "localm-report-issue"}
@@ -327,15 +382,23 @@ def main(argv=None) -> int:
     log_path, log_tail = _newest_log(args.log or None)
     body = build_body(scrub(summary), scrub(description), diag, log_path, log_tail)
 
+    # Resolved BEFORE the preview so the destination can be part of what the user
+    # reviews: an overridden endpoint should be visible, not silent.
+    url, token = read_proxy()
+
     # PREVIEW: show exactly what will be sent, always (the review-first contract).
     print()
     print("  ----- this is exactly what will be sent (edit later if you prefer) -----")
     for line in body.splitlines():
         print("  " + line)
     print("  -----------------------------------------------------------------------")
+    if url:
+        print(f"  Destination: {endpoint_host(url)} "
+              f"(over {urllib.parse.urlsplit(url).scheme})")
+    else:
+        print("  Destination: none configured - the report will only be saved locally.")
     print()
 
-    url, token = read_proxy()
     when = _timestamp()
 
     # CONFIRM. No confirmation possible (not a tty) and not --yes -> save only,

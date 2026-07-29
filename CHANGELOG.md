@@ -136,6 +136,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path when something has put an empty stand-in numpy on the import path, which
   is a broken environment rather than a missing optional dependency.
 
+### Fixed
+- **`localm rm` no longer offers to delete a file it will only unregister.** The
+  confirmation prompt picked its wording with a weaker path check than the
+  deletion itself used, so a model registered from a folder that merely shares a
+  name prefix with your models folder (say `<data dir>/models-old`) was announced
+  as "PERMANENTLY deletes ..." when removing it would in fact only drop the name.
+  Nothing was ever deleted unexpectedly, the prompt simply over-warned, but it now
+  describes exactly what will happen because the prompt and the deletion consult
+  the same check. A registered file that has already gone missing is now described
+  as missing, rather than as living outside your models folder.
+- **The standalone bug reporter shows where a report is going, and sends only over
+  http(s).** The preview you confirm now names the destination host, so a reporter
+  pointed somewhere unexpected is visible instead of silent. An endpoint override
+  that is not `http://` or `https://` is refused and said out loud rather than
+  used or quietly swapped for the built-in one; the report is saved locally and
+  nothing is sent. Pointing the reporter at your own proxy over http or https
+  works exactly as before.
+
 ## [0.1.3] - 2026-07-23
 
 ### Added
