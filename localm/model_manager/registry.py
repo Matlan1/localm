@@ -69,10 +69,17 @@ def is_llm(entry: dict) -> bool:
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
 
 
-def _entry_path(entry) -> Optional[str]:
+def _entry_path(entry, field: str = "path") -> Optional[str]:
     """The stored file path of a registry *entry*, or None when the entry is
-    malformed (not a dict; its ``path`` missing / null / not a non-empty string;
-    or that path carrying a ``..`` component).
+    malformed (not a dict; the named *field* missing / null / not a non-empty
+    string; or that path carrying a ``..`` component).
+
+    *field* selects WHICH stored path to validate. It defaults to ``path``, the
+    model's own file. ``mmproj`` (the multimodal projector recorded beside a
+    vision GGUF) is the other one, and it is a path in exactly the same sense:
+    it is read from the same hand-editable file and handed to the same native
+    loader. It was previously read raw, so a projector entry bypassed both the
+    type check and the ``..`` rejection that this choke point exists to apply.
 
     registry.json is normally written only by localm and is always well-formed,
     but it is a real, user-visible file (``localm info`` names it) that can be
@@ -87,10 +94,10 @@ def _entry_path(entry) -> Optional[str]:
 
     INVARIANT (grep ``_entry_path`` before adding a new registry consumer): EVERY
     site that iterates ``load_registry()`` (or looks an entry up by name) and then
-    reads the entry's ``path`` / ``source`` / ``model_type`` MUST route that access
-    through this helper (or an explicit ``isinstance(entry, dict)`` guard). A raw
-    ``entry["path"]`` / ``entry.get("path")`` crashes on a non-dict or null/int
-    path. The known consumers, all guarded, are: this module (list/info/vision/
+    reads the entry's ``path`` / ``mmproj`` / ``source`` / ``model_type`` MUST route
+    that access through this helper (or an explicit ``isinstance(entry, dict)``
+    guard). A raw ``entry["path"]`` / ``entry.get("path")`` crashes on a non-dict
+    or null/int path. The known consumers, all guarded, are: this module (list/info/vision/
     external/alias/dedup/sync), the MCP ``list_models``
     (plugins/mcpserver/server.py), the GUI ``/api/models`` + ``/api/vram-estimate``
     (plugins/gui/routes/models.py), the API ``model_detail``
@@ -105,7 +112,7 @@ def _entry_path(entry) -> Optional[str]:
     """
     if not isinstance(entry, dict):
         return None
-    p = entry.get("path")
+    p = entry.get(field)
     if not (isinstance(p, str) and p):
         return None
     # A '..' segment is malformed too, and this is the choke point where every
@@ -417,8 +424,16 @@ def get_model_mmproj(name: str, *, allow_direct_path: bool = False) -> Optional[
     a remote chain was demonstrated for them."""
     reg = _mm.load_registry()
     entry = reg.get(name) if isinstance(reg, dict) else None
-    if isinstance(entry, dict) and entry.get("mmproj"):
-        mmp = Path(entry["mmproj"])
+    # Through the choke point, not a raw read: the recorded projector is a stored
+    # path from the same hand-editable file as ``path``, and it goes to the same
+    # native mtmd loader, so it gets the same type check and ``..`` rejection. The
+    # raw ``entry["mmproj"]`` this replaces raised TypeError on a null/int value
+    # and passed a traversal component straight through. A malformed projector
+    # falls through to the auto-detect below, which is the same recovery a
+    # recorded-but-missing one already gets.
+    recorded = _entry_path(entry, "mmproj")
+    if recorded:
+        mmp = Path(recorded)
         if mmp.exists():
             return str(mmp)
         # Recorded but gone: fall through to auto-detect rather than handing the

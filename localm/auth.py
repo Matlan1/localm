@@ -35,6 +35,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+from typing import Callable
 from typing import Optional
 
 from localm.debuglog import logger
@@ -715,9 +716,12 @@ def _hash_key(key: str) -> str:
     return derived
 
 
-def _record_digest_for(record: dict, key: str, fast: str) -> Optional[str]:
+def _record_digest_for(record: dict, key: str, fast: Callable[[], str]) -> Optional[str]:
     """The digest *key* would produce under *record*'s DECLARED construction, or
     None when the record cannot be evaluated.
+
+    *fast* is a CALLABLE, not a string, so the cheap digest is computed only on
+    the branch that actually returns one. See _find_keystore_record for why.
 
     A record with no "alg" predates the marker, and create_key was the only writer
     then, so it is a generated token on the cheap path. An UNKNOWN alg returns
@@ -725,7 +729,7 @@ def _record_digest_for(record: dict, key: str, fast: str) -> Optional[str]:
     would let a future strong record be matched by a weak comparison."""
     alg = record.get("alg") or _ALG_FAST
     if alg == _ALG_FAST:
-        return fast
+        return fast()
     if alg == _ALG_KDF:
         try:
             return _scrypt_derive(key, bytes.fromhex(str(record.get("salt", ""))),
@@ -743,8 +747,27 @@ def _record_digest_for(record: dict, key: str, fast: str) -> Optional[str]:
 
 
 def _find_keystore_record(key: str, records: list) -> Optional[dict]:
-    """The keystore record *key* authenticates against, or None."""
-    fast = _fast_digest(key)
+    """The keystore record *key* authenticates against, or None.
+
+    The cheap digest is computed LAZILY, on first use, rather than up front. The
+    presented key here may be a human-chosen owner key, and hashing it unsalted
+    just because the loop MIGHT later meet a fast-alg row is the same mistake
+    _owner_identity already avoids on its own branch ("computed only on the
+    branch that actually returns one"); this path had not been given the same
+    treatment. An owner key's record declares the KDF alg, so its fast digest was
+    never the value that authenticated it - it was computed and discarded. Now it
+    is not computed at all unless a record actually declares the fast
+    construction (CodeQL 247).
+
+    Memoised, so a keystore holding many generated-token rows still hashes once
+    per lookup rather than once per row."""
+    _fast_memo: list = []
+
+    def fast() -> str:
+        if not _fast_memo:
+            _fast_memo.append(_fast_digest(key))
+        return _fast_memo[0]
+
     for r in records:
         cand = _record_digest_for(r, key, fast)
         if cand is None:
