@@ -1,4 +1,52 @@
 {
+ "255": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1080,
+  "lineHash": "732ef917db7415bf:1",
+  "comment": "False positive: every use of d (containment test, is_dir/rmtree delete, outcome probes) is dominated by d.resolve().parent == root.resolve(), which raises unless d is a direct child of the installed root. See dispositions.json, guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "254": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1079,
+  "lineHash": "35c239bb4d71f5d7:1",
+  "comment": "False positive: every use of d (containment test, is_dir/rmtree delete, outcome probes) is dominated by d.resolve().parent == root.resolve(), which raises unless d is a direct child of the installed root. See dispositions.json, guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "253": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1092,
+  "lineHash": "44e3b6551355a529:1",
+  "comment": "False positive: every use of d (containment test, is_dir/rmtree delete, outcome probes) is dominated by d.resolve().parent == root.resolve(), which raises unless d is a direct child of the installed root. See dispositions.json, guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "252": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1091,
+  "lineHash": "f5357495f4d39632:1",
+  "comment": "False positive: every use of d (containment test, is_dir/rmtree delete, outcome probes) is dominated by d.resolve().parent == root.resolve(), which raises unless d is a direct child of the installed root. See dispositions.json, guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "251": {
+  "rule": "py/path-injection",
+  "file": "scripts/check_coverage_floors.py",
+  "line": 143,
+  "lineHash": "5d6a88fe0293d106:1",
+  "comment": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
+  "reason": "won't fix"
+ },
+ "250": {
+  "rule": "py/path-injection",
+  "file": "scripts/check_coverage_floors.py",
+  "line": 137,
+  "lineHash": "f7a37db04ded0efd:1",
+  "comment": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
+  "reason": "won't fix"
+ },
  "249": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/pull.py",
@@ -298,7 +346,7 @@
  "207": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1296,
+  "line": 1310,
   "lineHash": "64bcdca5e6f53469:1",
   "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
   "reason": "won't fix"
@@ -306,7 +354,7 @@
  "206": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1067,
+  "line": 1071,
   "lineHash": "cc7468924a63ddc:1",
   "comment": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
   "reason": "false positive"
@@ -346,7 +394,7 @@
  "176": {
   "rule": "py/path-injection",
   "file": "localm/plugins/mcpserver/server.py",
-  "line": 616,
+  "line": 618,
   "lineHash": "6acdc374c7275538:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -354,7 +402,7 @@
  "175": {
   "rule": "py/path-injection",
   "file": "localm/plugins/mcpserver/server.py",
-  "line": 615,
+  "line": 617,
   "lineHash": "396d028ab1c7da7e:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -362,7 +410,7 @@
  "174": {
   "rule": "py/path-injection",
   "file": "localm/plugins/mcpserver/server.py",
-  "line": 613,
+  "line": 615,
   "lineHash": "cc9cae0d89d54793:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -602,7 +650,7 @@
  "126": {
   "rule": "py/path-injection",
   "file": "localm/inference/http_server.py",
-  "line": 1261,
+  "line": 1274,
   "lineHash": "10913945e7b7b395:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -802,7 +850,7 @@
  "97": {
   "rule": "py/stack-trace-exposure",
   "file": "localm/inference/http_server.py",
-  "line": 2894,
+  "line": 2965,
   "lineHash": "566bea2e158cc7a5:1",
   "comment": "False positive (maintainer-approved): returning stacks IS the feature; the residual flow is by design. Boundary-crossing half FIXED: was unauthenticated in keyless mode, now needs a credential, 404s off loopback, abs paths 32/63 -> 0/65. dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -810,7 +858,7 @@
  "87": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 501,
+  "line": 511,
   "lineHash": "621d263e46574fca:1",
   "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -818,7 +866,7 @@
  "86": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 499,
+  "line": 509,
   "lineHash": "8203dbe5f0f0e605:1",
   "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -826,7 +874,7 @@
  "85": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 459,
+  "line": 469,
   "lineHash": "8366a931db1e049:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -834,7 +882,7 @@
  "84": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 454,
+  "line": 464,
   "lineHash": "cbcc642963671e4d:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -842,7 +890,7 @@
  "83": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 448,
+  "line": 458,
   "lineHash": "1b79d2b060a96cc4:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -874,7 +922,7 @@
  "79": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 436,
+  "line": 446,
   "lineHash": "41cededfeae3c062:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -882,7 +930,7 @@
  "78": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 435,
+  "line": 445,
   "lineHash": "ec446e423e429900:1",
   "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -890,7 +938,7 @@
  "77": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 247,
+  "line": 250,
   "lineHash": "9b71a181e4f0fbcc:1",
   "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1058,7 +1106,7 @@
  "47": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1767,
+  "line": 1792,
   "lineHash": "fc4a29b8ba430794:1",
   "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1066,7 +1114,7 @@
  "46": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1767,
+  "line": 1792,
   "lineHash": "fc4a29b8ba430794:1",
   "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1074,7 +1122,7 @@
  "44": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1211,
+  "line": 1225,
   "lineHash": "32cc8f5bc40f2ef0:1",
   "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
   "reason": "false positive"
@@ -1082,7 +1130,7 @@
  "43": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1187,
+  "line": 1201,
   "lineHash": "3383460c8d925db9:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1090,7 +1138,7 @@
  "42": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1184,
+  "line": 1198,
   "lineHash": "64166dad0c6d366a:2",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1098,7 +1146,7 @@
  "41": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1182,
+  "line": 1196,
   "lineHash": "64e5bb081b334b40:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1106,7 +1154,7 @@
  "40": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1177,
+  "line": 1191,
   "lineHash": "566b81613dc898e9:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1114,7 +1162,7 @@
  "39": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1174,
+  "line": 1188,
   "lineHash": "9355b687e0ee7567:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1122,7 +1170,7 @@
  "38": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1170,
+  "line": 1184,
   "lineHash": "64166dad0c6d366a:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1130,7 +1178,7 @@
  "37": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1168,
+  "line": 1182,
   "lineHash": "5fd5f8d778f71f8b:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1138,7 +1186,7 @@
  "36": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1168,
+  "line": 1182,
   "lineHash": "5fd5f8d778f71f8b:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1146,7 +1194,7 @@
  "35": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1161,
+  "line": 1175,
   "lineHash": "2af70029240c6726:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1154,7 +1202,7 @@
  "34": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1158,
+  "line": 1172,
   "lineHash": "8063bd2b95c72443:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1162,7 +1210,7 @@
  "33": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1158,
+  "line": 1172,
   "lineHash": "8063bd2b95c72443:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1170,7 +1218,7 @@
  "32": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1157,
+  "line": 1171,
   "lineHash": "32e781f3827fb110:1",
   "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
   "reason": "false positive"
@@ -1178,25 +1226,9 @@
  "31": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
-  "line": 1106,
+  "line": 1120,
   "lineHash": "53eda2fcd2add5ac:1",
   "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
-  "reason": "false positive"
- },
- "30": {
-  "rule": "py/path-injection",
-  "file": "localm/plugins/engine.py",
-  "line": 1076,
-  "lineHash": "8bb7183096b16dc0:1",
-  "comment": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
-  "reason": "false positive"
- },
- "29": {
-  "rule": "py/path-injection",
-  "file": "localm/plugins/engine.py",
-  "line": 1075,
-  "lineHash": "593cd2336620742e:1",
-  "comment": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
   "reason": "false positive"
  },
  "26": {
