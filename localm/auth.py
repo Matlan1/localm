@@ -458,21 +458,20 @@ def _legacy_owner_identity(key: str) -> str:
     return _fast_digest(key)
 
 
-# Per-process random MAC key for the in-memory memo. NOT a credential and never
-# persisted: it exists so the memo can be keyed by the presented secret WITHOUT
-# computing a bare fast hash of that secret. Two things follow. A memory scrape
-# of the memo yields values that mean nothing in any other process, and the
-# owner key no longer reaches a plain unsalted hash on the per-request path at
-# all - previously _hash_key computed _fast_digest(key) unconditionally, so the
-# hot path hashed a possibly-user-chosen secret on EVERY call even though it
-# then threw that value away for the owner.
-_MEMO_MAC_KEY = secrets.token_bytes(32)
-
-
 def _memo_key(key: str) -> str:
-    """Keyed lookup handle for the memo. Not invertible without _MEMO_MAC_KEY."""
-    return hmac.new(_MEMO_MAC_KEY, key.encode("utf-8", "surrogatepass"),
-                    hashlib.sha256).hexdigest()
+    """Lookup handle for the in-memory memo: the presented secret's fast digest.
+
+    A keyed HMAC was tried here and REVERTED. It read better in isolation (a
+    scraped memo would mean nothing in another process) but it was wrong twice
+    over: it deviated from the remedy the maintainer specified ("cache the
+    presented secret's fast digest -> verified marker"), and CodeQL models
+    hmac.new(..., sha256) as the SAME weak-password-hash sink, so it turned two
+    traced flows into eight while changing no observable behaviour. It bought a
+    property nobody needed at the cost of the one the design asked for.
+
+    This value is never persisted and never leaves the process; the digest that
+    IS written to disk for the owner key is the scrypt derivation."""
+    return _fast_digest(key)
 
 
 def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,

@@ -573,17 +573,26 @@ def test_sessions_restrict_perms_is_not_posix_only(auth):
         assert oct(os.stat(store).st_mode & 0o777) == "0o600"
         assert oct(os.stat(untouched).st_mode & 0o777) == "0o644"
     else:
-        # Fires-control, grounded in measured icacls output rather than assumed:
-        # an untouched sibling in the same directory carries three INHERITED aces
-        # (SYSTEM, Administrators, OWNER RIGHTS - each printed with the "(I)"
-        # marker), while a restricted file carries exactly one explicit ace for
-        # the current user because /inheritance:r dropped the rest. A POSIX-only
-        # _restrict_perms - the actual defect - would leave sessions.json looking
-        # like the sibling, so both halves below would fail.
+        # The control CANNOT be "an untouched sibling carries inherited aces".
+        # That is true on a normal workstation (measured here: SYSTEM,
+        # Administrators and OWNER RIGHTS, each printed with the "(I)" marker)
+        # and FALSE on the GitHub windows-latest runner, where a fresh file in
+        # the temp tree carries none - so the control failed on CI while the
+        # product behaviour was correct. Ambient ACL layout is a property of the
+        # machine, not of the code under test, and a control must not depend on it.
+        #
+        # What IS invariant is the contract of `/inheritance:r /grant:r <user>:F`:
+        # after it, the file has no INHERITED entry. And the fires-control comes
+        # from the RETURN VALUE, which is environment-independent: the POSIX-only
+        # implementation that was the actual defect fell off the end of a
+        # `if os.name == "posix":` branch and returned None on Windows, so
+        # `is True` here fails against it on any Windows box.
+        assert sessions._restrict_perms(store) is True
         fingerprint = _acl_fingerprint(store)
         assert not any("(I)" in ace for ace in fingerprint), fingerprint
-        assert any("(I)" in ace for ace in _acl_fingerprint(untouched))
-        assert fingerprint != _acl_fingerprint(untouched)
+    # The real regression guard, on both platforms: sessions.json (the key
+    # DIGEST) is treated exactly like auth.key (the PLAINTEXT). That asymmetry
+    # was the ACL half of CodeQL 88.
     assert _acl_fingerprint(store) == _acl_fingerprint(auth.key_file())
 
 
