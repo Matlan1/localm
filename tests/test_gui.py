@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 import queue
 import shutil
 import threading
@@ -2443,8 +2444,19 @@ class TestRagEndpoints:
             # unknown collection / bad path validation
             assert client.post("/api/rag/collections/ghost/add",
                                json={"paths": [str(docs)]}).status_code == 404
+            # An ABSOLUTE path outside the allowed indexing roots gets the owner
+            # the add-and-continue consent flow (409) - the SAME answer an
+            # out-of-policy path that DOES exist gets. It used to 400 "Not found"
+            # here, and that difference was a path-existence oracle over the whole
+            # disk for any rag-scoped key (CodeQL 59): permission is now decided
+            # first. A missing path INSIDE the allowed roots still reports "Not
+            # found" - see tests/test_disclosure.py::TestRagAddExistenceOracle.
+            # Must be absolute on THIS platform: "Z:/nope" is drive-absolute only
+            # on Windows, and on POSIX it resolves under Path.cwd(), which is an
+            # always-allowed root, so it would pass confinement and 400 instead.
+            outside = "Z:/nope" if os.name == "nt" else "/ws9-no-such-root/nope"
             assert client.post("/api/rag/collections/kb/add",
-                               json={"paths": ["Z:/nope"]}).status_code == 400
+                               json={"paths": [outside]}).status_code == 409
 
             r = client.post("/api/rag/collections/kb/add",
                             json={"paths": [str(docs)], "embed": False})

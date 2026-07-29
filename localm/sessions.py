@@ -97,8 +97,18 @@ def _save(records: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(records, indent=2), encoding="utf-8")
+    # Restrict the TEMP file, not the destination: it already holds the full
+    # digest payload with directory-inherited permissions, so a crash between
+    # these two lines would otherwise leave an unrestricted copy behind. Doing it
+    # here also means ONE icacls spawn instead of two, which matters because this
+    # runs on the asyncio event loop (session_login, create_key_ep, _gui_index).
+    # MEASURED: os.replace carries the source's ACL onto the destination, so the
+    # restriction survives the rename; the retry below covers the case where it
+    # did not happen at all.
+    ok = _restrict_perms(tmp)
     os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
-    _restrict_perms(path)
+    if not ok:
+        _restrict_perms(path)
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
     try:
@@ -110,16 +120,18 @@ def _save(records: list) -> None:
         _CACHE["records"] = None
 
 
-def _restrict_perms(path: Path) -> None:
-    """Owner-only perms where the OS supports it (POSIX chmod; best-effort). The
-    data dir is already user-scoped, so this is defense-in-depth, never fatal."""
-    try:
-        if os.name == "posix":
-            os.chmod(path, 0o600)
-    except OSError:
-        # A usage/permissions nicety on a filesystem without per-file perms must
-        # never break session persistence; the home dir scoping is the real guard.
-        pass
+def _restrict_perms(path: Path) -> bool:
+    """Owner-only perms where the OS supports it (best-effort, never fatal).
+    Returns True when the tightening is believed to have happened.
+
+    Was POSIX-ONLY, which was the actual defect behind CodeQL 88: this file
+    records ``key_hash``, the same sha256 the keystore stores, while auth.py ran
+    icacls on Windows for auth.key. So on Windows the key DIGEST inherited
+    BUILTIN\\Users from the data dir and was readable by any local account,
+    while the PLAINTEXT next to it was not. Now shares auth.key's exact
+    implementation."""
+    from localm.config import restrict_file_perms
+    return restrict_file_perms(path)
 
 
 def _expired(rec: dict, now: float) -> bool:

@@ -57,6 +57,8 @@ from typing import Optional
 
 from rich.console import Console
 
+from localm import pathscrub
+
 console = Console(highlight=False)
 
 # Intentionally published maintainer contact for bug reports (hygiene-ok).
@@ -211,41 +213,18 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
     return diag
 
 
-def _scrub_home(text: str) -> str:
-    """Drop the home directory (which contains the username) from any paths so a
-    tester's report does not leak their account name; the file/line structure that
-    matters for debugging is kept. Guard ONLY the home lookup: if Path.home() raises
-    or is empty we must NOT ship the raw text as if scrubbed (privacy fail), so fail
-    safe and strip the username with a fallback regex over common home-path roots."""
-    if not text:
-        return text
-    home = ""
-    try:
-        home = str(Path.home())
-    except Exception:
-        home = ""
-    if home:
-        # Replace the home dir in BOTH separator forms: a config value entered
-        # with forward slashes does not match the native backslash form, and on
-        # Windows paths are case-insensitive - a lowercased drive/Users segment
-        # is the same directory - so a plain case-sensitive str.replace leaks
-        # the username on those variants (AUD-SCRUBHOME).
-        variants = {home, home.replace("\\", "/")}
-        if sys.platform == "win32":
-            for v in variants:
-                text = re.sub(re.escape(v), "~", text, flags=re.IGNORECASE)
-        else:
-            for v in variants:
-                text = text.replace(v, "~")
-    # ALWAYS apply the known-home-root username strip as a backstop, in both
-    # separator forms (and case-insensitively on Windows): it catches a
-    # home-rooted path that is NOT exactly Path.home() - a different account, or
-    # any path under C:\Users / /home / /Users the replacement above missed.
-    # A privacy scrub must never ship the account name, so this runs even when
-    # the home lookup succeeded (defence in depth).
-    flags = re.IGNORECASE if sys.platform == "win32" else 0
-    return re.sub(r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+",
-                  r"\1<redacted>", text, flags=flags)
+# The home/username policy itself lives in localm.pathscrub, so the report
+# scrubber and the API-response scrubber (embedder status, /debug/stacks) cannot
+# drift apart - a copy of a privacy rule is a copy that gets fixed once. The
+# behaviour here is unchanged: replace Path.home() with "~" in both separator
+# forms (case-insensitively on Windows, AUD-SCRUBHOME), and ALWAYS apply the
+# known-home-root username strip as a backstop so a path that is not exactly
+# Path.home() - a different account - is caught too.
+#
+# A report deliberately keeps the INSTALL dir (pathscrub.scrub_paths would drop
+# it): the maintainer reading the report needs to know where the app is
+# installed. Responses to a lower-privileged caller use scrub_paths instead.
+_scrub_home = pathscrub.scrub_user_paths
 
 
 def _scrub_url_creds(text: str) -> str:

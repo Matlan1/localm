@@ -260,6 +260,13 @@ class JobStore:
                 f"{self._defs_file.name}.corrupt-{stamp}")
             if raw is not None:
                 backup.write_text(raw, encoding="utf-8")
+                # The backup is a verbatim copy of jobs.json, so it carries the
+                # same `owner` key digests - restrict it too, or the quarantine
+                # path quietly reintroduces exactly the exposure the ACL on the
+                # live file closes (CodeQL 88), and it PERSISTS because nothing
+                # ever cleans these up.
+                from localm.config import restrict_file_perms
+                restrict_file_perms(backup)
             logger.warning(
                 "jobs store %s is corrupt (%s); backed up to %s and starting "
                 "with an empty job list - your scheduled jobs are preserved in "
@@ -280,7 +287,20 @@ class JobStore:
             f"{self._defs_file.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}")
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                        encoding="utf-8")
+        # Each job def records `owner` - the sha256 of the creating key, the SAME
+        # digest the keystore stores. Restrict the file to this account the way
+        # auth.key already is, or the digest is readable where the plaintext is
+        # not (CodeQL 88). The TEMP file is what gets restricted: it already holds
+        # the whole payload, its name is unique per writer so one left behind by a
+        # crash is never overwritten or cleaned up, and os.replace carries the
+        # source's ACL onto the destination (measured). One spawn instead of two,
+        # which matters because job writes happen in async handlers. Retry on the
+        # destination only if the first attempt did not happen.
+        from localm.config import restrict_file_perms
+        ok = restrict_file_perms(tmp)
         os.replace(tmp, self._defs_file)
+        if not ok:
+            restrict_file_perms(self._defs_file)
 
     # ---- CRUD --------------------------------------------------------------
     def list(self) -> list:

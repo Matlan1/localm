@@ -261,10 +261,12 @@ CORE_FIELDS: list = [
     # admin_only: this names WHICH BROWSER ORIGINS may call the authenticated
     # API - it widens a trust boundary exactly like net_allow_private (network
     # reach) and the rag_* keys (filesystem reach) do. "*" additionally opts the
-    # sensitive unauthenticated GETs in _CROSS_ORIGIN_GET_REFUSED (/whoami,
-    # /debug/stacks - see http_server.py) out of their cross-origin refusal, so a
-    # non-owner config:write key setting this could disclose root_dir (the OS
-    # username) to any website. See routes/config.py admin_only gate.
+    # sensitive GETs in _CROSS_ORIGIN_GET_REFUSED (/whoami, /debug/stacks - see
+    # http_server.py) out of their cross-origin refusal, so a non-owner
+    # config:write key setting this could disclose root_dir (the OS username) to
+    # any website. /whoami is unauthenticated; /debug/stacks additionally
+    # requires the shell token in open mode, so for it this waives only the
+    # cross-origin half. See routes/config.py admin_only gate.
     SettingField("cors_origins", Widget.TEXT, "CORS origins",
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',

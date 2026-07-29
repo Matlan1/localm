@@ -658,6 +658,86 @@ def ensure_dirs() -> None:
     _mkdir_or_explain(MODELS_DIR, is_home=False)
 
 
+def _perm_warn(path: Path, why: str) -> None:
+    """Record a failed permission tightening at debug level.
+
+    Discoverable rather than silent (AGENTS.md rule 5), but not escalated: the
+    data dir is already user-scoped, so a failure here degrades defence in depth,
+    it does not expose a plaintext secret."""
+    try:
+        from localm.debuglog import logger
+        logger.debug("could not restrict permissions on %s (%s); the data "
+                     "directory's own scoping still applies", path.name, why)
+    except Exception:
+        pass
+
+
+def restrict_file_perms(path: Path) -> bool:
+    """Best-effort: restrict *path* to the current user (POSIX chmod 0600, or
+    Windows icacls). Returns True when the tightening is believed to have
+    happened, False when it did not. No-op on failure - the data dir is already
+    user-scoped, so this per-file tightening is defence in depth.
+
+    The return value exists so a caller doing the atomic temp+replace dance can
+    restrict the TEMP file (which already holds the whole payload) and skip a
+    second call on the destination in the happy path. MEASURED on Windows:
+    os.replace carries the source's ACL onto the destination, overwriting the
+    destination's inherited one, so one call is normally enough; POSIX rename
+    likewise carries the source's mode. Callers should still retry on the
+    destination when this returns False, so a failed first attempt is not the
+    single point of failure for a security property.
+
+    Lives here, not in auth.py, because THREE files need it and only one used to
+    get it (CodeQL 88). ``auth.key`` holds the owner key in PLAINTEXT and got the
+    full treatment; ``sessions.json`` and ``jobs.json`` hold the SAME sha256
+    digest the keystore stores (``http_server.principal_id`` returns
+    ``key_hash``) and had a POSIX-only chmod or nothing at all - so on Windows
+    the digest was readable by any local account while the plaintext was not.
+    An unsalted sha256 of a 256-bit ``secrets.token_urlsafe(32)`` is not
+    crackable, but a digest is still a credential artefact and the asymmetry was
+    the actual defect. One implementation so a fourth caller cannot get a
+    weaker fourth variant.
+    """
+    try:
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+        else:
+            import subprocess
+            user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+            if not user:
+                _perm_warn(path, "no USERNAME/USER in the environment")
+                return False
+            # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
+            # /grant:r replaces any existing grant for this user, so the result
+            # is an explicit, sole full-control ACE.
+            r = subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True, check=False)
+            if r.returncode != 0:
+                # icacls FAILS without raising (access denied, an unresolvable
+                # principal, a non-NTFS volume), so without this the function
+                # would return as though the file had been locked down. Rule 5:
+                # a security step that did not happen must not look like one
+                # that did. Still best-effort, so this reports rather than
+                # raising - breaking session persistence over a perms nicety
+                # would be the worse failure.
+                _perm_warn(path, (r.stderr or r.stdout or b"").decode(
+                    "utf-8", "replace").strip() or f"icacls exit {r.returncode}")
+                return False
+        return True
+    except Exception as e:
+        # Best-effort (see docstring): a failure (icacls missing, a filesystem
+        # without per-file perms) leaves the home-dir scoping in effect, which is
+        # the real protection. A perms nicety must never raise and break session
+        # persistence or job storage. NOT a silenced privacy failure in the rule-5
+        # sense: nothing here reports a guarantee to the user, and the secret this
+        # protects is a digest whose plaintext is separately restricted - but it
+        # is REPORTED (debug) and returned as False rather than swallowed, so a
+        # caller can retry and nothing reads as a success that did not happen.
+        _perm_warn(path, repr(e))
+        return False
+
+
 # Registry and config are mutated from several places at once - the GUI server
 # threads, the `localm pull` subprocess the GUI spawns, and sync_models_dir on
 # every launch. A plain open("w")+json.dump truncates the file before writing,
