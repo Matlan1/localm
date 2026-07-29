@@ -975,10 +975,28 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             mgr, lambda m: m.set_installed_state(plugin, True), plugin=plugin)
         if err is not None:
             return err
+        dep_result = None
         with _quiet_stdout():
             with_deps = args.get("with_deps", True)
             if with_deps and mgr.plugin_missing_deps(plugin):
-                mgr.install_plugin_deps(plugin)
+                dep_result = mgr.install_plugin_deps(plugin)
+        if dep_result is not None and not dep_result.ok:
+            # Left ENABLED rather than rolled back: this matches the CLI's own
+            # `plugin install` behaviour (cli/plugins.py's _install_deps /
+            # plugin_install_engine), which also leaves a plugin installed on a
+            # dep failure and points the operator at retrying the extras later -
+            # consistent handling beats inventing a new rollback policy just for
+            # the MCP path. But a caller told "successfully installed" has no
+            # reason to suspect it is degraded, so the failure must be SURFACED,
+            # never swallowed (AGENTS.md rule 5): folded into the reply below,
+            # plus a warning here since this reply is the only place it is seen.
+            from localm.debuglog import logger
+            logger.warning("install_plugin(%s): pip extras failed to install: %s",
+                            plugin, dep_result.error)
+            failed = ", ".join(dep_result.failed) or "see error"
+            return _text_result(
+                f"Plugin '{plugin}' installed and enabled, but its dependencies "
+                f"failed to install ({failed}): {dep_result.error}", is_error=True)
         return _text_result(f"Plugin '{plugin}' successfully installed and enabled.")
 
     def enable_plugin(args: dict) -> dict:
