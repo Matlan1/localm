@@ -23,7 +23,8 @@ import uuid
 from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional
 
 from . import _api as api
-from ._structs import llama_token, LlamaChatMessage, LlamaBatch
+from ._structs import (
+    llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride)
 
 
 _stderr_lock = threading.Lock()
@@ -474,6 +475,74 @@ def _build_sampler(
     return chain
 
 
+# The FUSED per-layer expert weights, as llama.cpp's converters name them:
+# blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps. Only these move. The router
+# (ffn_gate_inp) and any SHARED expert stay wherever the layer assignment put them
+# on purpose: they are read for EVERY token, and they are tiny, so moving them to
+# system RAM would cost per-token bandwidth for almost no VRAM back.
+# Built by concatenation rather than a format string so the literal stays a plain
+# regex with no interpolation machinery around it.
+_MOE_TENSOR_PREFIX = r"blk\."
+_MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
+
+
+def _apply_cpu_moe(mp, n_layers: int, model_path: str):
+    """Keep the first *n_layers* layers' EXPERT weights in system RAM.
+
+    Points ``mp.tensor_buft_overrides`` at a NULL-terminated override array and
+    returns the objects that must stay alive across
+    ``llama_load_model_from_file`` (the array AND the pattern bytes it points
+    into - ctypes does not own those strings). Returns None, leaving *mp*
+    untouched, when the CPU buffer type cannot be resolved.
+
+    That None path is deliberately LOUD rather than silent: the user asked for a
+    specific placement, and quietly loading with a DIFFERENT one would report
+    success for something that did not happen (AGENTS.md rule 5). The load still
+    proceeds, because a normal load is a working load - it just says so."""
+    from ._loader import cpu_buffer_type
+    from localm.debuglog import logger as _dbg
+
+    # A dense model has no expert tensors, so every pattern below would match
+    # nothing and the setting would silently do nothing. Say so instead: a control
+    # that appears to apply but cannot is exactly the silent no-op rule 5 forbids.
+    from localm.model_manager.gguf import gguf_expert_count
+    from pathlib import Path as _Path
+    if gguf_expert_count(_Path(model_path)) == 0:
+        from localm.console import console
+        console.print(
+            "[yellow]  n_cpu_moe:[/yellow] this model has no experts (it is not a "
+            "Mixture-of-Experts model), so the setting does nothing here. Loading "
+            "normally.")
+        _dbg.info("n_cpu_moe=%d ignored: %s reports no experts",
+                  n_layers, model_path)
+        return None
+
+    buft = cpu_buffer_type()
+    if not buft:
+        from localm.console import console
+        console.print(
+            "[yellow]  n_cpu_moe:[/yellow] the CPU buffer type could not be "
+            "resolved from this llama runtime, so MoE experts were NOT moved to "
+            "system RAM. Loading normally instead.")
+        _dbg.warning("n_cpu_moe=%d requested but cpu_buffer_type() returned None; "
+                     "loading without a tensor placement override", n_layers)
+        return None
+
+    patterns = [(_MOE_TENSOR_PREFIX + str(i) + _MOE_TENSOR_SUFFIX).encode("ascii")
+                for i in range(n_layers)]
+    array = (LlamaModelTensorBuftOverride * (len(patterns) + 1))()
+    for i, pattern in enumerate(patterns):
+        array[i].pattern = pattern
+        array[i].buft = buft
+    # NULL-pattern sentinel: how the native side finds the end of the array.
+    array[len(patterns)].pattern = None
+    array[len(patterns)].buft = None
+    mp.tensor_buft_overrides = ctypes.cast(array, ctypes.c_void_p)
+    _dbg.info("n_cpu_moe=%d: expert weights of layers 0-%d pinned to system RAM",
+              n_layers, n_layers - 1)
+    return (array, patterns)
+
+
 class LlamaCpp:
     """
     In-process GGUF inference backed by the native llama.dll.
@@ -496,6 +565,7 @@ class LlamaCpp:
         cancel_event: Optional["threading.Event"] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
+        n_cpu_moe: int = 0,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -567,6 +637,28 @@ class LlamaCpp:
         # below - it is read once at load time, not held as a live pointer.
         _tensor_split_keepalive = apply_gpu_split(
             mp, ratios_override=gpu_split_ratios)
+
+        # MoE expert placement (opt-in, n_cpu_moe > 0): keep the EXPERT weights of
+        # the first N layers in system RAM while everything else follows the normal
+        # layer assignment. This is llama.cpp's own --n-cpu-moe, driven through
+        # llama_model_params.tensor_buft_overrides.
+        #
+        # It buys VRAM FOOTPRINT, not throughput - measured, and the distinction
+        # matters because the opposite was assumed first. On a 64-expert/8-active
+        # MoE at MATCHED VRAM it is throughput-neutral (52.23 vs 52.04 tok/s), but
+        # it reaches a given speed in far less VRAM: 21.28 tok/s in 241 MiB where
+        # whole-layer offload needed 859 MiB for 20.19. Sparsity already applies
+        # under layer offload too (a CPU-resident layer's experts are still only
+        # 8-of-64 read per token), which is why the throughput is a wash and why
+        # this is default-off: it is a footprint dial, not a free speed-up.
+        #
+        # The array must stay alive across llama_load_model_from_file - it is read
+        # at load time, exactly like tensor_split above - and every `pattern` bytes
+        # object with it, hence keeping the list, not just the array.
+        self._moe_override_keepalive = None
+        if n_cpu_moe > 0:
+            self._moe_override_keepalive = _apply_cpu_moe(
+                mp, n_cpu_moe, model_path)
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false

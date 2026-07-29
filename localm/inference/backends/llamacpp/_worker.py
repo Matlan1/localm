@@ -49,6 +49,7 @@ class GgufWorker(VramSizingMixin):
         cancel_event=None,
         vram_overhead_bytes: Optional[int] = None,
         gpu_split_ratios: Optional[list] = None,
+        n_cpu_moe: int = 0,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -57,6 +58,7 @@ class GgufWorker(VramSizingMixin):
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
+        self.n_cpu_moe = n_cpu_moe
         self.n_ctx_max = n_ctx_max
         self.n_ctx_grow = n_ctx_grow
         self.cancel_event = cancel_event
@@ -108,6 +110,7 @@ class GgufWorker(VramSizingMixin):
             cancel_event=self.cancel_event,       # abort mid-load if superseded
             vram_check=self._check_context_fit,   # guard context GROWTH too
             gpu_split_ratios=self.gpu_split_ratios,
+            n_cpu_moe=self.n_cpu_moe,
             verbose=False,
         )
         self._loaded = True

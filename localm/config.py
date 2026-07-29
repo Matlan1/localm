@@ -186,6 +186,19 @@ DEFAULT_CONFIG: dict = {
     # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
+    # Opt-in MoE expert placement: keep the EXPERT weights of the first N
+    # layers in system RAM while the rest of the model follows the normal
+    # layer assignment (llama.cpp's --n-cpu-moe). 0 = off.
+    #
+    # This is a VRAM-FOOTPRINT dial, not a speed-up, and it is off by
+    # default because the opposite was assumed first and measured false: at
+    # MATCHED VRAM it is throughput-neutral (52.23 vs 52.04 tok/s on a
+    # 64-expert/8-active MoE). What it buys is reaching a given speed in far
+    # less VRAM - 21.28 tok/s in 241 MiB where whole-layer offload needed
+    # 859 MiB for 20.19 - which matters when something else wants the card.
+    # Only affects Mixture-of-Experts models; a dense model has no expert
+    # tensors to move, so any value is a no-op there.
+    "n_cpu_moe": 0,
     # When n_gpu_layers is left at its "everything" default, auto-size how many
     # layers actually go on the GPU from free VRAM at load: a model too big for
     # full GPU offload runs some layers on CPU (slower) and LOADS, instead of

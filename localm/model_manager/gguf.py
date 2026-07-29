@@ -479,6 +479,56 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     return n_layers * n_head_kv * head_dim * 2 * 2
 
 
+def gguf_expert_count(path: Path) -> int:
+    """Number of EXPERTS in *path*, or 0 when it is not a Mixture-of-Experts model.
+
+    Read from the header's ``<arch>.expert_count`` before the model is loaded, so
+    a placement decision that only makes sense for an MoE can tell the difference
+    rather than silently doing nothing on a dense model.
+
+    Deliberately separate from ``gguf_kv_bytes_per_token``: expert weights cost
+    VRAM but contribute NOTHING to the KV cache, and conflating the two is the bug
+    that function exists to fix. Returns 0 - never raises - on an unreadable or
+    non-GGUF file, same 'no signal' contract as the other probes here."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return 0
+
+    architecture = None
+    counts: dict = {}
+    try:
+        if buf[:4] != b"GGUF":
+            return 0
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return 0
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key.endswith(".expert_count"):
+                try:
+                    counts[key], off = _gguf_read_scalar(buf, off, vtype)
+                    continue
+                except struct.error:
+                    pass
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+
+    if not architecture:
+        return 0
+    value = counts.get(architecture + ".expert_count")
+    return int(value) if isinstance(value, int) and value > 0 else 0
+
+
 def _gguf_metadata_probe(path: Path) -> dict:
     """Best-effort read of the GGUF header metadata needed for embedding-model
     detection: ``general.architecture`` and whether any ``*.pooling_type`` key

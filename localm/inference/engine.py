@@ -115,6 +115,7 @@ def create_backend(
             n_ctx_grow=cfg.get("n_ctx_grow", 4096),
             ctx_auto=bool(cfg.get("ctx_auto", False)),
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
+            n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
 

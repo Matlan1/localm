@@ -604,6 +604,47 @@ def _ggml_dev_handles() -> "List[ctypes.CDLL]":
     return handles
 
 
+def cpu_buffer_type() -> Optional[int]:
+    """The ggml CPU backend's buffer type, as an opaque pointer, or None.
+
+    This is the destination half of a per-tensor placement override: pointing
+    ``llama_model_params.tensor_buft_overrides`` at it keeps the matched tensors
+    in system RAM while the rest of the model still goes to the GPU (see
+    LlamaCpp's n_cpu_moe handling).
+
+    Returns None rather than raising when the registry cannot answer - an older
+    build without the device accessors, or a build that registered no CPU device
+    at all. The caller then skips the override entirely and loads normally, which
+    is the honest degradation: a placement request we cannot satisfy must not
+    silently become a DIFFERENT placement (rule 5)."""
+    load_lib()
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    name_fn = _ggml_sym(handles, "ggml_backend_dev_name")
+    buft_fn = _ggml_sym(handles, "ggml_backend_dev_buffer_type")
+    if not (cnt and get and name_fn and buft_fn):
+        return None
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    name_fn.restype = ctypes.c_char_p
+    name_fn.argtypes = [ctypes.c_void_p]
+    buft_fn.restype = ctypes.c_void_p
+    buft_fn.argtypes = [ctypes.c_void_p]
+    try:
+        for i in range(int(cnt())):
+            dev = get(i)
+            if not dev:
+                continue
+            if (name_fn(dev) or b"").decode("utf-8", "replace").upper() == "CPU":
+                return buft_fn(dev) or None
+    except Exception as e:  # noqa: BLE001 - a probe must never break a load
+        logger.debug("cpu_buffer_type() query failed (%s); skipping the "
+                     "tensor-placement override", type(e).__name__)
+    return None
+
+
 def _ggml_sym(handles: "List[ctypes.CDLL]", name: str):
     for h in handles:
         fn = getattr(h, name, None)
