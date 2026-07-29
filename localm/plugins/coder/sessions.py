@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
+from .parser import strip_xml_tool_calls
 from .verify import VerifyCommand as _VerifyCommand, command_text as _verify_text
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
@@ -389,7 +390,6 @@ class CoderSession:
         history; the feed rows are a visual summary. True when something was
         restored. Tool-call markup is stripped from the recap, and tool-result
         envelopes / steering notes are skipped."""
-        import re
         try:
             data = self.agent.load_checkpoint()
         except Exception:
@@ -407,8 +407,14 @@ class CoderSession:
             content = m.get("content")
             if role not in ("user", "assistant") or not isinstance(content, str):
                 continue
-            text = re.sub(r"<tool_call>.*?</tool_call>", "", content,
-                          flags=re.DOTALL).strip()
+            # Same splitter as the Markdown transcript. This was a THIRD private
+            # copy of the tool_call regex (an inline
+            # ``<tool_call>.*?</tool_call>``) carrying the same defect the other
+            # two had: a lazy body scans to end-of-text from EVERY unterminated
+            # opener, so hostile model text recovered from a checkpoint made the
+            # resume recap quadratic. Copies are what let that survive two fixes.
+            _calls, text = strip_xml_tool_calls(content)
+            text = text.strip()
             if not text or text.startswith("<tool_result") \
                     or "[user steering note" in text:
                 continue

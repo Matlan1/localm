@@ -34,8 +34,27 @@ import re
 # closing tag, tolerant of case and stray whitespace (``</ tool_result >``,
 # ``<TOOL_RESULT>`` ...). Only the leading ``<`` is rewritten, so the rest of the
 # text stays legible to the model.
+# The whitespace tolerance is DE-AMBIGUATED, not bounded. ``\s*/?\s*`` is two
+# adjacent unbounded quantifiers whenever ``/?`` matches empty, and both can claim
+# the same whitespace, so a hostile ``'<' + ' ' * n`` costs O(n^2): measured 0.49s
+# / 6.19s / 46.6s at 5,000 / 20,000 / 60,000 spaces (a repeat of the 60,000 case
+# under the box-wide lock, on a box loaded to 100% CPU by other work, read 66.3s -
+# both are upper bounds and the conclusion is the same), and 60,000 is exactly what
+# POST /api/web/fetch accepts via max_chars, on remote-fetched page text.
+# Moving the slash INSIDE the optional group removes the ambiguity: when the group
+# does not participate there is only ONE ``\s*``, so there is only one way to match
+# a whitespace run. Same language as the original (0 divergences over 200,000
+# adversarial strings), and linear - the same 60,000-space input costs 0.0026s.
+#
+# Deliberately NOT bounded (an earlier revision used ``\s{0,8}``). This is an
+# anti-evasion control: nothing in the codebase parses the closing fence, so its
+# only consumer is the MODEL, a fuzzy reader. Any finite bound hands an attacker a
+# trivial bypass by typing one more space, and here the bound bought nothing -
+# the unbounded form is equally linear. ``_SPECIAL_RE`` below is bounded
+# ({0,200}?) because it matches a token whose length is genuinely bounded, which
+# is a different situation.
 _FRAME_RE = re.compile(
-    r"<(\s*/?\s*(?:tool_result|untrusted_content))",
+    r"<((?:\s*/)?\s*(?:tool_result|untrusted_content))",
     re.IGNORECASE,
 )
 
