@@ -2,8 +2,6 @@
   <img src=".github/images/logo.svg" width="420" alt="LocaLM">
 </p>
 
-# LocaLM
-
 **Offline local LLM inference and extension platform - GGUF and HuggingFace models, OpenAI-compatible server, agentic coding, media generation, RAG, and more through a plugin engine.**
 
 ![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue)
@@ -14,11 +12,14 @@ LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll` (no 
 
 Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist only as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat reach it through a single policy choke point: `off` / `ask` / `allow` modes, domain allow/deny lists, and a private-address SSRF guard ([guide](docs/network.md)).
 
-## Screenshots
-
 <p align="center">
   <img src=".github/images/chat.png" width="640" alt="LocaLM chat: a streaming reply with markdown and syntax-highlighted code"><br>
-  <img src=".github/images/models.png" width="640" alt="LocaLM Models page: registered GGUF and HuggingFace models, color-coded by type">
+  <sub>Chat - streaming replies, markdown, syntax-highlighted code</sub>
+</p>
+
+<p align="center">
+  <img src=".github/images/models.png" width="640" alt="LocaLM Models page: registered GGUF and HuggingFace models, color-coded by type"><br>
+  <sub>Models - GGUF and HuggingFace side by side, typed and color-coded</sub>
 </p>
 
 ## Quick start
