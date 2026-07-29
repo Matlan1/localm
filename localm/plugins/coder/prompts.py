@@ -369,6 +369,28 @@ def _display_cwd(cwd) -> str:
         return p.name or str(p)
 
 
+def _cwd_leaf_name(cwd) -> str:
+    """The bare directory name a model could mistake for a path SEGMENT to
+    prepend, rather than the root it is already standing in.
+
+    Any project outside the user's home directory (an entirely ordinary setup
+    - a separate drive, /opt, /srv, an external mount) hits _display_cwd's
+    fallback and is shown as JUST this name, with no leading path context at
+    all. Measured live: qwen2.5-coder-1.5b-instruct AND qwen2.5-coder-7b-
+    instruct BOTH, independently, read a bare "Working directory: proj" and
+    then wrote tool-call paths like "proj/strings_utils.py" - which resolves
+    to ".../proj/proj/strings_utils.py" and does not exist. Every read_file /
+    edit_file against the real file then fails on that doubled path,
+    repeatedly, until the circuit breaker stops the run - not a model-
+    capability gap, a prompt ambiguity reproduced identically across two very
+    different model sizes.
+    """
+    try:
+        return Path(cwd).resolve().name or "."
+    except Exception:
+        return "."
+
+
 def build_system_prompt(
     cwd: Path,
     agent_name: str = "localcoder",
@@ -441,17 +463,26 @@ def build_system_prompt(
     # do not leak into the prompt - and thus into a shareable artifact or a model
     # that echoes it back. The tools still operate on the real cwd; the RULES tell
     # the model to use relative paths (REC-CODER-GUI-PATH).
+    #
+    # The disambiguating clause below is not decoration: see _cwd_leaf_name's
+    # docstring for the live, cross-model-size failure it closes - a bare
+    # "Working directory: proj" with no clarification is read as a name to
+    # prepend, not a root already stood in, and it happens whether the model
+    # is 1.5B or 7B parameters.
     shown_cwd = _display_cwd(cwd)
+    leaf = _cwd_leaf_name(cwd)
+    cwd_note = (f' (paths are relative to here - do not repeat "{leaf}", '
+                f'e.g. "file.py" not "{leaf}/file.py")')
     if family == "small":
         identity = (
             f"You are {agent_name}, an AI coding assistant.\n"
-            f"Working directory: {shown_cwd}"
+            f"Working directory: {shown_cwd}{cwd_note}"
         )
     else:
         identity = (
             f"You are {agent_name}, an expert AI coding assistant running fully offline.\n"
             f"You help the user write, debug, refactor, and understand code.\n\n"
-            f"Working directory: {shown_cwd}"
+            f"Working directory: {shown_cwd}{cwd_note}"
         )
 
     extra_section = f"\n{extra_tool_docs}\n" if extra_tool_docs else ""
@@ -522,7 +553,9 @@ def build_subagent_system_prompt(
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"YOUR ROLE: {role}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"You are a sub-agent spawned for one focused task in {_display_cwd(cwd)}.\n"
+        f"You are a sub-agent spawned for one focused task in {_display_cwd(cwd)} "
+        f"(paths are relative to there - do not repeat \"{_cwd_leaf_name(cwd)}\" "
+        f"in a path).\n"
         f"{mission_line}"
         f"{tools_sentence}"
         f"Your toolset is deliberately narrowed for this role. If the task seems "
