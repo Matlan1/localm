@@ -459,9 +459,10 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     policy = indexing_policy()
     addable: list[str] = []
     blocked: list[str] = []
+    confined: list[Path] = []
     for p in paths:
         try:
-            confine_index_path(p, policy)
+            confined.append(confine_index_path(p, policy))
         except ConfinementError as e:
             (addable if e.reason == "outside_allowed" else blocked).append(
                 str(e.path) if e.reason == "outside_allowed" else str(e))
@@ -483,6 +484,13 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
             403, "These folders are outside the allowed indexing folders, and "
             "only the owner can widen the list: "
             + ", ".join(sorted(set(addable))[:5]))
+    # Everything below acts on the CONFINED, resolved paths the check returned,
+    # never on the caller's original strings: probing existence on a value that
+    # was not the one validated is how a check-then-use gap opens, and the
+    # store's own confinement (which re-runs under the collection lock) resolves
+    # identically, so the two stages can no longer disagree about which file
+    # they mean.
+    paths = confined
     # Only now, on paths that PASSED confinement: a caller entitled to index
     # here is entitled to know the file is not there, and rule 5 says tell them
     # the real reason rather than failing vaguely later.

@@ -1290,8 +1290,22 @@ class Collection:
         _collection_lock(self.name) after a fresh _load() (see add_paths)."""
         say = on_progress or (lambda _t: None)
         if policy is not None:
-            for p in paths:
-                confine_index_path(p, policy)   # raises ValueError
+            # ACT ON WHAT WAS CHECKED. confine_index_path returns the RESOLVED
+            # path it validated; calling it for its exception alone and then
+            # walking the caller's original string is the decide-on-one/act-on-
+            # the-other shape registry.py documents as an escape at its own
+            # remove_model gate.
+            #
+            # HONEST SCOPE: this is defence in depth, NOT a live hole that was
+            # open. _expand re-confines every file it emits, on that file's own
+            # resolved path, so an out-of-policy file was never indexed even
+            # before this line changed; and _walk_files skips reparse points, so
+            # the obvious symlinked-root case was already covered. What it buys
+            # is that the property is now local - the top-level walk root is the
+            # value confinement returned, rather than a different value that a
+            # second gate downstream happens to catch. Do not read it as a
+            # vulnerability fix.
+            paths = [confine_index_path(p, policy) for p in paths]  # raises ValueError
         # Persist the FOLDER roots now that confinement has accepted them, so a
         # later re-sync can re-walk them (module docstring). Done before the
         # expand so an add that finds no indexable file still records the folder -
