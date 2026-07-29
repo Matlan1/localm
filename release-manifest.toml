@@ -131,7 +131,7 @@ patterns = [
     "playwright.config.mjs",
 
     # --- CI / repo governance ---
-    ".github/",                # workflows, CODEOWNERS, dependabot, PR template
+    ".github/",                # workflows, dependabot, PR template
 
     # --- server-side infra, deployed separately (NOT the localm client) ---
     "tools/",                  # tools/bugreport-proxy: the Cloudflare Worker

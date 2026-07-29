@@ -393,3 +393,38 @@ Guardrails that still apply:
 - Only on the maintainer's own repos.
 - A history rewrite or force-push still requires telling the maintainer first
   (see the secret-hygiene section above).
+
+### What you publish to GitHub goes out under the maintainer's name
+
+Every PR body, review and issue comment an agent writes here is posted from the
+MAINTAINER's account, on a PUBLIC repo. There is no bot badge and no attribution:
+a stranger reads it as the maintainer speaking. Write accordingly.
+
+**Post a CONCLUSION, not your reasoning as it develops.** Work the problem out
+first, then post once.
+
+This is measured, not a style preference. PR #841 collected five comments in
+eleven minutes that ran: "do not merge this" -> "it is already gone" -> "objection
+withdrawn" -> "the red check is #97" -> "correction to my previous comment". The
+net content was one paragraph. Issue #677 did the same thing with a correction to
+a correction. Across those two threads, eight comments carried about two comments'
+worth of conclusion, published as the maintainer arguing with himself. Every one
+of them also emailed him, so a five-comment think-aloud is five interruptions for
+one paragraph.
+
+- ONE comment per conclusion. Still working it out? Work it out in `dev-notes/`,
+  not in a comment thread.
+- Wrong after posting? DELETE the comment and post the corrected one. Do not
+  append a "Correction to my previous comment". Deleting a comment genuinely
+  removes it, and it is the only cleanup on GitHub that actually works.
+- EDITING A PR BODY DOES NOT REMOVE THE OLD TEXT. Prior revisions stay retrievable
+  through the API with no way to purge them, so a body you "cleaned up" still
+  reads in full to anyone who looks. Get it right the first time rather than
+  planning to edit it later. (Verified against the API: #841 had 5 prior
+  revisions, #842 had 4, #845 had 2.)
+- Keep internal orchestration vocabulary OUT of anything published: lane, CONTROL,
+  testlock, test slots, workstream numbers, agent handles, session ids. It means
+  nothing to a reader and it describes machinery that is nobody else's business.
+- Research notes, TODO entries, plans, backlog items and status reports do not
+  belong on GitHub at all. They live in `dev-notes/`. A PR carries the change and
+  the evidence for it, nothing else.
