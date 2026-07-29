@@ -18,6 +18,18 @@ from localm.plugins.coder.tools import (
 )
 
 
+def _norm(raw: bytes) -> str:
+    """Universal-newline-normalise raw bytes for a platform-portable
+    comparison. The fixtures below write via Path.write_text(), which
+    translates \\n -> the platform line separator on write (\\r\\n on
+    Windows, unchanged on Linux) - so the RAW bytes ToolResult.changes
+    reports (deliberately unnormalised, matching execution.py's own
+    snapshot convention) differ by platform even though the file's logical
+    content does not. Normalise before comparing so the assertion holds on
+    both, the same way CI's own two platforms would each see it."""
+    return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
 class TestSearchReplacePartialWriteHonesty:
     def _project(self, tmp_path, n=3):
         for i in range(n):
@@ -48,6 +60,13 @@ class TestSearchReplacePartialWriteHonesty:
         # The filesystem really is in the reported state.
         assert (cwd / "f0.txt").read_text(encoding="utf-8") == "new value\n"
         assert (cwd / "f1.txt").read_text(encoding="utf-8") == "old value\n"
+        # A partial apply must still expose what it actually wrote (rule 5):
+        # the changed-files/undo tracker reads this even on a failed call, so
+        # the one real mutation must not go untracked just because the batch
+        # as a whole errored.
+        assert len(r.changes) == 1
+        name, old, new = r.changes[0]
+        assert name == "f0.txt" and _norm(old) == "old value\n" and new == "new value\n"
 
     def test_first_write_failure_reports_zero_modified(self, tmp_path):
         cwd = self._project(tmp_path, n=2)
@@ -62,6 +81,7 @@ class TestSearchReplacePartialWriteHonesty:
         assert "0 of 2 file(s)" in r.output
         assert "Modified:" not in r.output          # nothing was written
         assert "NOT modified:" in r.output
+        assert r.changes is None                    # nothing to track - nothing changed
 
     def test_all_writes_succeed_unchanged(self, tmp_path):
         cwd = self._project(tmp_path)
@@ -69,6 +89,9 @@ class TestSearchReplacePartialWriteHonesty:
                                 glob="*.txt")
         assert r.ok is True
         assert "Replaced 3 match(es) in 3 file(s)" in r.output
+        assert {name for name, _, _ in r.changes} == {"f0.txt", "f1.txt", "f2.txt"}
+        assert all(_norm(old) == "old value\n" and new == "new value\n"
+                  for _, old, new in r.changes)
 
 
 class TestEditFileEmptyOld:

@@ -154,6 +154,39 @@ class TestSearchReplace:
         # File should be unchanged
         assert (project / "src" / "main.py").read_text() == original
 
+    def test_dry_run_reports_the_same_changes_shape_a_real_apply_would(self, project):
+        """dry_run's preview and a real apply share ONE matching pass (see
+        ToolResult.changes) - this is what lets patch mode compute an
+        accurate diff via dry_run without a second, possibly-diverging
+        implementation. old must be the file's REAL current bytes (nothing
+        was written) and new must be what a real apply would write.
+
+        Compared against the file's OWN bytes rather than a hardcoded
+        literal: Path.write_text() (the `project` fixture) translates \\n to
+        the platform line separator on write, so the raw on-disk bytes
+        differ between Windows and Linux even though the logical content
+        does not - old_bytes must match whichever this platform produced.
+        `name` is compared via as_posix() for the same portability reason:
+        ToolResult.changes' path uses this tool's existing native-separator
+        convention (matching the report text search_replace has always
+        produced), Windows-native here - the downstream consumer
+        (_record_changed_file) re-derives and normalises it to posix
+        regardless, which is what the footer test elsewhere in this PR
+        checks; this test is about the raw field's CONTENT, not that
+        normalisation."""
+        r = tool_search_replace(
+            project, pattern="def main", replacement="def entrypoint",
+            glob="**/*.py", dry_run=True
+        )
+        assert r.ok
+        assert len(r.changes) == 1
+        name, old, new = r.changes[0]
+        assert Path(name).as_posix() == "src/main.py"
+        assert new == "def entrypoint():\n    pass\n"
+        # Confirms "nothing was written" too: the old bytes in `changes`
+        # still match what is really on disk.
+        assert old == (project / "src" / "main.py").read_bytes()
+
     def test_dry_run_reports_matches(self, project):
         r = tool_search_replace(
             project, pattern=r"def \w+", replacement="def X",
@@ -168,6 +201,7 @@ class TestSearchReplace:
         )
         assert r.ok
         assert "0 match" in r.output.lower() or "no matches" in r.output.lower()
+        assert r.changes is None
 
     def test_invalid_regex_returns_error(self, project):
         r = tool_search_replace(project, pattern="[broken", replacement="x")

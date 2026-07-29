@@ -465,6 +465,30 @@ class TestGroundingFooter:
             "Done.\n\n[session record: 1 file(s) changed: app.py]")
         assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 1\n"
 
+    def test_footer_reports_search_replace_changes(self, tmp_path):
+        """THE ORIGINAL GAP THIS FOOTER WAS BUILT TO CLOSE, closing the loop
+        on itself: a task that used ONLY search_replace to edit a real file
+        used to leave changed_files() - and so this footer - empty, because
+        search_replace's targets are a glob+regex sweep rather than a `path`
+        arg the pre-call snapshot tracker could see. A false "no files
+        changed" is exactly the under-claiming mirror of the over-claiming
+        bug this footer exists to catch. Fixed via ToolResult.changes (see
+        execution.py's search_replace branch in _post_tool_success)."""
+        (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, auto_approve=True, self_verify=False)
+        responses = iter([
+            '<tool_call>\n{"name": "search_replace", "args": '
+            '{"pattern": "x = 1", "replacement": "x = 2", "glob": "*.py"}}'
+            '\n</tool_call>\n',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("bump the constant")
+        assert result == (
+            "Done.\n\n[session record: 1 file(s) changed: app.py]")
+        assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 2\n"
+
     def test_footer_names_multiple_changed_files_sorted(self, tmp_path):
         """The single-file test above cannot catch a count/join/sort bug -
         "1 file(s)" is right whether or not pluralization, joining, and

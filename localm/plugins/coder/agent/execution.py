@@ -7,6 +7,7 @@ confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agen
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Optional
@@ -16,8 +17,8 @@ from ..display import (
     console, print_tool_call, print_tool_error, print_tool_result,
 )
 from ..diffutil import (
-    compute_multifile_diff, compute_tool_diff, read_old_content,
-    resolve_new_content,
+    compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
+    read_old_content, resolve_new_content,
 )
 from ..confirm import invoke_confirm
 from ..parser import ToolCall
@@ -26,7 +27,7 @@ from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _SCOPE_PATH_ARGS,
+    _PATCH_MODE_ELIGIBLE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
@@ -356,15 +357,25 @@ class _ExecutionMixin:
         # Patch-mode: intercept write tools, accumulate diffs, don't touch disk.
         # A write tool the interceptor can't express as a diff must NOT fall
         # through to a real disk write - patch-mode promises no changes.
-        if self.patch_mode and call.name in _UNDOABLE_TOOLS:
+        # search_replace is eligible too (_PATCH_MODE_ELIGIBLE_TOOLS), via its
+        # own dry_run rather than the pre-call snapshot _UNDOABLE_TOOLS uses -
+        # see that constant's comment for why the two sets differ.
+        if self.patch_mode and call.name in _PATCH_MODE_ELIGIBLE_TOOLS:
             chunk = self._patch_mode_intercept(call)
             if chunk is not None:
                 self._patch_chunks.append(chunk)
                 # Name the files the DIFF actually covers, not every path the
                 # call mentioned: a file whose edit produced no change is not
                 # "captured", and saying it was overstates what patch mode holds.
-                targets = list(dict.fromkeys(_call_target_paths(call.name, call.args)))
-                covered = [t for t in targets if f"b/{t}" in chunk] or targets
+                # search_replace has no pre-known targets at all (its files are
+                # discovered by the sweep, not named in the call args), so read
+                # them off the diff's own "+++ b/<path>" headers instead - the
+                # only source of truth available for it.
+                if call.name == "search_replace":
+                    covered = re.findall(r"^\+\+\+ b/(.+)$", chunk, re.MULTILINE)
+                else:
+                    targets = list(dict.fromkeys(_call_target_paths(call.name, call.args)))
+                    covered = [t for t in targets if f"b/{t}" in chunk] or targets
                 label = ", ".join(covered) if covered else "?"
                 result = ToolResult.success(
                     f"[patch-mode] diff captured for {label}",
@@ -609,6 +620,33 @@ class _ExecutionMixin:
                 if any(marker in cmd for marker in _TEST_COMMAND_MARKERS):
                     self._unverified_writes.clear()
 
+        # search_replace: tracked from its OWN result.changes (populated by the
+        # tool once it knows which files the sweep actually touched), not the
+        # result.ok-gated branch above. A PARTIAL apply reports ok=False (a
+        # failed batch must not read as a success) but the files written
+        # before the failure are real mutations on disk and must still be
+        # tracked/undoable - result.changes carries exactly those, whether the
+        # call as a whole succeeded or partially failed. Guarded on the
+        # TOOL'S OWN dry_run arg (distinct from self.dry_run/self.patch_mode,
+        # already excluded above and by the early-return interceptors) because
+        # a model-requested preview populates the same field with data that
+        # was never written.
+        if (not self.dry_run and not self.patch_mode
+                and call.name == "search_replace"
+                and not call.args.get("dry_run") and result.changes):
+            self._undo_seq = getattr(self, "_undo_seq", 0) + 1
+            undo_call_id = self._undo_seq
+            for rel, old_bytes, _new_text in result.changes:
+                self._record_changed_file(rel, old_bytes, call.name)
+                self._undo_stack.append({
+                    "path": (self.cwd / rel).resolve(),
+                    "old_content": old_bytes,
+                    "tool": call.name,
+                    "call_id": undo_call_id,
+                })
+                if Path(rel).suffix.lower() in _CODE_EXTS:
+                    self._unverified_writes.add(rel)
+
     def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
         """
         Compute a unified diff for a write/edit/patch call without touching disk.
@@ -620,6 +658,16 @@ class _ExecutionMixin:
         # reports "cannot be captured", and patch mode silently loses the edit.
         if call.name == "edit_files":
             return compute_multifile_diff(self.cwd, call.args.get("edits"))
+        # search_replace's targets are a glob + regex sweep, not a `path` arg -
+        # there is no old_content to read ahead of time, so it gets its own
+        # helper (which runs the real sweep via dry_run rather than touching
+        # disk) instead of falling through to the single-file path below.
+        if call.name == "search_replace":
+            return compute_search_replace_diff(
+                self.cwd, call.args.get("pattern", ""),
+                call.args.get("replacement", ""),
+                call.args.get("glob", "**/*"),
+            )
         path_arg = call.args.get("path", "")
         old_text = read_old_content(self.cwd, path_arg)
         return compute_tool_diff(call.name, call.args, old_text)

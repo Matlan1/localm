@@ -119,6 +119,76 @@ class TestChangedFiles:
         assert agent.changed_files() == []
         assert not (tmp_path / "a.py").exists()
 
+    def test_search_replace_tracked(self, tmp_path):
+        """search_replace's targets are a glob+regex sweep, not a `path` arg,
+        so it needs its own post-hoc tracking path (ToolResult.changes) - the
+        pre-call snapshot every other tool here uses cannot cover it (there is
+        no path to snapshot before the call runs)."""
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, [
+            _tc("search_replace", pattern="x = 1", replacement="x = 2",
+                glob="*.py"),
+            "Done."])
+        agent.run_task("bump the constant")
+        files = agent.changed_files()
+        assert len(files) == 1
+        f = files[0]
+        assert f["path"] == "a.py" and not f["created"] and f["exists"]
+        assert f["writes"] == 1 and f["last_tool"] == "search_replace"
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 2\n"
+
+    def test_search_replace_dry_run_arg_not_tracked(self, tmp_path):
+        """The MODEL's own dry_run=true (a preview, distinct from the agent-
+        level dry_run tested above) must not be recorded as a change either -
+        ToolResult.changes carries the same shape for both a preview and a
+        real apply, so the tracker must gate on the call's own dry_run arg,
+        not merely on whether `changes` is populated."""
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, [
+            _tc("search_replace", pattern="x = 1", replacement="x = 2",
+                glob="*.py", dry_run=True),
+            "Done."])
+        agent.run_task("preview the change")
+        assert agent.changed_files() == []
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+
+    def test_search_replace_partial_apply_still_tracks_what_was_written(self, tmp_path):
+        """End-to-end through the REAL agent dispatch path (not the tool in
+        isolation - test_tools_files_honesty.py already proves the tool's own
+        ToolResult.changes is correct on a partial apply; this proves
+        _post_tool_success actually ACTS on that data). A batch that fails
+        partway must still track the file(s) it genuinely wrote - result.ok
+        is False for the call as a whole, but _post_tool_success's
+        search_replace branch does not gate on result.ok (rule 5: a real,
+        partial mutation must not go untracked just because the batch as a
+        whole reports an error)."""
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("x = 1\n", encoding="utf-8")
+        real_write = Path.write_text
+        calls = {"n": 0}
+
+        def failing_write(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return real_write(self, *args, **kwargs)
+
+        agent = _make_agent(tmp_path, [
+            _tc("search_replace", pattern="x = 1", replacement="x = 2",
+                glob="*.py"),
+            "Done."])
+        with patch.object(Path, "write_text", failing_write):
+            agent.run_task("bump the constant in both files")
+        files = agent.changed_files()
+        assert len(files) == 1          # only the file that actually wrote
+        assert files[0]["last_tool"] == "search_replace"
+        written = files[0]["path"]
+        assert (tmp_path / written).read_text(encoding="utf-8") == "x = 2\n"
+        # And it is undoable, same as a full success would be.
+        msg = agent.undo()
+        assert "restored" in msg
+        assert (tmp_path / written).read_text(encoding="utf-8") == "x = 1\n"
+
 
 # ---------------------------------------------------------------------------
 #  Mid-task message queue
@@ -288,6 +358,18 @@ class TestUndoStack:
         assert [Path(e["path"]).name for e in stack] == ["two.txt", "one.txt"]
         assert all(e["tool"] == "write_file" for e in stack)
 
+    def test_search_replace_write_is_undoable(self, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        agent = _make_agent(tmp_path, [
+            _tc("search_replace", pattern="x = 1", replacement="x = 2",
+                glob="*.py"),
+            "Done."])
+        agent.run_task("bump the constant")
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 2\n"
+        msg = agent.undo()
+        assert "restored" in msg
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+
 
 # ---------------------------------------------------------------------------
 #  Checkpoint / resume
@@ -383,3 +465,38 @@ class TestPatchModeGuard:
         assert not result.ok and "[patch-mode]" in result.output
         # disk untouched
         assert json.loads(nb_path.read_text(encoding="utf-8")) == nb
+
+    def test_search_replace_is_captured_not_written_in_patch_mode(self, tmp_path):
+        """The regression this guards: search_replace was not in the tool set
+        the patch-mode interception gate checked (it is not pre-call-
+        snapshottable like the other undoable tools), so --patch-mode's
+        documented promise - "Capture ALL file writes as a unified diff
+        instead of modifying files" - was silently false for it: it wrote to
+        disk for real even with patch mode on."""
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        agent = _make_agent(tmp_path)
+        agent.patch_mode = True
+        call = _make_call("search_replace", pattern="x = 1", replacement="x = 2",
+                          glob="*.py")
+        result = agent._execute_tool(call, interactive=False)
+        assert result.ok and "[patch-mode]" in result.output
+        assert "a.py" in result.output
+        # disk untouched - the whole point of patch mode
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+        diff = agent.flush_patch()
+        assert "-x = 1" in diff and "+x = 2" in diff
+        # Not tracked as a real change either - nothing was actually written.
+        assert agent.changed_files() == []
+
+    def test_search_replace_no_match_reports_uncaptured_not_blocked(self, tmp_path):
+        """0 matches is "no change", not "unsupported operation" - the
+        fallback message covers both, but this pins that a real pattern with
+        no hits in patch mode does not falsely claim a capture."""
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        agent = _make_agent(tmp_path)
+        agent.patch_mode = True
+        call = _make_call("search_replace", pattern="NOTHING_MATCHES_XYZ",
+                          replacement="unused", glob="*.py")
+        result = agent._execute_tool(call, interactive=False)
+        assert not result.ok and "[patch-mode]" in result.output
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
