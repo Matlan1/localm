@@ -544,6 +544,15 @@ _GPU_PROBE_CLI_DEADLINE = _GPU_PROBE_DEADLINE
 GPU_PROBE_OK = "ok"            # a fresh probe completed - an empty list means genuinely none
 GPU_PROBE_TIMEOUT = "timeout"  # probe exceeded the deadline (cold driver init / wedge); INCONCLUSIVE
 GPU_PROBE_BUSY = "busy"        # another probe is inflight, or the probe thread could not start
+# The probe completed WITHIN its deadline (unlike TIMEOUT) but no source could
+# conclusively rule out a GPU: the isolated torch enumeration could not be asked
+# this round (latched-unavailable, or wedged on this attempt - see
+# _torch_gpus_isolated_once) and nvidia-smi, the only other source, also found
+# nothing - which proves nothing on an AMD/Intel box nvidia-smi cannot see at
+# all. An empty list under this status is INCONCLUSIVE, same as TIMEOUT, and
+# for the same reason a caller must not retry-with-a-longer-deadline expecting
+# it to help: nvidia-smi's answer will not change no matter how long you wait.
+GPU_PROBE_INCONCLUSIVE = "inconclusive"
 
 _gpu_probe_lock = threading.Lock()
 _gpu_last_good: Optional[list] = None    # last SUCCESSFUL probe; served on a wedge
@@ -624,12 +633,16 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     genuinely no measurable GPU), :data:`GPU_PROBE_TIMEOUT` (the probe exceeded
     ``deadline`` - typically a cold ROCm/CUDA driver init that has not finished, so
     an empty ``gpus`` is INCONCLUSIVE and a retry with a longer deadline may
-    succeed), or :data:`GPU_PROBE_BUSY` (another probe is already inflight or the
-    probe thread could not start; no fresh reading was taken). A caller that
-    renders a user-facing "no GPU" message MUST branch on this so a slow cold probe
-    is not misreported as "no torch / no GPU" (AGENTS.md rule 5). ``return_status``
-    defaults to False, preserving the bare-list contract every existing caller and
-    the ~28 test modules that patch this function rely on.
+    succeed), :data:`GPU_PROBE_BUSY` (another probe is already inflight or the
+    probe thread could not start; no fresh reading was taken), or
+    :data:`GPU_PROBE_INCONCLUSIVE` (the probe completed, but the isolated torch
+    enumeration could not be asked this round and nvidia-smi - the only other
+    source - also found nothing; unlike TIMEOUT, a longer deadline will not help,
+    since nvidia-smi's answer does not change with time). A caller that renders a
+    user-facing "no GPU" message MUST branch on this so a slow cold probe, or an
+    inconclusive one, is not misreported as "no torch / no GPU" (AGENTS.md rule 5).
+    ``return_status`` defaults to False, preserving the bare-list contract every
+    existing caller and the ~28 test modules that patch this function rely on.
 
     Tries torch first (CUDA/ROCm - torch's ROCm build aliases torch.cuda.* to
     HIP under the hood, so an AMD card enumerates through the exact same API,
@@ -665,8 +678,9 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
 def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
     """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)``
     where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` /
-    :data:`GPU_PROBE_BUSY`. Split out so ``list_gpus`` can expose the status opt-in
-    without duplicating the thread + deadline machinery. ``wait_for_inflight``: see
+    :data:`GPU_PROBE_BUSY` / :data:`GPU_PROBE_INCONCLUSIVE`. Split out so
+    ``list_gpus`` can expose the status opt-in without duplicating the thread +
+    deadline machinery. ``wait_for_inflight``: see
     :func:`list_gpus` - a patient off-loop caller JOINS a probe already in flight
     (bounded by ``deadline``) rather than short-circuiting on BUSY."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_done, _gpu_probe_result
@@ -723,7 +737,9 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
             # done.set() so they would not hang - that is a BUSY, not a fresh OK.
             if "value" in join_result:
                 v = join_result["value"]
-                return (list(v) if v is not None else []), GPU_PROBE_OK
+                status = (GPU_PROBE_OK if join_result.get("conclusive", True)
+                         else GPU_PROBE_INCONCLUSIVE)
+                return (list(v) if v is not None else []), status
             with _gpu_probe_lock:
                 served = list(_gpu_last_good) if _gpu_last_good is not None else []
             return served, GPU_PROBE_BUSY
@@ -747,6 +763,20 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
         except Exception as e:   # the probe swallows its own errors; belt-and-braces
             logger.debug("list_gpus: probe raised unexpectedly: %s", e)
         with _gpu_probe_lock:
+            # CONCLUSIVENESS (GPU_PROBE_INCONCLUSIVE): propagates the distinction
+            # _isolated_torch_unavailable already makes rather than inventing a new
+            # one - that latch is set ONLY when the isolated torch enumeration
+            # proved it could not answer this round (never for an honest "torch
+            # answered, zero devices" - see test_a_real_empty_answer_does_NOT_latch),
+            # so reading it here is exact, not a heuristic. Gated on an EMPTY value:
+            # a non-empty reading came from a source that DID answer (nvidia-smi
+            # found real hardware, or torch answered before the latch engaged) and
+            # is conclusive regardless of the latch - the actual sm_120 case this
+            # isolation exists for is NVIDIA, where nvidia-smi still answers while
+            # torch is latched-unavailable. Read under this same lock (not a
+            # separate one) because it is the same global _torch_gpus_isolated_once
+            # mutates, and this probe thread is the only writer while it runs.
+            conclusive = not (not value and _isolated_torch_unavailable)
             if _gpu_probe_epoch != my_epoch:
                 # A reset retired this probe while it ran: its reading describes a
                 # state the owner has explicitly dropped, and the in-flight slot is
@@ -778,6 +808,7 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
         # COMPLETED probe as a TIMEOUT, manufacturing the very "no GPU"/inconclusive
         # lie the status contract above exists to prevent.
         result["value"] = value
+        result["conclusive"] = conclusive
         done.set()
 
     try:
@@ -806,7 +837,9 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
     if done.wait(deadline):
         # Fresh probe finished in time: return ITS result (never a cached one).
         v = result.get("value")
-        return (list(v) if v is not None else []), GPU_PROBE_OK
+        status = (GPU_PROBE_OK if result.get("conclusive", True)
+                 else GPU_PROBE_INCONCLUSIVE)
+        return (list(v) if v is not None else []), status
     # Deadline exceeded: the driver call is stuck in native code and cannot be
     # cancelled. Serve the last-known-good value and let the abandoned thread
     # finish (or never); _gpu_probe_inflight stays True until it does, so a wedge
@@ -1124,19 +1157,35 @@ def _torch_gpus_isolated_once() -> list:
       at WARNING that the isolation was lost and the stall risk is back. A safety
       net for a genuine runtime failure, not the design.
 
-    KNOWN GAP, recorded rather than hidden (AGENTS.md rule 5). Once latched, this
-    returns [] and the probe falls through to nvidia-smi. On a box where nvidia-smi
-    ALSO cannot answer - an AMD or Intel card whose torch wedges - the probe then
-    completes with [] and status GPU_PROBE_OK, which a caller reads as "genuinely no
-    GPU". The old in-process import would instead have overrun the caller's deadline
-    and reported GPU_PROBE_TIMEOUT, i.e. INCONCLUSIVE, which is the more honest
-    answer. Narrow in practice: the AMD ROCm/HIP conflict is already caught earlier
-    by _torch_gpu_probe_known_doomed, and the wedge this was written for (sm_120) is
-    NVIDIA, where nvidia-smi does answer. Closing it properly needs a way for the
-    probe to say "completed but inconclusive", which the current status contract has
-    no channel for - GPU_PROBE_OK is decided by the probe COMPLETING, not by it
-    having learned anything. Do not paper over it by returning None here: every
-    caller of _list_gpus_probe expects a list."""
+    FORMERLY A KNOWN GAP, now closed. Once latched, this still returns [] and the
+    probe still falls through to nvidia-smi (unchanged - see below for why). On a
+    box where nvidia-smi ALSO cannot answer - an AMD or Intel card whose torch
+    wedges - the probe used to complete with [] and status GPU_PROBE_OK, which a
+    caller read as "genuinely no GPU", when the honest answer was "could not
+    determine". Closed by propagating the distinction this latch already makes
+    (rather than inventing a new one): :func:`_list_gpus_with_status` reads
+    ``_isolated_torch_unavailable`` once this call returns, and reports
+    :data:`GPU_PROBE_INCONCLUSIVE` instead of :data:`GPU_PROBE_OK` exactly when
+    the reading came back empty AND this latch is set - never for a non-empty
+    reading (nvidia-smi finding real hardware, e.g. the sm_120 case this
+    isolation exists for, is conclusive regardless of the latch).
+
+    This function's OWN return type is deliberately UNCHANGED (still a bare
+    ``list``, never ``None``): every caller of :func:`_list_gpus_probe` - and the
+    ~25 tests across test_discover.py / test_torch_probe_isolation.py /
+    test_gpu_probe_nonblocking.py / test_vram_eviction_safety.py that monkeypatch
+    it as a bare-list-returning double - rely on that contract. The status
+    channel is a separate, additive path through module state, not a change to
+    this function's signature.
+
+    STILL OUT OF SCOPE, documented rather than silently left inconsistent
+    (AGENTS.md rule 5): :func:`_torch_gpu_probe_known_doomed` skips the torch
+    attempt ENTIRELY on its narrower doomed combination (Windows + resident HIP
+    runtime + rocm_sdk torch) without touching this latch, so that skip is not
+    detected as inconclusive here either. Left alone deliberately - it is a
+    different, already-audited code path, and closing it would need
+    :func:`_list_gpus_probe` itself to track conclusiveness across every source
+    it tries, not just this one."""
     global _isolated_torch_unavailable
     with _gpu_probe_lock:
         if _isolated_torch_unavailable:
@@ -1860,8 +1909,9 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
     still work there (total is all fit_label needs).
 
     When ``return_status`` is True, returns ``(info, status)`` where ``status``
-    is list_gpus()'s own GPU_PROBE_OK/GPU_PROBE_TIMEOUT/GPU_PROBE_BUSY - a
-    caller that will present a specific number as CURRENT FACT (not just a fit
+    is list_gpus()'s own GPU_PROBE_OK/GPU_PROBE_TIMEOUT/GPU_PROBE_BUSY/
+    GPU_PROBE_INCONCLUSIVE - a caller that will present a specific number as
+    CURRENT FACT (not just a fit
     ceiling) must check this rather than trust a timed-out probe's stale
     last-known-good fallback (AGENTS.md rule 5; see the vram_before/after
     bytes this fed into /v1/models/unload, which is exactly that case).
@@ -1969,14 +2019,22 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
                 # name so the AMD pairing can be authorised.
                 #
                 # ONLY when the probe COMPLETED empty (torch-less: it returns [] fast,
-                # status OK) - never when it TIMED OUT or was BUSY. A timeout means the
-                # driver is wedged/cold and the box is unmeasurable; the pre-load gate
-                # deliberately treats that as "skip the VRAM check", and surfacing an
-                # independent ADL number there would silently turn a skipped gate into
-                # an enforcing one (and could act on a reading taken while the driver
-                # is in a bad state). status is None only when the caller did not ask
-                # for it (return_status=False fit-badges), which never gate on timeout.
-                if status not in (GPU_PROBE_TIMEOUT, GPU_PROBE_BUSY):
+                # status OK) - never when it TIMED OUT, was BUSY, or was INCONCLUSIVE.
+                # A timeout means the driver is wedged/cold and the box is
+                # unmeasurable; the pre-load gate deliberately treats that as "skip
+                # the VRAM check", and surfacing an independent ADL number there
+                # would silently turn a skipped gate into an enforcing one (and could
+                # act on a reading taken while the driver is in a bad state).
+                # INCONCLUSIVE (the isolated torch probe could not be asked and
+                # nvidia-smi also found nothing) gets the same conservative treatment:
+                # gpu_usage.device_global_used_bytes' ADL/PDH mapping itself partially
+                # depends on torch's pci_bus_id as one of its strategies, so it is not
+                # proven independent of the same trouble - the honest degrade is
+                # total-only, exactly as for TIMEOUT/BUSY, not a fresh claim of
+                # certainty this call has not earned. status is None only when the
+                # caller did not ask for it (return_status=False fit-badges), which
+                # never gates on any of these.
+                if status not in (GPU_PROBE_TIMEOUT, GPU_PROBE_BUSY, GPU_PROBE_INCONCLUSIVE):
                     try:
                         from localm import gpu_usage
                         entry = {"index": 0, "name": best_desc, "total": int(best)}

@@ -23,7 +23,8 @@ from localm import discover
 # sys.modules from the start, so patch.dict has nothing to evict.
 from localm import gpu_usage as _gpu_usage_imported_early  # noqa: F401
 from localm.discover import (
-    DiscoverError, GPU_PROBE_BUSY, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
+    DiscoverError, GPU_PROBE_BUSY, GPU_PROBE_INCONCLUSIVE, GPU_PROBE_OK,
+    GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _native_backend_has_vulkan,
@@ -1103,6 +1104,78 @@ class TestListGpusTimeoutStatus:
         assert seen.get("wait_for_inflight") is False
 
 
+class TestListGpusInconclusiveStatus:
+    """Closes a documented gap (see _torch_gpus_isolated_once's KNOWN GAP
+    paragraph): once the isolated-torch latch has engaged AND nvidia-smi also
+    cannot answer - the realistic case is an AMD or Intel card whose torch
+    wedges - the probe used to complete with [] and status GPU_PROBE_OK,
+    indistinguishable from a genuine no-GPU box. status must now be
+    GPU_PROBE_INCONCLUSIVE instead, and ONLY in that specific combination."""
+
+    def _blind_nvidia_smi(self, monkeypatch):
+        import subprocess
+        monkeypatch.setattr(subprocess, "run",
+                            MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
+
+    def test_latch_engaged_and_nvidia_smi_blind_reports_inconclusive(self, monkeypatch):
+        """The scenario the gap named: torch wedges THIS round (engaging the
+        latch as a side effect) and nvidia-smi (NVIDIA-only) cannot see the
+        AMD/Intel card either."""
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        self._blind_nvidia_smi(monkeypatch)
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert gpus == []
+        assert status == discover.GPU_PROBE_INCONCLUSIVE, (
+            "torch could not be asked (latched) and nvidia-smi found nothing - "
+            "an AMD/Intel box's real answer is unknown, not 'no GPU'")
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unavailable is True   # the latch engaged
+
+    def test_fires_control_genuine_no_gpu_box_stays_ok(self, monkeypatch):
+        """FIRES-CONTROL: a real, honest empty answer from torch (no latch) plus
+        a blind nvidia-smi is a GENUINE no-GPU box and must NOT be downgraded to
+        inconclusive - a change that made every empty reading inconclusive would
+        still pass the test above but must fail this one."""
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: [])
+        self._blind_nvidia_smi(monkeypatch)
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert gpus == []
+        assert status == discover.GPU_PROBE_OK, (
+            "torch conclusively answered 'no device' - this must stay a genuine "
+            "no-GPU reading, not be swept into inconclusive")
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unavailable is False
+
+    def test_preexisting_latch_with_a_conclusive_nvidia_smi_stays_ok(self, monkeypatch):
+        """The actual case the isolation was built for (sm_120): torch is ALREADY
+        latched-unavailable from an earlier probe, but nvidia-smi still finds the
+        real hardware this round. A non-empty reading is conclusive regardless of
+        the latch - it must never be downgraded just because torch sat out."""
+        monkeypatch.setattr(discover, "_isolated_torch_unavailable", True)
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_isolated",
+            lambda: pytest.fail("latch was engaged; must not respawn the child"))
+        import subprocess
+        monkeypatch.setattr(subprocess, "run", MagicMock(return_value=MagicMock(
+            returncode=0, stdout="0, RTX 4090, 24576, 20000\n")))
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert status == discover.GPU_PROBE_OK
+        assert gpus and gpus[0]["name"] == "RTX 4090"
+
+
 class TestListGpusJoinInflight:
     """A patient off-loop caller must be able to JOIN a probe already in flight
     (opt-in wait_for_inflight), not just get an instant BUSY.
@@ -1959,6 +2032,19 @@ class TestVramInfoRegistryTierDeviceGlobalFree:
         self._arm(monkeypatch, status=GPU_PROBE_BUSY, used=3_500_000_000)
         info, _ = discover.vram_info(return_status=True)
         assert info == {"total": self._TOTAL}
+
+    def test_inconclusive_probe_stays_total_only(self, monkeypatch):
+        """An INCONCLUSIVE reading (isolated torch could not be asked and
+        nvidia-smi also found nothing) gets the same conservative treatment as
+        TIMEOUT/BUSY: gpu_usage.device_global_used_bytes' ADL/PDH mapping is
+        not proven independent of the same torch trouble, so the enrichment
+        must not run - stay total-only rather than assert a fresh certainty
+        this call did not earn."""
+        seen = self._arm(monkeypatch, status=GPU_PROBE_INCONCLUSIVE, used=3_500_000_000)
+        info, st = discover.vram_info(return_status=True)
+        assert st == GPU_PROBE_INCONCLUSIVE
+        assert info == {"total": self._TOTAL}
+        assert "gpus" not in seen, "the usage source must not be consulted when inconclusive"
 
     def test_declining_source_stays_total_only(self, monkeypatch):
         """A non-AMD / multi-adapter box: the usage source returns {} rather than
