@@ -290,6 +290,55 @@ class TestPartialParseSurfacing:
         assert dispatched[0].args["path"] == "b.py"
         assert len(self._partial_notices(agent)) == 1
 
+    def test_partial_notice_is_capped_not_repeated_every_turn(self, tmp_path):
+        """The notice's own example text is itself tool-call-shaped (a literal
+        <tool_call> block with "name"/"args" keys) - a model that echoes it
+        back as commentary while also making one real call each turn would
+        otherwise re-trigger this notice forever, once per turn. Capped at
+        _MAX_TOOL_REPAIRS, the same bound and the same reasoning as the
+        repair-turn mechanism above."""
+        from localm.plugins.coder.agent.constants import _MAX_TOOL_REPAIRS
+
+        def _broken_and_good(i):
+            # Varied per turn (different path each time) so the UNRELATED
+            # identical-response circuit breaker (_REPEAT_RESPONSE_ABORT)
+            # does not fire first and mask what this test is checking.
+            return (
+                f'<tool_call>\n{{"name": 123, "args": {{"path": "a{i}.py"}}}}\n</tool_call>\n\n'
+                f'<tool_call>\n{{"name": "read_file", "args": {{"path": "b{i}.py"}}}}\n</tool_call>\n'
+            )
+
+        # More turns of the same shape than the cap allows, then a plain
+        # final answer so the task actually ends.
+        responses = iter([_broken_and_good(i) for i in range(_MAX_TOOL_REPAIRS + 3)]
+                         + ["Done."])
+        agent = _make_agent(tmp_path, max_turns=_MAX_TOOL_REPAIRS + 5)
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          # A FRESH list per call, not return_value=[...] -
+                          # MagicMock(return_value=[...]) hands back the SAME
+                          # list object every call, and loop.py appends the
+                          # notice onto it in place; across several turns
+                          # that shared, ever-growing list re-sends every
+                          # earlier turn's notice on every later turn too,
+                          # which once made this test pass at the right
+                          # NUMBER for the wrong reason (confirmed live by
+                          # instrumenting st.partial_notice_count directly:
+                          # the cap held at 2 while _messages still showed
+                          # 5, because the mock kept re-appending onto one
+                          # shared list rather than loop.py re-appending).
+                          side_effect=lambda *a, **k: ["<result>ok</result>"]), \
+             patch.object(agent, "_maybe_compact"):
+            # _maybe_compact is patched out: a MOCKED backend has no real
+            # token counts, so its fill-ratio estimate is unreliable here,
+            # and an auto-compaction mid-run would summarise away earlier
+            # notices - a second, independent confound with nothing to do
+            # with the cap this test exists to check.
+            result = agent.run_task("read two files repeatedly")
+        assert result == "Done."
+        assert len(self._partial_notices(agent)) == _MAX_TOOL_REPAIRS
+
     def test_no_partial_notice_when_everything_parsed(self, tmp_path):
         agent = _make_agent(tmp_path)
         responses = iter([

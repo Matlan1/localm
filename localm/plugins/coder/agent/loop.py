@@ -160,7 +160,8 @@ class _LoopMixin:
         # on the earlier green.
         st = SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0,
                              verify_retries=0, verify_settled=False,
-                             verify_checked_at=self._write_total())
+                             verify_checked_at=self._write_total(),
+                             partial_notice_count=0)
 
         try:
             while self._turns < self.max_turns:
@@ -322,8 +323,19 @@ class _LoopMixin:
                 # session record. `segments` already has the successfully-parsed
                 # call spans excised (split_response), so anything tool-call-
                 # shaped left in it is exactly what failed to parse.
+                #
+                # Capped at _MAX_TOOL_REPAIRS (matching the repair-turn's own
+                # cap, same reasoning): the notice's own example text is itself
+                # tool-call-shaped (a literal <tool_call> block with "name"/
+                # "args" keys), so a model that echoes it back verbatim as
+                # commentary - confirmed live: constructing exactly that echo
+                # alongside one real call reproduces looks_like_tool_attempt()
+                # returning True on the leftover - would otherwise re-trigger
+                # this notice indefinitely, once per turn, forever.
                 leftover = "".join(seg for seg in segments if isinstance(seg, str))
-                if looks_like_tool_attempt(leftover):
+                if (looks_like_tool_attempt(leftover)
+                        and st.partial_notice_count < _MAX_TOOL_REPAIRS):
+                    st.partial_notice_count += 1
                     result_blocks.append(
                         "[tool-call format] Part of this response looked like "
                         "another tool call, but it could not be parsed (the "
