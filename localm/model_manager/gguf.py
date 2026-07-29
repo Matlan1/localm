@@ -310,6 +310,28 @@ _GGUF_FIXED_TYPE_SIZES = {
 _GGUF_TYPE_STRING = 8
 _GGUF_TYPE_ARRAY = 9
 
+# struct formats for the same fixed-width types, keyed identically to
+# _GGUF_FIXED_TYPE_SIZES so the two tables cannot drift apart.
+_GGUF_SCALAR_FORMATS = {
+    0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i",
+    6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d",
+}
+
+# The "<architecture>."-prefixed keys describing the attention shape, i.e. what
+# the KV cache actually costs per token. Stored as suffixes because llama.cpp
+# namespaces them under general.architecture ("llama.block_count",
+# "qwen3moe.attention.head_count_kv", ...). Deliberately does NOT include any
+# expert/MoE key: expert weights cost VRAM but contribute nothing to KV, and
+# conflating the two is the bug this exists to fix.
+_GGUF_KV_SHAPE_SUFFIXES = (
+    ".block_count",
+    ".embedding_length",
+    ".attention.head_count",
+    ".attention.head_count_kv",
+    ".attention.key_length",
+    ".attention.value_length",
+)
+
 # Bounded read for the metadata probe: real GGUF writers put general.* and
 # <arch>.pooling_type keys before the (often large) tokenizer vocab arrays and
 # all tensor data, so a few MB is always enough; this guarantees the probe
@@ -355,6 +377,106 @@ def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
     if size is None:
         raise struct.error(f"unsupported gguf value type {vtype}")
     return off + size
+
+
+def _gguf_read_scalar(buf: bytes, off: int, vtype: int):
+    """Read one FIXED-WIDTH GGUF scalar at *off*; returns (value, new_offset).
+
+    Raises struct.error for a string/array/unknown type rather than guessing, so
+    a key whose value is not a plain number (e.g. a per-layer head_count_kv
+    ARRAY) can never be silently read as one. Callers catch and treat that as
+    'no signal'."""
+    fmt = _GGUF_SCALAR_FORMATS.get(vtype)
+    if fmt is None:
+        raise struct.error(f"gguf value type {vtype} is not a fixed-width scalar")
+    (val,) = struct.unpack_from(fmt, buf, off)
+    return val, off + _GGUF_FIXED_TYPE_SIZES[vtype]
+
+
+def gguf_kv_bytes_per_token(path: Path) -> int:
+    """f16 KV-cache bytes per token, computed from *path*'s own GGUF header.
+
+    Same formula as ``LlamaCpp._read_kv_bytes_per_token``, but read from the
+    FILE rather than from a loaded model. That is the entire point: the offload
+    decision (how many layers fit in VRAM) has to be made BEFORE the model is
+    loaded, so until now it charged KV from the file's SIZE - which is wrong in
+    both directions. A sparse MoE inflates the file with expert weights that
+    cost no KV at all, so it was over-charged; a wide-KV dense model was
+    under-charged (~2.6x low on a 12B) and could be judged to fit when its KV
+    cache actually overflows VRAM.
+
+    K and V cache = n_layers * n_head_kv * head_dim, times 2 (K and V) and times
+    2 bytes/element (llama.cpp's default f16 type_k/type_v). head_dim comes from
+    the explicit ``attention.key_length``/``value_length`` keys when present
+    (several architectures set a head_dim that is NOT n_embd/n_head) and falls
+    back to n_embd // n_head otherwise.
+
+    Returns 0 - never raises - when the file is not a readable GGUF, or the
+    shape keys are absent, non-scalar, or non-positive. 0 means 'no signal', and
+    the caller keeps its previous heuristic; a wrong number here would silently
+    mis-size every load, so refusing to answer is the safe failure."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return 0
+
+    architecture = None
+    vals: dict = {}
+    try:
+        if buf[:4] != b"GGUF":
+            return 0
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if version < 2:
+            return 0            # v1's 32-bit counts predate every arch we size
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            # Collect by FULL key and resolve against the architecture at the
+            # end, so key order does not matter and an mmproj's parallel
+            # "clip.*" attention block can never be mistaken for the LLM's.
+            if any(key.endswith(s) for s in _GGUF_KV_SHAPE_SUFFIXES):
+                try:
+                    vals[key], off = _gguf_read_scalar(buf, off, vtype)
+                    continue
+                except struct.error:
+                    pass        # not a scalar (array/string) - skip it normally
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        # Truncated inside the bounded read, or a malformed layout. Fall through
+        # and answer from whatever resolved cleanly; if that is not enough the
+        # arithmetic below returns 0 and the caller falls back.
+        pass
+
+    if not architecture:
+        return 0
+
+    def _get(suffix: str) -> int:
+        v = vals.get(f"{architecture}{suffix}")
+        return int(v) if isinstance(v, int) and v > 0 else 0
+
+    n_layers = _get(".block_count")
+    n_head_kv = _get(".attention.head_count_kv")
+    if not n_layers or not n_head_kv:
+        return 0
+    k_len = _get(".attention.key_length")
+    v_len = _get(".attention.value_length")
+    if k_len and v_len:
+        return n_layers * n_head_kv * (k_len + v_len) * 2
+    n_embd = _get(".embedding_length")
+    n_head = _get(".attention.head_count")
+    if not n_embd or not n_head:
+        return 0
+    head_dim = n_embd // n_head
+    if head_dim <= 0:
+        return 0
+    return n_layers * n_head_kv * head_dim * 2 * 2
 
 
 def _gguf_metadata_probe(path: Path) -> dict:
