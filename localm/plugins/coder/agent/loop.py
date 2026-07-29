@@ -298,8 +298,8 @@ class _LoopMixin:
 
                 # ---- there are tool calls --------------------------------
                 # Show the non-tool-call text parts first
+                segments = split_response(response, calls)
                 if interactive:
-                    segments = split_response(response, calls)
                     for seg in segments:
                         if isinstance(seg, str) and seg.strip():
                             console.print(seg.strip())
@@ -308,6 +308,31 @@ class _LoopMixin:
 
                 # Execute tools - run non-destructive batches in parallel
                 result_blocks = self._execute_tools(calls, interactive=interactive)
+
+                # A PARTIAL parse failure is otherwise invisible: parse_tool_calls
+                # silently drops any tool-call-shaped block whose body could not
+                # be recovered (malformed JSON that exhausts every lenient-parse
+                # fallback), and the only downstream check for a parse problem is
+                # "calls came back empty" (_handle_no_tool_calls) - which never
+                # fires when a SIBLING call in the same response parsed fine.
+                # Measured live: an edit_file on an existing file (large, more
+                # escaping-prone content) silently vanished while a sibling
+                # write_file and run_shell in the same turn executed for real -
+                # the model never found out and, without this, neither would the
+                # session record. `segments` already has the successfully-parsed
+                # call spans excised (split_response), so anything tool-call-
+                # shaped left in it is exactly what failed to parse.
+                leftover = "".join(seg for seg in segments if isinstance(seg, str))
+                if looks_like_tool_attempt(leftover):
+                    result_blocks.append(
+                        "[tool-call format] Part of this response looked like "
+                        "another tool call, but it could not be parsed (the "
+                        "JSON body was likely malformed) - it was NOT run, "
+                        "unlike the call(s) above. If you still need it, "
+                        "re-emit just that one call in the exact "
+                        '<tool_call>\n{"name": "TOOL_NAME", "args": {...}}\n'
+                        "</tool_call> format."
+                    )
 
                 # Feed all results back as a user message, compressing large
                 # outputs when the context is filling up

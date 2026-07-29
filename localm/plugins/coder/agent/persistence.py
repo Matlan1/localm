@@ -5,6 +5,7 @@ cumulative session diff, and undo. Mixed into Agent."""
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import datetime
 import difflib
@@ -407,6 +408,23 @@ class _PersistenceMixin:
                 dataclasses.asdict(cs)
                 for cs in (getattr(self, "_delegated", None) or [])
             ],
+            # The changed-files tracker (GUI "files changed" / session_diff).
+            # Without this, a server restart or GUI reconnect mid-session lost
+            # every prior write's record even though the writes themselves are
+            # still on disk and the conversation resumes intact - the diff view
+            # would silently go blank for work that genuinely happened. Each
+            # entry's "original" is the pre-change snapshot (bytes or None for
+            # a newly-created file); base64-encoded because JSON has no bytes
+            # type.
+            "changed_files": {
+                key: {
+                    "original": (base64.b64encode(entry["original"]).decode("ascii")
+                                 if entry.get("original") is not None else None),
+                    "writes": entry.get("writes", 1),
+                    "last_tool": entry.get("last_tool", "unknown"),
+                }
+                for key, entry in self._changed_files.items()
+            },
         }
         p = self._checkpoint_path
         try:
@@ -452,6 +470,38 @@ class _PersistenceMixin:
         self._total_tokens = data.get("total_tokens", 0)
         self.set_todos(normalize_todos(data.get("todos")))
         self._restore_delegated(data.get("delegated"))
+        self._restore_changed_files(data.get("changed_files"))
+
+    def _restore_changed_files(self, raw) -> None:
+        """Rebuild the changed-files tracker from a checkpoint.
+
+        The file is plain user-writable JSON (same posture as
+        _restore_delegated): each entry is filtered to the expected shape and
+        skipped if it does not fit, rather than trusted as-is. An older
+        checkpoint (saved before this field existed) has no "changed_files"
+        key at all - *raw* is then None and this just leaves the tracker
+        empty, exactly its prior (lossy) behaviour, not a new failure mode.
+        """
+        restored: dict[str, dict] = {}
+        if isinstance(raw, dict):
+            for key, entry in raw.items():
+                if not isinstance(key, str) or not isinstance(entry, dict):
+                    continue
+                original_b64 = entry.get("original")
+                try:
+                    original = (base64.b64decode(original_b64)
+                                if original_b64 is not None else None)
+                except Exception:
+                    continue   # corrupt encoding: drop this entry, not the resume
+                writes = entry.get("writes", 1)
+                if not isinstance(writes, int):
+                    writes = 1
+                last_tool = entry.get("last_tool", "unknown")
+                if not isinstance(last_tool, str):
+                    last_tool = "unknown"
+                restored[key] = {"original": original, "writes": writes,
+                                 "last_tool": last_tool}
+        self._changed_files = restored
 
     def _restore_delegated(self, raw) -> None:
         """Rebuild the delegated-work pointers from a checkpoint.
