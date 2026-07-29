@@ -27,6 +27,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from localm.pathsafe import is_unc_or_device_path
+
 # Process-wide lock serialising the read-modify-write of jobs.json. The scheduler
 # records results from a worker thread (run_in_executor) while route handlers
 # create/edit jobs on the event-loop thread, and several JobStore instances may
@@ -213,6 +215,20 @@ class Job:
         # Only keep known fields so a forward-compat file with extra keys loads.
         known = {f for f in cls.__dataclass_fields__}      # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def cwd_unc_error(cwd) -> Optional[str]:
+    """None when *cwd* is safe to use as a coder job's working directory, else
+    a ready-to-show refusal message.
+
+    Mirrors model_manager.unregistered_model_error's shape: ONE function that
+    owns the wording, called identically by every writer (plug.py's POST/PUT,
+    cli.py's job_add) and by the runner's authoritative run-time re-check
+    (runner.py's _run_coder), so a future wording change has exactly one place
+    to happen rather than three copies that can drift apart."""
+    if cwd and is_unc_or_device_path(str(cwd)):
+        return "cwd must be a local directory path, not a UNC or device path."
+    return None
 
 
 # --------------------------------------------------------------------------- #

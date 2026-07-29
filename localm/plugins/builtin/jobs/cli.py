@@ -67,7 +67,7 @@ def _store():
 def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
             scope, allow_shell, model, disabled):
     """Add a new scheduled job."""
-    from localm.plugins.builtin.jobs.store import Job
+    from localm.plugins.builtin.jobs.store import Job, cwd_unc_error
 
     # The THIRD write path into `model`, after POST and PUT /api/jobs. The runner
     # re-checks at run time, so an unregistered name here was not a security hole -
@@ -80,6 +80,16 @@ def job_add(name, prompt, cron, every, coder, memory, rag, collection, cwd,
     _bad = unregistered_model_error(model)
     if _bad:
         click.echo(f"Invalid job: {_bad}", err=True)
+        sys.exit(1)
+
+    # THIRD write path into `cwd`, after POST and PUT /api/jobs (plug.py's
+    # _check_cwd) - same reasoning as the model-name check just above: a
+    # poisoned row must never reach disk regardless of which writer created
+    # it. Shares cwd_unc_error's wording with plug.py and the runner's
+    # run-time re-check, so all three never drift apart.
+    _bad_cwd = cwd_unc_error(cwd)
+    if _bad_cwd:
+        click.echo(f"Invalid job: {_bad_cwd}", err=True)
         sys.exit(1)
 
     picked = [f for f, on in (("--coder", coder), ("--memory", memory),
