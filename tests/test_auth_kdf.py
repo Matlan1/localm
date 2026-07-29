@@ -563,8 +563,15 @@ def test_sessions_restrict_perms_is_not_posix_only(auth):
     untouched.write_text("[]", encoding="utf-8")
 
     if os.name == "posix":
+        # Pin the sibling's mode instead of inheriting whatever the environment's
+        # umask happens to produce. Measured 0o644 here and on CI (umask 0022),
+        # but under umask 0077 a fresh file is ALREADY 0o600 - and then a
+        # fires-control phrased as "the sibling is not 0600" fails on a machine
+        # where nothing is wrong. The control has to come from this test, not
+        # from ambient process state.
+        os.chmod(untouched, 0o644)
         assert oct(os.stat(store).st_mode & 0o777) == "0o600"
-        assert oct(os.stat(untouched).st_mode & 0o777) != "0o600"
+        assert oct(os.stat(untouched).st_mode & 0o777) == "0o644"
     else:
         # Fires-control, grounded in measured icacls output rather than assumed:
         # an untouched sibling in the same directory carries three INHERITED aces
