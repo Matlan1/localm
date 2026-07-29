@@ -1,4 +1,12 @@
 {
+ "256": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/coder/plug.py",
+  "line": 193,
+  "lineHash": "e1025e563172df60:1",
+  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
  "255": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
@@ -1010,7 +1018,7 @@
  "63": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
-  "line": 493,
+  "line": 512,
   "lineHash": "a774173349f04b6e:1",
   "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1018,7 +1026,7 @@
  "62": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
-  "line": 389,
+  "line": 408,
   "lineHash": "c8b710d8fc9cb5f3:1",
   "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1026,7 +1034,7 @@
  "61": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
-  "line": 387,
+  "line": 406,
   "lineHash": "9f884f950af9d82a:1",
   "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1034,7 +1042,7 @@
  "60": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
-  "line": 382,
+  "line": 401,
   "lineHash": "7599b1c882aad8f7:1",
   "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
@@ -1045,14 +1053,6 @@
   "line": 429,
   "lineHash": "6fda2672265a3dad:1",
   "comment": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
-  "reason": "false positive"
- },
- "57": {
-  "rule": "py/path-injection",
-  "file": "localm/plugins/builtin/coder/plug.py",
-  "line": 177,
-  "lineHash": "e42acd754903349b:1",
-  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md",
   "reason": "false positive"
  },
  "53": {
