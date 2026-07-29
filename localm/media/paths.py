@@ -230,8 +230,11 @@ def confined_move_dest(request: Request, raw: str) -> Path:
         # The exception is NOT interpolated: str(OSError) carries .filename, so
         # it would hand the absolute data dir path - and hence the OS username -
         # to the only principal that reaches this branch, a non-owner key that
-        # just failed the fs_access check. _resolved_home() already logs the
-        # real cause server-side, which is where the path belongs.
+        # just failed the fs_access check. The cause goes to the server log
+        # instead, which is where the path belongs. (This branch calls
+        # home_dir().resolve() directly rather than _resolved_home(), so it does
+        # its OWN logging below - _resolved_home's warning is on the input-image
+        # path, not this one.)
         from localm.debuglog import logger
         logger.warning("move destination refused: the localm data directory "
                        "could not be resolved", exc_info=True)

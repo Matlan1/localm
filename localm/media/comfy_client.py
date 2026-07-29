@@ -1690,6 +1690,11 @@ _IMAGE_SIGNATURES: tuple[tuple[tuple[int, bytes], ...], ...] = (
     ((0, b"\xff\xd8\xff"),),                       # JPEG
     ((0, b"GIF87a"),),                             # GIF
     ((0, b"GIF89a"),),
+    # BMP's signature really is only two bytes. That is weak in the abstract, but
+    # not here: the threat is a caller naming SOMEONE ELSE'S file (auth.key, a
+    # session store) to have it transmitted, and they control WHICH file, never
+    # its first two bytes. A file that happens to start "BM" is not a file an
+    # attacker can arrange to contain a secret.
     ((0, b"BM"),),                                 # BMP
     ((0, b"RIFF"), (8, b"WEBP")),                  # WebP
     ((0, b"II*\x00"),),                            # TIFF, little-endian
@@ -1722,9 +1727,17 @@ def _upload_image(image_path: Path, api_url: str) -> str:
     with open(image_path, "rb") as f:
         head = f.read(16)
     if not looks_like_image(head):
+        # Deliberately does NOT say "is not an image": this allowlist is narrower
+        # than "image". localm itself accepts .heic/.heif elsewhere
+        # (gui/web.py _SHARE_IMAGE_EXTS, i.e. an ordinary iPhone photo), and
+        # those are refused here because the backend's loader cannot be assumed
+        # to read them. Telling a user their photo "is not an image" would be
+        # false and would send them debugging the wrong thing; name the
+        # supported set and let them convert.
         raise ValueError(
-            f"{image_path.name} is not an image (no PNG/JPEG/GIF/BMP/WebP/TIFF "
-            f"signature); refusing to upload it to ComfyUI")
+            f"{image_path.name} is not in a format this upload supports "
+            f"(PNG, JPEG, GIF, BMP, WebP or TIFF - detected from the file's "
+            f"own header, not its extension); refusing to upload it to ComfyUI")
     boundary = "LocalcoderUploadBoundary"
     img_bytes = image_path.read_bytes()
     content_type = "image/jpeg" if image_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
