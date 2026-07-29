@@ -1230,7 +1230,7 @@ def tool_search_replace(
         p for p in cwd.glob(glob)
         if p.is_file() and p.resolve().is_relative_to(cwd_resolved)
     )
-    changes: list[tuple[Path, Path, str, int]] = []  # (abs, rel, new_text, count)
+    changes: list[tuple[Path, Path, str, int, bytes]] = []  # (abs, rel, new_text, count, old_bytes)
     unreadable: list[str] = []  # files we could not read; a replacement may be left partial
 
     oversized: list[str] = []   # skipped by the size cap, reported not silenced
@@ -1242,6 +1242,27 @@ def tool_search_replace(
                 except ValueError:
                     oversized.append(str(fp))
                 continue
+            # TWO separate reads, deliberately not one decoded from the other:
+            #
+            # old_bytes (read_bytes, no translation) is the pre-change
+            # snapshot the changed-files/undo tracker needs (ToolResult.
+            # changes) - matching execution.py's existing snapshot convention
+            # for write_file/edit_file (`abs_path.read_bytes()`), which is
+            # also untranslated raw bytes.
+            #
+            # text (read_text, universal-newline translation ON) is what the
+            # regex substitution runs against. Decoding old_bytes directly
+            # instead of using read_text() here was tried and is WRONG: on
+            # Windows, read_text() normalises CRLF -> LF on the way in and
+            # write_text() re-normalises LF -> CRLF on the way out, so the
+            # round trip is symmetric and a CRLF file stays CRLF with no
+            # extra bytes. Skipping the read-side normalisation left literal
+            # \r\n in `text`; write_text()'s own \n -> \r\n translation then
+            # ran on top of that untouched \r, inserting an EXTRA \r before
+            # every line ending post-substitution ("x = 2\r\n" -> disk bytes
+            # "x = 2\r\r\n", which read_text() then reports as "x = 2\n\n" -
+            # a spurious blank line on every line the sweep touched).
+            old_bytes = fp.read_bytes()
             text = fp.read_text(encoding="utf-8", errors="replace")
         except Exception:
             # Record (do not silence) the skip so a partial mutation is not reported as complete.
@@ -1266,7 +1287,7 @@ def tool_search_replace(
             rel = fp.relative_to(cwd)
         except ValueError:
             rel = fp
-        changes.append((fp, rel, new_text, len(matches)))
+        changes.append((fp, rel, new_text, len(matches), old_bytes))
 
     # Warn about unreadable files so the user knows the replacement may be partial
     # (matches in these files were skipped, not applied) - surface, do not silence.
@@ -1286,39 +1307,54 @@ def tool_search_replace(
             summary="search_replace - 0 matches",
         )
 
-    total = sum(n for _, _, _, n in changes)
+    total = sum(n for _, _, _, n, _ in changes)
     summary_lines = [
         f"  {rel}  ({n} match{'es' if n != 1 else ''})"
-        for _, rel, _, n in changes
+        for _, rel, _, n, _ in changes
     ]
     report = "\n".join(summary_lines)
 
     if dry_run:
+        # Same (path, old_bytes, new_text) shape as the real-apply return
+        # below, populated from the SAME matching pass above rather than a
+        # second implementation - so patch mode's preview (which calls this
+        # tool with dry_run=True to compute a diff without touching disk)
+        # can never see a different set of files than a real apply would.
         return ToolResult.success(
             f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
             summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
+            changes=[(str(rel), old_bytes, new_text)
+                    for _, rel, new_text, _, old_bytes in changes],
         )
 
     written: list[str] = []
-    for fp, rel, new_text, _ in changes:
+    applied: list[tuple[str, bytes, str]] = []  # files actually written, for changes=
+    for fp, rel, new_text, _, old_bytes in changes:
         try:
             fp.write_text(new_text, encoding="utf-8")
         except Exception as e:
             # Honesty on a mid-loop write failure: the files written before this
             # one ARE modified on disk. A bare error would read as "nothing
-            # changed" - say exactly what was and was not applied.
-            pending = [str(r) for _, r, _, _ in changes
+            # changed" - say exactly what was and was not applied. `changes`
+            # carries only the files that succeeded, so the caller (the
+            # changed-files/undo tracker) can still record and undo the real,
+            # partial mutation instead of it going untracked because the call
+            # overall reports failure.
+            pending = [str(r) for _, r, _, _, _ in changes
                        if str(r) not in written]
             return ToolResult.error(
                 f"Failed to write {rel}: {e}\n"
                 f"[PARTIAL APPLY: {len(written)} of {len(changes)} file(s) were "
                 f"already modified before this failure]\n"
                 + (f"Modified: {', '.join(written)}\n" if written else "")
-                + f"NOT modified: {', '.join(pending)}"
+                + f"NOT modified: {', '.join(pending)}",
+                changes=applied or None,
             )
         written.append(str(rel))
+        applied.append((str(rel), old_bytes, new_text))
 
     return ToolResult.success(
         f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
         summary=f"search_replace: {total} replacement(s) in {len(changes)} file(s)",
+        changes=applied,
     )

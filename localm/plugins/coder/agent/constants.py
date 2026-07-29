@@ -11,10 +11,30 @@ _MUTATING_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "run_shell",
 })
 
-# Tools whose file changes can be undone (we snapshot before they run).
-# These are also the tools recorded in the changed-files tracker.
+# Tools whose file changes can be undone via a PRE-call snapshot (we read the
+# target path(s) from the call args and snapshot their bytes before the tool
+# runs). These are also the tools whose pre-call snapshot feeds the
+# changed-files tracker.
+#
+# search_replace is DELIBERATELY NOT here: its targets are a glob + regex
+# sweep discovered only by actually running it, so there is no `path` arg (or
+# _NESTED_PATH_TOOLS entry) to snapshot ahead of time - _call_target_paths()
+# would return []. It is still undoable and tracked, via a SEPARATE, post-call
+# path (ToolResult.changes, populated by the tool itself once it knows which
+# files it touched) - see _PATCH_MODE_ELIGIBLE_TOOLS, _patch_mode_intercept,
+# and _post_tool_success's search_replace branch. Adding it here instead would
+# route it through the pre-call snapshot AND the single-file patch-mode diff
+# path, which cannot express a multi-file regex sweep and would silently
+# break it rather than fix it.
 _UNDOABLE_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "patch_file", "edit_notebook_cell",
+})
+
+# Tools patch mode intercepts (capture a diff, never touch disk). Superset of
+# _UNDOABLE_TOOLS: search_replace is patch-mode-eligible via its own dry_run
+# rather than the pre-call snapshot path (see _UNDOABLE_TOOLS's comment).
+_PATCH_MODE_ELIGIBLE_TOOLS: frozenset[str] = _UNDOABLE_TOOLS | frozenset({
+    "search_replace",
 })
 
 # Tools whose target paths are NESTED inside a collection arg rather than sitting
