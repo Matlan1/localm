@@ -36,7 +36,9 @@ def register(app: FastAPI, ctx) -> None:
         fields, files = _web._parse_multipart(body, boundary)
         inbox = _web._share_inbox()
         owner = principal_id(request)
-        n = 0
+        # Names are all checked BEFORE anything is written, so a refused share
+        # never leaves a partial inbox entry behind.
+        accepted = []
         for filename, _ctype, data in files:
             if not data:
                 continue
@@ -44,6 +46,20 @@ def register(app: FastAPI, ctx) -> None:
             if Path(filename or "").suffix.lower() not in _web._SHARE_IMAGE_EXTS:
                 continue
             safe = Path(filename or "shared").name[:80] or "shared"
+            # Path().name alone is NOT a sufficient sanitizer: it leaves
+            # "photo:stream.png" intact, which on NTFS writes into an alternate
+            # data stream that /api/share/pending cannot list, and leaves an
+            # embedded NUL intact, which raises ValueError out of write_bytes as
+            # a bare 500. Reuse /api/upload's guard rather than restating its
+            # character set - a second copy of a security constant is how the two
+            # drift apart. This one refuses where /api/upload skips: that route
+            # reports which files it saved, this returns only a redirect carrying
+            # a count, so a silent skip here would be invisible to the caller.
+            if not _web._name_is_safe(safe):
+                raise HTTPException(400, "Invalid file name.")
+            accepted.append((safe, data))
+        n = 0
+        for safe, data in accepted:
             name = _web._share_entry_name(owner, _uuid.uuid4().hex, safe)
             (inbox / name).write_bytes(data)
             n += 1
