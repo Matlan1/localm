@@ -102,6 +102,155 @@ test("switching the model via the dropdown refreshes the VRAM estimate", async (
     "a fresh estimate is fetched after the model switch");
 });
 
+test("refreshModels() picks up an externally-switched active model and refreshes the VRAM estimate", async () => {
+  // The other side of the "switching via the dropdown refreshes the estimate"
+  // test above: here nothing in THIS client calls switchModel() at all - another
+  // tab, another device, the CLI, or an MCP client changed the server's active
+  // model instead. The only thing that ever learns about that is the 30s
+  // refreshModels() poll (app/init.js's setInterval), so it has to carry the
+  // estimate refresh too or a tab already sitting on Settings is stuck showing
+  // the previous model's numbers indefinitely.
+  const calls = [];
+  let active = "m1";
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    const method = (opts.method || "GET").toUpperCase();
+    calls.push({ u, method });
+    if (u.includes("/api/vram-estimate"))
+      return { ok: true, status: 200, json: async () => ({
+        model: active, model_bytes: GIB, weights: GIB, kv_cache: 0.1 * GIB,
+        overhead: 1.4 * GIB, needed: 2.5 * GIB, free: 10 * GIB, total: 16 * GIB,
+        fits: true, approximate: true }) };
+    if (u.endsWith("/v1/config") && method === "GET")
+      return { ok: true, status: 200, json: async () => ({ n_ctx: 4096, n_gpu_layers: 99 }) };
+    if (u.includes("/api/models"))
+      return { ok: true, status: 200, json: async () => ({
+        models: [
+          { name: "m1", active: active === "m1", size_bytes: GIB },
+          { name: "m2", active: active === "m2", size_bytes: 4 * GIB },
+        ],
+        active,
+      }) };
+    if (u.includes("/api/plugins"))
+      return { ok: true, status: 200, json: async () => ({ plugins: [] }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const { window } = loadApp({ fetchImpl });
+  await waitFor(() => /needed/.test(window.document.getElementById("perf-estimate").textContent));
+  const before = calls.filter((c) => c.u.includes("/api/vram-estimate")).length;
+
+  active = "m2";                    // an external client switches the server's active model
+  await window.refreshModels();     // the real 30s poll function, called directly
+
+  assert.ok(calls.filter((c) => c.u.includes("/api/vram-estimate")).length > before,
+    "an externally-detected active-model change refetches the VRAM estimate");
+  assert.equal(window.document.getElementById("model-select").value, "m2",
+    "the dropdown also reflects the external switch (pre-existing behaviour)");
+});
+
+test("refreshModels() does NOT refetch the VRAM estimate when the active model is unchanged", async () => {
+  // Negative case for the fix above: a routine poll tick with nothing changed
+  // must not turn into an extra estimate fetch every 30s.
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ u });
+    if (u.includes("/api/vram-estimate"))
+      return { ok: true, status: 200, json: async () => ({
+        model: "m1", model_bytes: GIB, weights: GIB, kv_cache: 0.1 * GIB,
+        overhead: 1.4 * GIB, needed: 2.5 * GIB, free: 10 * GIB, total: 16 * GIB,
+        fits: true, approximate: true }) };
+    if (u.endsWith("/v1/config"))
+      return { ok: true, status: 200, json: async () => ({ n_ctx: 4096, n_gpu_layers: 99 }) };
+    if (u.includes("/api/models"))
+      return { ok: true, status: 200, json: async () => ({
+        models: [{ name: "m1", active: true, size_bytes: GIB }], active: "m1" }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const { window } = loadApp({ fetchImpl });
+  await waitFor(() => /needed/.test(window.document.getElementById("perf-estimate").textContent));
+  const before = calls.filter((c) => c.u.includes("/api/vram-estimate")).length;
+
+  await window.refreshModels();     // routine poll tick, nothing changed
+
+  assert.equal(calls.filter((c) => c.u.includes("/api/vram-estimate")).length, before,
+    "an unchanged active model must not trigger a redundant estimate refetch");
+});
+
+test("refreshModels() refreshes the estimate when the active model is externally UNLOADED", async () => {
+  // A truthy-both-sides guard (previousActive && modelCache.active && ...) looks
+  // like it only skips the boot-time call, but "" is also the value /api/models
+  // legitimately reports after an external unload (another tab's Unload button,
+  // the CLI, an MCP client) - so that guard shape drops this transition too,
+  // leaving the panel showing the unloaded model's stale (and now WRONG, not
+  // just outdated) numbers while the status line correctly says "no model".
+  const calls = [];
+  let active = "m1";
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ u });
+    if (u.includes("/api/vram-estimate"))
+      return { ok: true, status: 200, json: async () => ({
+        model: active, model_bytes: active ? GIB : 0, weights: active ? GIB : 0,
+        kv_cache: 0.1 * GIB, overhead: 1.4 * GIB, needed: 1.5 * GIB, free: 10 * GIB,
+        total: 16 * GIB, fits: true, approximate: true }) };
+    if (u.endsWith("/v1/config"))
+      return { ok: true, status: 200, json: async () => ({ n_ctx: 4096, n_gpu_layers: 99 }) };
+    if (u.includes("/api/models"))
+      return { ok: true, status: 200, json: async () => ({
+        models: [{ name: "m1", active: active === "m1", size_bytes: GIB }], active }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const { window } = loadApp({ fetchImpl });
+  await waitFor(() => /needed/.test(window.document.getElementById("perf-estimate").textContent));
+  const before = calls.filter((c) => c.u.includes("/api/vram-estimate")).length;
+
+  active = "";                      // an external client unloads the active model
+  await window.refreshModels();     // the real 30s poll function, called directly
+
+  assert.ok(calls.filter((c) => c.u.includes("/api/vram-estimate")).length > before,
+    "an externally-detected unload refetches the VRAM estimate");
+  assert.equal(window.document.getElementById("status-text").textContent, "no model",
+    "the status line reflects the unload too (pre-existing behaviour)");
+});
+
+test("refreshModels() refreshes the estimate when a model is loaded after being unloaded (mirror case)", async () => {
+  // The other half of the unload gap: previousActive can ALSO legitimately be ""
+  // right after an unload poll, which a truthy-both-sides guard cannot tell apart
+  // from the one-time boot sentinel - so the NEXT external switch (unload -> load
+  // of a different model) would be silently dropped too, leaving the panel stuck
+  // on the model that was active before the unload, forever.
+  const calls = [];
+  let active = "";
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ u });
+    if (u.includes("/api/vram-estimate"))
+      return { ok: true, status: 200, json: async () => ({
+        model: active, model_bytes: active ? GIB : 0, weights: active ? GIB : 0,
+        kv_cache: 0.1 * GIB, overhead: 1.4 * GIB, needed: 1.5 * GIB, free: 10 * GIB,
+        total: 16 * GIB, fits: true, approximate: true }) };
+    if (u.endsWith("/v1/config"))
+      return { ok: true, status: 200, json: async () => ({ n_ctx: 4096, n_gpu_layers: 99 }) };
+    if (u.includes("/api/models"))
+      return { ok: true, status: 200, json: async () => ({
+        models: active ? [{ name: active, active: true, size_bytes: GIB }] : [], active }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const { window } = loadApp({ fetchImpl });
+  // Boot with nothing active (the harmless sentinel case) - this call must NOT
+  // count as "the transition to compare against" for the real switch below.
+  await waitFor(() => /needed/.test(window.document.getElementById("perf-estimate").textContent));
+  const before = calls.filter((c) => c.u.includes("/api/vram-estimate")).length;
+
+  active = "m1";                    // an external client loads a model from a no-model state
+  await window.refreshModels();     // the real 30s poll function, called directly
+
+  assert.ok(calls.filter((c) => c.u.includes("/api/vram-estimate")).length > before,
+    "loading a model from a previously-empty active state refetches the VRAM estimate");
+  assert.equal(window.document.getElementById("model-select").value, "m1");
+});
+
 test("Apply PATCHes n_ctx and n_gpu_layers to /v1/config", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls) });

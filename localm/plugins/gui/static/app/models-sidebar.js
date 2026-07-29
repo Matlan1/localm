@@ -420,6 +420,13 @@ window.refreshInstallGateIfOpen = function () {
 
 export let modelCache = { models: [], active: "" };
 
+// Tracks whether refreshModels() has completed at least once, so the very first
+// (boot-time) call can be told apart from a later call that legitimately observes
+// NO active model (an external unload, or a poll landing before anything has ever
+// loaded) - modelCache.active is "" in both cases, so the value alone can't
+// distinguish them. See the truthiness note below.
+let _modelsEverRefreshed = false;
+
 export async function refreshModels() {
   try {
     const r = await fetch("/api/models?type=llm", { headers: authHeaders() });
@@ -440,6 +447,7 @@ export async function refreshModels() {
       return;
     }
     const data = await r.json();
+    const previousActive = modelCache.active;
     // Tolerate a malformed or empty payload (an old server or a proxy returning
     // {}). Without this, iterating an undefined model list throws and the model
     // dropdown silently breaks - fall back to an empty list instead.
@@ -460,6 +468,25 @@ export async function refreshModels() {
     }
     setStatus("ok", data.active || "no model");
     renderModelSplitLine(data.active_gpu_split);
+    // The active model can change from OUTSIDE this tab too - another tab,
+    // another device, the CLI, an MCP client - while Settings is already open. A
+    // same-tab switch refreshes the Live Tuning VRAM estimate itself (switchModel's
+    // callers each call refreshPerfEstimate directly), but this 30s poll is the
+    // only thing that ever learns about an external switch, so it has to carry the
+    // estimate refresh too or the panel is left showing the previous model's
+    // numbers indefinitely (it otherwise only touches the dropdown/status line).
+    // Deliberately NOT `previousActive && modelCache.active && ...`: requiring
+    // BOTH sides truthy looks like it merely skips the boot-time call, but "" is
+    // also the legitimate value after an external UNLOAD, so a truthy-only guard
+    // masks that transition AND poisons the next one - an unload then a reload
+    // from elsewhere would both be silently dropped, since neither the outgoing
+    // nor the incoming side of one of those two polls is truthy. _modelsEverRefreshed
+    // is the only thing that actually means "not the first call"; every value
+    // change after that (including through "") must refresh.
+    if (_modelsEverRefreshed && modelCache.active !== previousActive) {
+      refreshPerfEstimate();
+    }
+    _modelsEverRefreshed = true;
   } catch (e) {
     setStatus("err", "server unreachable");
   }
