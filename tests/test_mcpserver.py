@@ -907,6 +907,57 @@ class TestGenerateImageSafety:
             assert "data dir" in r["result"]["content"][0]["text"]
         mock_gen.assert_not_called()
 
+    @pytest.mark.parametrize("secret_name",
+                             ["auth.key", "auth.json", "sessions.json"])
+    def test_input_image_cannot_name_the_credential_store(self, secret_name):
+        """An MCP client is usually an LLM steerable by injected content, and
+        input_image is READ and then UPLOADED to ComfyUI - which
+        sanitize_comfy_url permits to be a LAN or public host over plaintext
+        http. Confining that read to the data dir was far too wide: the data dir
+        IS the credential store. auth.key is the plaintext owner key.
+
+        Named by file rather than "some path outside", because inside-the-data-
+        dir is precisely the case the old confinement allowed. A test that only
+        proves an outside path is refused passes on the unfixed code."""
+        from localm.config import home_dir
+        server, _ = _server()
+        home = home_dir()
+        secret = home / secret_name
+        secret.parent.mkdir(parents=True, exist_ok=True)
+        # Readable AND image-shaped, so nothing downstream can be credited with
+        # the refusal - the path policy has to be what stops it.
+        secret.write_bytes(b"\x89PNG\r\n\x1a\nowner-key-material")
+
+        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
+            r = self._call(server, {"prompt": "x", "input_image": str(secret)})
+
+        assert r["result"]["isError"] is True, r["result"]
+        mock_gen.assert_not_called()
+        body = r["result"]["content"][0]["text"]
+        assert "uploads" in body or "galleries" in body, body
+        # The refusal must not hand the data dir path (and so the OS username)
+        # back to the client.
+        assert str(home) not in body, body
+
+    def test_input_image_from_the_uploads_inbox_is_accepted(self):
+        """The legitimate flow must survive: a file in the upload inbox still
+        reaches generate_image. Without this the test above passes just as well
+        against a policy that refuses everything."""
+        from localm.config import home_dir
+        server, _ = _server()
+        home = home_dir()
+        src = home / "uploads" / "ref.png"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
+
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            r = self._call(server, {"prompt": "x", "input_image": str(src)})
+
+        assert r["result"].get("isError") is not True, r["result"]
+        mock_gen.assert_called_once()
+        assert mock_gen.call_args.kwargs["input_image"] == src.resolve()
+
     @pytest.mark.parametrize("mode,expected_write_sidecar", [
         ("privacy", False),
         ("log", True),

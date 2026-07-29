@@ -125,51 +125,84 @@ def allowed_input_roots() -> list[Path]:
     return list(_home_input_roots(home)) if home is not None else []
 
 
-def confined_input_image(raw: str) -> Path:
-    """Resolve and confine an ``input_image`` to an allowed root.
+class InputImageRefused(ValueError):
+    """An ``input_image`` was refused by the policy below.
 
-    Raises HTTPException(400) when the path escapes every allowed root or does
-    not point at an existing file. Symlinks are resolved first, so a link inside
-    an allowed root that targets outside it is still rejected.
+    A ValueError rather than an HTTPException because the policy is NOT
+    HTTP-specific: the MCP server reaches the same ComfyUI upload over stdio
+    JSON-RPC, where raising fastapi's exception would escape the tool-call
+    handler instead of becoming an error reply. ``confined_input_image`` is the
+    thin HTTP wrapper; ``check_input_image`` is the policy. Same split
+    ``pathsafe`` already draws between ``confined_name`` (raises HTTPException)
+    and ``confined_under`` (raises ValueError)."""
 
-    The rejection message names the allowed LOCATIONS but never an absolute
-    path: the data dir contains the OS username, and this route is reachable by
-    a non-owner key.
 
-    An unresolvable data dir FAILS CLOSED with its own distinct error, rather
-    than falling through to the ordinary refusal: a fault must not be reported
-    as a routine policy decision (AGENTS rule 5). Because the allowed roots are
-    now exactly four subdirectories OF the data dir, "no data dir" really does
-    mean "nothing is permitted" - there is no wider root left to fall back to.
+class InputImageUnavailable(InputImageRefused):
+    """The policy could not be EVALUATED - the data dir would not resolve.
+
+    Distinct from an ordinary refusal so a FAULT is never reported as a routine
+    policy decision (AGENTS rule 5). Subclasses InputImageRefused so a caller
+    that only wants "did this pass" still fails closed by catching the base."""
+
+
+def check_input_image(raw: str) -> Path:
+    """Resolve and confine an ``input_image`` to an allowed root, or raise.
+
+    The transport-independent policy. Raises InputImageRefused when the path
+    escapes every allowed root or does not point at an existing file, and
+    InputImageUnavailable when the data dir cannot be resolved at all. Symlinks
+    are resolved first, so a link inside an allowed root that targets outside it
+    is still rejected.
+
+    Messages name the allowed LOCATIONS but never an absolute path: the data dir
+    contains the OS username, and every caller of this is reachable by a
+    principal that is not the owner.
+
+    An unresolvable data dir FAILS CLOSED. Because the allowed roots are exactly
+    four subdirectories OF the data dir, "no data dir" really does mean "nothing
+    is permitted" - there is no wider root left to fall back to.
     """
     home = _resolved_home()
     if home is None:
-        raise HTTPException(
-            500, "Cannot resolve the localm data directory, so no input image "
-                 "can be authorised. See the server log for the cause.")
+        raise InputImageUnavailable(
+            "Cannot resolve the localm data directory, so no input image can be "
+            "authorised. See the server log for the cause.")
     # BEFORE any syscall on the caller's string: a UNC path would be refused
     # below anyway (it cannot be under a local data dir), but only AFTER
     # .resolve() had already dialled SMB and stalled the event loop for minutes.
     # Skipped only if the data dir is ITSELF a UNC path, where a UNC input can
     # legitimately be under an allowed root.
     if is_unc_or_device_path(raw) and not is_unc_or_device_path(str(home)):
-        raise HTTPException(
-            400, "Input image must be a local file you uploaded or a generated "
-                 "image; network (UNC) and device paths are not accepted.")
+        raise InputImageRefused(
+            "Input image must be a local file you uploaded or a generated "
+            "image; network (UNC) and device paths are not accepted.")
     try:
         resolved = Path(raw).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid input image path")
+        raise InputImageRefused("Invalid input image path")
     if not any(_under(resolved, h) for h in _home_input_roots(home)):
-        raise HTTPException(
-            400, "Input image must be a file you uploaded (the Settings page's "
-                 "uploads folder) or one of the generated-media galleries. "
-                 "Other locations, including the localm data directory itself "
-                 "and the localm install directory, are not readable by this "
-                 "route.")
+        raise InputImageRefused(
+            "Input image must be a file you uploaded (the Settings page's "
+            "uploads folder) or one of the generated-media galleries. Other "
+            "locations, including the localm data directory itself and the "
+            "localm install directory, are not readable here.")
     if not resolved.is_file():
-        raise HTTPException(400, f"Input image not found: {raw}")
+        raise InputImageRefused(f"Input image not found: {raw}")
     return resolved
+
+
+def confined_input_image(raw: str) -> Path:
+    """``check_input_image`` for an HTTP route: the same policy, as an
+    HTTPException.
+
+    A 500 for InputImageUnavailable and a 400 for everything else, so a fault
+    the operator must fix is not returned as a caller mistake."""
+    try:
+        return check_input_image(raw)
+    except InputImageUnavailable as e:
+        raise HTTPException(500, str(e))
+    except InputImageRefused as e:
+        raise HTTPException(400, str(e))
 
 
 def confined_move_dest(request: Request, raw: str) -> Path:

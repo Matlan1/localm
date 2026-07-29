@@ -99,7 +99,14 @@ localm process's own permissions rather than a sandbox:
   install directory - and a file with no image signature is refused before it is
   uploaded to ComfyUI (which may be another machine, over plain http). Moving a
   generated file OUT of the data directory needs host filesystem access, the
-  same dial as the folder picker that chooses the destination.
+  same dial as the folder picker that chooses the destination. The same rule
+  covers the `generate_image` MCP tool, which reaches the same upload.
+  Known limit, if you issue several media keys: those source folders are
+  SHARED, so one media key can use another's generated image as an img2img
+  source. The uploads inbox has no per-key ownership at all, so this is a
+  property of the folders rather than of one route. It is narrower than it
+  looks - the folders hold generated media and files you uploaded, not your
+  keys or sessions - but if that matters to you, issue one media key.
 - **`config:write` / `plugins:admin` / `keys:admin`** are privileged and are never
   granted implicitly - only the owner key may mint keys carrying them.
 

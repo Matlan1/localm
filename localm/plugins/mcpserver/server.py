@@ -731,13 +731,19 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         from localm.audit import SessionMode, effective_mode
         from localm.config import home_dir
         from localm.image_gen.comfy import generate_image as gen_img
+        from localm.media import paths as _media_paths
 
         home = home_dir().resolve()
 
         def _confine(raw: str, label: str):
-            """Keep MCP file paths inside the localm data dir - this tool is
-            driven by an LLM client, so an arbitrary output_path/input_image
-            could read or overwrite anything on disk (SEC-7)."""
+            """Keep an MCP OUTPUT path inside the localm data dir - this tool is
+            driven by an LLM client, so an arbitrary output_path could overwrite
+            anything on disk (SEC-7).
+
+            WRITE targets only. ``input_image`` deliberately does NOT use this:
+            confining a READ to the data dir is far too wide, because the data
+            dir is the credential store (auth.key is the plaintext owner key,
+            plus auth.json, sessions.json, rag/, coder/). See below."""
             p = Path(raw).expanduser()
             p = p if p.is_absolute() else home / p
             p = p.resolve()
@@ -750,7 +756,16 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             out_arg = args.get("output_path")
             out = (_confine(out_arg, "output_path") if out_arg
                    else home / "mcp-images" / f"mcp-{int(time.time())}.png")
-            input_p = _confine(args["input_image"], "input_image") if args.get("input_image") else None
+            # input_image is a READ that is then UPLOADED to ComfyUI, over an
+            # api_url sanitize_comfy_url permits to be a LAN or public host on
+            # plaintext http - so it is read-AND-TRANSMIT, and the data dir is
+            # exactly the wrong boundary for it. Same policy the image/video HTTP
+            # routes use (uploads inbox + the generated-media galleries), via the
+            # non-HTTP entry point so a refusal becomes an error REPLY here
+            # rather than an HTTPException escaping the stdio handler.
+            # InputImageRefused is a ValueError, so the existing except catches it.
+            input_p = (_media_paths.check_input_image(args["input_image"])
+                       if args.get("input_image") else None)
         except ValueError as e:
             return _text_result(str(e), is_error=True)
 
