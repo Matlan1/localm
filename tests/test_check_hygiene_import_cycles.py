@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""scripts/check_hygiene.py check 7: no module-level import cycles between the
+top-level units under localm/.
+
+Why a cycle check rather than a declared tier map: localm has no declared
+layering, and two readers auditing the same tree derived different "upward edge"
+counts (2 and 7) because each invented a map, four of the seven being artifacts of
+one map omitting modules. Acyclicity needs no map and no allowlist, and the two
+shapes a tier map must carve out - an entry point, and unordered peers - are legal
+by construction because neither can form a cycle.
+
+These tests pin the three things that make the check worth having: it FIRES on a
+real cycle (a check that has never been red proves nothing), it does NOT fire on
+the entry-point and peer shapes, and it ignores function-local imports, which are
+the deliberate, standard way to break a cycle in Python.
+"""
+
+import importlib.util
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_check_hygiene():
+    spec = importlib.util.spec_from_file_location(
+        "check_hygiene", REPO_ROOT / "scripts" / "check_hygiene.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _pkg(tmp_path, files: dict[str, str]) -> Path:
+    """Build a throwaway localm/ package tree from {relative path: source}."""
+    root = tmp_path / "localm"
+    for rel, src in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    return root
+
+
+# --------------------------------------------------------------------------- #
+#  NEGATIVE: it must actually fire                                             #
+# --------------------------------------------------------------------------- #
+
+def test_module_level_cycle_is_detected(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": "from localm.plugins.engine import PluginEngine\n",
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "a real inference <-> plugins cycle must be reported"
+    joined = "\n".join(problems)
+    assert "import cycle" in joined
+    assert "inference" in joined and "plugins" in joined
+    # The report must be ACTIONABLE: it has to name both closing edges with a
+    # file:line, not merely announce that a cycle exists.
+    assert "inference/engine.py:1" in joined, joined
+    assert "plugins/engine.py:1" in joined, joined
+
+
+def test_three_unit_cycle_is_detected(tmp_path, monkeypatch):
+    """A cycle does not have to be a mutual pair."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "a/x.py": "from localm.b.y import B\n",
+        "b/y.py": "from localm.c.z import C\n",
+        "c/z.py": "from localm.a.x import A\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems
+    joined = "\n".join(problems)
+    for unit in ("a", "b", "c"):
+        assert unit in joined, joined
+
+
+# --------------------------------------------------------------------------- #
+#  POSITIVE: the shapes a tier map would have to allowlist must be legal       #
+# --------------------------------------------------------------------------- #
+
+def test_entry_point_importing_downward_is_legal(tmp_path, monkeypatch):
+    """localm/__main__.py -> localm.cli is a source node, never a cycle.
+
+    This is the shape that forces an exception list into any hand-written tier
+    map, and the reason this check is acyclicity instead.
+    """
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "__main__.py": "from localm.cli import main\n",
+        "cli/_core.py": "from localm.config import load_config\n",
+        "config.py": "X = 1\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+def test_peers_sharing_a_lower_unit_are_legal(tmp_path, monkeypatch):
+    """image_gen / music_gen / video_gen all importing media is not an ordering
+    violation - they are unordered peers, and no cycle exists."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "image_gen/comfy.py": "from localm.media.comfy_client import C\n",
+        "music_gen/comfy.py": "from localm.media.comfy_client import C\n",
+        "video_gen/comfy.py": "from localm.media.comfy_client import C\n",
+        "media/comfy_client.py": "C = 1\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+def test_function_local_import_does_not_count(tmp_path, monkeypatch):
+    """A deferred import is the standard, deliberate way to break a cycle and is
+    NOT a violation. Only eager, module-level edges form the graph."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "def go():\n"
+            "    from localm.plugins.engine import PluginEngine\n"
+            "    return PluginEngine\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+def test_self_import_within_a_unit_is_not_a_cycle(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": "from localm.inference.textnorm import scrub\n",
+        "inference/textnorm.py": "def scrub():\n    pass\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+# --------------------------------------------------------------------------- #
+#  Robustness                                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_unparseable_file_is_reported_not_skipped(tmp_path, monkeypatch):
+    """A file the gate cannot read is one it cannot vouch for. Silently treating
+    it as edge-free would let a cycle hide behind a syntax error (rule 5)."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {"inference/broken.py": "def (\n"})
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert any("could not parse" in p for p in problems), problems
+
+
+def test_absent_localm_package_is_not_an_error(tmp_path, monkeypatch):
+    """Not a localm checkout: other gates report that, this one stays quiet."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+# --------------------------------------------------------------------------- #
+#  The real tree                                                               #
+# --------------------------------------------------------------------------- #
+
+def test_the_shipped_tree_has_no_module_level_cycles():
+    """The whole point: master is acyclic, so this check carries no allowlist.
+
+    If this ever goes red, the fix is to move the shared code to a lower unit both
+    sides can import - NOT to defer the import into a function, which hides the
+    cycle rather than removing it.
+    """
+    ch = _load_check_hygiene()
+    assert ch._import_cycle_violations() == []
