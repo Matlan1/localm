@@ -270,6 +270,13 @@ class TestPartialParseSurfacing:
             and "Part of this response looked like another tool call" in str(m.get("content", ""))
         ]
 
+    def _cap_announcements(self, agent):
+        return [
+            m for m in agent._messages
+            if m["role"] == "user"
+            and "further occurrences this task will not be reported individually" in str(m.get("content", ""))
+        ]
+
     def test_sibling_success_does_not_hide_an_unrecoverable_call(self, tmp_path):
         agent = _make_agent(tmp_path)
         broken_and_good = (
@@ -338,6 +345,45 @@ class TestPartialParseSurfacing:
             result = agent.run_task("read two files repeatedly")
         assert result == "Done."
         assert len(self._partial_notices(agent)) == _MAX_TOOL_REPAIRS
+        # Rule 5 (AGENTS.md "we do not hide problems"): the cap bounds
+        # repetition, not visibility - exactly ONE final notice must tell
+        # the model further occurrences will not be individually reported,
+        # rather than the drops just stopping with no explanation.
+        assert len(self._cap_announcements(agent)) == 1
+
+    def test_partial_notice_cap_logs_every_drop_even_once_silent_to_the_model(self, tmp_path):
+        """The turns AFTER the one-time cap announcement must still leave a
+        durable trace - going fully silent (nothing in the fed-back message,
+        nothing logged) would be exactly the invisible-drop bug #920 fixed,
+        recurring inside the very mechanism built to surface it."""
+        from localm.plugins.coder.agent.constants import _MAX_TOOL_REPAIRS
+
+        def _broken_and_good(i):
+            return (
+                f'<tool_call>\n{{"name": 123, "args": {{"path": "a{i}.py"}}}}\n</tool_call>\n\n'
+                f'<tool_call>\n{{"name": "read_file", "args": {{"path": "b{i}.py"}}}}\n</tool_call>\n'
+            )
+
+        n_turns = _MAX_TOOL_REPAIRS + 3   # more than the cap
+        responses = iter([_broken_and_good(i) for i in range(n_turns)] + ["Done."])
+        agent = _make_agent(tmp_path, max_turns=n_turns + 2)
+        debug_calls = []
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          side_effect=lambda *a, **k: ["<result>ok</result>"]), \
+             patch.object(agent, "_maybe_compact"), \
+             patch("localm.debuglog.logger.debug",
+                   side_effect=lambda *a, **k: debug_calls.append(a)):
+            result = agent.run_task("read two files repeatedly")
+        assert result == "Done."
+        # 1 announcement + (n_turns - cap - 1) further silent-to-the-model
+        # turns must each still produce a debug trace - that is the whole
+        # point being tested, not just "some logging happened somewhere".
+        still_silent_turns = n_turns - _MAX_TOOL_REPAIRS - 1
+        assert len(debug_calls) >= still_silent_turns >= 1, (
+            f"expected at least {still_silent_turns} debug trace(s) for the "
+            f"drops that stopped being reported to the model, got {len(debug_calls)}")
 
     def test_no_partial_notice_when_everything_parsed(self, tmp_path):
         agent = _make_agent(tmp_path)

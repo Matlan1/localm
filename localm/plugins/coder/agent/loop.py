@@ -161,7 +161,7 @@ class _LoopMixin:
         st = SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0,
                              verify_retries=0, verify_settled=False,
                              verify_checked_at=self._write_total(),
-                             partial_notice_count=0)
+                             partial_notice_count=0, partial_notice_cap_announced=False)
 
         try:
             while self._turns < self.max_turns:
@@ -333,18 +333,48 @@ class _LoopMixin:
                 # returning True on the leftover - would otherwise re-trigger
                 # this notice indefinitely, once per turn, forever.
                 leftover = "".join(seg for seg in segments if isinstance(seg, str))
-                if (looks_like_tool_attempt(leftover)
-                        and st.partial_notice_count < _MAX_TOOL_REPAIRS):
-                    st.partial_notice_count += 1
-                    result_blocks.append(
-                        "[tool-call format] Part of this response looked like "
-                        "another tool call, but it could not be parsed (the "
-                        "JSON body was likely malformed) - it was NOT run, "
-                        "unlike the call(s) above. If you still need it, "
-                        "re-emit just that one call in the exact "
-                        '<tool_call>\n{"name": "TOOL_NAME", "args": {...}}\n'
-                        "</tool_call> format."
-                    )
+                if looks_like_tool_attempt(leftover):
+                    if st.partial_notice_count < _MAX_TOOL_REPAIRS:
+                        st.partial_notice_count += 1
+                        result_blocks.append(
+                            "[tool-call format] Part of this response looked "
+                            "like another tool call, but it could not be "
+                            "parsed (the JSON body was likely malformed) - "
+                            "it was NOT run, unlike the call(s) above. If you "
+                            "still need it, re-emit just that one call in "
+                            'the exact <tool_call>\n{"name": "TOOL_NAME", '
+                            '"args": {...}}\n</tool_call> format.'
+                        )
+                    elif not st.partial_notice_cap_announced:
+                        # Rule 5 (AGENTS.md "we do not hide problems"): the cap
+                        # bounds REPETITION, not VISIBILITY. Going fully silent
+                        # here would trade the loud bug #920 fixed - a dropped
+                        # call nobody hears about - for a quiet one, in exactly
+                        # the sessions hitting this the most. One final notice
+                        # naming the change, then a durable debug trace (below)
+                        # for every further occurrence so the drop stays
+                        # discoverable even once the model stops being told.
+                        st.partial_notice_cap_announced = True
+                        result_blocks.append(
+                            "[tool-call format] Another part of this response "
+                            "looked like an unparseable tool call, same as "
+                            "the earlier notice(s) this turn - further "
+                            "occurrences this task will not be reported "
+                            "individually, but each one is still a call that "
+                            "did NOT run."
+                        )
+                        from localm.debuglog import logger
+                        logger.debug(
+                            "partial tool-call parse failures capped at %d "
+                            "notices this task; further drops logged only",
+                            _MAX_TOOL_REPAIRS)
+                    else:
+                        from localm.debuglog import logger
+                        logger.debug(
+                            "tool-call parse likely dropped a call (leftover "
+                            "text still looks like an attempt); notice cap "
+                            "already reached, not reported to the model "
+                            "this turn")
 
                 # Feed all results back as a user message, compressing large
                 # outputs when the context is filling up
