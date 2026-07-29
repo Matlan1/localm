@@ -31,6 +31,7 @@ import time
 import pytest
 
 from localm.plugins.coder.audit import SessionMode
+from tests.conftest import final_answer as _final_answer
 
 
 # --------------------------------------------------------------------------- #
@@ -110,7 +111,7 @@ def test_clean_run_after_a_failed_run_reports_ok(home, tmp_path):
     assert agent.last_run_ok is False
 
     second = agent.run_task("now just say something")
-    assert second == "All clean now."
+    assert _final_answer(second) == "All clean now."
     assert agent.last_run_ok is True, (
         "a clean run after a failed one still reported failure - _loop never "
         "re-armed _last_run_ok, so one bad turn poisoned the whole session")
@@ -152,11 +153,11 @@ def test_a_stopped_run_does_not_poison_the_next_one(home, tmp_path):
         return out
 
     agent.backend.chat = _chat_then_stop
-    assert agent.run_task("long thing") == "partial answer"
+    assert _final_answer(agent.run_task("long thing")) == "partial answer"
     assert agent.last_run_ok is False and agent._user_stopped is True
 
     agent.backend.chat = original_chat
-    assert agent.run_task("something else") == "All clean now."
+    assert _final_answer(agent.run_task("something else")) == "All clean now."
     assert agent.last_run_ok is True
     assert agent._user_stopped is False
 
