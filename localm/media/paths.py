@@ -32,6 +32,8 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
+from localm import pathsafe as _pathsafe
+
 # The gallery subdirectories of the data dir, one per media plugin. Defined here
 # and consumed by each plug.py so the names have a single definition: the input
 # policy below has to agree with where the plugins actually write, and two
@@ -81,24 +83,16 @@ def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def is_unc_or_device_path(raw: str) -> bool:
-    """True for a Windows UNC (``\\\\host\\share``) or device (``\\\\.\\x``,
-    ``\\\\?\\x``) path STRING.
-
-    PURE STRING WORK - no filesystem access - so it is safe to run on
-    unsanitized caller input BEFORE any syscall, and that ordering is the entire
-    point. ``Path.resolve()`` on a UNC path to an unroutable host DIALS SMB and
-    blocks for minutes (measured here: a probe of ``\\\\192.0.2.1\\share`` did
-    not return inside 120s), and these routes are ``async``, so a single request
-    stalls the whole event loop. Against a REACHABLE attacker share, Windows
-    also auto-authenticates and surrenders the host net-NTLMv2 credential. The
-    refusal is worthless if it happens after the dial.
-
-    All four separator mixes are tested, not just ``\\\\``: ntpath treats them
-    alike, so ``//h/s``, ``\\/h/s`` and ``/\\h/s`` all parse to the drive
-    ``\\\\h\\s``. Checking only the canonical form is the bug this avoids."""
-    s = raw.strip()
-    return len(s) >= 2 and s[:2] in ("\\\\", "//", "\\/", "/\\")
+# The UNC/device predicate is localm.pathsafe.is_unc_or_device_path, NOT a copy.
+# This module carried its own for a while, written independently while WS4/WS6
+# was still in flight; that lane has since landed the shared one (#845) and it is
+# STRICTLY STRONGER - the same four separator mixes as its first test, plus an
+# authoritative ntpath.splitdrive backstop for spellings neither of us
+# enumerated. Two copies of a security predicate is how one of them silently
+# stops matching the other, so the local one is gone rather than kept "in case".
+# Re-exported here so this module's own callers and its tests still read as one
+# policy surface.
+is_unc_or_device_path = _pathsafe.is_unc_or_device_path
 
 
 def allowed_input_roots() -> list[Path]:
