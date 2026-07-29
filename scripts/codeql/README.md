@@ -110,3 +110,23 @@ itself, and an EXTRACTED but NON-TRANSFORMING guard that returns no value (the
 tainted value passes to it, not through it). Hence the design rule that is worth
 more than the tooling: **the sink must consume the barrier's RETURN VALUE.**
 Transform, do not merely validate.
+
+## This tooling is a specimen of its own third finding
+
+`residue_check.py` raises `py/path-injection` alerts on itself, and the count
+went **4 -> 6** across two rounds of trying to fix them. Both rounds found a real
+defect (a path component from a data file rather than argv; and resolving before
+validating, when `resolve()` performs filesystem I/O and a declared
+`\host\share` would dial SMB). Both are fixed. **The alert count still rose**,
+because each guard added is itself a path expression on tainted data and becomes
+a new sink.
+
+That is the third bullet at the top of this file, observed on the file that
+states it. Checking containment requires constructing the path first, so the
+construction is always the flagged sink and the guard is always after it - a
+validate-and-raise, which CodeQL walks straight through.
+
+**The lesson is the one this whole directory exists to make operational: do not
+drive the alert count to zero. Drive the code to correct, then adjudicate what
+remains with evidence.** A patch loop against the count will keep finding work
+long after it has stopped finding vulnerabilities.
