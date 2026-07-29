@@ -371,7 +371,7 @@ def test_provision_backend_verifies_default_sha256(monkeypatch):
         return 1
 
     monkeypatch.setattr(sl, "_fetch_and_place", fake_fetch_and_place)
-    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend: ("https://dummy.url", "dummysha"))
+    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend, cuda_line=None: ("https://dummy.url", "dummysha"))
 
     sl._provision_backend("vulkan", Path("dummy_target"), sha256=None, with_cudart=False)
     assert passed_sha256 == ["dummysha"]

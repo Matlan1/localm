@@ -57,6 +57,31 @@ def test_cuda_line_selected_from_architecture(compute_capability, expected_line)
 
 
 @pytest.mark.parametrize(
+    "compute_capability, expected_line",
+    [
+        # A BARE major version (no minor component - nvidia-smi is not known
+        # to ever emit this for compute_cap, but nothing validates the field,
+        # so this must not silently misjudge it). _ver_tuple parses "10" to
+        # the 1-element tuple (10,) - proven by the pre-existing
+        # test_ver_tuple_parses_and_tolerates_junk in test_cuda_setup.py - and
+        # plain Python tuple comparison treats a shorter tuple that is an
+        # exact prefix as SMALLER regardless of the missing component's
+        # value: (10,) >= (10, 0) is False even though 10 == 10. Comparing via
+        # _ver_at_least (which pads before comparing) must get this right at
+        # exactly the Blackwell-datacenter boundary _BLACKWELL_MIN_CAP exists
+        # to catch - a regression here would silently reintroduce the class
+        # of bug this whole feature was built to fix.
+        ("10", "cuda-13"),
+        ("13", "cuda-13"),   # major alone already exceeds the threshold
+        ("9", "cuda-12"),    # bare pre-Blackwell major stays on cuda-12
+    ],
+)
+def test_cuda_line_bare_major_version_boundary(compute_capability, expected_line):
+    info = sl.NvidiaInfo(present=True, compute_capability=compute_capability)
+    assert info.cuda_line == expected_line
+
+
+@pytest.mark.parametrize(
     "compute_capability",
     [
         "",                 # absent - preflight never populated it
@@ -113,6 +138,30 @@ def test_blackwell_card_with_13x_driver_below_pinned_patch_is_not_yet_ok():
     build their driver cannot run."""
     info = sl.NvidiaInfo(present=True, compute_capability="12.0", cuda_capability="13.0")
     assert info.driver_ok is False
+
+
+def test_driver_ok_bare_major_driver_version_padded_not_prefix_compared():
+    """The same bare-major-version boundary as cuda_line's, but for the
+    driver side: _ver_tuple treats a bare major as its own short tuple (e.g.
+    "13" -> (13,), proven by the pre-existing
+    test_ver_tuple_parses_and_tolerates_junk), and the comparison against a
+    (major, minor) threshold must pad rather than let Python's tuple
+    ordering treat the shorter tuple as smaller regardless of value. Padding
+    with a trailing 0 is the CONSERVATIVE reading (a bare "13" is treated as
+    the earliest possible 13.x, "13.0") - so it can still correctly fail a
+    minimum that needs a specific minor (13.3), while a bare major that is
+    numerically higher than the whole threshold (comparing the differing
+    first component) still passes regardless of the missing minor."""
+    # Bare "13" against the cuda-13 line's (13,3) minimum: 13.0 does not
+    # clear 13.3 - correctly not-ok, not waved through by a padding bug.
+    assert sl.NvidiaInfo(present=True, compute_capability="12.0",
+                         cuda_capability="13").driver_ok is False
+    # No compute_capability set -> cuda-12 line, (12,4) minimum: bare "12"
+    # (== "12.0") does not clear 12.4 - correctly not-ok.
+    assert sl.NvidiaInfo(present=True, cuda_capability="12").driver_ok is False
+    # Bare "13" against the cuda-12 line's (12,4) minimum: 13 > 12 on the
+    # major alone, so it clears regardless of the missing minor.
+    assert sl.NvidiaInfo(present=True, cuda_capability="13").driver_ok is True
 
 
 def test_pre_blackwell_card_driver_thresholds_unchanged():
@@ -312,3 +361,100 @@ def test_full_matrix_resolves_a_real_pair_and_never_gives_old_driver_new_line(
         monkeypatch.setattr(sl.click, "confirm",
                             lambda *a, **k: pytest.fail("must not prompt when the driver is not ok"))
         assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False)
+
+
+# --------------------------------------------------------------------------- #
+# main() end-to-end: a detected Blackwell GPU must reach _provision_backend   #
+# with cuda_line == "cuda-13", not silently fall back to the module default.  #
+# Every existing CliRunner-level test of main()'s cuda dialogue wiring        #
+# (test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue in    #
+# test_cuda_setup.py) uses NvidiaInfo(present=False), whose cuda_line is      #
+# "cuda-12" anyway - so it cannot tell "wiring intact" apart from "wiring     #
+# silently reverted to the hardcoded default". This test can.                #
+# --------------------------------------------------------------------------- #
+
+def test_main_threads_blackwell_arch_into_cuda13_fetch(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(
+        present=True, gpu_name="RTX 5090", driver_version="571.96",
+        cuda_capability="13.3", compute_capability="12.0"))
+
+    target = tmp_path / "lib"
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+    seen = []
+
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+        seen.append((backend, with_cudart, cuda_line))
+        (tgt / sl._lib_name()).write_bytes(b"stub")
+
+    monkeypatch.setattr(sl, "_provision_backend", fake_provision_backend)
+    monkeypatch.setattr(sl, "_clear_target", lambda tgt: None)
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg_dir: True)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    monkeypatch.setattr(sl, "_verify", lambda: None)
+
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(sl.main, ["--backend", "cuda", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert seen == [("cuda", True, "cuda-13")], (
+        "main() must thread the GPU-detected cuda_line (not the module default) "
+        "all the way to _provision_backend")
+
+
+def test_main_threads_pre_blackwell_arch_into_cuda12_fetch(monkeypatch, tmp_path):
+    """The mirror case: an older NVIDIA card must still resolve to cuda-12
+    through the SAME main()-level wiring - proves this is genuinely
+    architecture-driven, not a hardcoded Blackwell special case."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(
+        present=True, gpu_name="RTX 4090", driver_version="552.22",
+        cuda_capability="12.4", compute_capability="8.9"))
+
+    target = tmp_path / "lib"
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+    seen = []
+
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+        seen.append((backend, with_cudart, cuda_line))
+        (tgt / sl._lib_name()).write_bytes(b"stub")
+
+    monkeypatch.setattr(sl, "_provision_backend", fake_provision_backend)
+    monkeypatch.setattr(sl, "_clear_target", lambda tgt: None)
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg_dir: True)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    monkeypatch.setattr(sl, "_verify", lambda: None)
+
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(sl.main, ["--backend", "cuda", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert seen == [("cuda", True, "cuda-12")]
+
+
+# --------------------------------------------------------------------------- #
+# nvidia_preflight() against a REALISTIC older-driver error response, not     #
+# just synthetic garbage strings constructed directly on NvidiaInfo. Real    #
+# nvidia-smi on older driver builds (confirmed: driver 470.182.03) rejects   #
+# --query-gpu=compute_cap with an error sentence rather than a version, since #
+# that field does not exist on some older driver releases.                   #
+# --------------------------------------------------------------------------- #
+
+def test_nvidia_preflight_handles_unsupported_compute_cap_field(monkeypatch):
+    def fake_smi(*args):
+        joined = " ".join(str(a) for a in args)
+        if "compute_cap" in joined:
+            return ('"compute_cap" is not a valid field to query, '
+                    "--help-query-gpu for available fields.\n")
+        if "--query-gpu=name" in joined:
+            return "NVIDIA GeForce RTX 3080\n"
+        return ("|  NVIDIA-SMI 470.182.03   Driver Version: 470.182.03   "
+                "CUDA Version: 11.4  |\n")
+    monkeypatch.setattr(sl, "_nvidia_smi", fake_smi)
+    info = sl.nvidia_preflight()
+    assert info.present
+    # The raw error line ends up in compute_capability (nothing validates the
+    # field), but it must degrade safely through _ver_tuple's broad except,
+    # never crash and never be mistaken for a Blackwell architecture.
+    assert info.cuda_line == "cuda-12"
+    assert info.driver_ok is False   # 11.4 genuinely too old for cuda-12's 12.4 minimum

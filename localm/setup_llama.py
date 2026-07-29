@@ -18,10 +18,12 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
   * ``cuda`` - NVIDIA peak performance. On Windows the matching self-contained
     ``cudart`` bundle from the same release is fetched too, so NO CUDA Toolkit is
     needed; a driver preflight + load-test fall back to ``vulkan`` if the driver
-    is too old. The CUDA asset LINE is chosen from the detected GPU architecture
-    (Blackwell - sm_100/sm_120 - automatically gets the newer 13.x line; every
-    older architecture stays on the broad-compatibility 12.x line). On Linux the
-    cuda build needs a system CUDA runtime present.
+    is too old. On Windows the CUDA asset LINE is also chosen from the detected
+    GPU architecture (Blackwell - sm_100/sm_120 - automatically gets the newer
+    13.x line; every older architecture stays on the broad-compatibility 12.x
+    line). On Linux the cuda build needs a system CUDA runtime present and is
+    always the 12.x line (no self-contained cudart bundling or per-line asset
+    split exists there).
   * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
     Intel performance but needs the oneAPI runtime; ``cpu`` is self-contained.
   * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
@@ -459,13 +461,18 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
     return guess, sha
 
 
-def _resolve_backend_url(backend: str) -> str:
+def _resolve_backend_url(backend: str, cuda_line: Optional[str] = None) -> str:
     """Resolve a backend name to a downloadable archive URL.
 
     ``amd-rocm`` is the self-contained lemonade build (special-cased). Every
     other backend maps to an upstream llama.cpp release asset for this platform.
+    *cuda_line* is passed straight through to _resolve_backend_asset (see its
+    docstring); no production code calls this function (main() resolves via
+    _provision_backend -> _resolve_backend_asset directly), but it is kept
+    line-aware so it cannot silently drift back to a hardcoded cuda-12 default
+    if something starts calling it again.
     Raises ``click.ClickException`` if the backend is not available here."""
-    url, _sha = _resolve_backend_asset(backend)
+    url, _sha = _resolve_backend_asset(backend, cuda_line)
     return url
 
 
@@ -892,11 +899,13 @@ _CUDA_LINE = "cuda-12"
 
 # Compute-capability floor for "needs the 13.x line" (nvidia-smi's
 # ``compute_cap`` query, e.g. "8.9", "12.0" - the GPU's sm/arch level, NOT the
-# driver's max CUDA version). Verified against NVIDIA's own docs: Blackwell
-# datacenter parts (B100/B200/GB100) report compute capability 10.0 (sm_100)
-# and Blackwell consumer/workstation parts (RTX 5090/5080/5070 Ti/5070/5060)
-# report 12.0 (sm_120); CUDA 12.8 was the first toolkit release to add
-# Blackwell kernels. >= 10.0 catches both variants and any later architecture
+# driver's max CUDA version). Per NVIDIA's published architecture numbers,
+# Blackwell datacenter parts (B100/B200/GB100) report compute capability 10.0
+# (sm_100) and Blackwell consumer/workstation parts (RTX 5090/5080/5070
+# Ti/5070/5060) report 12.0 (sm_120); CUDA 12.8 was the first toolkit release
+# to add Blackwell kernels. This is NOT verified against real Blackwell
+# hardware (none is available here) - only the offline selection logic below
+# is. >= 10.0 catches both variants and any later architecture
 # without a new special case each time.
 _BLACKWELL_MIN_CAP = (10, 0)
 
@@ -925,6 +934,19 @@ def _ver_tuple(v: str) -> Optional[tuple]:
         return None
 
 
+def _ver_at_least(parsed: tuple, minimum: tuple) -> bool:
+    """*parsed* >= *minimum*, treating a bare-major version (no minor
+    component, e.g. "10" -> (10,)) as ".0". Plain tuple comparison would
+    otherwise get this wrong: Python considers a tuple that is a strict
+    PREFIX of another to be the smaller one regardless of the missing
+    component's value, so (10,) >= (10, 0) is False even though 10 == 10.
+    _ver_tuple's own contract (a bare major parses to a 1-element tuple, not
+    padded) is intentional and unchanged - this is where the padding belongs,
+    at the comparison, not the parse."""
+    padded = parsed + (0,) * (len(minimum) - len(parsed))
+    return padded >= minimum
+
+
 @dataclass
 class NvidiaInfo:
     """What nvidia-smi told us. Advisory only; every field may be empty."""
@@ -943,7 +965,7 @@ class NvidiaInfo:
         evidence it needs the newer, narrower-compatibility line (same
         "unknown != too old" reasoning as driver_ok below)."""
         cap = _ver_tuple(self.compute_capability)
-        if cap is not None and cap >= _BLACKWELL_MIN_CAP:
+        if cap is not None and _ver_at_least(cap, _BLACKWELL_MIN_CAP):
             return "cuda-13"
         return "cuda-12"
 
@@ -960,7 +982,7 @@ class NvidiaInfo:
         # An unparseable capability is unknown, not old: cannot judge, do not block.
         if parsed is None:
             return True
-        return parsed >= _MIN_DRIVER_CUDA[self.cuda_line]
+        return _ver_at_least(parsed, _MIN_DRIVER_CUDA[self.cuda_line])
 
 
 def _nvidia_smi(*args: str) -> str:
@@ -1161,7 +1183,11 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
         return
     # Every other backend is a single archive resolved from the chosen name.
-    url, fallback_sha = _resolve_backend_asset(chosen)
+    # Also reached for chosen == "cuda" with with_cudart False (no current
+    # caller produces that combination - see _cuda_setup_dialogue - but
+    # forwarding cuda_line here means it never silently reverts to the
+    # cuda-12 default if one ever does).
+    url, fallback_sha = _resolve_backend_asset(chosen, cuda_line)
     _fetch_verified(url, target, sha256 or fallback_sha, "release asset")
 
 
