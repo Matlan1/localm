@@ -1051,7 +1051,11 @@ class PluginManager:
                 f"{url} is not wired up yet")
         raise KeyError(f"no such plugin: {name}")
 
-    def _remove_installed_dir(self, name: str) -> None:
+    def _remove_installed_dir(self, name: str) -> bool:
+        """Delete the plugin's directory from the installed folder. Returns True
+        if the directory is gone afterwards (or never existed), False if it is
+        still present because ``shutil.rmtree`` failed - the caller (uninstall(),
+        set_installed_state()) must not report a bare success in that case."""
         import shutil
         # The DELETE site's safety property is CONTAINMENT, not identifier shape.
         # uninstall() admits any basename present on disk (_installed_set returns
@@ -1074,8 +1078,18 @@ class PluginManager:
         try:
             if d.is_dir():
                 shutil.rmtree(d)
-        except OSError:
-            pass
+        except OSError as e:
+            # A locked file, an AV hold, or a permission denial (all reachable on
+            # Windows) leaves the directory - and any code/data in it - on disk.
+            # Silently swallowing this told the caller "uninstalled" when it was
+            # not (rule 5); surface it so uninstall()/set_installed_state() can
+            # report the real outcome instead of trusting a precomputed flag.
+            _log.warning(
+                "plugin %s: could not remove installed directory %s: %s; the "
+                "directory (and any residual code/data) remains on disk",
+                name, d, e)
+            return not d.is_dir()
+        return not d.is_dir()
 
     # ---- refresh stale builtin copies (upgrade safety) ---------------------
     # An installed builtin is a COPY of the bundled store source taken at install
@@ -1568,7 +1582,13 @@ class PluginManager:
         """Uninstall a plugin: unload it, disable it, and DELETE its directory from
         the installed folder (it reverts to being merely available in the store).
         User content is kept unless *delete_data*; the on_uninstall hook runs
-        first. Returns True if it was installed; KeyError if wholly unknown."""
+        first. Returns True only if it was installed AND its directory was
+        actually removed from disk; False if it was not installed to begin with,
+        or if the removal could not complete (a locked file, an AV hold, or a
+        permission denial - all reachable on Windows). In the latter case the
+        plugin is still disabled and unloaded, but its files remain on disk; see
+        the WARNING logged by _remove_installed_dir for the concrete cause.
+        KeyError if wholly unknown."""
         self.discover()
         spec = self._specs.get(name)
         was_installed = name in self._installed_set()
@@ -1609,8 +1629,13 @@ class PluginManager:
         self._set_enabled(name, False)
         if delete_data and spec and spec.data_subdir:
             self._delete_plugin_data(spec)
-        self._remove_installed_dir(name)             # delete from the installed folder
-        return was_installed
+        removed = self._remove_installed_dir(name)    # delete from the installed folder
+        if was_installed and not removed:
+            _log.warning(
+                "plugin %s: uninstall disabled and unloaded it, but its "
+                "installed directory could not be removed; reporting a "
+                "degraded result rather than a bare success", name)
+        return was_installed and removed
 
     def _delete_plugin_data(self, spec: PluginSpec) -> None:
         import shutil
