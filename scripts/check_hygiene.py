@@ -35,6 +35,17 @@ Scans tracked files and fails on:
      installed PWA would keep serving the stale cached file forever, since a
      service worker only re-checks its precached files when its own bytes
      change. Shipped twice undetected by a human before this check existed.
+  7. A module-level import CYCLE between top-level units under localm/ (e.g.
+     inference <-> plugins). Acyclicity is checked instead of a hand-written tier
+     map because a map is a maintained artifact encoding opinions - two readers
+     auditing the same tree derived different "upward edge" counts purely from
+     inventing different maps - whereas a cycle is a property of the graph. The
+     two shapes any layer map has to carve out are legal here BY CONSTRUCTION: an
+     entry point (__main__ -> cli) is a source node, and peers (image_gen /
+     music_gen / video_gen -> media) are unordered, so neither can form a cycle
+     and neither needs an allowlist. Function-local imports are ignored: deferring
+     an import is the standard, deliberate way to break a cycle in Python and this
+     codebase does it on purpose, so only eager module-level edges count.
 
 It also runs the release-file manifest gate (scripts/check_manifest.py,
 NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
@@ -1102,6 +1113,154 @@ def _install_hook() -> int:
     return 0
 
 
+# ---- check 7: no module-level import cycles between packages ---------------
+#
+# WHY A CYCLE CHECK AND NOT A DECLARED LAYER MAP. localm has no declared layering,
+# and the cost of that is measurable: two readers auditing the same tree derived
+# DIFFERENT "upward edge" counts (2 and 7) purely because each invented a tier map,
+# and four of the seven were artifacts of one map omitting modules rather than real
+# inversions. A hand-written map is a maintained artifact that encodes opinions;
+# every disagreement with it becomes an allowlist entry, which is documentation
+# pretending to be enforcement.
+#
+# Acyclicity needs no map and no allowlist. It is a property of the graph, so the
+# two shapes that any tier map has to carve out are legal BY CONSTRUCTION:
+#   * an ENTRY POINT (localm/__main__.py importing localm.cli) is a source node;
+#   * PEERS (image_gen/music_gen/video_gen all importing media) are unordered.
+# Neither can create a cycle, so neither needs an exception. What it does catch is
+# a genuine mutual dependency, which is the thing that actually hurts: it makes
+# import order load-bearing and forces the deferred-import workarounds below.
+#
+# MODULE-LEVEL ONLY, deliberately. A function-local import is the standard,
+# intentional way to break a cycle in Python and this codebase uses it that way on
+# purpose (73% of intra-package imports are function-local). Flagging those would
+# fire on dozens of documented design choices and need exactly the allowlist this
+# check exists to avoid. Only eager, module-level edges count.
+#
+# Granularity is the top-level unit under localm/ (the package name, or the module
+# name for a top-level .py), because that is the level a layering claim is made at.
+# Intra-package cycles are a separate, much noisier question and are not in scope.
+
+
+def _import_unit(module: str) -> str:
+    """The top-level unit under ``localm`` that *module* belongs to."""
+    parts = module.split(".")
+    return parts[1] if len(parts) > 1 else "<root>"
+
+
+def _module_name(path: Path, pkg_root: Path) -> str:
+    rel = path.relative_to(pkg_root).as_posix()[: -len(".py")]
+    if rel.endswith("/__init__"):
+        rel = rel[: -len("/__init__")]
+    return "localm" + ("." + rel.replace("/", ".") if rel else "")
+
+
+def _module_level_import_edges(pkg_root: Path) -> dict[str, dict[str, str]]:
+    """unit -> {imported unit: "file:line of one eager import that creates it"}.
+
+    A parse failure is REPORTED by the caller rather than skipped: a file this gate
+    cannot read is a file it cannot vouch for, and silently treating it as
+    edge-free would let a cycle hide behind a syntax error (rule 5)."""
+    edges: dict[str, dict[str, str]] = {}
+    for path in sorted(pkg_root.rglob("*.py")):
+        unit = _import_unit(_module_name(path, pkg_root))
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError as e:
+            edges.setdefault(unit, {})["<unparseable>"] = f"{path}: {e}"
+            continue
+        for node in ast.walk(tree):
+            # col_offset 0 == module level. Anything indented is inside a function,
+            # class body or conditional and is not an eager dependency.
+            if getattr(node, "col_offset", 1) != 0:
+                continue
+            targets: list[str] = []
+            if (isinstance(node, ast.ImportFrom) and node.level == 0
+                    and node.module and node.module.startswith("localm")):
+                targets = [node.module]
+            elif isinstance(node, ast.Import):
+                targets = [a.name for a in node.names if a.name.startswith("localm")]
+            for target in targets:
+                other = _import_unit(target)
+                if other != unit:
+                    rel = path.relative_to(REPO).as_posix()
+                    edges.setdefault(unit, {}).setdefault(
+                        other, f"{rel}:{node.lineno}")
+    return edges
+
+
+def _strongly_connected(edges: dict[str, dict[str, str]]) -> list[list[str]]:
+    """Tarjan's SCC, iterative so a deep graph cannot blow the recursion limit."""
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    result: list[list[str]] = []
+    counter = 0
+    nodes = sorted(set(edges) | {v for d in edges.values() for v in d})
+    for root in nodes:
+        if root in index:
+            continue
+        work: list[tuple[str, list[str]]] = [(root, sorted(edges.get(root, {})))]
+        index[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, pending = work[-1]
+            if pending:
+                nxt = pending.pop(0)
+                if nxt not in index:
+                    index[nxt] = low[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, sorted(edges.get(nxt, {}))))
+                elif nxt in on_stack:
+                    low[node] = min(low[node], index[nxt])
+                continue
+            work.pop()
+            if work:
+                low[work[-1][0]] = min(low[work[-1][0]], low[node])
+            if low[node] == index[node]:
+                component = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    component.append(w)
+                    if w == node:
+                        break
+                result.append(component)
+    return result
+
+
+def _import_cycle_violations() -> list[str]:
+    """Module-level import cycles between top-level units under localm/."""
+    pkg_root = REPO / "localm"
+    if not pkg_root.is_dir():
+        return []          # not a localm checkout; other gates report that
+    edges = _module_level_import_edges(pkg_root)
+    problems = [f"could not parse {detail}"
+                for targets in edges.values()
+                for other, detail in targets.items() if other == "<unparseable>"]
+    for component in _strongly_connected(edges):
+        if len(component) < 2:
+            continue
+        members = set(component)
+        involved = sorted(
+            f"{u} -> {v} ({edges[u][v]})"
+            for u in component for v in edges.get(u, {}) if v in members)
+        problems.append(
+            "module-level import cycle between localm packages: "
+            + " <-> ".join(sorted(component))
+            + "\n      closed by: " + "\n                 ".join(involved)
+            + "\n      Break it by moving the shared code to a lower unit both can "
+              "import (a dependency-free leaf usually belongs at the root), NOT by "
+              "deferring the import into a function - that hides the cycle rather "
+              "than removing it.")
+    return problems
+
+
 def _manifest_problems() -> list[str]:
     """The release-file manifest gate's findings (NEW-RELEASE-FILEMANIFEST), run as
     part of this one hygiene pass. check_manifest lives beside this file; a missing or
@@ -1152,6 +1311,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_raw_accessor_violations(tracked))
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_bump_violations())
+    problems.extend(_import_cycle_violations())
     # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
     # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
     # failures for CI-style use.
