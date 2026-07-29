@@ -135,6 +135,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   erroring the query, and says which situation it hit - including naming the
   path when something has put an empty stand-in numpy on the import path, which
   is a broken environment rather than a missing optional dependency.
+
 ### Fixed
 - **`localm rm` no longer offers to delete a file it will only unregister.** The
   confirmation prompt picked its wording with a weaker path check than the
