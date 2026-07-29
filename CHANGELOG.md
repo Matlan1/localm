@@ -278,6 +278,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it into the `uploads` subfolder (or upload it from the Settings page) and it
   will work again; images already in a gallery are unaffected.
 
+### Fixed
+- **Mixture-of-Experts models now use the GPU they actually fit in.** Deciding how
+  many layers to put on the GPU needs to know what the context cache costs, and
+  localm estimated that from the model file's SIZE. That works for an ordinary
+  model but badly overstates it for a Mixture-of-Experts model, whose file is
+  large because it holds many experts that cost nothing to keep context for. The
+  overstatement ate the VRAM budget, so localm quietly loaded fewer layers onto
+  the GPU than would have fit, and generation was slower than your card allowed
+  with no message saying why. The cost is now read from the model's own attention
+  shape instead: on a 35B-class MoE with 12 GB free that is 13 layers on the GPU
+  where it previously managed 8. Ordinary (dense) models are also measured more
+  accurately, and a model whose file cannot be read falls back to the old
+  estimate, so nothing that worked before stops working.
+
 ## [0.1.3] - 2026-07-23
 
 ### Added

@@ -515,6 +515,50 @@ class VramSizingMixin:
         way."""
         return min(max(model_bytes // 100_000, 16_000), 512_000)
 
+    def _kv_bytes_per_token(self) -> int:
+        """Per-token KV cost for a sizing decision, best source first.
+
+        1. the LOADED model's own attention accessors
+           (``LlamaCpp.kv_bytes_per_token``) - exact, but it only exists AFTER a
+           load, so it can never answer the "how many layers do I offload?"
+           question, which has to be settled before the load;
+        2. this file's own GGUF header (``gguf_kv_bytes_per_token``) - equally
+           exact and available BEFORE the load. This step is the fix: it is why
+           ``_auto_gpu_layers`` now charges the real KV cost instead of a guess;
+        3. ``_bytes_per_token(file size)`` - the size-class heuristic, kept only
+           for a file whose header cannot be read.
+
+        Why (3) alone was wrong, in both directions: KV cost is a function of
+        the ATTENTION shape only, so deriving it from file size over-charges a
+        sparse MoE (whose file is inflated by expert weights that cost no KV,
+        shrinking the weight budget and silently UNDER-offloading) and
+        under-charges a wide-KV dense model (~2.6x low on a 12B, which could
+        judge a KV cache that actually overflows VRAM to fit).
+
+        Step 2 is memoised per instance: it reads a bounded prefix of the file
+        and the sizing helpers ask for this several times per load. Never
+        returns 0 - step 3's floor is 16 KB - so callers can divide by it."""
+        accurate = getattr(getattr(self, "_llm", None), "kv_bytes_per_token", 0)
+        if accurate:
+            return int(accurate)
+        cached = getattr(self, "_gguf_kv_bpt", None)
+        if cached is None:
+            from localm.model_manager.gguf import gguf_kv_bytes_per_token
+            try:
+                cached = int(gguf_kv_bytes_per_token(Path(self.model_path)))
+            except Exception as exc:  # contracted not to raise - surface if it does
+                # Not fatal (step 3 still answers), but it would silently restore
+                # the very mis-sizing this method exists to remove, so make the
+                # regression discoverable instead of invisible (AGENTS.md rule 5).
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf KV-shape probe failed (%s); falling back to the "
+                           "size-class estimate", type(exc).__name__)
+                cached = 0
+            self._gguf_kv_bpt = cached
+        if cached:
+            return cached
+        return self._bytes_per_token(self._model_bytes())
+
     def _check_vram(self) -> None:
         """
         Warn - loudly and with options - when the model is unlikely to fit in
@@ -558,7 +602,7 @@ class VramSizingMixin:
                 return  # can't measure (no torch / no GPU) - nothing useful to say
             total = self._total_vram_bytes()
         model_bytes = self._model_bytes()
-        kv_cache = self.n_ctx * self._bytes_per_token(model_bytes)
+        kv_cache = self.n_ctx * self._kv_bytes_per_token()
         # Charge only the offloaded fraction of the weights: a partial load
         # (0 < g < 99, whether auto-sized or a user's explicit -g) puts only some
         # layers on the GPU, so it needs far less VRAM than the whole model. A
@@ -665,14 +709,11 @@ class VramSizingMixin:
         # KV bytes per token on the GPU: only the offloaded layers keep their KV in
         # VRAM (offload_kqv); CPU layers' KV lives in system RAM. Mirror _check_vram's
         # weight fraction so a partial auto load is charged only its GPU share.
-        # Prefer the architecture-accurate per-token KV size computed at load
-        # (LlamaCpp.kv_bytes_per_token) over the size-class heuristic, which
-        # under-counts wide-KV models badly (~2.6x low on a 12B) and would judge a
-        # KV cache that actually overflows VRAM to fit. Fall back to the estimate
-        # only when the accurate value is unavailable (model not loaded yet in a
-        # direct/test call, or a stripped DLL without the head accessors).
-        per_token = (getattr(self._llm, "kv_bytes_per_token", 0)
-                     or self._bytes_per_token(self._model_bytes()))
+        # Architecture-accurate per-token KV where it can be had (the loaded
+        # model's accessors, else this file's GGUF header), and only then the
+        # size-class heuristic. See _kv_bytes_per_token for why the heuristic
+        # alone was wrong in both directions.
+        per_token = self._kv_bytes_per_token()
         if gpu_layers < self._DEFAULT_GPU_LAYERS:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             per_token = int(per_token * min(1.0, gpu_layers / layers))
@@ -773,7 +814,7 @@ class VramSizingMixin:
                   - embedder_ctx_reservation_bytes())
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
-        auto = budget // self._bytes_per_token(model)
+        auto = budget // self._kv_bytes_per_token()
         auto = (auto // 1024) * 1024
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
@@ -842,7 +883,7 @@ class VramSizingMixin:
         model = self._model_bytes()
         if model <= 0:
             return self._DEFAULT_GPU_LAYERS    # can't size - attempt full offload
-        kv = self.n_ctx * self._bytes_per_token(model)
+        kv = self.n_ctx * self._kv_bytes_per_token()
         overhead = self._VRAM_OVERHEAD_BYTES
         if free >= model + kv + overhead:
             return self._DEFAULT_GPU_LAYERS    # full offload fits

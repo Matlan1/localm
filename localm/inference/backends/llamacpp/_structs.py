@@ -3,9 +3,18 @@
 ctypes Structure definitions for the llama.cpp C API.
 
 These layouts were derived by probing the prebuilt llama.dll with known default
-values and cross-referencing against llama.h.  The prebuilt is from a commit
-that sits between the introduction of llama_init_from_model and the addition of
-the 'devices' / 'tensor_buft_overrides' fields to llama_model_params.
+values and cross-referencing against llama.h.  The prebuilt is from a commit that
+ALREADY carries the 'devices' / 'tensor_buft_overrides' fields, at the FRONT of
+llama_model_params (see the annotated offsets below).  Re-probed 2026-07-28
+against the shipped amd-rocm build b1-7c158fb: llama_model_default_params()
+returns devices = NULL at offset 0, tensor_buft_overrides = NULL at 8,
+n_gpu_layers = -1 at 16 and split_mode = 1 at 20, i.e. the NEW layout; reading
+those bytes as the OLD layout is self-inconsistent (it yields n_gpu_layers = 0
+and split_mode = 0).  Keep this paragraph correct and name the build you probed:
+``_abi.verify_abi`` does NOT check THIS struct's layout (it fingerprints
+llama_context_params' three -1 enums plus a split_mode range check), so this note
+is the only record of it, and a stale one sends the next reader to the wrong
+conclusion about what the runtime supports.
 
 The ``sizeof`` asserts below guard against editing these definitions wrong; they
 do NOT validate against the loaded DLL (a struct is the same size whatever the
