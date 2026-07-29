@@ -1122,7 +1122,21 @@ def _torch_gpus_isolated_once() -> list:
       spawn worker, found live 2026-07-22), and nothing noticed. So degrade to
       the IN-PROCESS import, which is what this code did before, and say plainly
       at WARNING that the isolation was lost and the stall risk is back. A safety
-      net for a genuine runtime failure, not the design."""
+      net for a genuine runtime failure, not the design.
+
+    KNOWN GAP, recorded rather than hidden (AGENTS.md rule 5). Once latched, this
+    returns [] and the probe falls through to nvidia-smi. On a box where nvidia-smi
+    ALSO cannot answer - an AMD or Intel card whose torch wedges - the probe then
+    completes with [] and status GPU_PROBE_OK, which a caller reads as "genuinely no
+    GPU". The old in-process import would instead have overrun the caller's deadline
+    and reported GPU_PROBE_TIMEOUT, i.e. INCONCLUSIVE, which is the more honest
+    answer. Narrow in practice: the AMD ROCm/HIP conflict is already caught earlier
+    by _torch_gpu_probe_known_doomed, and the wedge this was written for (sm_120) is
+    NVIDIA, where nvidia-smi does answer. Closing it properly needs a way for the
+    probe to say "completed but inconclusive", which the current status contract has
+    no channel for - GPU_PROBE_OK is decided by the probe COMPLETING, not by it
+    having learned anything. Do not paper over it by returning None here: every
+    caller of _list_gpus_probe expects a list."""
     global _isolated_torch_unavailable
     with _gpu_probe_lock:
         if _isolated_torch_unavailable:
