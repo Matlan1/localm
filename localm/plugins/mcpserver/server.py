@@ -44,6 +44,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from localm.pathsafe import is_unc_or_device_path
+
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
 SERVER_VERSION = "0.1.3"
@@ -656,6 +658,31 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(
                 "'name' is required - pick a short registry name for this model",
                 is_error=True)
+        # `repo` is an MCP-CLIENT-supplied string, not a path the local user
+        # picked - is_unc_or_device_path's "remote value" contract applies:
+        # refuse UNC/device syntax unconditionally, BEFORE the
+        # Path(repo).exists() sink below ever runs. That sink is the
+        # vulnerability: on Windows it dials SMB and auto-authenticates for a
+        # UNC target, and can stall for minutes inline in this handler - see
+        # pathsafe.reject_unsafe_path_string's docstring for the measured cost.
+        #
+        # DELIBERATELY NOT gated on os.name, unlike reject_unsafe_path_string's
+        # `//`-form check (that function's docstring: the os.name gate is the
+        # POLICY for a path the LOCAL user picked, e.g. a folder-picker value,
+        # where a legitimate POSIX path can start with `//`). `repo` has no
+        # such legitimate case: no real HuggingFace repo id contains a
+        # backslash or starts with `//`, on any platform, so refusing it
+        # unconditionally costs nothing and gives one invariant to test
+        # instead of "secure on Windows, permissive-on-Linux" - and this
+        # server does in fact run on Windows, where the sink is live.
+        #
+        # The message does not echo `repo` back, unlike the local-add message
+        # below: this string never reached a safe-to-display check.
+        if is_unc_or_device_path(repo):
+            return _text_result(
+                "'repo' looks like a filesystem path (UNC or device syntax), not "
+                "a HuggingFace repo id. pull_model downloads a model by repo id "
+                "(e.g. 'owner/name').", is_error=True)
         # A LOCAL PATH IS NOT A PULL, and letting a client "pull" one turns this
         # tool into a registry-WRITE primitive: pull_model treats an existing path
         # as a local add (see pull.py's is_local_path branch), registering an
@@ -767,6 +794,15 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             confining a READ to the data dir is far too wide, because the data
             dir is the credential store (auth.key is the plaintext owner key,
             plus auth.json, sessions.json, rag/, coder/). See below."""
+            # BEFORE any syscall: a UNC path is ABSOLUTE on Windows (the one
+            # platform the SMB-dial harm applies to), so without this check it
+            # would skip the `home / p` join below and go straight to
+            # `p.resolve()` unconfined - the same defect as pull_model's `repo`
+            # above, on a different sink. check_input_image (used for
+            # input_image, not this helper) already carries this exact guard;
+            # this helper was the sibling that missed it.
+            if is_unc_or_device_path(raw):
+                raise ValueError(f"{label} must be a local path, not a UNC or device path")
             p = Path(raw).expanduser()
             p = p if p.is_absolute() else home / p
             p = p.resolve()
@@ -817,6 +853,14 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if not cwd:
             return _text_result("'cwd' is required (the project directory to work in)",
                                  is_error=True)
+        # `cwd` is MCP-client-supplied, same as pull_model's `repo` above (see
+        # the --model comment below: "the client also chooses cwd") - refuse
+        # UNC/device syntax unconditionally, BEFORE is_dir() below ever runs.
+        # is_dir() dials SMB for a UNC target exactly like exists() does.
+        if is_unc_or_device_path(cwd):
+            return _text_result(
+                "'cwd' must be a local directory path, not a UNC or device path.",
+                is_error=True)
         cwd_path = Path(cwd).expanduser()
         if not cwd_path.is_dir():
             return _text_result(f"cwd is not a directory: {cwd_path}", is_error=True)
