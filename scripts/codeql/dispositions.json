@@ -27,7 +27,8 @@
     "guarded-delete-plugin": "False positive. This function holds sinks of two kinds and the comment covers both. The flagged containment test (d.resolve().parent == root.resolve()) is itself a path expression on the tainted value, so it is reported as a sink; and it dominates the rmtree below it, which is reported separately. Deliberately confining by resolved parent rather than by re-validating the id, because an already-installed plugin whose name is not identifier-shaped must still be uninstallable.",
     "model-lookup-gate": "False positive. This function holds sinks of two kinds and the comment covers both. The registry branch routes the stored path through _entry_path; the direct-path branch is reachable only when the caller passes allow_direct_path=True, and the check dominating it is inline in this function. Every call site on every reported flow leaves that parameter at its refusing default. CodeQL cannot model either: the guard tests a different parameter from the tainted one, and it has no boolean-literal context sensitivity.",
     "plugin-swap-invariant": "False positive. This function holds sinks of two kinds and the comment covers both. The plugin id was validated at the _installed_dir / _store_dir choke point before reaching here, and the function re-asserts the containment invariant inline, dominating all of its own sinks. CodeQL has no sanitizer model for the identifier-shaped id check, and no traversal to observe for the inline re-assertion.",
-    "confinement-fixed-2026-07-29": "The check-then-use gap here was fixed on 2026-07-29: the sink now consumes the value the guard returned instead of the caller's original. The alert persists because the flagged expression is the path construction that the check necessarily follows (see the choke-point note), not because the flow is unguarded."
+    "confinement-fixed-2026-07-29": "The check-then-use gap here was fixed on 2026-07-29: the sink now consumes the value the guard returned instead of the caller's original. The alert persists because the flagged expression is the path construction that the check necessarily follows (see the choke-point note), not because the flow is unguarded.",
+    "weak-hash-generated-token": "False positive. The only human-chosen secret this system holds is the owner key, and it is routed to scrypt: _owner_identity derives it, and its keystore record declares the KDF construction, so the fast digest is never the value that authenticates it. Every other key reaching this hash is either a keystore token, which create_key generates as secrets.token_urlsafe(32) and is therefore 256 bits of CSPRNG output where no dictionary or rainbow table applies and hash speed is irrelevant, or a failed guess, which is hashed and discarded. The remaining traced flow is the migration helper _legacy_owner_identity, whose output is never persisted and never authenticates anything: it exists to FIND rows still carrying the old identity so they can be rewritten to the derived one."
   },
   "dispositions": {
     "localm/cli/maintenance.py::setup_embeddings": "registry-path-chain",
@@ -93,7 +94,8 @@
     "localm/plugins/gui/routes/admin.py::export_logs": "authorization-gated",
     "localm/plugins/gui/routes/admin.py::fs_dirs": "authorization-gated",
     "localm/plugins/mcpserver/server.py::list_models": "registry-path-chain",
-    "scripts/report_issue.py::opener": "authorization-gated"
+    "scripts/report_issue.py::opener": "authorization-gated",
+    "localm/auth.py::_fast_digest": "weak-hash-generated-token"
   },
   "reasons": {
     "registry-path-chain": "false positive",
@@ -107,6 +109,7 @@
     "guarded-delete-plugin": "false positive",
     "model-lookup-gate": "false positive",
     "plugin-swap-invariant": "false positive",
-    "confinement-fixed-2026-07-29": "false positive"
+    "confinement-fixed-2026-07-29": "false positive",
+    "weak-hash-generated-token": "false positive"
   }
 }
