@@ -551,7 +551,7 @@ def _run_episode_consolidation(work_dir: Path, backend) -> None:
     Reporting is the point: memory that rewrites itself without saying so is how a
     bad merge becomes invisible. Groups whose merge came back unusable are left
     untouched and counted."""
-    from localm.inference.textnorm import strip_think
+    from localm.textnorm import strip_think
     from localm.plugins.coder.episodes import EpisodeStore, consolidate
 
     def _complete(prompt: str) -> str:

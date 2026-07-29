@@ -146,7 +146,7 @@ def real_embed_fn(real_embedder):
 # --------------------------------------------------------------------------- #
 
 def _make_complete(backend, think_seen: dict):
-    from localm.inference.textnorm import strip_think
+    from localm.textnorm import strip_think
 
     def complete(prompt: str) -> str:
         raw = "".join(backend.chat_stream(

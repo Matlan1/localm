@@ -123,7 +123,7 @@ def compact_messages(
     # 2026-07-02, live-confirmed on the CLI path), silently degrading recall of
     # the summarised turns. Keep only the visible answer; an all-reasoning
     # reply becomes empty and takes the honest hard-trim fallback below.
-    from localm.inference.textnorm import strip_think
+    from localm.textnorm import strip_think
     summary = strip_think(summary).strip()
 
     if summary:

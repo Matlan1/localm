@@ -522,7 +522,7 @@ async def memory_consolidate(request: Request = None):
         # strip_think: memory must never ingest the reasoning channel (audit C1
         # store-poisoning; the /v1 routes strip it for clients, internal consumers
         # must do the same).
-        from localm.inference.textnorm import strip_think
+        from localm.textnorm import strip_think
         return strip_think("".join(_ENGINE.chat_stream(
             [{"role": "user", "content": prompt}]))).strip()
 
@@ -578,7 +578,7 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
                 # Session logs keep the assistant's reasoning channel; the fact
                 # extractor must see only the visible answer, or scratchpad text
                 # pollutes the extraction prompt (audit C1).
-                from localm.inference.textnorm import strip_think
+                from localm.textnorm import strip_think
                 content = strip_think(content)
                 if not content.strip():
                     continue
@@ -727,7 +727,7 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
             continue
         who = "User" if rec.get("type") == "user" else "Assistant"
         if who == "Assistant":
-            from localm.inference.textnorm import strip_think
+            from localm.textnorm import strip_think
             content = strip_think(content)
             if not content.strip():
                 continue
@@ -963,7 +963,7 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         eng = _ENGINE
         if eng is None or not getattr(eng, "loaded", False):
             return
-        from localm.inference.textnorm import strip_think
+        from localm.textnorm import strip_think
 
         def complete(prompt: str) -> str:
             return strip_think("".join(
