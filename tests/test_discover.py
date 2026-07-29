@@ -3552,6 +3552,19 @@ class TestTorchProbeKnownDoomedSkip:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", _tracking_import)
+
+        # Since #833 the COLD path enumerates OUT of process (a cold `import
+        # torch` here takes the Windows loader lock and blocks every thread in
+        # the process - see localm/_torch_gpu_probe.py), so on that path an
+        # "attempt" is the child spawn rather than an in-process import. It is
+        # recorded identically, and stubbed so no unit test spawns a real torch
+        # child, which keeps these cases asserting the guard's TRADE-OFF (the
+        # skip fires only on the proven combo) rather than the mechanism the
+        # attempt happens to use. The resident case still goes in-process and is
+        # still counted by the tracking import above.
+        monkeypatch.setattr(
+            discover, "_torch_gpus_isolated",
+            lambda: (attempted.append("torch"), [])[1])
         return attempted
 
     def test_skips_torch_on_the_proven_doomed_combo(

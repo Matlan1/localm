@@ -120,6 +120,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Detecting your graphics card no longer freezes the app for several seconds
+  on Windows.** The first time localm looked up your GPU it loaded PyTorch's
+  graphics libraries inside the server itself. Windows only lets one thing load
+  libraries at a time, and starting any new task needs that same permission, so
+  while the lookup ran the whole app stopped answering - measured at 10.9 seconds
+  on one machine, and longer where the graphics driver is slow to wake up. The
+  lookup now happens in a separate helper process, so the app keeps responding
+  while it runs, and a graphics driver that never answers is given up on after 20
+  seconds instead of hanging startup.
 - **A model registered on an unreachable network path no longer freezes the whole
   server.** The models list, a model's detail view and the VRAM estimate each
   measured registered files on the same thread that answers every other request,
