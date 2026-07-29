@@ -185,6 +185,37 @@ permanent public record of what shipped and are never rewritten; the in-progress
   used or quietly swapped for the built-in one; the report is saved locally and
   nothing is sent. Pointing the reporter at your own proxy over http or https
   works exactly as before.
+- **Error messages and diagnostics no longer hand out your folder layout or
+  account name.** The Knowledge page's embedding status used to report a failed
+  model load with the full path baked into the message, so anything that could
+  read that status - including a restricted key holding only the `rag` scope -
+  learned your data directory and, with it, your operating-system username. The
+  reason you actually need ("not an embedding model") is unchanged; only the
+  directory is replaced. The same redaction now applies to the GPU-fallback
+  notice and to the `/debug/stacks` hang-diagnosis dump, which additionally now
+  requires a credential: it was reachable with none at all on a default keyless
+  install, and returned every thread's stack including source lines and install
+  paths. Full detail still goes to the debug log, where the local operator wants
+  it.
+- **Asking to index a folder can no longer be used to probe the server's disk.**
+  Adding paths to a knowledge collection checked whether each path existed
+  before checking whether you were allowed to index it, and said so in the
+  error - so a restricted key could ask about any absolute path on the machine
+  and read the answer off the response. Permission is now decided first, and an
+  out-of-bounds path gets the same reply whether or not it is there.
+- **Saved sessions and scheduled jobs get the same file protection as the key
+  file on Windows.** `sessions.json` and `jobs.json` record a hash of the API key
+  that created each entry, but only `auth.key` - which holds the key itself - was
+  locked to your account; the two files holding the hashes inherited permissions
+  that let any local account read them. All three are now restricted the same
+  way. Note this protects where those hashes are STORED; how the owner key
+  itself is hashed is a separate, still-open issue if you set a short or
+  guessable key by hand (prefer `localm key generate`).
+- **The bug-report proxy no longer echoes internal errors to callers.** An
+  unexpected failure returned the raw error text, readable from any web origin;
+  it now returns an opaque request id and logs the real error, with its stack,
+  where the operator can see it. (Deployed separately from the app, so this
+  takes effect when the proxy is next deployed.)
 
 ## [0.1.3] - 2026-07-23
 

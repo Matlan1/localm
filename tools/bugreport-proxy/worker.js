@@ -35,7 +35,22 @@ export default {
       }
       return json({ error: "not found" }, 404);
     } catch (e) {
-      return json({ error: "proxy error", detail: String(e).slice(0, 200) }, 500);
+      // This catch sits OUTSIDE secretOk(), and json() serves the body with
+      // Access-Control-Allow-Origin: * (see cors()), so whatever it carries is
+      // readable by any web origin. It used to return String(e).slice(0, 200) -
+      // raw runtime error text describing internal state. Reachable without the
+      // shared secret whenever SHARED_SECRET is UNSET, which is the documented
+      // open configuration for the issue routes (secretOk returns true), so an
+      // upstream failure inside fileReport/listIssues surfaced its message to an
+      // anonymous caller.
+      //
+      // Return an opaque id and log the REAL error, with its stack, server-side.
+      // That is strictly BETTER for debugging than the old 200-character prefix
+      // (a full stack in `wrangler tail` instead of a truncated message) while
+      // the caller gets only an id they can quote in a report.
+      const rid = crypto.randomUUID();
+      console.error("proxy error", rid, (e && e.stack) || String(e));
+      return json({ error: "proxy error", request_id: rid }, 500);
     }
   },
 };

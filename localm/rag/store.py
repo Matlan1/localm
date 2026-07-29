@@ -461,12 +461,20 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     # policy is present (every API caller, owner and non-owner alike - a loopback
     # page or remote client is untrusted). This runs BEFORE the mode branches so a
     # secret is never offered through the whitelist "add and continue" consent flow.
-    # Guarded on is_file() so a directory merely NAMED like a secret (a real
-    # ./credentials or ./.env folder) is still walkable, not over-blocked. The CLI
-    # (policy=None, returned above) stays unconfined: the local operator can already
-    # read their own files, so an explicit single-file pick is still honoured there.
-    if rp.is_file() and (rp.suffix.lower() in SECRET_SUFFIXES
-                         or is_secret_index_name(rp.name)):
+    # Guarded on "not a directory" rather than is_file() so a directory merely
+    # NAMED like a secret (a real ./credentials or ./.env folder) is still
+    # walkable, not over-blocked, while a path that does NOT EXIST is still
+    # refused here. That difference matters: with is_file(), an existing
+    # secret-named path raised secret_file (400) and a missing one fell through
+    # to the whitelist branch (409/403), so the two answers differed and the
+    # response was still an existence oracle for exactly the interesting targets
+    # (a .pem, a .key, an id_rsa). Both now get the same refusal. Compare
+    # _SENSITIVE_NAMES above, which already never consulted the filesystem.
+    # The CLI (policy=None, returned above) stays unconfined: the local operator
+    # can already read their own files, so an explicit single-file pick is still
+    # honoured there.
+    if not rp.is_dir() and (rp.suffix.lower() in SECRET_SUFFIXES
+                            or is_secret_index_name(rp.name)):
         raise ConfinementError(
             f"Refusing to index {rp.name}: key/credential material is not "
             f"indexed through the API. Use the local CLI (`localm rag add`) if "

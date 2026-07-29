@@ -2843,12 +2843,25 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             return response
 
     # Loopback-only debug endpoint: every thread's stack + the asyncio task list,
-    # for diagnosing a hang/slowdown from the SAME machine on demand. fs-host
-    # gated (Depends(require_fs_host)) because stacks can carry sensitive frame
-    # data, and 404'd off loopback. NOTE: served ON the event loop, so it answers
-    # only while the loop is alive (a partial stall, a task backlog). A FULLY
-    # wedged loop cannot respond here at all - that case is captured by the
-    # off-loop watchdog file (LOCALM_HANG_WATCHDOG); this endpoint complements it.
+    # for diagnosing a hang/slowdown from the SAME machine on demand. 404'd off
+    # loopback. NOTE: served ON the event loop, so it answers only while the loop
+    # is alive (a partial stall, a task backlog). A FULLY wedged loop cannot
+    # respond here at all - that case is captured by the off-loop watchdog file
+    # (LOCALM_HANG_WATCHDOG); this endpoint complements it.
+    #
+    # THREE gates, because the obvious one is not enough (CodeQL 97):
+    #   1. Depends(require_fs_host) - meaningful in PROTECTED mode (a key's
+    #      fs_access dial), but in DEFAULT KEYLESS mode effective_fs_access
+    #      returns "host" for EVERY caller, so on its own it was a tautology and
+    #      this was one of only two fully unauthenticated reads on the server.
+    #   2. the open-mode shell-token gate, via _SHELL_TOKEN_GETS below - that is
+    #      what makes gate 1 non-vacuous in keyless mode.
+    #   3. the bind_host loopback check below. Deliberately on app.state.bind_host
+    #      (what the server actually BOUND to) and never request.client.host:
+    #      behind portmux the request peer is always 127.0.0.1, so the peer
+    #      address cannot distinguish a loopback client from a LAN one.
+    # Frame text is path-scrubbed on the way out (see below) - gating it is not a
+    # licence to keep emitting the install layout to whoever holds the token.
     @app.get("/debug/stacks", include_in_schema=False,
              dependencies=[Depends(require_fs_host)])
     async def _debug_stacks(request: Request):
@@ -2856,7 +2869,17 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         if not _is_loopback_host(host):
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
         import traceback
-        threads = {str(tid): traceback.format_stack(frame)
+
+        from localm.pathscrub import path_scrubber
+        # traceback.format_stack emits absolute paths ('File "<install>/localm/
+        # inference/http_server.py", line N') which name the install dir and, on
+        # a per-user install, the OS account. Redact the DIRECTORY only: the file
+        # name, line number, function and source line all survive, so this stays
+        # a usable hang diagnosis (rule 5 - scrub, do not mute). Bound once
+        # rather than per string: a dump is hundreds of frames and each prefix
+        # resolve is a filesystem call.
+        scrub = path_scrubber()
+        threads = {str(tid): [scrub(line) for line in traceback.format_stack(frame)]
                    for tid, frame in sys._current_frames().items()}
         tasks = []
         try:
@@ -2864,7 +2887,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 tasks.append({
                     "name": task.get_name(),
                     "done": task.done(),
-                    "stack": [str(f) for f in task.get_stack(limit=20)],
+                    "stack": [scrub(str(f)) for f in task.get_stack(limit=20)],
                 })
         except RuntimeError:
             pass   # no running loop (should not happen inside an async handler)
@@ -2947,6 +2970,20 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # port is same-site, which is the precise actor the comment above at the
     # _cross_origin_refused definition names. Refused in EVERY mode instead.
     _CROSS_ORIGIN_GET_REFUSED_PREFIXES = ("/api/fs/",)
+    # Sensitive GETs that sit OUTSIDE the /api,/v1 prefixes the open-mode
+    # shell-token gate below keys on, and so were never covered by it (CodeQL
+    # 97). /debug/stacks' own Depends(require_fs_host) is a TAUTOLOGY in keyless
+    # mode - effective_fs_access returns "host" for everyone when no key is
+    # configured - so without this list it was reachable with no credential at
+    # all. Listing it here routes it through the same shell-token + cross-origin
+    # check as a management read, which is what makes its fs-host gate mean
+    # something. /whoami is deliberately NOT here: it is the endpoint the GUI
+    # shell calls to discover whether it needs a key at all, so requiring the
+    # token to read it would be circular. Its disclosure is handled by the
+    # cross-origin refusal above and is a separate, narrower surface.
+    # NOTE: enforced only on a LOOPBACK bind - see the comment at token_gated_get
+    # below for why answering 403 off loopback would open a new oracle.
+    _SHELL_TOKEN_GETS = ("/debug/stacks",)
 
     def _cross_origin_refused(request) -> bool:
         """True when this request carries an Origin header that is neither
@@ -2999,9 +3036,23 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             # it is not a management credential - a configured external origin must
             # use an API key for state changes.
         is_unsafe = request.method in _UNSAFE_METHODS
-        is_metadata_get = (
+        # A _SHELL_TOKEN_GETS path is token-gated only where it is actually
+        # SERVED. /debug/stacks 404s off a loopback bind (deliberately hidden),
+        # and returning 403 there instead would tell an unauthenticated NETWORK
+        # caller that the endpoint exists - a brand new existence oracle opened
+        # in the middle of closing a disclosure, since an unknown path under
+        # /debug/ 404s. So off loopback, fall through to the handler's own 404.
+        # The handler does the loopback check before computing anything, so
+        # nothing is spent serving it.
+        token_gated_get = (
             request.method == "GET"
-            and (request.url.path.startswith("/api/") or request.url.path.startswith("/v1/"))
+            and request.url.path in _SHELL_TOKEN_GETS
+            and _is_loopback_host(
+                getattr(request.app.state, "bind_host", "127.0.0.1")))
+        is_metadata_get = token_gated_get or (
+            request.method == "GET"
+            and (request.url.path.startswith("/api/")
+                 or request.url.path.startswith("/v1/"))
             and request.url.path != "/api/session"
             and not request.url.path.startswith("/v1/models")
         )
