@@ -326,6 +326,122 @@ def test_unsafe_member_detection():
 
 # ----------------- rollback surfaces restore failures -------------------
 
+class TestRollbackRefusesPoisonedManifestNames:
+    """CodeQL 172: rollback() names can come from <home>/updates/applied_names.json,
+    an ordinary file in the data dir, previously validated only as list[str]. Each
+    name reached `installed / name` and then shutil.rmtree/unlink.
+
+    update_watchdog.py calls main(['--yes']) automatically after a failed health
+    probe with stdin=DEVNULL, so the isatty() confirmation is skipped and this can
+    fire with no human present.
+
+    Every vector asserts the same two things: the target OUTSIDE the install
+    survives, and the refusal is REPORTED (RuntimeError), never silently skipped.
+    """
+
+    @staticmethod
+    def _install_and_backup(tmp_path):
+        inst, bdir = tmp_path / "inst", tmp_path / "bak"
+        inst.mkdir(); bdir.mkdir()
+        _fake_install(inst)
+        return inst, bdir
+
+    # EVERY vector must resolve INSIDE tmp_path. A negative test runs the
+    # deliberately-vulnerable code for real, so a payload naming a REAL location
+    # is not a test, it is a live deletion of that location. This was learned the
+    # hard way: an earlier revision of this test used the literal "C:/Users/Public"
+    # and, run against the reverted code, shutil.rmtree emptied it. Absolute and
+    # drive-qualified vectors are therefore BUILT from tmp_path (which is itself
+    # drive-qualified and absolute on Windows), so they exercise the identical
+    # code path - an absolute component REPLACES the base under pathlib - with the
+    # blast radius contained in the fixture.
+    ABS = "<ABS_OUTSIDE>"          # -> tmp_path/victim, absolute + drive-qualified
+    UNC_HOST = "<UNC>"             # -> a UNC form; never dialed, rejected lexically
+
+    @pytest.mark.parametrize("vector", [
+        "../../victim",            # traversal out of the install
+        "../victim",
+        ABS,                       # absolute + drive-qualified (replaces the base)
+        UNC_HOST,                  # UNC
+        "\\\\198.51.100.7\\share",  # UNC backslash spelling, RFC5737 TEST-NET-2
+    ])
+    def test_escaping_name_is_refused_and_reported(self, tmp_path, vector):
+        inst, bdir = self._install_and_backup(tmp_path)
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        (victim / "keep.txt").write_text("do not delete me", encoding="utf-8")
+        name = {self.ABS: str(victim),
+                self.UNC_HOST: "//198.51.100.7/share/x"}.get(vector, vector)
+
+        with pytest.raises(RuntimeError) as ei:
+            au.rollback(bdir, inst, [name])
+
+        assert "unsafe" in str(ei.value).lower()
+        assert victim.is_dir() and (victim / "keep.txt").exists()
+
+    @pytest.mark.parametrize("name", ["", ".", "   ", "./"])
+    def test_collapsing_name_does_not_delete_the_install(self, tmp_path, name):
+        """`Path(install) / ""` and `/ "."` both collapse to the install dir
+        itself, so rmtree on the result would delete the WHOLE installation.
+        These do not escape the root, so an escape-only check (_unsafe_member)
+        returns False for them - this is the case that check cannot see."""
+        inst, bdir = self._install_and_backup(tmp_path)
+
+        with pytest.raises(RuntimeError) as ei:
+            au.rollback(bdir, inst, [name])
+
+        assert "unsafe" in str(ei.value).lower()
+        assert inst.is_dir()
+        assert (inst / "VERSION").exists(), "the install was deleted"
+        assert (inst / "localm" / "__init__.py").exists()
+
+    @pytest.mark.parametrize("name", ["home", ".venv", ".git", "issues", "qa"])
+    def test_never_touch_name_is_refused(self, tmp_path, name):
+        """swap_entries EXCLUDES NEVER_TOUCH, so a manifest naming one is poisoned
+        by construction. It matters most on a portable install, where `home` sits
+        INSIDE the install root: rolling back an entry named `home` would delete
+        the user's models, chat history and auth keys, and the backup does not
+        hold them to restore."""
+        inst, bdir = self._install_and_backup(tmp_path)
+
+        with pytest.raises(RuntimeError) as ei:
+            au.rollback(bdir, inst, [name])
+
+        assert "unsafe" in str(ei.value).lower()
+        assert (inst / "home" / "config.json").read_text() == "user data"
+        assert (inst / ".venv" / "marker").read_text() == "keep"
+
+    def test_safe_names_alongside_a_poisoned_one_still_roll_back(self, tmp_path):
+        """Best-effort, matching rollback()'s existing contract: it attempts every
+        name, then reports the collected failures. A poisoned entry must not
+        abort the legitimate half of the rollback."""
+        inst, bdir = self._install_and_backup(tmp_path)
+        (bdir / "VERSION").write_text("0.1.0", encoding="utf-8")
+        (inst / "VERSION").write_text("0.2.0", encoding="utf-8")
+
+        with pytest.raises(RuntimeError):
+            au.rollback(bdir, inst, ["VERSION", "../../victim"])
+
+        assert (inst / "VERSION").read_text().strip() == "0.1.0"   # restored anyway
+
+    def test_unsafe_swap_name_detection(self):
+        """Unit-level truth table, so a future edit to the helper cannot quietly
+        widen it. Includes the two shapes _unsafe_member alone passes.
+
+        These are PURE string checks - _unsafe_swap_name touches no filesystem -
+        so naming a drive here deletes nothing. Contrast the parametrized cases
+        above, which drive the real rollback and must stay inside tmp_path."""
+        for bad in ["", ".", "..", "   ", "../x", "Z:/x", "/x", "//h/s",
+                    "a/b", "home", ".venv", "__pycache__", None, 3]:
+            assert au._unsafe_swap_name(bad), f"should be unsafe: {bad!r}"
+        for ok in ["localm", "VERSION", "pyproject.toml", "runtime", "docs"]:
+            assert not au._unsafe_swap_name(ok), f"should be safe: {ok!r}"
+        # The gap this helper exists to close: an escape-only test passes these.
+        assert not au._unsafe_member("")
+        assert not au._unsafe_member(".")
+        assert not au._unsafe_member("home")
+
+
 def test_rollback_raises_when_a_restore_fails(tmp_path, monkeypatch):
     inst, bdir = tmp_path / "inst", tmp_path / "bak"
     inst.mkdir(); bdir.mkdir()
