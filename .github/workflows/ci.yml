@@ -212,9 +212,15 @@ jobs:
       # These floors were measured and verified (both pass and fail) on
       # Windows only; re-derive and verify a second set before ever gating
       # the ubuntu-latest leg too.
+      # --report prints each module's REAL measured percent next to its floor
+      # before enforcing (it does not suppress the check - see the script). That
+      # makes every CI run publish the numbers needed to raise a floor, so the
+      # next person does not need a local --cov run to find them. Not a luxury:
+      # portmux.py's floor sat ~60 points below its real value because the only
+      # way to learn the real value was to re-measure it by hand.
       - name: Per-module coverage floors (trust boundary)
         if: matrix.os == 'windows-latest'
-        run: python scripts/check_coverage_floors.py
+        run: python scripts/check_coverage_floors.py --report
 
       # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
       # tests-js/ loads app.js and exercises it. node:test, no build step.
