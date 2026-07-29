@@ -388,7 +388,15 @@ _BAD_NAME_CHARS = set('<>:"|?*\\/') | {chr(c) for c in range(32)}
 
 
 def _name_is_safe(safe: str) -> bool:
-    """True if *safe* (already a basename) is a usable, listable file name."""
+    """True if *safe* (already a basename) is a usable, listable file name.
+
+    A shared security guard, not a local helper. Several call sites depend on it,
+    covering both the write paths (/api/upload, /share-target) and the delete
+    path (via _confined_upload_path), so widening _BAD_NAME_CHARS widens what all
+    of them accept. Grep for the callers before changing it rather than trusting
+    this sentence: a list written into a docstring goes stale the moment someone
+    adds one.
+    """
     return bool(safe) and safe not in (".", "..") and not (set(safe) & _BAD_NAME_CHARS)
 
 
