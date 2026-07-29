@@ -324,6 +324,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   where it previously managed 8. Ordinary (dense) models are also measured more
   accurately, and a model whose file cannot be read falls back to the old
   estimate, so nothing that worked before stops working.
+- **NVIDIA Blackwell GPUs (RTX 50-series, and datacenter B100/B200) can now use
+  the CUDA backend.** `setup-llama` always fetched the older CUDA 12.x build,
+  which has no code for Blackwell's architecture, so a Blackwell card either
+  failed to load the CUDA backend or crashed partway through inference - even
+  though upstream already publishes a newer build that supports it. Setup now
+  detects your GPU's own architecture (not just your driver) and fetches the
+  CUDA 13.x build automatically when it is needed; every earlier NVIDIA GPU is
+  unaffected and keeps using the same 12.x build as before. If your driver is
+  not new enough for the line your GPU needs, setup falls back to Vulkan and
+  explains why, exactly as it already did for an old driver.
 
 ### Fixed
 - **The Settings "Live tuning" VRAM estimate could get stuck on the previous

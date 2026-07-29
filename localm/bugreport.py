@@ -179,6 +179,8 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
                 diag["nvidia_gpu"] = nv.gpu_name
                 diag["nvidia_driver"] = nv.driver_version
                 diag["nvidia_cuda_capability"] = nv.cuda_capability
+                diag["nvidia_compute_capability"] = nv.compute_capability
+                diag["nvidia_cuda_line"] = nv.cuda_line
     except Exception:
         # Best-effort: probing the NVIDIA driver/CUDA capability is optional
         # detail. If it fails (no nvidia-smi, a driver hiccup) the report simply
@@ -602,6 +604,8 @@ def build_report(summary: str, reason: str = "",
         "recommended_backend": "Recommended backend", "detect_source": "Detected via",
         "nvidia_gpu": "NVIDIA GPU", "nvidia_driver": "NVIDIA driver",
         "nvidia_cuda_capability": "Driver CUDA capability",
+        "nvidia_compute_capability": "GPU compute capability",
+        "nvidia_cuda_line": "Selected CUDA line",
         "native_runtime_provisioned": "Native runtime provisioned",
         "native_libs": "Native libraries", "operation": "Operation",
         "backend": "Backend (effective)", "requested_backend": "Backend (requested)",
