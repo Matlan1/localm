@@ -12,12 +12,40 @@ on:
   # automated signal, and it arrives after the merge rather than before it. Use
   # workflow_dispatch to run the suite against a branch on demand.
   #
+  # AND THE PART THAT COMMENT ORIGINALLY MISSED: that local run is not equivalent
+  # to this one. It differs along TWO independent axes, neither visible from the
+  # local run itself.
+  #   PLATFORM. Contributors run Windows; this matrix runs Windows AND Linux. A
+  #   Linux-only regression reached master exactly this way (#845: three
+  #   test_scope.py purity tests failing on os.lstat('/opt'), invisible on
+  #   Windows because Path.resolve() only lstats every component on POSIX).
+  #   DEPENDENCY SET. This job installs `.[dev,rag]`, which has no numpy; a dev
+  #   venv usually does. A failure that needs numpy absent cannot appear locally.
+  # So a green local suite does not predict this job. Dispatch it against the
+  # branch and read the JOB conclusions. WSL (Ubuntu, python 3.12) reproduces
+  # both axes and is the cheapest real pre-merge Linux signal available.
+  #
   # Code scanning is unaffected and still runs per-PR (.github/workflows/
   # codeql.yml): it is about a minute per language and its whole value is
   # catching a newly introduced alert BEFORE it lands on master.
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      run_abi:
+        # OFF by default so a plain dispatch runs EXACTLY the job set a push runs.
+        # Before this input, dispatch was the only pre-merge signal (no
+        # pull_request trigger) AND it ran a job push skips, so every pre-merge
+        # check was a strict SUPERSET of the post-merge run it was predicting.
+        # Since abi-check tracks a MOVING upstream target it flips independently
+        # of any branch - measured failing and succeeding on the same commit
+        # hours apart - so it reported run-level "failure" on healthy branches
+        # and every lane carried a "read the job conclusions, not the run
+        # conclusion" workaround. This makes the run-level conclusion mean
+        # something again; pass -f run_abi=true to opt in.
+        description: "Also run the native llama.cpp ABI drift check (slow; tracks a MOVING upstream target)"
+        type: boolean
+        default: false
   schedule:
     # Weekly drift check of the hand-written llama.cpp ctypes binding against the
     # MOVING upstream release the cpu/vulkan/cuda backends track. Mon 06:00 UTC.
@@ -139,7 +167,10 @@ jobs:
   abi-check:
     name: native llama.cpp ABI drift
     runs-on: windows-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # The weekly cron still runs it unconditionally; a dispatch must opt in.
+    # `inputs.run_abi` is undefined (falsy) for push and schedule events, so the
+    # schedule arm is what keeps the drift coverage.
+    if: github.event_name == 'schedule' || inputs.run_abi
     steps:
       - uses: actions/checkout@v7
 
