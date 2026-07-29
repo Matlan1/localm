@@ -310,8 +310,9 @@ def rm(model, yes):
     unregister-only). Disable it permanently with:
     localm config confirm_remove false
     """
-    from ..config import MODELS_DIR, load_registry
-    from ..model_manager import _entry_path, find_aliases_by_path
+    from ..config import load_registry
+    from ..model_manager import (
+        _entry_path, find_aliases_by_path, is_owned_model_path)
 
     cfg = load_config()
     if not yes and cfg.get("confirm_remove", True):
@@ -330,10 +331,21 @@ def rm(model, yes):
                 if others:
                     detail = (f"unregisters the name only - file kept, "
                               f"still registered as: {', '.join(others)}")
-                elif str(path).startswith(str(MODELS_DIR)) and path.exists():
-                    size = path.stat().st_size / 1024**3 if path.is_file() else None
-                    size_s = f" ({size:.1f} GB)" if size else ""
-                    detail = f"PERMANENTLY deletes {path}{size_s}"
+                # Same predicate as remove_model's delete gate, via the one
+                # shared helper, so this prompt can never promise a deletion the
+                # gate will not perform (a sibling <data dir>/models-old file
+                # used to be announced as "PERMANENTLY deletes").
+                elif is_owned_model_path(path):
+                    if path.exists():
+                        size = path.stat().st_size / 1024**3 if path.is_file() else None
+                        size_s = f" ({size:.1f} GB)" if size else ""
+                        detail = f"PERMANENTLY deletes {path}{size_s}"
+                    else:
+                        # Owned but already gone: remove_model's `owned and
+                        # path.exists()` gate skips the delete, so this is a
+                        # name-only drop - and calling it "outside <data
+                        # dir>/models" would be false.
+                        detail = "unregisters the name only (the file is already missing)"
                 else:
                     detail = "unregisters the name only (file is outside <data dir>/models)"
                 click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)

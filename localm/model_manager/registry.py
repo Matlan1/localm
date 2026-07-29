@@ -1353,18 +1353,19 @@ def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
     inside ``<data dir>/models``.
 
     Every caller that decides whether a registered file is managed MUST route
-    through this. Today that is the deletion in :func:`remove_model` and the
-    managed/external split in :func:`sync_models_dir`.
+    through this. Today that is the deletion in :func:`remove_model`, the
+    managed/external split in :func:`sync_models_dir`, and the "PERMANENTLY
+    deletes" wording in the ``localm rm`` confirmation prompt
+    (``cli/models.py``).
 
-    NOT YET ROUTED THROUGH IT: the "PERMANENTLY deletes" wording in the
-    ``localm rm`` confirmation prompt (``cli/models.py``), which still uses the
-    weakest of the three variants below. So the prompt and the deletion can
-    currently DISAGREE - the prompt says a sibling like ``<data dir>/models-old``
-    will be permanently deleted while this gate correctly declines to delete it.
-    That mismatch errs toward OVER-warning and can never cause an unexpected
-    deletion, and converting the prompt is a separate change. Stated here rather
-    than implied, because a docstring claiming the prompt already routes through
-    this would make the disagreement look impossible.
+    Including the prompt is what stops the text a user confirms from describing
+    something the deletion will not do. It used to carry the weakest of the
+    three variants below and could DISAGREE with this gate,
+    announcing a permanent delete for a sibling like ``<data dir>/models-old``
+    that the gate then correctly declined to delete. That mismatch only ever
+    erred toward OVER-warning and could not cause an unexpected deletion, but
+    wrong text on a destructive confirmation teaches people to distrust the
+    prompt, so the two now share this one predicate by construction.
 
     Three hand-rolled variants had drifted apart, and two of them were wrong in a
     way that reaches ``shutil.rmtree``:
