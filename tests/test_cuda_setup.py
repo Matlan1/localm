@@ -583,6 +583,33 @@ def test_clear_target_missing_dir_does_not_raise(tmp_path):
     sl._clear_target(tmp_path / "nope")          # must not raise
 
 
+def test_clear_target_preserves_git_sentinels(tmp_path):
+    """runtime/localm_llama_runtime/lib/ is a real directory in the git
+    checkout, tracked only via its .gitignore ("*" / "!.gitkeep" /
+    "!.gitignore") that keeps setup-llama's downloaded native binaries out of
+    version control. _clear_target used to delete EVERY file in the target
+    dir with no exclusion, so every `setup-llama` run against a git checkout
+    deleted both tracked sentinel files from the working tree - emptying the
+    .gitignore and leaving a later `git add -A` free to stage hundreds of MB
+    of DLLs into git."""
+    gitignore = tmp_path / ".gitignore"
+    gitkeep = tmp_path / ".gitkeep"
+    gitignore.write_text("*\n!.gitkeep\n!.gitignore\n", encoding="utf-8")
+    gitkeep.write_text("", encoding="utf-8")
+    stale_dll = tmp_path / "llama.dll"
+    stale_dll.write_bytes(b"stale build")
+    blas_dir = tmp_path / "rocblas"
+    (blas_dir / "library").mkdir(parents=True)
+    (blas_dir / "library" / "kernel.co").write_bytes(b"kernel")
+
+    sl._clear_target(tmp_path)
+
+    assert gitignore.read_text(encoding="utf-8") == "*\n!.gitkeep\n!.gitignore\n"
+    assert gitkeep.exists()
+    assert not stale_dll.exists()
+    assert not blas_dir.exists()
+
+
 # --------------------------- _provision_backend (cuda) -------------------- #
 
 def test_provision_backend_cuda_fetches_build_and_cudart(monkeypatch, tmp_path):
