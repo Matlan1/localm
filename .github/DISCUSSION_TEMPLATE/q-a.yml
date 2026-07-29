@@ -1,0 +1,43 @@
+title: "[GPU setup] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Setup help for GGUF/llama.cpp GPU backends (AMD, NVIDIA, Intel). See
+        [docs/gpu-setup.md](https://github.com/Matlan1/localm/blob/master/docs/gpu-setup.md)
+        for the backend table before asking; this form is for when it still is not working.
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and OS
+      description: e.g. "AMD RX 6600, Windows 11" or "NVIDIA RTX 4070, Ubuntu 24.04"
+      placeholder: GPU model, OS
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend you tried
+      options:
+        - vulkan
+        - amd-rocm
+        - hip
+        - cuda
+        - sycl
+        - cpu
+        - not sure / auto-detected
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`localm doctor` output"
+      description: Run `localm doctor` and paste the output.
+      render: text
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened
+      description: What you expected, what happened instead, and any error or log output.
+    validations:
+      required: true
