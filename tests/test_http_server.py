@@ -10,8 +10,12 @@ from fastapi.testclient import TestClient
 from localm.inference.http_server import create_app
 
 
-def _make_mock_engine(loaded: bool = True):
-    """Mock Engine with controllable loaded state and fake chat_stream."""
+def _make_mock_engine(loaded: bool = True, gpu_placement=None):
+    """Mock Engine with controllable loaded state and fake chat_stream.
+
+    gpu_placement mirrors the real Engine.gpu_placement property (None by
+    default, matching a never-loaded/HF-backend engine that cannot report
+    per-layer GPU placement - see test_load_endpoint_gpu_placement below)."""
     engine = MagicMock()
     _state = {"loaded": loaded}
 
@@ -31,6 +35,7 @@ def _make_mock_engine(loaded: bool = True):
     engine.display_name = "test-model"
     engine.count_tokens.return_value = 2
     engine.count_messages_tokens.return_value = 3
+    engine.gpu_placement = gpu_placement
     type(engine).loaded = property(lambda self: _state["loaded"])
     return engine
 
@@ -220,6 +225,72 @@ class TestLoadEndpoint(unittest.TestCase):
         r = self.client.post("/v1/models/load")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "already_loaded")
+
+    def test_load_omits_gpu_placement_when_backend_cannot_report_it(self):
+        # Default mock (gpu_placement=None, e.g. an HF backend or a model that
+        # has never been loaded): the old response shape is unchanged, no
+        # gpu_layers_* keys fabricated without evidence.
+        r = self.client.post("/v1/models/load")
+        body = r.json()
+        self.assertNotIn("gpu_layers_offloaded", body)
+        self.assertNotIn("gpu_layers_total", body)
+        self.assertNotIn("degraded", body)
+
+    def test_load_reports_full_gpu_offload_as_not_degraded(self):
+        self.engine.gpu_placement = {
+            "gpu_layers_offloaded": 32, "gpu_layers_total": 32,
+            "degraded": False,
+        }
+        r = self.client.post("/v1/models/load")
+        body = r.json()
+        self.assertEqual(body["status"], "loaded")
+        self.assertEqual(body["gpu_layers_offloaded"], 32)
+        self.assertEqual(body["gpu_layers_total"], 32)
+        self.assertFalse(body["degraded"])
+
+    def test_load_reports_partial_gpu_offload_as_degraded(self):
+        # AGENTS.md rule 5: a model too big to fully fit VRAM still loads (the
+        # backend's own sizing deliberately defers to a partial/zero GPU
+        # offload rather than refusing), so the response must not read as an
+        # unqualified success - it must say how much of the model actually
+        # landed on the GPU.
+        self.engine.gpu_placement = {
+            "gpu_layers_offloaded": 12, "gpu_layers_total": 32,
+            "degraded": True,
+        }
+        r = self.client.post("/v1/models/load")
+        body = r.json()
+        self.assertEqual(body["status"], "loaded")
+        self.assertEqual(body["gpu_layers_offloaded"], 12)
+        self.assertEqual(body["gpu_layers_total"], 32)
+        self.assertTrue(body["degraded"],
+                         "a partial GPU offload must not report unqualified success")
+
+    def test_load_reports_zero_gpu_offload_as_degraded(self):
+        # The extreme end of the same silent fallback: the whole model ran on
+        # CPU, and "loaded" must still not read as a normal full GPU load.
+        self.engine.gpu_placement = {
+            "gpu_layers_offloaded": 0, "gpu_layers_total": 32,
+            "degraded": True,
+        }
+        r = self.client.post("/v1/models/load")
+        body = r.json()
+        self.assertEqual(body["gpu_layers_offloaded"], 0)
+        self.assertTrue(body["degraded"])
+
+    def test_load_already_loaded_also_reports_gpu_placement(self):
+        # A caller polling load-status of an already-resident model (a second
+        # pre-warm call, or a race) is equally entitled to the truth about
+        # placement, not just a fresh "loaded".
+        self.engine.load()
+        self.engine.gpu_placement = {
+            "gpu_layers_offloaded": 12, "gpu_layers_total": 32,
+            "degraded": True,
+        }
+        r = self.client.post("/v1/models/load")
+        body = r.json()
+        self.assertEqual(body["status"], "already_loaded")
+        self.assertTrue(body["degraded"])
 
 
 class TestChatCompletionsNonStreaming(unittest.TestCase):

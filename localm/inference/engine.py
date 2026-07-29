@@ -256,6 +256,32 @@ class Engine:
         return getattr(self._backend, "effective_ctx_max", None)
 
     @property
+    def gpu_placement(self) -> Optional[dict]:
+        """Where the last load's transformer layers actually ended up: GPU vs
+        CPU. ``{"gpu_layers_offloaded": N, "gpu_layers_total": M, "degraded":
+        bool}`` when the backend can report it (GgufBackend, once a load has
+        completed and the model's true layer count is known), else None -
+        e.g. before any load, or for a backend that places layers itself
+        without a layer-count knob (HF's device_map="auto").
+
+        ``degraded`` is True whenever fewer than the full layer count landed
+        on the GPU, whatever the reason (VRAM-constrained auto-sizing, or an
+        explicit partial n_gpu_layers) - a caller of /v1/models/load has no
+        visibility into the server's own config either way, so this is
+        reported unconditionally rather than only for the auto-sized case.
+        Exists so a load response can tell a full GPU load from a silent CPU
+        fallback (AGENTS.md rule 5) instead of a bare "loaded" that hides it."""
+        offloaded = getattr(self._backend, "gpu_layers_offloaded", None)
+        total = getattr(self._backend, "gpu_layers_total", None)
+        if offloaded is None or not total:
+            return None
+        return {
+            "gpu_layers_offloaded": offloaded,
+            "gpu_layers_total": total,
+            "degraded": offloaded < total,
+        }
+
+    @property
     def last_finish_reason(self) -> str:
         """Why the most recent generation ended: "stop" (model finished) or
         "length" (the max_tokens budget ran out). Backends that cannot tell

@@ -10,7 +10,7 @@ import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState } from "../app/icons.js";
-import { modelCache, refreshModels, showKeyGate, switchModel } from "../app/models-sidebar.js";
+import { modelCache, refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -150,7 +150,7 @@ export async function refreshModelsPage() {
           try {
             const res = await switchModel(m.name);
             if (!res || res.status !== "superseded") {
-              toast("Model switched to " + m.name);
+              toastLoadResult(res, m.name);
               refreshModelsPage();
               // Keep the Settings "Live tuning" VRAM estimate (which defaults to
               // the active model) in sync with a switch made from this page too.

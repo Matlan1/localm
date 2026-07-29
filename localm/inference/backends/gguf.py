@@ -84,6 +84,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # ...]}), or None when no split applied - recorded in _load_native for
         # the GUI's loaded-model status (GET /api/models -> active_gpu_split).
         self.applied_gpu_split: Optional[dict] = None
+        # How many of the model's transformer layers actually ended up on the
+        # GPU vs its true total, resolved in _load_native from the same
+        # ground truth as effective_gpu_layers (see there): None until a load
+        # has completed, or when the true layer count is unknowable this load
+        # (unmeasurable VRAM with no prior cache - see model_meta). Read by
+        # Engine.gpu_placement so a caller can tell a full GPU load from a
+        # partial/zero (CPU-fallback) one instead of a bare "loaded" (AGENTS.md
+        # rule 5 - a silent downgrade must not report unqualified success).
+        self.gpu_layers_offloaded: Optional[int] = None
+        self.gpu_layers_total: Optional[int] = None
         # The isolated worker process holding the real model - see
         # llamacpp/_runner.py. None until load() succeeds.
         self._runner = None
@@ -298,6 +308,24 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         if isinstance(n_layers, int) and n_layers > 0:
             from localm.model_meta import store_n_layers
             store_n_layers(self.model_path, n_layers)
+
+        # Ground truth for how many of those layers actually ended up on the
+        # GPU this load, vs the model's true total, so a caller (HTTP
+        # /v1/models/load, GUI, MCP) can tell a full GPU load from a silent
+        # CPU fallback (AGENTS.md rule 5) instead of a bare "loaded" that
+        # hides it. `gpu_layers` is the exact n_gpu_layers this load handed
+        # llama.cpp (resolved above, before the native call); llama.cpp
+        # offloads min(requested, real layer count), so once the load has
+        # succeeded that arithmetic against the now-known true count is the
+        # ground truth, not a re-guess.
+        total_layers = n_layers if isinstance(n_layers, int) and n_layers > 0 else self._cached_layer_count()
+        self.gpu_layers_total = total_layers
+        if total_layers:
+            self.gpu_layers_offloaded = min(gpu_layers, total_layers)
+        elif gpu_layers < self._DEFAULT_GPU_LAYERS:
+            self.gpu_layers_offloaded = gpu_layers   # already an absolute count
+        else:
+            self.gpu_layers_offloaded = None   # "everything" sentinel, true count unknown
 
         # VRAM usage after load - device-level driver numbers.
         #

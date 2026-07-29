@@ -542,6 +542,21 @@ export async function switchModel(model) {
   return data;
 }
 
+// Toast the outcome of a switchModel() call. A model too big to fully fit
+// VRAM still loads (the backend deliberately defers to a partial/zero GPU
+// offload rather than refusing), so a plain "switched" toast would read as
+// success even when the load quietly fell back to (slow) CPU layers -
+// res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total)
+// says so; warn instead of a bare success toast (AGENTS.md rule 5).
+export function toastLoadResult(res, model) {
+  if (res && res.degraded) {
+    toast(`Model switched to ${model} (${res.gpu_layers_offloaded}/` +
+          `${res.gpu_layers_total} layers on GPU, rest on CPU - slower)`, true);
+  } else {
+    toast("Model switched to " + model);
+  }
+}
+
 modelSelect.onchange = async () => {
   const model = modelSelect.value;
   try {
@@ -549,7 +564,7 @@ modelSelect.onchange = async () => {
     // Superseded: a newer selection is now loading - stay quiet and let its own
     // handler report when it lands, instead of toasting a model we abandoned.
     if (!res || res.status !== "superseded") {
-      toast("Model switched to " + model);
+      toastLoadResult(res, model);
       // The Settings "Live tuning" VRAM estimate defaults to the active model
       // server-side, but only re-fetches on its own slider input - refresh it
       // here too so a switch made from the model dropdown is reflected without
