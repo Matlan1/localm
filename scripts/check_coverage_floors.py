@@ -36,6 +36,31 @@ structural platform split as a regression the first time CI's Linux leg ran
 this check. The floors below were measured and verified (both pass and fail)
 on Windows only; see .github/workflows/ci.yml for where this runs.
 
+MEASURE FROM A WORKTREE OR A FRESH CLONE, NOT THE MAIN CHECKOUT. This is a
+SECOND environmental axis, separate from the platform one above, and it is
+easy to trip because nothing about it is visible in the diff.
+
+`config.py` resolves the data directory by testing `repo_root / "home"` (see
+its `_warn_unconfigured_home` fallback). `home/` is GITIGNORED local state: it
+exists in a working main checkout and does NOT exist in a git worktree or in
+CI's fresh clone. So importing config.py from the main checkout takes the
+"configured" branch, while a worktree and CI take the "no data directory
+configured" branch and execute the warning path.
+
+Measured 2026-07-29 on ONE unchanged commit (config.py had zero commits and an
+identical line count between the two runs): main checkout 82.4201%, which is
+BELOW the floor of 83, against 84.7032% from a worktree, which is the value
+this floor was set from and the value CI reproduces.
+
+The trap that makes this worth a docstring rather than a comment: the failure
+message this script prints tells the reader to "lower the floor in the SAME PR
+that explains why". Someone who measured from the main checkout would follow
+that advice and weaken a floor that was never breached. A gate quietly lowered
+by a person doing exactly what it told them to is worse than no gate.
+
+If you see config.py alone below its floor, check where you measured BEFORE
+changing any number.
+
 Floors are set ONE POINT BELOW the ACTUAL value measured on a real
 `--cov=localm` run on merged master (d62b244b, 2026-07-29, Windows), not the
 rounded integer a report displays, so today passes and a floor can only be
@@ -58,18 +83,36 @@ RAISED later, never silently lowered:
     higher, which only widens this floor's headroom, so the floor below is
     still one point below the TRUE value, not the stale estimate), portmux.py
     37.7289%.
-  - portmux.py gets no special casing versus the others above: it is under
-    active repair in a separate unit, but that only means its floor should
-    not be set ABOVE its current real value in anticipation of that work -
-    it does not exempt it from the same rounding-safety rule everything else
-    follows (floor = int(measured) - 1 = int(37.7289) - 1 = 36). A regression
-    below 36% still fails; the repair work raising it past 38%, 50%, etc. is
-    expected to land as its own floor bump later.
+  - portmux.py's repair HAS since landed (#898 took it to 97.8022%), and this
+    is the follow-up bump that entry anticipated: floor = int(97.8022) - 1 = 96.
+    Re-measured 2026-07-29 on 1fa3af2c from a worktree. It sat at 36 for a
+    while first, because #898 merged BEFORE the PR that measured the floors,
+    leaving ~62 points that could erode without tripping anything and no owner
+    for the bump - which is why `--report` now exists and why CI runs it.
+
+Current measured values (Windows, 2026-07-29, 1fa3af2c, FROM A WORKTREE):
+bindhost 100.0000, scopes 100.0000, pathsafe 93.1034, netpolicy 91.5865,
+auth 91.0112, tls 88.3041, config 84.9315, portmux 97.8022. Every floor above
+is int(measured) - 1 against these, so only portmux moved; the rest were
+already correct. Repo total 79.53%, so pyproject.toml's fail_under=78 is also
+still int(total) - 1 and needs no change.
 
 Run after a --cov pytest run has produced coverage.json (`pytest --cov=localm
 --cov-report=json ...`, or `coverage json` against an existing .coverage
 file):
     python scripts/check_coverage_floors.py [path/to/coverage.json]
+
+Add `--report` to print every module's REAL measured percent next to its floor,
+plus the headroom between them:
+    python scripts/check_coverage_floors.py --report
+
+Use it before changing a floor. Without it, raising one means re-deriving every
+value by hand out of coverage.json, and that friction is not hypothetical: it
+is why portmux.py sat at a floor of 36 for a while after its coverage reached
+the high nineties (the floor was measured one merge before the PR that raised
+it, and the follow-up bump had no owner). The report also names any floor that
+has drifted more than a few points below reality, which is exactly that state.
+`--report` does not suppress the check - it prints and then enforces as usual.
 """
 
 from __future__ import annotations
@@ -92,7 +135,7 @@ _MODULE_FLOORS: dict[str, int] = {
     "localm/auth.py": 90,
     "localm/tls.py": 87,
     "localm/config.py": 83,
-    "localm/portmux.py": 36,
+    "localm/portmux.py": 96,
 }
 
 
@@ -132,8 +175,39 @@ def check_floors(coverage_json: dict, floors: dict[str, int] = _MODULE_FLOORS) -
     return problems
 
 
+def report_rows(coverage_json: dict,
+                floors: dict[str, int] = _MODULE_FLOORS
+                ) -> list[tuple[str, float | None, int]]:
+    """``(module, measured_percent_or_None, floor)`` for every floored module,
+    in floor-table order. ``None`` means the module was absent from the report,
+    the same condition ``check_floors`` treats as its own problem.
+
+    Pure, like ``check_floors``, and sharing its key-normalization: coverage.json
+    keys use the HOST separator, so both sides are folded to forward slash."""
+    files = {k.replace("\\", "/"): v for k, v in coverage_json.get("files", {}).items()}
+    rows: list[tuple[str, float | None, int]] = []
+    for module, floor in floors.items():
+        entry = files.get(module.replace("\\", "/"))
+        actual = entry["summary"]["percent_covered"] if entry is not None else None
+        rows.append((module, actual, floor))
+    return rows
+
+
+# A floor is meant to sit ONE POINT below its measured value, so anything much
+# wider means the floor stopped tracking reality and is no longer protecting the
+# module it names. Reported, never failed: a module legitimately gains coverage
+# between the PR that adds tests and the PR that bumps the floor, and turning
+# that normal interval into a red gate would make the two PRs have to be one.
+_STALE_HEADROOM = 5.0
+
+
 def main(argv: list[str]) -> int:
-    path = Path(argv[0]) if argv else REPO / "coverage.json"
+    # --report is ADDITIVE, never a bypass: it prints the table and still runs
+    # the check, returning the same exit code. A flag that both reported and
+    # skipped enforcement would be an always-green gate one CI edit away.
+    args = [a for a in argv if a != "--report"]
+    want_report = len(args) != len(argv)
+    path = Path(args[0]) if args else REPO / "coverage.json"
     if not path.is_file():
         print(f"Coverage floor check could not run: {path} does not exist - "
               "run a --cov pytest with --cov-report=json (or `coverage json`) "
@@ -145,7 +219,35 @@ def main(argv: list[str]) -> int:
         print(f"Coverage floor check could not run: {path} is not valid "
               f"JSON: {e}", file=sys.stderr)
         return 1
-    problems = check_floors(data)
+    # Pass the table EXPLICITLY rather than leaning on the parameter default.
+    # The default is bound once at def time, so it would keep pointing at the
+    # original dict even after the module attribute is replaced - which would
+    # make a test that swaps the table silently assert against the shipped one
+    # instead, and pass for the wrong reason.
+    if want_report:
+        stale = []
+        print(f"{'module':<24} {'measured':>9} {'floor':>6} {'headroom':>9}")
+        for module, actual, floor in report_rows(data, _MODULE_FLOORS):
+            if actual is None:
+                print(f"{module:<24} {'ABSENT':>9} {floor:>5}% {'-':>9}")
+                continue
+            headroom = actual - floor
+            print(f"{module:<24} {actual:>8.4f}% {floor:>5}% {headroom:>8.2f}")
+            if headroom > _STALE_HEADROOM:
+                stale.append((module, actual, floor))
+        if stale:
+            print(f"\n{len(stale)} floor(s) more than {_STALE_HEADROOM:.0f} points "
+                  "below the measured value, so they are no longer protecting "
+                  "much - raise them to int(measured) - 1:")
+            for module, actual, floor in stale:
+                print(f"  {module}: floor {floor}%, measured {actual:.4f}% "
+                      f"-> {int(actual) - 1}")
+        print()
+        # stdout is block-buffered when piped (a CI log is), stderr is not, so
+        # without this the failure list below lands ABOVE the table it refers to.
+        sys.stdout.flush()
+
+    problems = check_floors(data, _MODULE_FLOORS)
     if problems:
         print("Per-module coverage floor check FAILED (see pyproject.toml "
               "[tool.coverage.report] and scripts/check_coverage_floors.py):\n",
@@ -153,6 +255,20 @@ def main(argv: list[str]) -> int:
         for p in problems:
             print("  " + p, file=sys.stderr)
         print(f"\n{len(problems)} module(s) below floor.", file=sys.stderr)
+        # The message above tells the reader they may lower the floor. Before
+        # anyone acts on that for config.py, name the one confounder known to
+        # produce a false sub-floor reading: measuring from a checkout that has
+        # a `home/` directory (see the module docstring). Keyed on config.py
+        # specifically because that is the module measured to branch on it -
+        # printing this for every failure would be noise on the real ones, and
+        # noise is how a genuine warning stops being read.
+        if (REPO / "home").is_dir() and any("config.py" in p for p in problems):
+            print("\nNOTE: this checkout has a `home/` directory, which config.py "
+                  "branches on. Its coverage is measured ~2 points LOWER here than "
+                  "in a worktree or CI's fresh clone, where `home/` is absent. "
+                  "Re-measure from a worktree before changing config.py's floor - "
+                  "the drop may be the environment, not a regression.",
+                  file=sys.stderr)
         return 1
     print(f"Per-module coverage floor check passed ({len(_MODULE_FLOORS)} "
           "trust-boundary modules).")
