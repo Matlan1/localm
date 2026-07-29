@@ -9,6 +9,8 @@ single main-GPU number as a deliberate (and, on reflection, unnecessary)
 design choice."""
 
 import sys
+import threading
+import time
 import types
 from collections import namedtuple
 from unittest.mock import patch
@@ -239,3 +241,175 @@ def test_cpu_ram_returns_empty_without_psutil(monkeypatch):
     simply absent, never an exception."""
     monkeypatch.setitem(sys.modules, "psutil", None)   # import psutil -> raises
     assert _cpu_ram() == {}
+
+
+# --- GPU-utilisation probe (efficiency/robustness, not the #833 freeze) --- #
+# The old _gpu_util() ran `subprocess.run(["nvidia-smi", ...], timeout=4)`
+# inline on every ~2.5s poll, with no single-flight and no cache: a slow
+# nvidia-smi parked the polling (executor) thread for up to 4s, and spawned a
+# fresh subprocess on every single poll regardless of whether the last one had
+# even finished. The fix moves the actual subprocess call onto its own
+# single-flighted background thread; _gpu_util() itself always returns
+# immediately with the last completed reading (or {} before the first one
+# lands), matching the CPU%/VRAM "omit rather than fabricate" convention used
+# everywhere else in this module. NOTE: this is unrelated to issue #833's
+# reported freeze - that dump shows this same subprocess.run's reader-thread
+# start blocked behind a cold `import torch` holding the Windows loader lock
+# elsewhere in the process (see dev-notes/finding-2026-07-29-loader-lock-
+# freezes-the-event-loop.md), which is fixed out-of-process in discover.py /
+# _torch_gpu_probe.py, not here.
+
+def _reset_gpu_util_cache(monkeypatch):
+    monkeypatch.setattr(sysstats, "_gpu_util_last", None)
+    monkeypatch.setattr(sysstats, "_gpu_util_last_at", None)
+    monkeypatch.setattr(sysstats, "_gpu_util_inflight", False)
+
+
+def test_gpu_util_probe_never_blocks_the_polling_thread(monkeypatch):
+    """A hanging/slow nvidia-smi must never park the calling (poll) thread,
+    and concurrent polls while one probe is in flight must not spawn a second
+    nvidia-smi (single-flight). An efficiency/robustness guard, independent of
+    issue #833's loader-lock freeze (see the module-level note above)."""
+    _reset_gpu_util_cache(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "42\n"
+
+    def _hanging_run(*args, **kwargs):
+        calls.append(1)
+        entered.set()
+        release.wait(5)   # simulate a slow/wedged nvidia-smi
+        return _Proc()
+
+    monkeypatch.setattr("subprocess.run", _hanging_run)
+
+    t0 = time.monotonic()
+    first = sysstats._gpu_util()
+    elapsed = time.monotonic() - t0
+
+    assert first == {}, "no reading has ever landed yet -> omitted, not fabricated"
+    assert elapsed < 0.5, (
+        f"_gpu_util() blocked the calling thread for {elapsed:.2f}s on a "
+        "hanging nvidia-smi - the old per-poll inline subprocess.run regression")
+    assert entered.wait(2), "background probe never started"
+
+    try:
+        # Further polls while the probe is still hanging must ALSO return
+        # instantly, and must NOT start a second concurrent nvidia-smi.
+        for _ in range(5):
+            t0 = time.monotonic()
+            out = sysstats._gpu_util()
+            assert time.monotonic() - t0 < 0.5
+            assert out == {}
+        assert len(calls) == 1, (
+            f"expected exactly one in-flight probe, subprocess.run was "
+            f"invoked {len(calls)} times - polls are stacking again")
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 2
+    while sysstats._gpu_util_last is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert sysstats._gpu_util() == {"gpu": {"percent": 42.0}}
+
+
+def test_gpu_util_reports_percent_once_probe_lands(monkeypatch):
+    _reset_gpu_util_cache(monkeypatch)
+
+    class _Proc:
+        returncode = 0
+        stdout = "17.5\n"
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: _Proc())
+
+    assert sysstats._gpu_util() == {}   # first call: probe just started, no reading yet
+
+    deadline = time.monotonic() + 2
+    while sysstats._gpu_util_last is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert sysstats._gpu_util() == {"gpu": {"percent": 17.5}}
+
+
+def test_gpu_util_omits_field_when_nvidia_smi_absent(monkeypatch):
+    """AMD/Intel box (no nvidia-smi): the field stays omitted, never a
+    fabricated 0%, the missing binary never raises, and a FAILED attempt is
+    throttled by the same refresh window as a successful one - otherwise a
+    GPU-less box would spawn a new probe thread on every single poll
+    forever, since a reading that never succeeds would never look 'fresh'."""
+    _reset_gpu_util_cache(monkeypatch)
+    calls = []
+
+    def _missing(*args, **kwargs):
+        calls.append(1)
+        raise FileNotFoundError("nvidia-smi not found")
+
+    monkeypatch.setattr("subprocess.run", _missing)
+
+    assert sysstats._gpu_util() == {}
+    deadline = time.monotonic() + 1
+    while sysstats._gpu_util_inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) == 1
+
+    for _ in range(10):
+        assert sysstats._gpu_util() == {}
+    assert len(calls) == 1, (
+        f"expected the failed attempt to be throttled by the refresh window, "
+        f"subprocess.run was invoked {len(calls)} times")
+
+
+def test_gpu_util_does_not_reprobe_within_the_refresh_window(monkeypatch):
+    """A fresh-enough cached reading must be served without spawning another
+    nvidia-smi call - otherwise every single poll would still shell out."""
+    _reset_gpu_util_cache(monkeypatch)
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "5\n"
+
+    def _run(*args, **kwargs):
+        calls.append(1)
+        return _Proc()
+
+    monkeypatch.setattr("subprocess.run", _run)
+
+    sysstats._gpu_util()
+    deadline = time.monotonic() + 2
+    while sysstats._gpu_util_last is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) == 1
+
+    # Polling again immediately (well inside the refresh window) must reuse
+    # the cached reading rather than shelling out again.
+    for _ in range(10):
+        assert sysstats._gpu_util() == {"gpu": {"percent": 5.0}}
+    assert len(calls) == 1
+
+
+def test_gpu_util_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch):
+    """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion),
+    _gpu_util() must still never raise (this module's own documented contract)
+    AND must reset the in-flight guard so a later call can retry - otherwise a
+    single failed spawn would wedge every future poll into believing a probe is
+    permanently running. Mirrors discover.py's list_gpus() handling of the same
+    failure."""
+    _reset_gpu_util_cache(monkeypatch)
+
+    def _broken_start(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _broken_start)
+
+    result = sysstats._gpu_util()   # must not raise
+
+    assert result == {}
+    assert sysstats._gpu_util_inflight is False, (
+        "a failed thread spawn left _gpu_util_inflight stuck True - no later "
+        "call could ever retry")

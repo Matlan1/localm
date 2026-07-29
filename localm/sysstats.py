@@ -184,13 +184,41 @@ def _vram() -> dict:
     return {"vram": vram}
 
 
-def _gpu_util() -> dict:
-    """{"gpu": {"percent": N}} via nvidia-smi (NVIDIA), or {} on any other box.
+_GPU_UTIL_REFRESH_INTERVAL_S = 2.0    # do not re-probe more often than the GUI polls
 
-    VRAM (above) is the metric that matters for fitting a model; utilisation is a
-    nice-to-have, and a clean CSV probe only exists for NVIDIA. AMD/Intel boxes
-    simply omit it rather than ship a fragile, often-wrong parse."""
+_gpu_util_lock = threading.Lock()
+_gpu_util_inflight = False
+_gpu_util_last: float | None = None      # last successfully read percent
+_gpu_util_last_at: float | None = None   # monotonic time of the last COMPLETED
+                                          # attempt (success or failure) - throttles
+                                          # retries on a no-nvidia-smi box too, not
+                                          # just successful readings
+
+
+def _gpu_util_probe() -> None:
+    """The actual (blocking) nvidia-smi call. Runs on its OWN daemon thread,
+    started single-flighted by :func:`_gpu_util` - never call this directly,
+    it can take up to its subprocess timeout on a slow/wedged driver.
+
+    KNOWN RESIDUAL RISK, deliberately not guarded further: CPython's
+    ``subprocess.run(..., timeout=N)`` on Windows, after a ``TimeoutExpired``,
+    calls ``process.kill()`` then calls ``communicate()`` a SECOND time with NO
+    timeout to drain the killed process's pipes (verified in
+    ``Lib/subprocess.py``'s ``run()``, the ``if _mswindows:`` branch). If a
+    killed nvidia-smi's pipes never close, that second call - and this whole
+    thread - can hang past the stated 4s indefinitely, leaving
+    ``_gpu_util_inflight`` stuck True forever (the reading simply freezes at
+    its last value; nothing user-facing blocks, unlike before this fix). This
+    is not new: the pre-fix code shared the identical subprocess timeout and
+    the identical exposure. Accepted rather than fixed with a retirement/epoch
+    mechanism (see the no-epoch note in :func:`_gpu_util`) because the field is
+    explicitly best-effort/nice-to-have and no caller ever blocks on it either
+    way - a genuinely wedged nvidia-smi that never releases its pipes is rare
+    enough that the fix's cost (a second timed layer, e.g. killing this thread
+    itself) is not worth it unless it is ever observed for real."""
+    global _gpu_util_inflight, _gpu_util_last, _gpu_util_last_at
     import subprocess
+    pct = None
     try:
         p = subprocess.run(
             ["nvidia-smi", "--query-gpu=utilization.gpu",
@@ -198,11 +226,77 @@ def _gpu_util() -> dict:
             capture_output=True, text=True, timeout=4,
         )
         if p.returncode == 0 and p.stdout.strip():
-            pct = float(p.stdout.strip().splitlines()[0].strip())
-            return {"gpu": {"percent": round(pct, 1)}}
+            pct = round(float(p.stdout.strip().splitlines()[0].strip()), 1)
     except Exception:
         pass
-    return {}
+    with _gpu_util_lock:
+        if pct is not None:
+            _gpu_util_last = pct
+        _gpu_util_last_at = time.monotonic()
+        _gpu_util_inflight = False
+
+
+def _gpu_util() -> dict:
+    """{"gpu": {"percent": N}} via nvidia-smi (NVIDIA), or {} on any other box
+    or before the first reading has landed.
+
+    VRAM (above) is the metric that matters for fitting a model; utilisation is a
+    nice-to-have, and a clean CSV probe only exists for NVIDIA. AMD/Intel boxes
+    simply omit it rather than ship a fragile, often-wrong parse.
+
+    NEVER blocks the calling (poll) thread on nvidia-smi: the subprocess call
+    runs single-flighted on its own daemon thread (:func:`_gpu_util_probe`),
+    and this function always returns immediately with the last completed
+    reading, omitting the field (never fabricating 0%) until one has landed -
+    the same "omit rather than fabricate" contract the CPU-percent meter and
+    the VRAM used/percent gate already use elsewhere in this module. The old
+    version ran a bare per-poll ``subprocess.run(..., timeout=4)`` (the poll
+    interval is 2.5s), which spawned a fresh nvidia-smi on every single poll
+    with no cap on how many could be in flight at once, and could park the
+    polling thread on a slow driver call. This is a standalone efficiency/
+    robustness fix for this one reading; it is unrelated to the GPU-enumeration
+    freeze diagnosed for issue #833 (a cold ``import torch`` holding the
+    Windows loader lock across thread creation process-wide, fixed separately
+    in ``discover.py``/``_torch_gpu_probe.py`` - a caller-side timeout or cache
+    cannot fix that class of stall, since nothing a caller does bounds a lock
+    the OS holds on another thread's behalf)."""
+    global _gpu_util_inflight
+    now = time.monotonic()
+    start_probe = False
+    with _gpu_util_lock:
+        stale = (_gpu_util_last_at is None
+                 or now - _gpu_util_last_at >= _GPU_UTIL_REFRESH_INTERVAL_S)
+        if stale and not _gpu_util_inflight:
+            _gpu_util_inflight = True
+            start_probe = True
+        last = _gpu_util_last
+    if start_probe:
+        try:
+            threading.Thread(target=_gpu_util_probe, name="localm-gpu-util-probe",
+                              daemon=True).start()
+        except Exception as e:
+            # Could not spawn the probe thread (e.g. OS thread exhaustion): the
+            # thread that would have cleared _gpu_util_inflight never ran, so
+            # clear it here - never leave it stuck True with nothing left to
+            # reset it (a LATER call must be able to retry). Mirrors discover.py's
+            # list_gpus() handling of the identical failure, minus its epoch
+            # gate: that gate exists to fence out a late write from a probe
+            # thread ABANDONED after overrunning its deadline (a thread that IS
+            # still running and could write after a caller gives up on it).
+            # There is no such thread here - Thread.start() itself raised, so
+            # no thread was ever created, and nothing can write into
+            # _gpu_util_last/_gpu_util_last_at after this reset. An epoch would
+            # be dead machinery implying a retirement mechanism this module
+            # does not have. Surfaced at debug (AGENTS.md rule 5) rather than
+            # propagating, matching this module's documented "NEVER raises"
+            # contract.
+            from localm.debuglog import logger
+            logger.debug("_gpu_util: could not start probe thread: %s", e)
+            with _gpu_util_lock:
+                _gpu_util_inflight = False
+    if last is None:
+        return {}
+    return {"gpu": {"percent": last}}
 
 
 def system_stats() -> dict:
