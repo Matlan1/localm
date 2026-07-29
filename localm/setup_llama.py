@@ -18,7 +18,10 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
   * ``cuda`` - NVIDIA peak performance. On Windows the matching self-contained
     ``cudart`` bundle from the same release is fetched too, so NO CUDA Toolkit is
     needed; a driver preflight + load-test fall back to ``vulkan`` if the driver
-    is too old. On Linux the cuda build needs a system CUDA runtime present.
+    is too old. The CUDA asset LINE is chosen from the detected GPU architecture
+    (Blackwell - sm_100/sm_120 - automatically gets the newer 13.x line; every
+    older architecture stays on the broad-compatibility 12.x line). On Linux the
+    cuda build needs a system CUDA runtime present.
   * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
     Intel performance but needs the oneAPI runtime; ``cpu`` is self-contained.
   * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
@@ -127,7 +130,14 @@ _ASSET_MATCH = {
     "win32": {
         "cpu":    ["bin-win-cpu-x64"],
         "vulkan": ["bin-win-vulkan-x64"],
-        "cuda":   ["bin-win-cuda-12.4-x64", "bin-win-cuda-12"],          # prefer the 12.x runtime line
+        # Keyed by CUDA LINE (NvidiaInfo.cuda_line), not a flat preference
+        # list: a Blackwell-class GPU must never fall through to a 12.x asset
+        # even as a "closest match" fallback, since that build's fatbin has no
+        # kernels for it (see the _CUDA_LINE block for the full rationale).
+        "cuda": {
+            "cuda-12": ["bin-win-cuda-12.4-x64", "bin-win-cuda-12"],
+            "cuda-13": ["bin-win-cuda-13.3-x64", "bin-win-cuda-13"],
+        },
         "sycl":   ["bin-win-sycl-x64"],
         "hip":    ["bin-win-hip-radeon-x64"],   # needs AMD HIP SDK present
     },
@@ -373,13 +383,20 @@ def _latest_tag() -> str:
     return _FALLBACK_TAG
 
 
-def _resolve_backend_asset(backend: str) -> tuple[str, Optional[str]]:
+def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tuple[str, Optional[str]]:
     """Resolve a backend name to a (url, sha256_digest) pair.
 
     If the release listing is available, resolves it dynamically and gets the
     sha256 from the digest field. If offline, falls back to the templated guess
     and queries the local pinned checksum dictionary.
+
+    *cuda_line* selects which asset-name substrings to match for the 'cuda'
+    backend on Windows (see NvidiaInfo.cuda_line) - ignored for every other
+    backend/platform, which have a single, non-line-specific matcher list.
+    Defaults to _CUDA_LINE (None resolved below, not bound as a literal
+    default - _CUDA_LINE is defined later in this module, after this function).
     """
+    cuda_line = cuda_line or _CUDA_LINE
     if backend == "amd-rocm":
         if sys.platform != "win32":
             raise click.ClickException(
@@ -407,7 +424,11 @@ def _resolve_backend_asset(backend: str) -> tuple[str, Optional[str]]:
         return DEFAULT_URL, "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
 
     plat = _platform_key()
-    matchers = _ASSET_MATCH.get(plat, {}).get(backend)
+    entry = _ASSET_MATCH.get(plat, {}).get(backend)
+    # The 'cuda' entry on win32 is keyed by cuda_line (a dict), not a flat
+    # list, since the right asset depends on the GPU's architecture, not just
+    # the platform - see _ASSET_MATCH's comment.
+    matchers = entry.get(cuda_line) if isinstance(entry, dict) else entry
     if not matchers:
         avail = ", ".join(sorted(_ASSET_MATCH.get(plat, {})))
         raise click.ClickException(
@@ -856,11 +877,43 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
 #  a reboot); a too-old driver is the single "you must do this part" branch.   #
 # --------------------------------------------------------------------------- #
 
-# Target the CUDA 12.x line: it is the broad-compatibility choice (runs on any
-# driver new enough for CUDA 12.4). Upstream also ships a 13.x line that needs a
-# newer driver; we resolve the build and its matching cudart bundle from 12.x.
+# Which upstream CUDA asset line to fetch is a function of the GPU's
+# ARCHITECTURE, not just the platform: upstream ships both a 12.x line (broad
+# compatibility - runs on any driver new enough for CUDA 12.4) and a 13.x line
+# (needed for Blackwell-class GPUs, but itself needing a newer driver and
+# dropping some pre-Turing arch support). NVIDIA Blackwell (datacenter sm_100,
+# consumer/workstation sm_120 - e.g. RTX 50-series) is not supported by our
+# pinned 12.4 build's fatbin: upstream only added Blackwell kernels starting
+# CUDA 12.8, and our two pinned lines are 12.4 and 13.3. So a Blackwell card
+# needs the 13.x line; every older architecture stays on 12.x, the
+# broad-compatibility default. _CUDA_LINE is the fallback used when no
+# architecture information is available at all (see NvidiaInfo.cuda_line).
 _CUDA_LINE = "cuda-12"
-_MIN_DRIVER_CUDA = (12, 4)
+
+# Compute-capability floor for "needs the 13.x line" (nvidia-smi's
+# ``compute_cap`` query, e.g. "8.9", "12.0" - the GPU's sm/arch level, NOT the
+# driver's max CUDA version). Verified against NVIDIA's own docs: Blackwell
+# datacenter parts (B100/B200/GB100) report compute capability 10.0 (sm_100)
+# and Blackwell consumer/workstation parts (RTX 5090/5080/5070 Ti/5070/5060)
+# report 12.0 (sm_120); CUDA 12.8 was the first toolkit release to add
+# Blackwell kernels. >= 10.0 catches both variants and any later architecture
+# without a new special case each time.
+_BLACKWELL_MIN_CAP = (10, 0)
+
+# Minimum driver-reported CUDA version ("cuda_capability") to trust each
+# line's build, keyed by the line itself since a newer line needs a newer
+# driver. Both match the PINNED asset's own X.Y (not just its major version):
+# the 12.4 entry is the original, long-verified threshold; the 13.3 entry
+# mirrors that same convention rather than relying on CUDA's minor-version-
+# compatibility guarantee across the (very recent) 13.x series, which there is
+# no Blackwell hardware here to confirm against directly. Being exact-match
+# here is the conservative side of that unknown: it can only route a
+# borderline driver to the safe Vulkan fallback, never hand it a build that
+# fails to load.
+_MIN_DRIVER_CUDA = {
+    "cuda-12": (12, 4),
+    "cuda-13": (13, 3),
+}
 
 
 def _ver_tuple(v: str) -> Optional[tuple]:
@@ -879,18 +932,35 @@ class NvidiaInfo:
     gpu_name: str = ""
     driver_version: str = ""
     cuda_capability: str = ""       # max CUDA the driver supports, e.g. "12.4"
+    compute_capability: str = ""    # the GPU's own sm/arch level, e.g. "12.0" (Blackwell/sm_120)
+
+    @property
+    def cuda_line(self) -> str:
+        """Which upstream CUDA asset line this GPU's ARCHITECTURE needs:
+        'cuda-12' (broad-compatibility default) or 'cuda-13' (required for
+        Blackwell and newer - see _BLACKWELL_MIN_CAP). Unknown or unparseable
+        capability stays on cuda-12: an unmeasured architecture is not
+        evidence it needs the newer, narrower-compatibility line (same
+        "unknown != too old" reasoning as driver_ok below)."""
+        cap = _ver_tuple(self.compute_capability)
+        if cap is not None and cap >= _BLACKWELL_MIN_CAP:
+            return "cuda-13"
+        return "cuda-12"
 
     @property
     def driver_ok(self) -> bool:
-        """True when the driver is new enough for the CUDA build we install.
-        Unknown capability is treated as OK (do not block on a parse miss)."""
+        """True when the driver is new enough for the CUDA line THIS GPU's
+        architecture needs (see cuda_line) - the minimum is not a single fixed
+        threshold, since Blackwell and older cards need different lines.
+        Unknown driver capability is treated as OK (do not block on a parse
+        miss)."""
         if not self.cuda_capability:
             return True
         parsed = _ver_tuple(self.cuda_capability)
         # An unparseable capability is unknown, not old: cannot judge, do not block.
         if parsed is None:
             return True
-        return parsed >= _MIN_DRIVER_CUDA
+        return parsed >= _MIN_DRIVER_CUDA[self.cuda_line]
 
 
 def _nvidia_smi(*args: str) -> str:
@@ -904,10 +974,16 @@ def _nvidia_smi(*args: str) -> str:
 
 
 def nvidia_preflight() -> NvidiaInfo:
-    """Detect the NVIDIA GPU + driver and the max CUDA version it supports.
+    """Detect the NVIDIA GPU + driver, the max CUDA version the DRIVER
+    supports, and the GPU's own compute capability (its architecture - e.g.
+    "12.0" for Blackwell/sm_120). These are two different questions: the
+    driver's version says what it CAN run; the compute capability says what
+    the CARD IS, which is what decides whether the 12.x build's fatbin even
+    has kernels for it (see NvidiaInfo.cuda_line).
 
     Never raises. Parses the nvidia-smi banner ("Driver Version: X  CUDA
-    Version: Y") and asks explicitly for the (untruncated) GPU name."""
+    Version: Y") and asks explicitly for the (untruncated) GPU name and its
+    compute capability."""
     out = _nvidia_smi()
     if not out.strip():
         return NvidiaInfo(present=False)
@@ -921,6 +997,9 @@ def nvidia_preflight() -> NvidiaInfo:
     name = _nvidia_smi("--query-gpu=name", "--format=csv,noheader").strip().splitlines()
     if name:
         info.gpu_name = name[0].strip()
+    cap = _nvidia_smi("--query-gpu=compute_cap", "--format=csv,noheader").strip().splitlines()
+    if cap:
+        info.compute_capability = cap[0].strip()
     return info
 
 
@@ -962,19 +1041,20 @@ def _pick_asset(assets: list, *needles: str, exclude: tuple = ()) -> Optional[di
     return None
 
 
-def _resolve_cuda_pair(tag: str) -> tuple:
-    """(build_asset, cudart_asset) for the Windows CUDA 12.x line. Either may be
-    None when the release listing is unavailable or lacks it.
+def _resolve_cuda_pair(tag: str, line: str = _CUDA_LINE) -> tuple:
+    """(build_asset, cudart_asset) for the Windows CUDA *line* ('cuda-12' or
+    'cuda-13' - see NvidiaInfo.cuda_line). Either may be None when the release
+    listing is unavailable or lacks it.
 
-    The build and the cudart runtime share the "...bin-win-cuda-12.x..." name
+    The build and the cudart runtime share the "...bin-win-cuda-X.Y..." name
     fragment (the runtime is e.g. cudart-llama-bin-win-cuda-12.4-x64.zip), and
     the runtime is often listed FIRST, so the build matcher MUST exclude
     "cudart" - otherwise build resolves to the runtime-only zip (CUDA DLLs, no
     llama.dll) and provisioning aborts with "the archive did not contain
     llama.dll" (NEW-CUDADLL)."""
     assets = _release_assets(tag)
-    build = _pick_asset(assets, "bin-win-" + _CUDA_LINE, exclude=("cudart",))
-    cudart = _pick_asset(assets, "cudart", "win-" + _CUDA_LINE)
+    build = _pick_asset(assets, "bin-win-" + line, exclude=("cudart",))
+    cudart = _pick_asset(assets, "cudart", "win-" + line)
     return build, cudart
 
 
@@ -1034,19 +1114,22 @@ def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "rel
 
 
 def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
-                       with_cudart: bool) -> None:
+                       with_cudart: bool, cuda_line: str = _CUDA_LINE) -> None:
     """Resolve + fetch the prebuilt(s) for *chosen* into *target*. For CUDA with
     *with_cudart* it also fetches the matching cudart runtime bundle so the
-    build is self-contained (no CUDA Toolkit needed). Raises on a fatal error."""
+    build is self-contained (no CUDA Toolkit needed). *cuda_line* picks which
+    upstream CUDA asset line to fetch ('cuda-12' or 'cuda-13' - see
+    NvidiaInfo.cuda_line); it is ignored for every other backend. Raises on a
+    fatal error."""
     if chosen == "cuda" and with_cudart and sys.platform == "win32":
         tag = _latest_tag()
-        build, cudart = _resolve_cuda_pair(tag)
+        build, cudart = _resolve_cuda_pair(tag, cuda_line)
         if build is None:
             # Asset listing unavailable: fall back to the templated build URL and
             # warn that the runtime bundle could not be resolved automatically.
             console.print("[yellow]Could not resolve CUDA assets; fetching build only.[/yellow]\n"
                           "[yellow]If it fails to load, use --backend vulkan or install CUDA Toolkit.[/yellow]")
-            url, fallback_sha = _resolve_backend_asset("cuda")
+            url, fallback_sha = _resolve_backend_asset("cuda", cuda_line)
             _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
             return
         
@@ -1224,12 +1307,17 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
     other_vendors = [v for v in (det.vendors if det else []) if v != "nvidia"]
     if info.present:
         console.print(f"  [green]OK[/green] NVIDIA GPU: {info.gpu_name or 'detected'}")
+        if info.compute_capability:
+            line_note = " (Blackwell)" if info.cuda_line == "cuda-13" else ""
+            console.print(f"  [dim]Compute capability {info.compute_capability}{line_note} "
+                          f"-> {info.cuda_line} line[/dim]")
         if info.cuda_capability:
             colour = "green" if info.driver_ok else "red"
             mark = "OK " if info.driver_ok else "no "
+            need = _MIN_DRIVER_CUDA[info.cuda_line]
             console.print(f"  [{colour}]{mark}[/{colour}] Driver {info.driver_version} "
                           f"supports CUDA {info.cuda_capability} "
-                          f"(need >= {_MIN_DRIVER_CUDA[0]}.{_MIN_DRIVER_CUDA[1]})")
+                          f"(need >= {need[0]}.{need[1]} for the {info.cuda_line} line)")
     elif other_vendors:
         seen = "/".join(v.upper() for v in other_vendors)
         console.print(f"  [yellow]?[/yellow] Could not run nvidia-smi - this machine "
@@ -1240,7 +1328,8 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
 
     # Driver too old: the one thing we cannot fetch for the user.
     if info.present and info.cuda_capability and not info.driver_ok:
-        console.print("  GPU driver update required for CUDA.")
+        console.print(f"  GPU driver update required for CUDA "
+                      f"(the {info.cuda_line} line this GPU needs).")
         console.print("  [dim]To enable later: update driver, reboot, run setup-llama --backend cuda[/dim]")
         console.print("  [green]Using Vulkan now[/green].")
         return "vulkan", False
@@ -1289,13 +1378,17 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
 
 
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
-                             with_cudart: bool, assume_yes: bool = False) -> str:
+                             with_cudart: bool, assume_yes: bool = False,
+                             cuda_line: str = _CUDA_LINE) -> str:
     """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
     user's pick silently (the never-override rule): inform WHY, then OFFER the
     universal Vulkan build when interactive (or fall back with a LOUD warning when
     *assume_yes* / no tty), and always say how to retry the chosen backend with
     --force. Returns the backend that ended up working. Exits non-zero if the user
     declines the fallback, or if NOTHING loads (a genuine environment fault).
+
+    *cuda_line* is the CUDA asset line to fetch when *chosen* is 'cuda' (see
+    NvidiaInfo.cuda_line); irrelevant otherwise.
 
     vulkan and cpu are self-contained and treated as terminal: if the user
     explicitly chose one and it does not load, that is an environment problem we
@@ -1304,7 +1397,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 
     def _try(backend: str, cudart: bool) -> None:
         _clear_target(target)
-        _provision_backend(backend, target, sha256 if backend == chosen else None, cudart)
+        _provision_backend(backend, target, sha256 if backend == chosen else None,
+                           cudart, cuda_line)
         if not (target / lib_name).exists():
             raise ArtifactError(f"the archive did not contain {lib_name}")
         _install_runtime_wheel(_runtime_pkg_dir())
@@ -1553,10 +1647,16 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         # CUDA is the visible peak-NVIDIA option: detect the driver, then offer to
         # fetch a self-contained runtime (no Toolkit) or fall back cleanly.
         with_cudart = False
+        cuda_line = _CUDA_LINE
         if chosen == "cuda" and sys.platform == "win32":
-            chosen, with_cudart = _cuda_setup_dialogue(nvidia_preflight(), assume_yes, det)
+            # Preflight ONCE and reuse it for both the dialogue and the asset
+            # line - a second nvidia-smi call could (rarely) see different
+            # hardware and pick a line the dialogue never actually displayed.
+            info = nvidia_preflight()
+            cuda_line = info.cuda_line
+            chosen, with_cudart = _cuda_setup_dialogue(info, assume_yes, det)
         result = _provision_with_fallback(chosen, target, sha256, with_cudart,
-                                          assume_yes)
+                                          assume_yes, cuda_line)
         _record_provisioned_backend(target, result)
 
     _verify()
