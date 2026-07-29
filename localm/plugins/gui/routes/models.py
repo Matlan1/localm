@@ -339,10 +339,12 @@ def register(app: FastAPI, ctx) -> None:
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
         from localm.model_manager import _entry_path
+        from localm.model_manager.gguf import gguf_kv_bytes_per_token
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
         n_layers = None
+        kv_bytes_per_token = 0
         # _entry_path returns None for a malformed / corrupt entry (non-dict, or a
         # null / non-string / empty path). The route's own guard below is
         # except OSError, which would NOT catch the AttributeError / TypeError such
@@ -356,7 +358,9 @@ def register(app: FastAPI, ctx) -> None:
             # not choose. A registered UNC row blocks in the Windows SMB
             # redirector for minutes and draws an outbound authentication attempt
             # from the server process - inline in this `async def` that stalls
-            # every request the server is serving, not just this one.
+            # every request the server is serving, not just this one. The GGUF
+            # header read for the KV-shape probe below is the same class of I/O,
+            # so it rides the same executor call instead of adding a second one.
             def _measure(ep: str):
                 try:
                     p = Path(ep)
@@ -364,14 +368,23 @@ def register(app: FastAPI, ctx) -> None:
                         # A prior load caches the model's true layer count, so a
                         # partial-offload estimate (n_gpu_layers < 99) scales by
                         # real layers instead of the /99 sentinel fallback.
-                        return p.stat().st_size, cached_n_layers(str(p))
+                        kv_bpt = 0
+                        try:
+                            kv_bpt = int(gguf_kv_bytes_per_token(p))
+                        except Exception as exc:  # contracted not to raise - surface if it does
+                            logger.debug(
+                                "gguf KV-shape probe failed (%s) for %s; the VRAM "
+                                "estimate falls back to the size-class heuristic",
+                                type(exc).__name__, ep)
+                        return p.stat().st_size, cached_n_layers(str(p)), kv_bpt
                 except (OSError, ValueError):
                     pass
-                return model_bytes, n_layers
+                return model_bytes, n_layers, kv_bytes_per_token
 
-            model_bytes, n_layers = await asyncio.get_running_loop().run_in_executor(
+            model_bytes, n_layers, kv_bytes_per_token = await asyncio.get_running_loop().run_in_executor(
                 get_plugin_executor(), _measure, epath)
-        est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers)
+        est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers,
+                            kv_bytes_per_token=kv_bytes_per_token)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it OFF the
         # event loop (it is safe-by-construction but still may take up to its
         # deadline on a wedged driver) so a stats read never stalls the WebUI.
