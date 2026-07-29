@@ -96,15 +96,54 @@ OFFLINE_SYSTEM = (
 #  Tool-call parsing (a server-side port of the GUI's parseWebCall)           #
 # --------------------------------------------------------------------------- #
 
-_THINK_RE = re.compile(r"<(think|reasoning|r)\b[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
-_WRAP_RE = re.compile(
-    r"<\|?/?tool_call\|?>\s*(?:call:(\w+)\s*)?(.*?)\s*<\|?/?tool_call\|?>",
-    re.DOTALL)
-_FENCE_RE = re.compile(r"```[ \t]*[A-Za-z_]*[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.DOTALL)
+# Everything in this section runs on RAW MODEL OUTPUT, so every quantifier is
+# reachable by whatever a poisoned page persuaded the model to emit. All three
+# patterns here shared one defect: a lazy body that scans to end-of-text from
+# EVERY opener when no closer follows. That is quadratic in the number of
+# openers and is INDEPENDENT of any ambiguity inside the pattern, which is why
+# de-ambiguating alone does not fix it. Measured before this change:
+#   _THINK_RE   0.054 / 0.21 / 1.22s at 2,000 / 4,000 / 8,000 '<r>' openers
+#   _WRAP_RE    0.058 / 0.447 / 3.56 / 30.0s at 500 / 1k / 2k / 4k trailing spaces
+#   _FENCE_RE   the same two adjacent `[ \t]*` quantifiers the coder's fence had
+# Each is now an opener paired with a closer found by a linear search, and the
+# scan is abandoned as soon as no closer can exist ahead. Same treatment the
+# coder's parser received; these were the second copy of those patterns.
+_THINK_OPEN_RE = re.compile(r"<(think|reasoning|r)\b[^>]*>", re.IGNORECASE)
+_WRAP_MARKER_RE = re.compile(r"<\|?/?tool_call\|?>")
+_CALL_PREFIX_RE = re.compile(r"call:(\w+)")
+_FENCE_OPEN_RE = re.compile(r"```[ \t]*(?:[A-Za-z_]\w*[ \t]*)?\r?\n")
+_FENCE_CLOSE_RE = re.compile(r"\r?\n[ \t]*```")
 
 
 def _strip_think(text: str) -> str:
-    return _THINK_RE.sub("", text or "")
+    """Remove ``<think>`` / ``<reasoning>`` / ``<r>`` blocks from a model reply.
+
+    The closing tag is located with ``str.find`` rather than by letting a lazy
+    ``.*?`` hunt for it. ``find`` is a linear C-level scan that returns -1
+    immediately when the tag is absent, so an unterminated opener costs one pass
+    over the tail instead of one pass PER OPENER - which is what made
+    ``'<r >' * 8000`` (32 KB, entirely plausible model output) cost 1.22s.
+
+    Once a closer is missing there cannot be one for any LATER opener either, so
+    the loop stops rather than re-walking the tail once per opener.
+    """
+    if not text:
+        return text
+    lowered = text.lower()
+    out = []
+    pos = 0
+    while True:
+        m = _THINK_OPEN_RE.search(text, pos)
+        if m is None:
+            break
+        close = f"</{m.group(1)}>".lower()
+        end = lowered.find(close, m.end())
+        if end < 0:
+            break
+        out.append(text[pos:m.start()])
+        pos = end + len(close)
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _lenient_json(body: str):
@@ -140,12 +179,23 @@ def _as_web_call(obj):
 
 
 def _top_level_objects(text: str):
-    """Yield each brace-balanced top-level ``{...}`` region (string-aware)."""
+    """Yield each brace-balanced top-level ``{...}`` region (string-aware).
+
+    Bounded by the LAST ``}`` in the text. Without that bound every ``{`` that
+    never balances scans to end-of-text, once per opening brace: measured
+    0.158 / 0.591 / 2.84s at 2,000 / 4,000 / 8,000 unmatched braces, on model
+    output. With it, text containing no closing brace after a given point costs
+    nothing there. This is not a regex, which is exactly why the CodeQL sweep
+    that found the pattern versions of this defect never flagged it.
+    """
+    last_close = text.rfind("}")
     i, n = 0, len(text)
     while i < n:
         if text[i] != "{":
             i += 1
             continue
+        if i > last_close:
+            return          # no closing brace ahead: no later '{' can balance
         depth, in_str, esc = 0, False, False
         j = i
         matched = False
@@ -174,16 +224,52 @@ def _top_level_objects(text: str):
             i += 1
 
 
+def _pair_scan(text: str, opener_re, closer_re):
+    """Yield ``(opener, closer)`` matches, opener paired with the NEXT closer.
+
+    The ``return`` on a missing closer is the whole cost fix: a closer search
+    that fails from one opener can never succeed from a later one, because a
+    later opener ends further right and would search a suffix of the range that
+    just came up empty. Without it, hostile text plants thousands of unterminated
+    openers and each one pays a scan to end-of-text.
+    """
+    pos = 0
+    while True:
+        opener = opener_re.search(text, pos)
+        if opener is None:
+            return
+        closer = closer_re.search(text, opener.end())
+        if closer is None:
+            return
+        yield opener, closer
+        pos = closer.end()
+
+
+def _iter_wrapped_bodies(text: str):
+    """Yield ``(call_name, body)`` for each ``<|tool_call>``-wrapped body."""
+    for opener, closer in _pair_scan(text, _WRAP_MARKER_RE, _WRAP_MARKER_RE):
+        inner = text[opener.end():closer.start()]
+        prefix = _CALL_PREFIX_RE.match(inner.lstrip())
+        name = prefix.group(1) if prefix else None
+        if prefix:
+            inner = inner.lstrip()[prefix.end():]
+        yield name, inner
+
+
+def _iter_fenced_bodies(text: str):
+    """Yield the body of each fenced block."""
+    for opener, closer in _pair_scan(text, _FENCE_OPEN_RE, _FENCE_CLOSE_RE):
+        yield text[opener.end():closer.start()]
+
+
 def parse_web_call(text: str):
     """First web tool call in *text*, or None. Tolerates the ``<tool_call>`` wrapper,
     code fences, and bare JSON, plus the JSON mangles local models emit - mirroring
     the GUI so a real attempt is not silently dropped."""
     clean = _strip_think(text or "")
     candidates = []
-    for m in _WRAP_RE.finditer(clean):
-        candidates.append((m.group(1), m.group(2)))
-    for m in _FENCE_RE.finditer(clean):
-        candidates.append((None, m.group(1)))
+    candidates.extend(_iter_wrapped_bodies(clean))
+    candidates.extend((None, body) for body in _iter_fenced_bodies(clean))
     for prefix, body in candidates:
         obj = _lenient_json(body.strip())
         call = _as_web_call(obj)

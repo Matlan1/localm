@@ -41,8 +41,14 @@ class LogRecord(TypedDict):
     lines: List[str]
 
 
+# The logger group starts with `[^:\s]`, not `[^:]`. Whitespace is a SUBSET of
+# `[^:]`, so `\s+([^:]+)` let both quantifiers claim the same run and a log line
+# with a long space run and no colon after it cost O(n^2): measured 0.011 / 0.185
+# / 0.838s at 1,000 / 4,000 / 8,000 spaces. Requiring the logger's FIRST
+# character to be neither a colon nor whitespace removes the overlap without
+# narrowing what matches - a logger name never begins with a space.
 _LOG_LINE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} (\w+)\s+([^:]+): (.*)$"
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} (\w+)\s+([^:\s][^:]*): (.*)$"
 )
 _NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?")
 _ERROR_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})

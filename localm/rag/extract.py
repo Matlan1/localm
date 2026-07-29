@@ -790,8 +790,15 @@ def _extract_docx(data: bytes, filename: str) -> str:
             xml = _read_zip_member(zf, "word/document.xml", filename)
     except (zipfile.BadZipFile, KeyError, OSError) as e:
         raise ExtractError(f"Cannot parse {filename} as .docx: {e}")
-    # Tabs and explicit breaks inside runs
-    xml = re.sub(r"<w:(?:tab|br|cr)\b[^>]*/?>", "\t", xml)
+    # Tabs and explicit breaks inside runs. The attribute span is `[^<>]*`, NOT
+    # `[^>]*`: bounded only by `>`, a malformed document whose openers never close
+    # (`'<w:br' * n`, no `>` anywhere) makes the class run to end-of-text and then
+    # backtrack a character at a time, from EVERY opener - quadratic, measured
+    # 0.012 / 0.157 / 2.575s at 2.5 / 10 / 40 KB of document.xml. Excluding `<`
+    # too stops each attempt at the next tag instead, which is O(1) per opener.
+    # Same justification the run extractor below already gives for its own class:
+    # XML escapes `<`, so a real attribute value can never contain one.
+    xml = re.sub(r"<w:(?:tab|br|cr)\b[^<>]*/?>", "\t", xml)
     # Split on the paragraph END tag - a LINEAR str.split, not a backtracking
     # regex. The old `<w:p\b.*?</w:p>` findall was quadratic on malformed XML
     # with tens of thousands of unmatched <w:p openers (ReDoS: ~135s CPU on a
@@ -806,7 +813,14 @@ def _extract_docx(data: bytes, filename: str) -> str:
         # can't stop, since it raises only after the burn). XML text is escaped,
         # so a real run never contains a raw '<'; `[^<]*` stops at the next tag and
         # cannot backtrack across openers, making this O(n) while staying correct.
-        runs = re.findall(r"<w:t\b[^>]*>([^<]*)</w:t>", para)
+        # The ATTRIBUTE span is `[^<>]*` for the same reason the content group is
+        # `[^<]*`. The content group was already hardened; the attribute one was
+        # missed, and it has the identical shape: with only `>` excluded, a
+        # paragraph of `'<w:t' * n` openers that never close scans to the end and
+        # backtracks once per opener (0.014 / 0.178 / 0.799s at 8 / 32 / 64 KB).
+        # A hardening pass that fixes one class in a pattern and leaves its
+        # sibling is exactly how this survived the first round.
+        runs = re.findall(r"<w:t\b[^<>]*>([^<]*)</w:t>", para)
         if runs:
             paragraphs.append(_unescape_xml("".join(runs)))
     return "\n\n".join(paragraphs)
