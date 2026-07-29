@@ -23,8 +23,10 @@ import mimetypes
 import os
 import re
 import stat as _stat
+import subprocess
 import sys
 import tempfile
+import traceback
 import shutil
 
 # Isolate LOCALM_HOME globally at import time so that any module importing
@@ -47,6 +49,7 @@ os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
 def pytest_sessionfinish(session, exitstatus):
     _cleanup_test_home()
     _report_system_path_touches(session)
+    _report_installer_runs(session)
     _report_wrong_temp_root(session)
 
 
@@ -475,6 +478,185 @@ def _report_system_path_touches(session):
         return
     print("\nSYSTEM PATH TOUCHES DETECTED (tests must stay inside tmp_path):\n"
           + _format_syspath_hits(_SYSPATH_HITS) + "\n" + _SYSPATH_ADVICE)
+    if getattr(session, "exitstatus", 0) == 0:
+        session.exitstatus = 1
+
+
+# --------------------------------------------------------------------------- #
+#  No test may install packages INTO THE INTERPRETER RUNNING THE SUITE         #
+#                                                                              #
+#  Found the hard way: windows CI went red at roughly 1 in 3 with              #
+#  `AttributeError: module 'numpy' has no attribute 'asarray'` from            #
+#  rag/store.py, on unrelated branches, with master green in the same window.  #
+#  numpy is not a declared dependency and never appears in the install step.   #
+#                                                                              #
+#  Cause: a test reaches a REAL installer, captured live from the CI process   #
+#  table as `uv pip install --python <the venv running the suite>              #
+#  faster-whisper>=1.2.1`. numpy comes in transitively, and WHILE THE WHEEL IS #
+#  UNPACKING `site-packages/numpy` exists with no `__init__.py` yet - which is #
+#  a PEP 420 namespace package, so `import numpy` SUCCEEDS and returns a       #
+#  module with no attributes. Any worker calling _cosine inside that window    #
+#  gets the AttributeError. The install then finishes, __init__.py lands, and  #
+#  the evidence erases itself, which is why it never reproduces afterwards.    #
+#                                                                              #
+#  Nothing keyed on the exception type can catch that: nothing raises. And the #
+#  reason it is invisible on a developer box is worse - numpy is usually       #
+#  already installed there, so the requirement is satisfied, no install runs,  #
+#  and the window never opens. The bug hides wherever anyone would look for it.#
+#                                                                              #
+#  `deps._run_pip` passes `--python sys.executable`, so the install lands in   #
+#  WHATEVER INTERPRETER THE SUITE IS ON: a throwaway venv in CI, but the       #
+#  shared .venv when the suite is run locally - and #839 made the local suite  #
+#  the load-bearing gate. So this is a rule breach with no author.             #
+#                                                                              #
+#  Installing into a DISPOSABLE venv under tmp_path stays allowed: the         #
+#  managed-ComfyUI tests legitimately build one and pip into it. The line is   #
+#  the TARGET, not the act, which is why this needs no allowlist to start with.#
+# --------------------------------------------------------------------------- #
+
+_INSTALLER_HITS: dict = {}
+_INSTALLER_ARMED = False
+
+
+def _norm_path(p) -> str:
+    try:
+        return os.path.normcase(os.path.abspath(str(p)))
+    except (OSError, ValueError):
+        return os.path.normcase(str(p))
+
+
+def _installer_argv(cmd) -> list:
+    if isinstance(cmd, (list, tuple)):
+        return [str(a) for a in cmd]
+    if isinstance(cmd, str):
+        return cmd.split()
+    return []
+
+
+def _stem(p: str) -> str:
+    return os.path.splitext(os.path.basename(p))[0].lower()
+
+
+def _installs_into_this_interpreter(cmd):
+    """The reason string when *cmd* installs into the running interpreter, else None.
+
+    Deliberately narrow. It must not fire on `pip cache dir`, `pip freeze` or
+    `pip list` (a real pip child with no install is fine and IS used by the
+    cache-containment tests), nor on an install aimed at another interpreter."""
+    argv = _installer_argv(cmd)
+    if not argv or "install" not in [a.lower() for a in argv]:
+        return None
+
+    head = _stem(argv[0])
+    target = None
+    if head == "uv" and [a.lower() for a in argv[1:3]] == ["pip", "install"]:
+        if "--python" in argv:
+            target = argv[argv.index("--python") + 1]
+        else:
+            # uv with no explicit target resolves to the ACTIVE environment,
+            # which under the suite is the one running it.
+            target = os.environ.get("VIRTUAL_ENV") or sys.executable
+    elif len(argv) >= 3 and argv[1] == "-m" and _stem(argv[2]) == "pip":
+        if "install" not in [a.lower() for a in argv[3:4]]:
+            return None                      # `-m pip cache dir`, `-m pip freeze`
+        target = argv[0]
+    elif head in ("pip", "pip3"):
+        target = argv[0]                     # a pip shim; judged by its location
+
+    if target is None:
+        return None
+
+    t = _norm_path(target)
+    if t == _norm_path(sys.executable) or t.startswith(_norm_path(sys.prefix)):
+        return "installs into the interpreter running the suite: " + " ".join(argv[:8])
+    return None
+
+
+def _arm_installer_guard() -> bool:
+    """Patch subprocess.Popen once, at import.
+
+    Popen rather than run(): run() goes through Popen, so one seam covers both,
+    and `deps._run_pip` uses Popen directly. A test that fakes Popen for itself
+    replaces this wrapper for that test and is therefore never flagged - correct,
+    because a faked installer installs nothing."""
+    global _INSTALLER_ARMED
+    if _INSTALLER_ARMED:
+        return False
+    real_popen = subprocess.Popen
+
+    class _GuardedPopen(real_popen):
+        def __init__(self, args, *a, **kw):
+            reason = _installs_into_this_interpreter(args)
+            if reason:
+                origin = "unknown"
+                for frame in reversed(traceback.extract_stack()[:-1]):
+                    f = frame.filename.replace("\\", "/")
+                    if "/tests/" in f or "/localm/" in f:
+                        origin = f"{os.path.basename(frame.filename)}:{frame.lineno}"
+                        break
+                key = (reason, origin)
+                _INSTALLER_HITS[key] = _INSTALLER_HITS.get(key, 0) + 1
+                # BLOCK, do not merely record. Recording would still let the
+                # install run, which is the whole harm: it mutates the suite's
+                # own environment mid-run (and the developer's shared venv when
+                # run locally), and the unpacking package is briefly importable
+                # with no attributes, failing unrelated tests in other workers.
+                # Reporting after the fact cannot undo either. The offending test
+                # fails here AND is named by the fixture below.
+                raise RuntimeError(
+                    "BLOCKED by tests/conftest.py: " + reason + "\n"
+                    + _INSTALLER_ADVICE)
+            super().__init__(args, *a, **kw)
+
+    subprocess.Popen = _GuardedPopen
+    _INSTALLER_ARMED = True
+    return True
+
+
+_arm_installer_guard()
+
+
+_INSTALLER_ADVICE = (
+    "  A test must never install packages into the interpreter it is running on.\n"
+    "  In CI that mutates the throwaway venv MID-RUN, and a package that is\n"
+    "  unpacking is briefly importable with NO attributes (a directory with no\n"
+    "  __init__.py is a namespace package), which fails unrelated tests in other\n"
+    "  workers with errors that point nowhere near the cause. Run locally, the same\n"
+    "  line mutates the developer's shared venv.\n"
+    "  Fix the TEST, not this guard: stub the installer (monkeypatch subprocess.Popen\n"
+    "  or deps._run_pip), drive the code path with dependency installation disabled,\n"
+    "  or point the install at a DISPOSABLE venv under tmp_path - installing into one\n"
+    "  of those is allowed and is not what this guard reports.")
+
+
+def _format_installer_hits(hits) -> str:
+    return "\n".join(f"    {reason}\n        from {origin}   x{count}"
+                     for (reason, origin), count in sorted(hits.items()))
+
+
+@pytest.fixture(autouse=True)
+def _no_installer_into_this_interpreter(request):
+    """Fail the test that spawned it, for the same reason the sibling guard does:
+    under ``-n auto`` a worker's exitstatus does not become the run's, but a failed
+    test does - and it names the culprit instead of leaving a global side effect to
+    attribute by hand afterwards (which is exactly what made this take a day)."""
+    before = dict(_INSTALLER_HITS)
+    yield
+    new = {k: v - before.get(k, 0) for k, v in _INSTALLER_HITS.items()
+           if v > before.get(k, 0)}
+    if new:
+        pytest.fail("this test ran a package installer against the suite's own "
+                    "interpreter:\n" + _format_installer_hits(new) + "\n"
+                    + _INSTALLER_ADVICE)
+
+
+def _report_installer_runs(session):
+    """Backstop for an install at import or collection time, before any test ran.
+    A no-op on the xdist controller, which spawns none of its own."""
+    if not _INSTALLER_HITS:
+        return
+    print("\nPACKAGE INSTALLER RUN AGAINST THE SUITE'S OWN INTERPRETER:\n"
+          + _format_installer_hits(_INSTALLER_HITS) + "\n" + _INSTALLER_ADVICE)
     if getattr(session, "exitstatus", 0) == 0:
         session.exitstatus = 1
 
