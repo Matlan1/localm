@@ -800,3 +800,144 @@ def test_marker_variant_stays_linear_when_none_of_many_markers_balance():
         "unbalanced markers plus one stray closing brace - the per-marker "
         "balance rescan is quadratic again")
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+#  Regression: a REAL call recovered by an earlier version of this scan must
+#  still be recovered, not just "the scan stays fast"
+# ---------------------------------------------------------------------------
+#
+# The fix above (rescan-budget cap replacing the unconditional "skip to
+# last_close+1") was needed because the unconditional skip shipped a real
+# correctness regression alongside the perf fix: a failed scan from an EARLIER
+# marker running all the way through last_close does NOT prove no LATER
+# marker can balance - a scan restarted at a later marker resets its own
+# depth to 0, so it can reach 0 again well before last_close even though the
+# earlier marker's scan, carrying that marker's own leftover depth, never
+# did. Measured directly on this repo (bisected against 3a649bbb^, the commit
+# immediately before #895): an unclosed canonical ``<tool_call>`` followed by
+# a well-formed one later in the SAME response went from 1 call recovered to
+# 0. Reported against qwen2.5-coder-1.5b-instruct - a "default" family model
+# per prompts.py, taught ONLY the canonical ``<tool_call>`` XML wrapper (not
+# the ``<|tool_call>`` finetune dialect _iter_marker_variant_calls exists
+# for) - so this pass is also the safety net _iter_xml_tool_calls's strict
+# opener/closer pairing relies on whenever an earlier unclosed tag steals a
+# later call's closing tag (see _pair_delimited: a closer search that finds
+# ANY later ``</tool_call>`` pairs with it regardless of which opener it
+# structurally belongs to, so pass 1 alone mis-reads this exact shape).
+
+def test_marker_variant_recovers_a_later_call_after_an_earlier_one_fails_to_balance():
+    """The mangled ``<|tool_call>`` dialect: an earlier malformed attempt must
+    not suppress a later, independent, well-formed one in the same response."""
+    text = (
+        '<|tool_call>call:write_file{"path": "x.py", "content": "def f():\\n'
+        '    pass'  # deliberately truncated: opens more braces than it closes
+        '\n\nLet me try that again.\n'
+        '<|tool_call>call:run_tests{"runner": "pytest"}<tool_call|>\n'
+    )
+    calls = parse_tool_calls(text, tool_names={"write_file", "run_tests"})
+    names = [c.name for c in calls]
+    assert "run_tests" in names, (
+        f"lost the later, well-formed call behind an earlier malformed one: {names}")
+
+
+def test_xml_wrapper_recovers_via_marker_fallback_after_an_earlier_unclosed_tag():
+    """The shape actually reported: a 'default'-family model (prompts.py) is
+    taught ONLY the canonical ``<tool_call>`` XML wrapper, never the
+    ``<|tool_call>`` dialect - so THIS is the path real small-model traffic
+    exercises. An earlier turn (or an earlier attempt in the same turn) that
+    opened ``<tool_call>`` without closing it must not cost a later,
+    well-formed ``<tool_call>...</tool_call>`` its execution."""
+    text = (
+        "Let me read the file first.\n"
+        "<tool_call>\n"
+        '{"name": "read_file", "args": {"path": "strings_utils.py"'
+        # truncated: no closing brace, no </tool_call> - this attempt is lost
+        "\n\nNow I will run the tests.\n"
+        "<tool_call>\n"
+        '{"name": "run_tests", "args": {"runner": "pytest"}}\n'
+        "</tool_call>\n"
+    )
+    calls = parse_tool_calls(text, tool_names={"read_file", "run_tests"})
+    names = [c.name for c in calls]
+    assert "run_tests" in names, (
+        f"lost the later, well-formed <tool_call> behind an earlier unclosed one: {names}")
+
+
+def test_marker_variant_rescan_budget_covers_realistic_repeated_failures():
+    """The cap that keeps the above fix linear (_MAX_EXPENSIVE_MARKER_RESCANS)
+    must not be so tight that an ordinary struggling small model - a handful
+    of botched attempts before it gets the format right, not thousands - loses
+    the call it finally got right. 10 failed attempts is already far more than
+    _MAX_TOOL_REPAIRS (2) lets a real session accumulate ACROSS turns; this
+    pins the budget stays generous within a SINGLE response too."""
+    failed_attempt = '<|tool_call>call:write_file{"path": "x.py", "content": "unterminated'
+    text = ("\n\n".join([failed_attempt] * 10)
+            + '\n\n<|tool_call>call:run_tests{"runner": "pytest"}<tool_call|>\n')
+    calls = parse_tool_calls(text, tool_names={"write_file", "run_tests"})
+    names = [c.name for c in calls]
+    assert "run_tests" in names, (
+        f"lost the well-formed call after only 10 realistic failed attempts: {names}")
+
+
+def test_marker_variant_drops_a_call_beyond_the_rescan_budget_by_design():
+    """States the boundary of the fix above explicitly, so it is a documented
+    design property rather than a gap left for someone to discover later:
+    _MAX_EXPENSIVE_MARKER_RESCANS is a BOUND, not a full fix. Beyond it, this
+    pass exhausts its retry budget and falls back to the fast (lossy)
+    last_close+1 skip - a well-formed call past the budget is STILL dropped,
+    exactly like on unpatched HEAD, just further out.
+
+    This is a deliberate, stated trade-off: no genuine model turn gets
+    anywhere near this many failed attempts in one response (see
+    test_marker_variant_rescan_budget_covers_realistic_repeated_failures for
+    the realistic bound this fix DOES cover - 10, already far more than
+    _MAX_TOOL_REPAIRS=2 lets a real session accumulate ACROSS whole turns).
+    This input is adversarial by construction, the same class of input
+    test_marker_variant_stays_linear_when_none_of_many_markers_balance uses
+    to pin the performance side of the same trade-off.
+    """
+    from localm.plugins.coder.parser import _MAX_EXPENSIVE_MARKER_RESCANS
+    failed_attempt = '<|tool_call>call:write_file{"path": "x.py", "content": "unterminated'
+    n_failures = _MAX_EXPENSIVE_MARKER_RESCANS + 8
+    text = ("\n\n".join([failed_attempt] * n_failures)
+            + '\n\n<|tool_call>call:run_tests{"runner": "pytest"}<tool_call|>\n')
+    calls = parse_tool_calls(text, tool_names={"write_file", "run_tests"})
+    names = [c.name for c in calls]
+    assert "run_tests" not in names, (
+        "expected the budget-exhausted fallback to still drop this call - if "
+        "it is now recovered, the fix's boundary moved and this test (and the "
+        "PR description) need to say where the new boundary is")
+
+
+def test_marker_variant_rescan_budget_keeps_cost_linear_not_quadratic():
+    """Asserts the ARITHMETIC the fix relies on, not a literal.
+
+    The property that must hold is: total cost is bounded by
+    ``_MAX_EXPENSIVE_MARKER_RESCANS`` full rescans (a CONSTANT), not by one
+    rescan per marker (the #895 regression, O(n) rescans of up to O(n) each -
+    quadratic). That means cost must scale LINEARLY with input size once the
+    budget is the same, not quadratically. Checked as a ratio rather than a
+    fixed wall/CPU budget so it stays meaningful if either
+    _MAX_EXPENSIVE_MARKER_RESCANS or the witness size is retuned later: a 4x
+    input increase should cost roughly 4x (linear), not roughly 16x
+    (quadratic) - measured directly on this project's venv, quiet box:
+    4,000->16,000 markers (4x) cost 0.11s->0.42s (3.9x); 16,000->64,000 (4x)
+    cost 0.42s->1.69s (4.0x). Asserted on CPU time (_timed_cpu), matching the
+    convention #895 itself established for these tests: targeted runs on this
+    box now execute concurrently, so a wall-clock bound would be flaky under
+    sibling load.
+    """
+    small_n, big_n = 4_000, 16_000
+    _, small_cpu = _timed_cpu(
+        parse_tool_calls, ("<tool_call>{" * small_n) + "}")
+    _, big_cpu = _timed_cpu(
+        parse_tool_calls, ("<tool_call>{" * big_n) + "}")
+    growth = big_n // small_n
+    ratio = big_cpu / max(small_cpu, 1e-6)
+    assert ratio < 8.0, (
+        f"a {growth}x input increase cost {ratio:.1f}x more CPU time "
+        f"({small_cpu:.3f}s -> {big_cpu:.3f}s) - closer to quadratic "
+        f"({growth ** 2}x) than linear ({growth}x); the expensive-rescan "
+        "budget is no longer bounding total cost to a constant number of "
+        "full rescans")
