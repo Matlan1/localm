@@ -12,6 +12,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Security
+- **An owner key you chose yourself is no longer stored as a fast, unsalted
+  fingerprint.** localm lets you pick your own key (`localm key set`, the
+  `LOCALM_API_KEY` variable, or writing `auth.key` by hand), and a key you chose
+  can be short or memorable. Its fingerprint was recorded in `sessions.json` and
+  `jobs.json` with a single fast hash, which anyone able to read those files
+  could work backwards from to recover the key itself - and unlike the key file
+  beside them, those two were readable by other accounts on Windows until
+  recently. Chosen keys now use a slow, salted derivation (scrypt), worked out
+  once per run instead of on every request, so day-to-day speed is unchanged.
+  Existing installs upgrade themselves the next time the key is used: you are
+  not signed out, scheduled jobs keep their owner, and nothing needs re-entering.
+  Keys that localm generated for you were never at risk (they are random and long
+  enough that hash speed is irrelevant) and keep working exactly as before.
 - **A plugin name can no longer escape the plugins folder.** Installing or
   refreshing a plugin took the name you gave it and joined it straight onto a
   path, so a crafted name like `..\something` pointed at a directory NEXT TO

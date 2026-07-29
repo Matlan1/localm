@@ -33,6 +33,7 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -236,6 +237,17 @@ def set_api_key(key: Optional[str]) -> None:
     tmp.write_text(key.strip() + "\n", encoding="utf-8")
     os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
     _restrict_perms(path)
+    # The key changed, so any memoised derivation for the OLD one is stale.
+    _forget_cached_digests()
+    # Derive at SET time, not on the per-request verify path: this is the one
+    # moment we are allowed to spend ~100ms on a memory-hard KDF. Doing it here
+    # also means the salt is on disk before anything can stamp an identity with
+    # it. Best-effort: a failure costs a derivation on first use, not access.
+    try:
+        _owner_digest(key)
+    except Exception as e:
+        logger.warning("could not pre-derive the owner key identity (%s); it "
+                       "will be derived on first use instead", e)
 
 
 def clear_api_key() -> None:
@@ -256,6 +268,16 @@ def clear_api_key() -> None:
         logger.warning("could not remove the keystore %s (%s); scoped keys may "
                        "still be active until it is deleted by hand",
                        keystore_file(), e)
+    # The derivation records describe credentials that no longer exist. They hold
+    # no plaintext and authenticate nothing, but a clear that leaves credential
+    # artefacts behind is not a clear - and a stale salt would silently re-link a
+    # future identical key to the cleared install's identities.
+    try:
+        owner_kdf_file().unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("could not remove the owner key derivation records %s "
+                       "(%s); delete it by hand", owner_kdf_file(), e)
+    _forget_cached_digests()
 
 
 def regenerate_key(nbytes: int = 32) -> str:
@@ -304,16 +326,22 @@ def require_auth_enabled() -> bool:
         return True
 
 
-def _restrict_perms(path: Path) -> None:
+def _restrict_perms(path: Path) -> bool:
     """Best-effort: restrict the key file to the current user. No-op on failure
-    or unsupported platforms - the data dir is already user-scoped.
+    or unsupported platforms - the data dir is already user-scoped. Returns True
+    when the tightening is believed to have happened.
 
     The implementation moved to ``config.restrict_file_perms`` so sessions.json
     and jobs.json (which hold the key DIGEST) get the identical treatment as
     auth.key (which holds the PLAINTEXT); they previously did not on Windows.
-    Kept as a name here because it is referenced throughout this module."""
+    Kept as a name here because it is referenced throughout this module.
+
+    The bool is PASSED THROUGH rather than discarded so a caller doing the atomic
+    temp+replace dance can restrict the temp file and retry on the destination
+    only when the first attempt failed - the contract sessions.py already relies
+    on. Dropping it here made that pattern silently degrade to always retrying."""
     from localm.config import restrict_file_perms
-    restrict_file_perms(path)
+    return restrict_file_perms(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -340,47 +368,372 @@ def keystore_file() -> Path:
     return home_dir() / "auth.json"
 
 
-def _hash_key(key: str) -> str:
-    # KNOWN ACCEPTED WEAKNESS on the user-chosen-owner-key path, recorded rather
-    # than justified. CodeQL py/weak-sensitive-data-hashing (alert 88) flags this
-    # unsalted SHA-256, and on one of the two paths that reach it the rule is
-    # RIGHT. Do not read this comment as a defence of the status quo.
-    #
-    # Two kinds of secret arrive here, and they are not equivalent:
-    #   * NAMED KEYSTORE KEYS are always secrets.token_urlsafe(32) (see
-    #     create_key) - 256 bits of CSPRNG output. No dictionary and no rainbow
-    #     table touches 2^256, so a KDF's work factor buys nothing here.
-    #   * THE OWNER KEY CAN BE USER-CHOSEN, and may be a human-memorable
-    #     password. `localm key set KEY` persists a key the user provides
-    #     (docs/cli.md), and set_api_key's own docstring above records that its
-    #     MIN_KEY_LEN and charset checks are CONFIG-time guards only: the
-    #     LOCALM_API_KEY env var and a hand-edited auth.key BYPASS THAT FUNCTION
-    #     ENTIRELY. So a short, low-entropy owner key reaches this line
-    #     unvalidated, and its digest is then persisted in sessions.json and
-    #     jobs.json. Against that input a single unsalted SHA-256 is exactly what
-    #     the rule warns about.
-    #
-    # Why it is not simply swapped for a KDF here: this runs on the PER-REQUEST
-    # verify path (_principal_from_token), so a naive scrypt/argon2 at this line
-    # is a latency cost on every authenticated request and a cheap DoS lever.
-    # The fix therefore has to move the expensive check off the hot path - verify
-    # once at session establishment (sessions.py already stores a key_hash), or
-    # salt+KDF the owner key at SET time and keep generated tokens on the cheap
-    # path behind a per-key marker. That is a design decision with a measurable
-    # latency budget, not a one-line edit, and it is open rather than settled.
-    #
-    # SEPARATE, and fixed: the files holding this digest (sessions.json,
-    # jobs.json) were not permission-restricted on Windows while auth.key holding
-    # the PLAINTEXT was, so the digest was readable where the secret was not.
-    # See config.restrict_file_perms and its callers. That was the ACL half of
-    # alert 88; it is NOT the whole of it, and the alert should not be treated as
-    # closed by it.
-    #
-    # surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
-    # UnicodeEncodeError on a lone surrogate, which would just move the crash here
-    # from the compare. Byte-identical to encode("utf-8") for every key that
-    # encodes at all, so no stored hash changes.
+# --------------------------------------------------------------------------- #
+#  Key digests: a KDF for the user-choosable owner key, fast for generated ones #
+# --------------------------------------------------------------------------- #
+# Two kinds of secret are digested here and they are NOT equivalent:
+#
+#   * NAMED KEYSTORE KEYS are always secrets.token_urlsafe(32) (create_key is the
+#     only writer) - 256 bits of CSPRNG output. No dictionary and no rainbow table
+#     touches 2^256, so a KDF's work factor buys nothing. These stay on the cheap
+#     path, marked EXPLICITLY on the record (never inferred from the key's shape).
+#   * THE OWNER KEY CAN BE USER-CHOSEN and may be human-memorable. `localm key set
+#     KEY` persists a key the user provides, and LOCALM_API_KEY / a hand-edited
+#     auth.key bypass set_api_key entirely, so they are not even length- or
+#     charset-checked. Its digest is PERSISTED (sessions.json key_hash, jobs.json
+#     owner), where one fast unsalted hash is an offline brute-force oracle that
+#     recovers the PLAINTEXT - which does authenticate. That is CodeQL alert 88
+#     (py/weak-sensitive-data-hashing) and it is a true positive.
+#
+# The digest is also a stable PRINCIPAL IDENTIFIER: it is recomputed later and
+# compared with == (jobs.runner._shell_still_authorized, principal_id -> job
+# ownership, sessions.key_hash). So it must be DETERMINISTIC for a given key - a
+# per-call random salt would break every one of those. The salt is therefore
+# persisted PER KEY, and the derivation is memoised per process (see
+# _digest_cache) so the KDF never runs on the per-request verify path more than
+# once per key.
+_SCRYPT_N = 2 ** 14            # RFC 7914 interactive-login cost
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
+# 128*N*r = 16 MiB is the actual working set; ask for headroom explicitly rather
+# than relying on OpenSSL's default cap, which has varied across versions and
+# fails the derivation outright when it is too low.
+_SCRYPT_MAXMEM = 64 * 1024 * 1024
+
+# Marker recorded ON a stored record saying which construction produced its
+# digest, so the cheap path is a DECLARED property of that record and not a guess
+# from the key's shape. A record with no marker predates this and is a generated
+# keystore token (create_key was the only writer), so it reads as _ALG_FAST and is
+# upgraded in place on its next successful verify.
+_ALG_FAST = "sha256"
+_ALG_KDF = "scrypt"
+
+# How many owner-key verifier records to keep. The same install legitimately sees
+# more than one owner key over time (a LOCALM_API_KEY override for one run, then
+# the file again; a rotation), and the SAME key must always derive the SAME digest
+# or job ownership and session identity would flip underneath the user. Keeping a
+# few records makes that stable; the cap stops the file growing without bound.
+_OWNER_KDF_KEEP = 8
+
+
+def owner_kdf_file() -> Path:
+    """Path to the owner-key KDF verifier records (inside the localm data dir)."""
+    from localm.config import home_dir
+    return home_dir() / "auth.kdf.json"
+
+
+def _fast_digest(key: str) -> str:
+    """Unsalted sha256 of *key*. Correct ONLY for a 256-bit generated token; for
+    anything a human may have chosen, use the KDF path.
+
+    surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
+    UnicodeEncodeError on a lone surrogate, which would move the crash here from
+    the compare. Byte-identical to encode("utf-8") for every key that encodes at
+    all, so no stored digest changes."""
     return hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,
+                   dklen: int) -> str:
+    """Salted scrypt of *key* -> hex. A module-level function (not an inline call)
+    so the memoisation above it can be proven to work: a test patches this and
+    counts the calls."""
+    return hashlib.scrypt(key.encode("utf-8", "surrogatepass"), salt=salt,
+                          n=n, r=r, p=p, dklen=dklen,
+                          maxmem=_SCRYPT_MAXMEM).hex()
+
+
+# Memoises the EXPENSIVE derivation only: fast-path digests are never inserted, so
+# a caller spraying random bearer tokens cannot pollute or grow this (the entries
+# it would create are exactly the ones we refuse to make). Bounded LRU because an
+# unbounded cache on a per-request path is a memory leak. Keyed on the presented
+# secret's fast DIGEST plus the data home - never the plaintext, and never a bare
+# digest, because one process legitimately serves more than one LOCALM_HOME (the
+# test suite does) and each home has its own salt.
+_DIGEST_CACHE_MAX = 64
+_digest_cache: "OrderedDict[str, str]" = OrderedDict()
+_DIGEST_CACHE_LOCK = threading.Lock()
+
+# Serialises MINTING an owner-key record. Without it two concurrent requests
+# presenting the owner key with a cold memo both find no record, both mint a
+# FRESH SALT, and both write - so the two requests stamp two different identities
+# and only one of them matches what ends up on disk. The identity would then be
+# unstable exactly when the server is busiest. Distinct from _DIGEST_CACHE_LOCK
+# (which only guards the dict) because it must be held across the whole
+# read-derive-write, and it is taken BEFORE any sessions lock, never after.
+#
+# RLock, not Lock: _hash_key takes it to make its check-then-derive atomic and
+# then calls _owner_digest, which takes it again so that set_api_key's DIRECT
+# call is covered by the same mutex. A plain Lock would deadlock that nesting.
+_OWNER_KDF_LOCK = threading.RLock()
+
+
+def _cache_scope() -> str:
+    """Scope component for a cache entry: which data home the salt came from."""
+    try:
+        return str(owner_kdf_file())
+    except Exception:
+        return ""
+
+
+def _cache_get(ck: str) -> Optional[str]:
+    with _DIGEST_CACHE_LOCK:
+        hit = _digest_cache.get(ck)
+        if hit is not None:
+            _digest_cache.move_to_end(ck)
+        return hit
+
+
+def _cache_put(ck: str, digest: str) -> None:
+    with _DIGEST_CACHE_LOCK:
+        _digest_cache[ck] = digest
+        _digest_cache.move_to_end(ck)
+        while len(_digest_cache) > _DIGEST_CACHE_MAX:
+            _digest_cache.popitem(last=False)
+
+
+def _forget_cached_digests() -> None:
+    """Drop the memoised derivations. Called whenever the owner key changes, so a
+    rotation takes effect at once instead of serving a stale identity."""
+    with _DIGEST_CACHE_LOCK:
+        _digest_cache.clear()
+
+
+def _load_owner_kdf() -> list:
+    """The owner-key verifier records, or [] when there are none.
+
+    A present-but-unreadable/corrupt file returns [] so a fresh record is minted
+    rather than locking the owner out of their own identity - the file is a
+    derivation aid, not a credential: it holds no plaintext, and nothing
+    AUTHENTICATES from it (the owner key is verified by plaintext ct_equal against
+    auth.key). Failing closed here would buy no security and would break a working
+    install, so the damage is SURFACED and repaired instead of being fatal."""
+    path = owner_kdf_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        logger.warning("owner key KDF file %s is unreadable or corrupt (%s); "
+                       "minting a fresh derivation record. Sessions and jobs "
+                       "owned by the owner key are re-linked automatically on "
+                       "the next successful verify", path, e)
+        return []
+    if not isinstance(data, dict):
+        return []
+    recs = data.get("records")
+    return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
+
+
+def _save_owner_kdf(records: list) -> None:
+    from localm.config import ensure_dirs
+    ensure_dirs()
+    path = owner_kdf_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"v": 1, "records": records}, indent=2),
+                   encoding="utf-8")
+    # Restrict the TEMP file (it already holds the whole payload) before the
+    # rename, exactly as sessions._save does, so a crash between the two lines
+    # cannot leave an unrestricted copy behind.
+    ok = _restrict_perms(path=tmp)
+    os.replace(tmp, path)
+    if not ok:
+        _restrict_perms(path=path)
+
+
+def _owner_kdf_record_for(key: str, records: list) -> Optional[dict]:
+    """The existing verifier record matching *key*, or None.
+
+    Verifies with EACH record's OWN stored parameters, which is what lets the cost
+    parameters be raised later without invalidating a key derived under the old
+    ones. Only ever called for a key already known to be the owner key, so the
+    number of derivations here is bounded by _OWNER_KDF_KEEP, once per process."""
+    for r in records:
+        if r.get("alg") != _ALG_KDF:
+            continue
+        try:
+            salt = bytes.fromhex(str(r.get("salt", "")))
+            digest = _scrypt_derive(key, salt, int(r["n"]), int(r["r"]),
+                                    int(r["p"]), int(r["dklen"]))
+        except (ValueError, KeyError, TypeError) as e:
+            # A hand-edited or truncated row must not break the whole lookup.
+            logger.debug("skipping an unusable owner KDF record (%s)", e)
+            continue
+        if ct_equal(digest, str(r.get("digest", ""))):
+            return r
+    return None
+
+
+def _owner_digest(key: str) -> str:
+    """The KDF-derived principal identity for the OWNER key *key*.
+
+    Reuses the persisted record for this key when there is one, so the value is
+    stable forever; otherwise mints one (fresh salt, current cost parameters) and
+    migrates any identity previously recorded under the legacy unsalted digest.
+
+    Holds _OWNER_KDF_LOCK across the whole read-derive-write so two callers
+    cannot mint two different salts for the same key (see the lock's comment).
+    Reentrant, so _hash_key may hold it already."""
+    with _OWNER_KDF_LOCK:
+        return _owner_digest_locked(key)
+
+
+def _owner_digest_locked(key: str) -> str:
+    records = _load_owner_kdf()
+    existing = _owner_kdf_record_for(key, records)
+    if existing is not None:
+        return str(existing["digest"])
+    salt = secrets.token_bytes(16)
+    rec = {
+        "alg": _ALG_KDF, "salt": salt.hex(), "n": _SCRYPT_N, "r": _SCRYPT_R,
+        "p": _SCRYPT_P, "dklen": _SCRYPT_DKLEN, "created": time.time(),
+        "digest": _scrypt_derive(key, salt, _SCRYPT_N, _SCRYPT_R, _SCRYPT_P,
+                                 _SCRYPT_DKLEN),
+    }
+    records.append(rec)
+    try:
+        _save_owner_kdf(records[-_OWNER_KDF_KEEP:])
+    except OSError as e:
+        # Not fatal: the digest is still correct for THIS process, so auth keeps
+        # working. But it is not persisted, so the next process mints a different
+        # salt and any identity stored under this one stops matching. Say so -
+        # a silent failure here would look like a stable identity that is not
+        # (AGENTS.md rule 5).
+        logger.warning("could not persist the owner key derivation record %s "
+                       "(%s); sessions and jobs stamped in this process may not "
+                       "be recognised after a restart", owner_kdf_file(), e)
+    _migrate_legacy_owner_identity(_fast_digest(key), rec["digest"])
+    return str(rec["digest"])
+
+
+def _migrate_legacy_owner_identity(legacy: str, current: str) -> None:
+    """Re-link anything recorded under the owner key's OLD unsalted digest.
+
+    Runs once, when a key's KDF record is first minted (so an upgraded install
+    migrates on the owner's next successful verify, and an install that never
+    re-authenticates is never touched). Best-effort by design: a failure here
+    costs a re-login, never access, so it is surfaced rather than raised.
+
+    jobs.json is deliberately NOT rewritten here - auth.py has no business
+    importing a plugin's store, and that side already has a documented
+    back-compat path that accepts the legacy digest and stamps the job as
+    owner-owned the first time it matches (see jobs.runner)."""
+    if not legacy or not current or legacy == current:
+        return
+    try:
+        from localm import sessions
+        n = sessions.relink_key_hash(legacy, current)
+        if n:
+            logger.debug("re-linked %d session(s) to the owner key's derived "
+                         "identity", n)
+    except Exception as e:
+        logger.warning("could not re-link existing sessions to the owner key's "
+                       "new derived identity (%s); those sessions stay valid, "
+                       "but a job created from one may not be recognised as the "
+                       "owner's until the next sign-in", e)
+
+
+def _is_owner_key(key: str) -> bool:
+    """True when *key* is the owner key currently in effect. An exact identity
+    check against the live value, NOT a guess from the key's length or alphabet -
+    a user-chosen owner key is indistinguishable from a token by shape."""
+    return ct_equal(key, get_api_key())
+
+
+def _hash_key(key: str) -> str:
+    """The stable identity digest for *key*.
+
+    The owner key (user-choosable, possibly human-memorable) gets a salted scrypt
+    derivation; a generated keystore token gets the cheap unsalted digest, which
+    is sound at 256 bits of CSPRNG entropy. The expensive path is memoised per
+    process, so it costs one derivation per key rather than one per request."""
+    fast = _fast_digest(key)
+    ck = fast + "@" + _cache_scope()
+    hit = _cache_get(ck)
+    if hit is not None:
+        return hit
+    if not _is_owner_key(key):
+        # A generated keystore token, or a token that matches nothing at all
+        # (every wrong guess lands here). Cheap, and never cached, so an attacker
+        # spraying tokens neither pays nor grows anything.
+        return fast
+    with _OWNER_KDF_LOCK:
+        # Re-check under the lock: a concurrent request may have minted the
+        # record (and warmed the memo) while we waited, and deriving again here
+        # would mint a SECOND salt for the same key.
+        hit = _cache_get(ck)
+        if hit is not None:
+            return hit
+        derived = _owner_digest(key)
+        _cache_put(ck, derived)
+    return derived
+
+
+def _record_digest_for(record: dict, key: str, fast: str) -> Optional[str]:
+    """The digest *key* would produce under *record*'s DECLARED construction, or
+    None when the record cannot be evaluated.
+
+    A record with no "alg" predates the marker, and create_key was the only writer
+    then, so it is a generated token on the cheap path. An UNKNOWN alg returns
+    None (refuse to match) rather than falling back to the cheap digest: guessing
+    would let a future strong record be matched by a weak comparison."""
+    alg = record.get("alg") or _ALG_FAST
+    if alg == _ALG_FAST:
+        return fast
+    if alg == _ALG_KDF:
+        try:
+            return _scrypt_derive(key, bytes.fromhex(str(record.get("salt", ""))),
+                                  int(record["n"]), int(record["r"]),
+                                  int(record["p"]), int(record["dklen"]))
+        except (ValueError, KeyError, TypeError) as e:
+            logger.debug("keystore record %s has unusable KDF parameters (%s); "
+                         "it cannot match", record.get("id"), e)
+            return None
+    logger.warning("keystore record %s declares an unknown hash algorithm %r; "
+                   "refusing to match it. A key written by a NEWER localm cannot "
+                   "be verified by this one - upgrade rather than editing the "
+                   "keystore by hand", record.get("id"), alg)
+    return None
+
+
+def _find_keystore_record(key: str, records: list) -> Optional[dict]:
+    """The keystore record *key* authenticates against, or None."""
+    fast = _fast_digest(key)
+    for r in records:
+        cand = _record_digest_for(r, key, fast)
+        if cand is None:
+            continue
+        # ct_equal, not compare_digest: both sides are normally hexdigests, but a
+        # hand-edited or corrupted keystore row could hold a non-ASCII "hash" and
+        # must fail to match, not 500 every request that reaches this loop.
+        if ct_equal(str(r.get("hash", "")), cand):
+            return r
+    return None
+
+
+def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
+    """Stamp the construction marker onto a legacy record, in place.
+
+    This is the transparent format upgrade: a store written before the marker
+    existed keeps verifying, and the first successful verify records what it
+    actually is, so the ambiguity is resolved once instead of being re-guessed
+    forever. Best-effort - a read-only store must not break authentication."""
+    if not key_id:
+        return
+    try:
+        with _KEYSTORE_LOCK:
+            records = _load_keystore()
+            for r in records:
+                if r.get("id") == key_id and not r.get("alg"):
+                    r["alg"] = alg
+                    _save_keystore(records)
+                    return
+    except Exception as e:
+        logger.debug("could not stamp the hash-alg marker on key %s (%s); it "
+                     "still verifies, the upgrade is retried next time",
+                     key_id, e)
 
 
 def _load_keystore() -> list:
@@ -432,11 +785,10 @@ def fs_access_for(token: str, default: str = "none") -> str:
     before this attribute existed defaults to the safe 'none')."""
     if not token or not token.strip():
         return default
-    h = _hash_key(token.strip())
-    for r in _load_keystore():
-        if r.get("hash") == h:
-            return norm_fs_access(r.get("fs_access", default))
-    return default
+    rec = _find_keystore_record(token.strip(), _load_keystore())
+    if rec is None:
+        return default
+    return norm_fs_access(rec.get("fs_access", default))
 
 
 def list_keys() -> list:
@@ -486,7 +838,15 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
     record = {
         "id": secrets.token_hex(6),
         "name": (name or "").strip() or "key",
-        "hash": _hash_key(key),
+        # _fast_digest, not _hash_key: this key was just generated by
+        # generate_key(), so it is 256 bits of CSPRNG output by construction and
+        # the cheap digest is sound. The "alg" marker RECORDS that decision on the
+        # row, so the verify path reads it as a declared property instead of
+        # inferring it from the key's length or alphabet - a user-chosen key is
+        # indistinguishable from a token by shape, which is what made the original
+        # "it is always a generated token" premise wrong (CodeQL 88 / C13).
+        "hash": _fast_digest(key),
+        "alg": _ALG_FAST,
         "scopes": clean,
         "created": time.time(),
         "expires": float(expires) if expires is not None else None,
@@ -694,16 +1054,16 @@ def verify(presented: Optional[str]) -> Optional[set]:
     owner = get_api_key()
     if ct_equal(presented, owner):
         return {S.ADMIN}
-    presented_hash = _hash_key(presented)
-    for r in _load_keystore():
-        # ct_equal, not compare_digest: both sides are normally hexdigests, but a
-        # hand-edited or corrupted keystore row could hold a non-ASCII "hash" and
-        # must fail to match, not 500 every request that reaches this loop.
-        h = r.get("hash", "")
-        if ct_equal(h, presented_hash):
-            exp = r.get("expires")
-            if exp is not None and time.time() > float(exp):
-                return None       # matched a real key, but it has expired
-            _touch_last_used(presented_hash)
-            return set(r.get("scopes", []))
-    return None
+    rec = _find_keystore_record(presented, _load_keystore())
+    if rec is None:
+        return None
+    exp = rec.get("expires")
+    if exp is not None and time.time() > float(exp):
+        return None               # matched a real key, but it has expired
+    if not rec.get("alg"):
+        # Legacy row: it verified on the cheap path, which is what it has always
+        # been. Record that now so the construction is declared rather than
+        # assumed on every later verify.
+        _mark_record_alg(rec.get("id"), _ALG_FAST)
+    _touch_last_used(str(rec.get("hash", "")))
+    return set(rec.get("scopes", []))
