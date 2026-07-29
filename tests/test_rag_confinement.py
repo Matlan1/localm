@@ -26,6 +26,7 @@ does and the CLI never does. A whitelist MISS is offered back to the owner as
 'add and continue' (409), not a dead-end error.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -225,6 +226,124 @@ class TestHardFloor:
         (ssh / "id").write_text("k", encoding="utf-8")
         with pytest.raises(ConfinementError):
             confine_index_path(ssh / "id", None)
+
+
+# --------------------------------------------------------------------------- #
+#  UNC / device path guard (2026-07-29 sweep, H3)                             #
+# --------------------------------------------------------------------------- #
+
+# Same non-routable RFC5737 (TEST-NET-1) address test_admin_fs_routes.py and
+# test_mcpserver.py use: guaranteed never to route anywhere, so even a total
+# fix failure cannot dial a real host from this machine or CI.
+_UNC = r"\\192.0.2.1\share"
+_UNC_FWD = "//192.0.2.1/share"
+_DEVICE = r"\\.\PhysicalDrive0"
+
+
+def _is_unc_or_device(s: str) -> bool:
+    """pathsafe.is_unc_or_device_path's forbidden-prefix check, judged by
+    Windows rules on every host, not gated on os.name - confine_index_path's
+    `p` is HTTP-API-reachable, so the guard refuses `//host/share` everywhere."""
+    return s[:2] in ("\\\\", "//", "\\/", "/\\")
+
+
+class TestUncDeviceGuard:
+    """confine_index_path()'s first statement used to be
+    Path(p).expanduser().resolve() with no lexical check at all - every
+    credential/policy check in this function runs AFTER resolve(), so none of
+    them could have prevented the SMB dial. Same defect class as pull_model's
+    `repo` (PR #893), just a different sink."""
+
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+    def test_rejected_without_touching_the_filesystem(self, home_env, monkeypatch, bad):
+        real_resolve = Path.resolve
+        seen: list = []
+
+        def spy(self, *a, **kw):
+            s = str(self)
+            seen.append(s)
+            if _is_unc_or_device(s):
+                raise AssertionError(
+                    f"Path.resolve() reached the filesystem with a UNC/device "
+                    f"string: {s!r} - this is the SMB dial (and the "
+                    "net-NTLMv2 leak), which happens before any exception is "
+                    "raised")
+            return real_resolve(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", spy)
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(bad, _wl())
+        assert ei.value.reason == "unc_or_device"
+        assert not any(_is_unc_or_device(s) for s in seen), (
+            "the UNC/device string reached Path.resolve() - the whole finding "
+            "is that this syscall happens before the confinement checks below "
+            "it get a chance to refuse it")
+
+    def test_rejected_in_blacklist_mode_and_cli_mode_too(self, home_env):
+        # Mode-independent, like the credential/secret-file hard floor: refused
+        # in blacklist mode (nothing in the denied list would catch it, since
+        # denial matching needs resolve() to have already run) and even for the
+        # unconfined CLI (policy=None) - there is no legitimate reason for a
+        # HuggingFace-style repo/path argument this codebase accepts anywhere
+        # to be UNC/device syntax.
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(_UNC, _bl())
+        assert ei.value.reason == "unc_or_device"
+        with pytest.raises(ConfinementError) as ei2:
+            confine_index_path(_UNC, None)
+        assert ei2.value.reason == "unc_or_device"
+
+    def test_ordinary_path_still_resolves(self, home_env):
+        """Control: an ordinary local path (not UNC/device syntax) must still
+        reach resolve() and be confined normally - the guard must not
+        over-reject."""
+        home, _ = home_env
+        f = home / "docs" / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        assert confine_index_path(f, _wl()) == f.resolve()
+
+    @pytest.mark.skipif(
+        os.name != "nt",
+        reason="HOMEDRIVE/HOMEPATH take precedence over USERPROFILE and this "
+               "repro clears them so USERPROFILE wins; POSIX expands ~ from "
+               "the password database and ignores USERPROFILE entirely, so "
+               "this mechanism is Windows-specific")
+    def test_rejects_a_path_that_expands_into_unc_via_userprofile(
+            self, home_env, monkeypatch):
+        """Regression pin for the expanduser-then-check ORDERING, not just
+        the guard's existence: a raw `~`-prefixed path is not UNC-shaped as
+        written, so a guard checking the raw string (rather than the
+        expanded one) would pass it straight through - only AFTER
+        expanduser() runs (resolving ~ against the server's own USERPROFILE)
+        does it become a UNC string. Real, if unusual, Windows config (a
+        roaming profile pointing the home directory at a network share), not
+        attacker input. Every other UNC test in this class uses an
+        already-UNC-shaped raw string, so none of them would catch this
+        ordering being reverted - this one is designed to."""
+        monkeypatch.setenv("USERPROFILE", _UNC)
+        monkeypatch.delenv("HOMEDRIVE", raising=False)
+        monkeypatch.delenv("HOMEPATH", raising=False)
+        expanded = str(Path("~/proj").expanduser())
+        assert _is_unc_or_device(expanded), (
+            f"test setup did not produce a UNC path: expanduser() gave {expanded!r}")
+
+        real_resolve = Path.resolve
+        seen: list = []
+
+        def spy(self, *a, **kw):
+            s = str(self)
+            seen.append(s)
+            if _is_unc_or_device(s):
+                raise AssertionError(
+                    f"Path.resolve() reached the filesystem with a UNC/device "
+                    f"string: {s!r}")
+            return real_resolve(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", spy)
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path("~/proj", _wl())
+        assert ei.value.reason == "unc_or_device"
+        assert not any(_is_unc_or_device(s) for s in seen)
 
 
 # --------------------------------------------------------------------------- #
@@ -433,6 +552,36 @@ class TestRagAddRoute:
                             headers=sc)
             assert r.status_code == 403, r.text
             assert "owner" in r.text.lower()
+
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+    def test_unc_and_device_path_rejected_without_touching_the_filesystem(
+            self, rag_route_app, monkeypatch, bad):
+        """H3 (2026-07-29 sweep): POST /api/rag/collections/{name}/add's
+        `paths` field reaches confine_index_path()'s Path.resolve() call with
+        no lexical check, up to 50 entries per request, synchronously inside
+        an async handler - the reachable HTTP surface for the store.py-level
+        finding above."""
+        app, _ = rag_route_app
+        real_resolve = Path.resolve
+        seen: list = []
+
+        def spy(self, *a, **kw):
+            s = str(self)
+            seen.append(s)
+            if _is_unc_or_device(s):
+                raise AssertionError(
+                    f"Path.resolve() reached the filesystem with a UNC/device "
+                    f"string: {s!r}")
+            return real_resolve(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", spy)
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"})
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [bad], "embed": False})
+        assert r.status_code == 400, r.text
+        assert not any(_is_unc_or_device(s) for s in seen), (
+            "the UNC/device string reached Path.resolve() via the HTTP route")
 
     def test_blacklist_allows_outside_but_denies_listed(self, rag_route_app,
                                                         tmp_path_factory):
