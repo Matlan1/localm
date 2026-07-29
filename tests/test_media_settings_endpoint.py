@@ -43,14 +43,22 @@ def test_media_schema_admin_only_fields_hidden_for_non_owner():
     owner_fields = {f["key"] for f in ss.media_schema_json("image", {}, cfg)}
     scoped_fields = {f["key"] for f in
                      ss.media_schema_json("image", {}, cfg, is_owner=False)}
-    assert {"launch_cmd", "api_url"} <= owner_fields, "owner sees everything"
-    assert not ({"launch_cmd", "api_url"} & scoped_fields), \
-        "a non-owner must not see launch_cmd/api_url"
-    assert "workdir" in scoped_fields, "an ordinary field stays visible"
+    assert {"launch_cmd", "api_url", "workdir"} <= owner_fields, "owner sees everything"
+    assert not ({"launch_cmd", "api_url", "workdir"} & scoped_fields), \
+        "a non-owner must not see launch_cmd/api_url/workdir"
+    # An ordinary media field still stays visible to a non-owner, so this test
+    # keeps proving the filter is SELECTIVE rather than hiding the whole block.
+    # (workdir used to play that role and no longer can - it is gated now.)
+    assert "output_dir" in scoped_fields, "an ordinary field stays visible"
 
 
 def test_media_admin_only_fields_is_the_single_source_of_truth():
-    assert ss.media_admin_only_fields() == {"launch_cmd", "api_url"}
+    # workdir joined in the REC-MEDIA-CMD CORE_FIELDS sweep: the PER-PLUGIN value
+    # WINS over the global comfy_workdir (scan.py:51-58, image/backend.py:58), and
+    # with a blank launch_cmd the launcher is auto-discovered INSIDE that folder
+    # (comfy_client.py:1125) and run via Popen - so it reaches execution exactly
+    # like launch_cmd does, and gating only the global left this surface open.
+    assert ss.media_admin_only_fields() == {"launch_cmd", "api_url", "workdir"}
 
 
 def test_media_schema_resolves_block_over_global():
@@ -282,9 +290,14 @@ def test_get_hides_launch_cmd_and_api_url_from_a_config_read_only_key(env):
 
     for plugin in reader_resp.json()["plugins"]:
         reader_keys = {f["key"] for f in plugin["fields"]}
-        assert not ({"launch_cmd", "api_url"} & reader_keys), \
-            f"{plugin['plugin']}: launch_cmd/api_url must be hidden from a scoped key"
-        assert "workdir" in reader_keys, "an ordinary field stays visible"
+        assert not ({"launch_cmd", "api_url", "workdir"} & reader_keys), \
+            f"{plugin['plugin']}: launch_cmd/api_url/workdir must be hidden " \
+            "from a scoped key"
+        # The over-gating control: something ORDINARY must still be visible, or
+        # this test would pass just as happily if the endpoint returned nothing.
+        # workdir used to be that control and can no longer be - it is gated now
+        # (REC-MEDIA-CMD sweep) - so output_dir takes the role.
+        assert "output_dir" in reader_keys, "an ordinary field stays visible"
 
 
 def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
@@ -300,9 +313,55 @@ def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
     client = TestClient(create_app(None))
     writer_hdr = {"Authorization": f"Bearer {writer}"}
 
-    r = client.post("/v1/media/config/image", json={"workdir": "/x"},
+    # The saved field must be one this key may actually SET: workdir joined
+    # launch_cmd/api_url on the owner gate in the REC-MEDIA-CMD sweep, so posting
+    # it here would 403 and stop testing the echo at all.
+    r = client.post("/v1/media/config/image", json={"output_dir": "/x"},
                     headers=writer_hdr)
     assert r.status_code == 200, r.text
     fields = {f["key"] for f in r.json()["fields"]}
-    assert not ({"launch_cmd", "api_url"} & fields)
-    assert "workdir" in fields
+    assert not ({"launch_cmd", "api_url", "workdir"} & fields)
+    assert "output_dir" in fields
+
+
+def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
+    """The owner gate on launch_cmd/api_url/workdir must not be defeated by
+    reading them off the GENERIC route.
+
+    GET /v1/media/config hides those three from a non-owner, but the media
+    plugins keep their OWN copy at cfg["plugins"][<plugin>]["comfy"][...]. That
+    subtree lives under the `plugins` key, which is engine_managed - a WRITE
+    gate only, never popped from a read - so before the scrub a plain
+    config:read key could fetch from /v1/config exactly what /v1/media/config
+    refused it. Same generic-outranks-specific shape as X8, on the read side.
+    """
+    from localm import auth, scopes
+    from localm.config import update_config
+
+    auth.set_api_key("owner-secret-media-789")
+    reader = auth.create_key("reader", [scopes.CONFIG_READ])["key"]
+    update_config(lambda c: c.__setitem__("plugins", {
+        "image": {"comfy": {"launch_cmd": "attacker.bat",
+                            "api_url": "http://attacker.invalid",
+                            "workdir": "/attacker/dir",
+                            "output_dir": "/ordinary/dir"}}}))
+    client = TestClient(create_app(None))
+
+    owner = client.get("/v1/config",
+                       headers={"Authorization": "Bearer owner-secret-media-789"})
+    scoped = client.get("/v1/config",
+                        headers={"Authorization": f"Bearer {reader}"})
+    assert owner.status_code == 200 and scoped.status_code == 200, scoped.text
+
+    owner_comfy = owner.json()["plugins"]["image"]["comfy"]
+    scoped_comfy = scoped.json()["plugins"]["image"]["comfy"]
+
+    # FIRES-CONTROL, two halves. Without them this passes vacuously if the
+    # route ever stops returning `plugins` at all, or returns it empty.
+    assert owner_comfy.get("launch_cmd") == "attacker.bat", \
+        "precondition: the owner must still see the value being hidden"
+    assert scoped_comfy.get("output_dir") == "/ordinary/dir", \
+        "the scrub must be TARGETED - an ordinary per-plugin field stays readable"
+
+    leaked = {"launch_cmd", "api_url", "workdir"} & set(scoped_comfy)
+    assert not leaked, f"non-owner read the owner-only media values: {sorted(leaked)}"

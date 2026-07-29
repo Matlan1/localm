@@ -124,11 +124,27 @@ class SettingField:
 # Order = display order. `owner != "core"` flags keys that migrate to a plugin.
 CORE_FIELDS: list = [
     # ---- Engine ----
+    # REC-MEDIA-CMD sweep: this names WHICH NATIVE CODE THE SERVER LOADS INTO
+    # ITSELF, so it is the largest trust boundary in this schema - larger than
+    # rag_* (which folders may be READ), net_allow_private (network reach) or
+    # cors_origins (browser origins), all of which are already admin_only.
+    # _loader.py:88-93 reads this key and the resolved dir is handed to
+    # ctypes.CDLL(); config.py:1256-1257 and _loader.py:88-93 both place it
+    # AHEAD of the bundled localm-llama-runtime wheel, so a planted file WINS.
+    # Unlike comfy_launch_cmd (which spawns a subprocess) this is arbitrary
+    # native code IN-PROCESS, with no subprocess boundary: discover.py:864-866
+    # names compute_devices()/has_max_devices() as in-process reachers and
+    # discover.py:1541 reaches has_max_devices() before any worker spawns.
+    # Ungated it completed a single-scope RCE chain: POST /api/upload is
+    # CONFIG_WRITE (gui/routes/uploads.py:24), applies no extension filter
+    # (gui/web.py:390-392), preserves an exact filename when there is no
+    # collision (gui/web.py:419-425) and RETURNS the absolute uploads dir - so
+    # ONE config:write key plants llama.dll and repoints this key at it.
     SettingField("binary_dir", Widget.FOLDER, "llama.cpp binary folder",
                  "Folder holding llama.dll / ggml libraries. Blank uses the "
                  "bundled runtime (auto-detected path shown); set it to point at "
                  "a custom build.",
-                 group="Engine", applies=Applies.NEXT_LOAD),
+                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
                  "Tokens of history the model starts with; grows on demand up to "
                  "the maximum below.",
@@ -283,10 +299,22 @@ CORE_FIELDS: list = [
                  "address only. Loopback binds never advertise.",
                  group="Server", applies=Applies.RESTART),
     # ---- Security ----
+    # REC-MEDIA-CMD sweep: defense in depth on a LATENT fail-closed control, NOT
+    # an active bypass - be precise about which, because overclaiming this one
+    # would be wrong. Both readers sit behind an any_key_configured() check
+    # (http_server.py:1982-1988, :2950-2951), so while any key exists the flag is
+    # INERT and clearing it cannot disable auth. The narrow real regression is
+    # deferred: an owner who set it true, whose non-owner key cleared it, and who
+    # later removes every key, silently gets an OPEN server instead of the
+    # fail-closed one they asked for. A non-owner should not be able to disarm a
+    # fail-closed control even latently, and the cost is ~zero: the effective
+    # state stays readable without config:read via GET /api/session
+    # (routes/session.py:136-147, no auth dependency), and the CLI/launcher write
+    # config directly rather than through this route.
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
                  "Refuse all requests until an API key is set (fail closed). "
                  "Required before exposing localm on a network.",
-                 group="Security", applies=Applies.RESTART),
+                 group="Security", applies=Applies.RESTART, admin_only=True),
     # admin_only: turning this ON lets a downloaded model directory run its own
     # bundled Python inside the localm process, which is arbitrary code execution
     # as the server user. Only an owner may make that call, never a config:write
@@ -307,18 +335,28 @@ CORE_FIELDS: list = [
                  "the desktop launcher.",
                  group="General"),
     # ---- Privacy ----
+    # REC-MEDIA-CMD sweep: these three decide WHETHER LOCALM WRITES THE USER'S
+    # CONTENT TO DISK. Turning privacy off starts persisting transcripts and an
+    # audit trail the owner had chosen not to keep, and that is a decision only
+    # the owner may make - a non-owner config:write key silently converting
+    # "nothing is written" into "everything is written" is the privacy contract
+    # inverted. Gating the READ costs the GUI nothing: it reads the injected
+    # cfg["effective_mode"] / cfg["effective_coder_mode"] (chat.js:204), which
+    # routes/config.py:38-39 adds AFTER the admin_only strip, never cfg["mode"].
     SettingField("mode", Widget.SELECT, "Session persistence",
                  "What localm saves: privacy = nothing written automatically; "
                  "log = a JSONL audit trail; full = log plus a chat transcript.",
-                 group="Privacy", options=_PRIVACY),
+                 group="Privacy", options=_PRIVACY, admin_only=True),
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
                  "Overrides the global persistence for chat only. Blank inherits "
                  "the global mode above.",
-                 group="Privacy", owner="chat", options=_PRIVACY_INHERIT),
+                 group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
+                 admin_only=True),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
                  "Overrides the global persistence for the coder only. Blank "
                  "inherits the global mode.",
-                 group="Privacy", owner="coder", options=_PRIVACY_INHERIT),
+                 group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
+                 admin_only=True),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
                  "While the memory plugin is enabled, recall the durable facts "
                  "localm has learned about you and add them to the system prompt "
@@ -358,7 +396,7 @@ CORE_FIELDS: list = [
                  "debug log) even in privacy mode, so an intermittent freeze or "
                  "crash leaves something to attach. Code stacks and operational "
                  "logs only, never your chat content.",
-                 group="Privacy"),
+                 group="Privacy", admin_only=True),
     # ---- Models ----
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
                  "Small on-device model for semantic search in memory and RAG "
@@ -366,7 +404,44 @@ CORE_FIELDS: list = [
                  "(bge-small-en-v1.5, nomic-embed-text-v1.5), a registered model "
                  "name, or a path to a GGUF. Run 'localm setup-embeddings' to fetch "
                  "it; until then, memory/RAG use lexical search.",
-                 group="Models", applies=Applies.NEXT_LOAD),
+                 # Owner-only because branch 1 of resolve_embedding_model_path()
+                 # (embedder.py:262-264) returns a CALLER-CHOSEN filesystem path with
+                 # no confined_* check, and that path is then handed to llama.cpp's
+                 # native GGUF parser. Same class as the rag_* keys (which host files
+                 # the server may open), plus attacker-chosen bytes reaching a C
+                 # parser; on Windows a UNC path also makes the is_file() probe an
+                 # outbound SMB/NTLM authentication. NOT an SSRF or arbitrary-download
+                 # hole: the download branch resolves repo+filename from the fixed
+                 # KNOWN_EMBEDDING_MODELS dict (:277-287) and returns None otherwise,
+                 # so do not restate this as a network finding.
+                 # Gating PATCH does NOT break ordinary embedder selection: the CLI
+                 # (setup-embeddings) and the RAG picker (POST /api/rag/embedding,
+                 # gated by the rag plugin scope, not config:write) both bypass this
+                 # route entirely.
+                 # RESIDUAL, STATED SO NOBODY READS THIS FLAG AS MORE THAN IT IS:
+                 # this flag closes the config:write path. The plugin route
+                 # POST /api/rag/embedding writes the SAME key under the
+                 # non-privileged `rag` scope (rag/plug.py, rag_embedding_set, via
+                 # update_config) and is gated separately by an owner check added in
+                 # that file; if that check is ever reverted, this flag ALONE does not
+                 # close the rag path. Verified by execution rather than assumed: on
+                 # master a `rag`-scoped principal passes authorization on that route
+                 # outright. Do not go hunting for the write in the re-embed endpoint,
+                 # which only READS this value to label a job.
+                 # SEVERITY, PRECISELY: nothing was being BYPASSED before this flag
+                 # (neither route gated the key, so there was no gate to get around),
+                 # but "no gate existed" is NOT the same as "no escalation existed".
+                 # A `rag`-scoped key - the documented restricted key, e.g.
+                 # --scope chat --scope rag - could point this process at an arbitrary
+                 # local path for the native parser to open, and the rag scope grants
+                 # no other arbitrary-path read: indexing goes through
+                 # confine_index_path, whose hard floor refuses credential folders
+                 # unconditionally. So this was a real CAPABILITY WIDENING FOR A
+                 # RESTRICTED PRINCIPAL, lower severity than binary_dir, with no
+                 # proven exploit and no demonstrated parser memory-safety bug.
+                 # binary_dir is the only field in this sweep to call an escalation.
+                 # Do not flatten the two to one severity in a write-up.
+                 group="Models", applies=Applies.NEXT_LOAD, admin_only=True),
     SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
                  "How the embedding model's token states become one vector. "
                  "mean suits bge/nomic (the default) and matches everything you "
@@ -494,6 +569,10 @@ CORE_FIELDS: list = [
                  "mode and for shared keys; stored under the localm data dir, not "
                  "your project. Manage with: localcoder --episodes / --forget-episodes.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    # REC-MEDIA-CMD sweep: this is an INJECTION-HARDENING control. Its own help
+    # says "leave ON unless you have a specific reason", so a non-owner turning
+    # it off re-opens the indirect-prompt-injection boundary for the OWNER's
+    # coder - the delegate weakens a defense it does not bear the consequence of.
     SettingField("coder_untrusted_provenance", Widget.TOGGLE,
                  "Tag untrusted external content",
                  "Mark coder tool results from the web, web search, and external "
@@ -501,12 +580,19 @@ CORE_FIELDS: list = [
                  "result boundary, so a fetched page cannot inject commands into "
                  "the agent (indirect prompt injection). Defense in depth - it "
                  "blocks nothing. Leave ON unless you have a specific reason.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
+                 admin_only=True),
     SettingField("coder_review", Widget.TOGGLE,
                  "Review changes before finishing",
                  "Before the coder declares a task done, a reviewer model reads the "
                  "diff and feeds blocking issues back for one more fix pass. Adds a "
                  "model round-trip per task that changed files. Off by default.",
+                 # DELIBERATELY NOT admin_only, unlike the coder_reviewer* fields
+                 # just below. This is the on/off switch for an extra review pass,
+                 # off by default: it crosses no trust boundary, and gating it would
+                 # stop a delegated user ENABLING more scrutiny, which is backwards.
+                 # coder_reviewer / coder_reviewer_model ARE owner-only because they
+                 # choose WHICH backend or model file reviews (a URL or a path).
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
@@ -517,12 +603,19 @@ CORE_FIELDS: list = [
                  "OpenAI-compatible endpoint (e.g. a 2nd local server). A network "
                  "reviewer is skipped in privacy mode and for shared keys (it would "
                  "send the diff off-machine) - those review with the local model.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
+                 admin_only=True),
+    # Gated together with coder_reviewer on purpose: gating the SELECTOR while
+    # leaving its ARGUMENT writable is the half-fix this sweep exists to catch.
+    # registry.py:256-276 falls through to Path(name), accepting any existing
+    # GGUF / HF dir, so this is not registry-only - it names a file the coder
+    # process loads into a llama.cpp backend.
     SettingField("coder_reviewer_model", Widget.TEXT,
                  "Reviewer model name",
                  "Model name for a cloud/URL reviewer. Blank uses a sensible provider "
                  "default or the agent's own model name.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
+                 admin_only=True),
     # ---- Knowledge (RAG plugin) ----
     # All three are OWNER-ONLY: they define which host folders document indexing
     # may read (a filesystem-read boundary). The localm data folder and credential
@@ -552,18 +645,31 @@ CORE_FIELDS: list = [
                  "a chat model is loaded. Off, such files are tagged plain text.",
                  group="Knowledge", owner="rag"),
     # ---- Media (ComfyUI: image / music / video plugins) ----
+    # REC-MEDIA-CMD: these three are the CORE twins of MediaFields that were
+    # already admin_only (see MEDIA_PLUGIN_FIELDS below). The write gate reads
+    # CORE_FIELDS only - admin_only_keys() is built from this list - so gating
+    # the mirror never protected these, and PATCH /v1/config was a back door
+    # around the stronger per-plugin gate at routes/config.py:220-225. Same
+    # shape as the X8 finding (a generic route outranking a specific one).
+    #
+    # workdir is not merely a folder: it selects where the launcher is
+    # AUTO-DISCOVERED (comfy_client.py:1125 discover_launch_cmd -> shlex.split ->
+    # Popen) AND what the model scanner walks into registry.json, and
+    # POST /api/comfy/setup (CONFIG_WRITE-only, gui/routes/comfy.py:92-93)
+    # executes <comfy_workdir>/venv/Scripts/python.exe. So a blank launch_cmd
+    # plus an attacker-chosen workdir still reaches execution.
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
                  "auto-detects a launcher inside. The one setting most setups need.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", admin_only=True),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
                  "auto-detects one in the ComfyUI folder above.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", admin_only=True),
     SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
                  "Where ComfyUI listens. Blank uses FLUX_API_URL, else "
                  "http://127.0.0.1:8188.",
-                 group="Media", owner="image"),
+                 group="Media", owner="image", admin_only=True),
     SettingField("comfy_launch_timeout", Widget.NUMBER,
                  "ComfyUI launch timeout (s)",
                  "Seconds to wait for ComfyUI after launching. A ZLUDA/ROCm cold "
@@ -572,6 +678,16 @@ CORE_FIELDS: list = [
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
                  "ComfyUI's own output folder. Only needed if you turn on "
                  "'Remove ComfyUI's copy' below; blank derives it.",
+                 # DELIBERATELY NOT admin_only, though it names a folder this
+                 # process DELETES from when comfy_delete_outputs is on
+                 # (comfy_client.py, the unlink() calls under _comfy_output_root).
+                 # That is a delete-ESCAPE concern, and the fix is path confinement
+                 # at the unlink site, not an owner flag here: an owner flag would
+                 # leave the escape reachable by the owner's own misconfiguration
+                 # while hiding an ordinary media setting from a delegated user.
+                 # Confinement is being added in comfy_client.py by the lane that
+                 # owns that file. If that confinement is ever removed, reopen THIS
+                 # decision rather than assuming the flag covers it.
                  group="Media", owner="image"),
     SettingField("comfy_delete_outputs", Widget.TOGGLE,
                  "Remove ComfyUI's copy after generating",
@@ -663,10 +779,21 @@ CORE_FIELDS: list = [
                  "Domains the model may reach. Empty = any. e.g. example.com "
                  "(also covers *.example.com).",
                  group="Network", owner="web"),
+    # REC-MEDIA-CMD sweep: net_deny is the SUPPRESSIVE half of the domain policy
+    # and is stored verbatim, so a non-owner can CLEAR it (validate_update
+    # accepts {"net_deny": []}) and silently un-block every host the owner
+    # blocked. That is the same trust-widening class as net_allow_private, which
+    # is already admin_only. Deliberately NOT symmetric with net_allow, which
+    # stays non-admin (pinned by test_net_allow_private_is_admin_only; cited by
+    # NAME, not line, because a line reference in a comment goes stale silently
+    # and this one already did): net_allow only names
+    # PUBLIC hosts and _check_public_address() still constrains it, so it is the
+    # fine-grained knob a scoped key legitimately manages. Removing a denial is
+    # not the same act as adding a permission.
     SettingField("net_deny", Widget.LIST, "Denied domains",
                  "Domains always refused, even if allowed above (deny wins). "
                  "Empty = none.",
-                 group="Network", owner="web"),
+                 group="Network", owner="web", admin_only=True),
     SettingField("net_allow_private", Widget.TOGGLE,
                  "Allow private/loopback targets (disables the SSRF guard)",
                  "Permit requests to localhost and private IP ranges. Off by "
@@ -677,10 +804,14 @@ CORE_FIELDS: list = [
                  # be able to set it (else it could reach loopback/metadata via any
                  # model-initiated fetch). See routes/config.py admin_only gate.
                  group="Network", owner="web", admin_only=True),
+    # REC-MEDIA-CMD sweep: names WHERE every web search is sent, so a non-owner
+    # can re-point the search channel at a host it controls and receive the
+    # owner's queries - the same "where does data go" boundary that already makes
+    # bugreport_upload_url and update_url admin_only.
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
                  "A SearXNG JSON search endpoint for web search. Blank uses "
                  "DuckDuckGo (no key needed).",
-                 group="Network", owner="web"),
+                 group="Network", owner="web", admin_only=True),
     # ---- Voice (plugin) ----
     SettingField("voice_stt_model", Widget.SELECT, "Speech-to-text model",
                  "Whisper model size for the microphone button. Larger is more "
@@ -1086,9 +1217,18 @@ class MediaField:
 
 # Order = display order within each plugin subsection.
 MEDIA_PLUGIN_FIELDS: list = [
+    # REC-MEDIA-CMD: the per-plugin workdir WINS over the global comfy_workdir
+    # (scan.py:51-58 returns the per-plugin value first; image/backend.py:58 and
+    # its music/video twins pass it into ensure_comfy()), so gating only
+    # the CORE field would leave this as the live surface. It reaches execution
+    # the same way: a blank launch_cmd makes the launcher AUTO-DISCOVERED inside
+    # this folder (comfy_client.py:1125) and run via Popen. admin_only here hides
+    # the resolved value; the WRITE gate is set_media_config in
+    # routes/config.py, which now covers workdir alongside launch_cmd/api_url.
     MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
                "ComfyUI folder",
-               "This plugin's ComfyUI install folder. Blank uses the shared default."),
+               "This plugin's ComfyUI install folder. Blank uses the shared default.",
+               admin_only=True),
     # REC-MEDIA-CMD: launch_cmd is a shell command and api_url is a render
     # target, so both widen a trust boundary the same way the tts library/
     # wasm_paths script-URL fields do - admin_only=True hides their RESOLVED

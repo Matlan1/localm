@@ -15,6 +15,33 @@ import localm.inference.http_server as _hs
 from localm import scopes
 
 
+def _scrub_media_admin_only(cfg: dict) -> None:
+    """Remove owner-only PER-PLUGIN media values from *cfg* in place.
+
+    Driven off MEDIA_PLUGIN_FIELDS rather than a hardcoded name list, so a field
+    that gains admin_only later is scrubbed here automatically instead of quietly
+    staying readable. Mutates the per-request dict from load_config(), never disk.
+    """
+    from localm.settings_schema import MEDIA_PLUGIN_FIELDS
+    plugins = cfg.get("plugins")
+    if not isinstance(plugins, dict):
+        return
+    for block in plugins.values():
+        if not isinstance(block, dict):
+            continue
+        for field in MEDIA_PLUGIN_FIELDS:
+            if not field.admin_only:
+                continue
+            node = block
+            *parents, leaf = field.block_path
+            for part in parents:
+                node = node.get(part) if isinstance(node, dict) else None
+                if not isinstance(node, dict):
+                    break
+            if isinstance(node, dict):
+                node.pop(leaf, None)
+
+
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
 
@@ -32,6 +59,16 @@ def register(app: FastAPI, ctx) -> None:
         if held is not None and scopes.ADMIN not in held:
             for k in admin_only_keys():
                 cfg.pop(k, None)
+            # The top-level pop above is NOT sufficient on its own. The media
+            # plugins keep their OWN copy of launch_cmd / api_url / workdir at
+            # cfg["plugins"][<plugin>]["comfy"][...] (written by set_media_config),
+            # and "plugins" is engine_managed, which gates the WRITE only - it is
+            # never popped here. So without this, a config:read key reads from the
+            # GENERIC route exactly the values GET /v1/media/config deliberately
+            # hides from it (media_schema_json's admin_only handling), and the
+            # owner gate on those fields becomes cosmetic. Same
+            # generic-route-outranks-the-specific-one shape as X8, on the read side.
+            _scrub_media_admin_only(cfg)
         # Read-only extras for the frontend (skipped by the settings form).
         # The server mode is fixed at startup (the audit log is opened then);
         # the coder default is resolved per new session.
@@ -217,12 +254,21 @@ def register(app: FastAPI, ctx) -> None:
         # non-owner config:write key. Require an ADMIN principal for those fields
         # in protected mode. Open mode is the trusted local owner (already gated by
         # the origin / shell-token guard), so caller_scopes is None there.
-        if any(k in ("launch_cmd", "api_url") for k in (body or {})):
+        #
+        # workdir joined this list in the CORE_FIELDS gating sweep. It is not
+        # merely a folder: when launch_cmd is blank the launcher is AUTO-DISCOVERED
+        # inside workdir (comfy_client.py:1125 discover_launch_cmd -> shlex.split ->
+        # Popen), so an attacker-chosen workdir reaches execution with no
+        # launch_cmd at all. It is also what the model scanner walks into
+        # registry.json (scan.py:51-58), and the PER-PLUGIN value WINS over the
+        # global comfy_workdir - so gating the core field alone left this open.
+        if any(k in ("launch_cmd", "api_url", "workdir") for k in (body or {})):
             held = _hs.caller_scopes(request)
             if held is not None and scopes.ADMIN not in held:
                 raise HTTPException(
-                    403, "Setting a media backend's launch_cmd or api_url requires "
-                    "an admin key (it configures a shell command / network target).")
+                    403, "Setting a media backend's launch_cmd, api_url or workdir "
+                    "requires an admin key (it configures a shell command, a network "
+                    "target, or the folder a launcher is discovered in).")
         try:
             merge = validate_media_block(name, body or {})
         except ValueError as e:
