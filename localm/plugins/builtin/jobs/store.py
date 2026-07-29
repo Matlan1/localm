@@ -84,16 +84,19 @@ def _redact_owner_digests(raw: str) -> str:
     prompt, model, cwd and name are left exactly as they were. Scrubbing more
     would protect the artefact by destroying the recovery data it exists to be.
 
-    Reports at debug when a digest-shaped value survives - a partially corrupt
-    file can hold one in a position this does not match, and a redaction that
-    silently half-happened must not look like one that fully did (rule 5)."""
+    Reports at warning when a digest-shaped value survives - a partially
+    corrupt file can hold one in a position this does not match, and a
+    redaction that silently half-happened must not look like one that fully
+    did (rule 5). The outer quarantine WARNING ("backed up to ... your
+    scheduled jobs are preserved") says nothing about a residual credential,
+    so this has to be operator-visible on its own, not buried at debug."""
     if not raw:
         return raw
     out, n = _OWNER_DIGEST_RE.subn(rf'\1"{_REDACTED_OWNER}"', raw)
     leftover = re.search(r"\b[0-9a-fA-F]{64}\b", out)
     if leftover:
         from localm.debuglog import logger
-        logger.debug(
+        logger.warning(
             "jobs store: quarantine copy still holds a digest-shaped value "
             "after redacting %d owner field(s); the file is corrupt, so it may "
             "carry one in a form this cannot match", n)
@@ -318,17 +321,24 @@ class JobStore:
                 # The backup still describes the user's jobs, so restrict it the
                 # way the live file is - the ACL and the redaction address
                 # different halves and neither makes the other unnecessary
-                # (CodeQL 88, issue #859).
+                # (CodeQL 88, issue #859). Check-and-retry like _write_all: a
+                # failed first attempt must not be the single point of failure
+                # for this file's ACL either.
                 from localm.config import restrict_file_perms
-                restrict_file_perms(backup)
+                if not restrict_file_perms(backup):
+                    restrict_file_perms(backup)
             logger.warning(
                 "jobs store %s is corrupt (%s); backed up to %s and starting "
                 "with an empty job list - your scheduled jobs are preserved in "
                 "the backup, not lost", self._defs_file, err, backup.name)
             self._prune_quarantine()
         except OSError as e:
+            # No refusal actually happens here: the caller still proceeds with
+            # an empty job list exactly as on success, so say what really
+            # occurs rather than claiming a refusal that never fires.
             logger.warning("jobs store: corrupt defs file could not be backed "
-                           "up (%s); refusing to silently discard it", e)
+                           "up (%s); the corrupt content may be lost on the "
+                           "next write", e)
 
     def _prune_quarantine(self) -> None:
         """Keep only the newest ``_QUARANTINE_KEEP`` corrupt-copies.
