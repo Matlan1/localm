@@ -130,15 +130,36 @@ class TestConfigTierRoutes:
             assert c.post("/api/logs/export", headers=_hdr(narrow),
                           json={"dest": ""}).status_code == 403
 
-    def test_config_write_reaches_logs_export(self, scoped_app):
+    def test_config_write_plus_fs_host_reaches_logs_export(self, scoped_app):
         from localm import auth
         # config:write is PRIVILEGED, so only an owner may mint it (allow_privileged);
         # that is exactly the principal that should reach the log-export route.
+        # It ALSO needs host filesystem access now: `dest` is an arbitrary host
+        # directory the route mkdir(parents=True)s and copies logs into, so it is
+        # gated on the same dial as the /api/fs/dirs picker that supplies `dest`.
         writer = auth.create_key("cfgwrite", [S.CONFIG_WRITE],
-                                 allow_privileged=True)["key"]
+                                 allow_privileged=True, fs_access="host")["key"]
         with TestClient(scoped_app) as c:
             r = c.post("/api/logs/export", headers=_hdr(writer), json={"dest": ""})
             assert r.status_code != 403
+
+    def test_config_write_without_fs_host_denied_logs_export(self, scoped_app, tmp_path):
+        """CodeQL WS8 (alert 2): config:write alone is NOT enough - the route
+        writes into a caller-named host directory, and its does-it-exist 400
+        was a directory-existence oracle for the whole disk."""
+        from localm import auth
+        writer = auth.create_key("cfgwrite-nofs", [S.CONFIG_WRITE],
+                                 allow_privileged=True)["key"]   # fs_access="none"
+        # dest must EXIST or the filesystem assertion is vacuous: export_logs
+        # 400s on a missing dest before it mkdirs anything, so "nothing was
+        # created" would hold with or without the gate.
+        dest = tmp_path / "exfil"
+        dest.mkdir()
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/logs/export", headers=_hdr(writer),
+                       json={"dest": str(dest)})
+            assert r.status_code == 403
+        assert list(dest.iterdir()) == [], "denied export still wrote into dest"
 
 
 class TestBaselineRoutesStayOpen:

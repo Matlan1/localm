@@ -1682,13 +1682,62 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
     return 1024, 1024
 
 
+# Magic-byte signatures of the raster formats ComfyUI's LoadImage node reads.
+# ((offset, bytes), ...) per format; WEBP and the RIFF family need a second
+# window, hence the tuple-of-windows shape rather than a flat prefix list.
+_IMAGE_SIGNATURES: tuple[tuple[tuple[int, bytes], ...], ...] = (
+    ((0, b"\x89PNG\r\n\x1a\n"),),                  # PNG
+    ((0, b"\xff\xd8\xff"),),                       # JPEG
+    ((0, b"GIF87a"),),                             # GIF
+    ((0, b"GIF89a"),),
+    # BMP's signature really is only two bytes. That is weak in the abstract, but
+    # not here: the threat is a caller naming SOMEONE ELSE'S file (auth.key, a
+    # session store) to have it transmitted, and they control WHICH file, never
+    # its first two bytes. A file that happens to start "BM" is not a file an
+    # attacker can arrange to contain a secret.
+    ((0, b"BM"),),                                 # BMP
+    ((0, b"RIFF"), (8, b"WEBP")),                  # WebP
+    ((0, b"II*\x00"),),                            # TIFF, little-endian
+    ((0, b"MM\x00*"),),                            # TIFF, big-endian
+)
+
+
+def looks_like_image(head: bytes) -> bool:
+    """True when *head* (the first bytes of a file) starts with the signature of
+    a raster image format ComfyUI can load."""
+    return any(all(head[off:off + len(sig)] == sig for off, sig in windows)
+               for windows in _IMAGE_SIGNATURES)
+
+
 def _upload_image(image_path: Path, api_url: str) -> str:
     """
     Upload a local image to ComfyUI via POST /upload/image.
 
     Returns the filename ComfyUI assigned (used in the LoadImage node).
     Raises on failure.
+
+    Sniffs the magic bytes FIRST, before reading the body or opening the socket.
+    This upload TRANSMITS the file, and sanitize_comfy_url deliberately permits
+    api_url to be a LAN or public host over plaintext http, so "whatever bytes
+    the caller named" must never leave the machine. media/paths.py confines
+    WHERE an HTTP caller's input_image may live; this is the choke point that
+    also covers the CLI and the coder tool, for which that path policy does not
+    apply. Both gates are needed: neither subsumes the other.
     """
+    with open(image_path, "rb") as f:
+        head = f.read(16)
+    if not looks_like_image(head):
+        # Deliberately does NOT say "is not an image": this allowlist is narrower
+        # than "image". localm itself accepts .heic/.heif elsewhere
+        # (gui/web.py _SHARE_IMAGE_EXTS, i.e. an ordinary iPhone photo), and
+        # those are refused here because the backend's loader cannot be assumed
+        # to read them. Telling a user their photo "is not an image" would be
+        # false and would send them debugging the wrong thing; name the
+        # supported set and let them convert.
+        raise ValueError(
+            f"{image_path.name} is not in a format this upload supports "
+            f"(PNG, JPEG, GIF, BMP, WebP or TIFF - detected from the file's "
+            f"own header, not its extension); refusing to upload it to ComfyUI")
     boundary = "LocalcoderUploadBoundary"
     img_bytes = image_path.read_bytes()
     content_type = "image/jpeg" if image_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"

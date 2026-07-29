@@ -93,6 +93,13 @@ localm process's own permissions rather than a sandbox:
   The `localm rag` CLI is unconfined (a local user can already read their own files).
   A `rag`-scoped key can still read documents under the allowed roots back through a
   query, so issue one only to clients you trust.
+- **`image` / `video` / `music`** read a source image for img2img only from the
+  uploads folder and the generated-media galleries - never the rest of the data
+  directory (which holds your owner key and sessions) and never the localm
+  install directory - and a file with no image signature is refused before it is
+  uploaded to ComfyUI (which may be another machine, over plain http). Moving a
+  generated file OUT of the data directory needs host filesystem access, the
+  same dial as the folder picker that chooses the destination.
 - **`config:write` / `plugins:admin` / `keys:admin`** are privileged and are never
   granted implicitly - only the owner key may mint keys carrying them.
 

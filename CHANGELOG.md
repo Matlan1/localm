@@ -258,6 +258,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it now returns an opaque request id and logs the real error, with its stack,
   where the operator can see it. (Deployed separately from the app, so this
   takes effect when the proxy is next deployed.)
+- **A restricted key can no longer read localm's own secrets through img2img,
+  nor create folders anywhere on your disk through the media galleries.** Three
+  paths a caller supplies were reaching the filesystem with no real limit. The
+  img2img / image-to-video "input image" was allowed to be any file in the
+  localm data directory - which is where your owner key, sessions and RAG store
+  live - and that file is uploaded to ComfyUI (which may legitimately be another
+  machine, over plain http) before anything checks it is an image. It is now
+  limited to the uploads folder and the generated-media galleries, and anything
+  without an image signature is refused before a byte leaves the machine. The
+  localm install folder is not readable through it either, which matters if you
+  installed with `git clone`: that folder holds more than the program.
+  "Move to folder..." on an image, clip or track took the destination as given
+  and created it; a key without host filesystem access is now confined to the
+  data directory, while the owner keeps any folder on the machine as before.
+  Exporting logs now needs host filesystem access too, matching the folder
+  picker that chooses where they go.
+  Migration: if you kept a reference image loose in the localm data folder, move
+  it into the `uploads` subfolder (or upload it from the Settings page) and it
+  will work again; images already in a gallery are unaffected.
 
 ## [0.1.3] - 2026-07-23
 
