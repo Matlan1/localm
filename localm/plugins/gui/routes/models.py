@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
-from localm import _pathcheck   # TODO(#843): fold into localm.pathsafe
+from localm import pathsafe
 from localm import scopes
 from localm.debuglog import logger
 from localm.inference.http_server import (principal_id, require_fs_host,
@@ -44,7 +44,7 @@ def _spec_names_a_host_path(spec: str) -> bool:
 
     Deliberately textual and existence-INDEPENDENT, for three reasons. It cannot
     stall: a UNC spec is classified without the stat that would block in the SMB
-    redirector for minutes (see _pathcheck.is_unc_or_device_path). It cannot become
+    redirector for minutes (see pathsafe.is_unc_or_device_path). It cannot become
     an existence oracle: the authorisation answer is identical whether or not the
     file is there. And it has no TOCTOU: "may this caller name a host path" is
     not a question whose answer may change between the check and the pull. That
@@ -68,7 +68,7 @@ def _spec_names_a_host_path(spec: str) -> bool:
     directory, it is unchanged from previous behaviour rather than something
     introduced here, and closing it needs a filesystem answer - which is exactly
     what cannot be spent here without rebuilding the oracle."""
-    # Trimming here is deliberate and is NOT the over-match that _pathcheck's
+    # Trimming here is deliberate and is NOT the over-match that pathsafe's
     # predicate avoids: this value is USER-TYPED (a spec pasted into the GUI
     # arrives with a trailing newline routinely), the route already trimmed it
     # once, and the consequence of over-matching is requiring host filesystem
@@ -77,7 +77,7 @@ def _spec_names_a_host_path(spec: str) -> bool:
     s = spec.strip()
     if not s:
         return False
-    if _pathcheck.is_unc_or_device_path(s):
+    if pathsafe.is_unc_or_device_path(s):
         return True
     if s.startswith("~"):
         return True
