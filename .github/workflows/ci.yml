@@ -30,13 +30,21 @@ on:
   # catching a newly introduced alert BEFORE it lands on master.
   push:
     branches: [master]
-  # RESTORED after #839 removed it, deliberately and only for the two matrix
-  # jobs (abi-check stays dispatch/schedule-only via its own `if`, which is the
-  # expensive, moving-target half #839 was really avoiding).
+  # NO `pull_request` TRIGGER. This is the maintainer's standing decision, made
+  # twice (#839, and again here after #860 restored it): a two-OS pytest matrix
+  # costing ~7 minutes per side does not belong in front of every PR. Do not add
+  # it back without asking him - it has now been removed, re-added, and removed
+  # again, and each flip cost a round of confusion about what actually gates a
+  # merge.
   #
-  # #839's reasoning was sound on cost and wrong on consequence: it made each
-  # lane's LOCAL suite the gate, and a local suite diverges from this one along
-  # THREE independent axes, none visible from the local run.
+  # WHAT STILL GATES A PR: code scanning, per-PR, via .github/workflows/
+  # codeql.yml. About a minute per language, and its whole value is catching a
+  # newly introduced alert BEFORE it lands.
+  #
+  # WHAT THIS COSTS, stated plainly rather than left to be rediscovered - #860
+  # restored the trigger for these reasons and they did not stop being true, they
+  # were outweighed. A local suite diverges from this job along three axes, none
+  # of them visible from the local run:
   #   PLATFORM       contributors run Windows; this matrix runs Windows AND Linux.
   #                  A Linux-only regression reached master exactly this way
   #                  (#845), and took four sessions to diagnose.
@@ -45,10 +53,11 @@ on:
   #                  appear locally at all.
   #   DEPENDENCY VER CI resolves the newest allowed dev tool; a venv lags. ruff
   #                  0.16 reddened master while every local venv on 0.15 was green.
-  # A trigger does not depend on every contributor remembering to run something.
-  # That is the whole argument: the previous arrangement worked only while nobody
-  # forgot, and the failure mode was silent.
-  pull_request:
+  # So the pre-merge signal is again whatever the contributor runs locally, plus
+  # master's post-merge run, which arrives AFTER the merge. Use workflow_dispatch
+  # against a branch when a change is one the three axes above could bite - a
+  # platform-specific path, anything touching dependency resolution - and WSL
+  # (Ubuntu, python 3.12) reproduces two of the three for free.
   workflow_dispatch:
     inputs:
       run_abi:
