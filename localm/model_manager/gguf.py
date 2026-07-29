@@ -606,3 +606,27 @@ def gguf_embedding_signal(path: Path) -> bool:
         return True
     return bool(meta.get("has_pooling_type"))
 
+
+# llama.cpp's clip.cpp writes this exact general.architecture value for every
+# vision-projector (mmproj) GGUF it exports - llava, idefics3, siglip and every
+# other projector variant share it, distinguished instead by a "clip.projector_type"
+# key. Verified against a real ggml-org/SmolVLM-256M-Instruct-GGUF mmproj file,
+# which also carries a parallel general.type="clip-vision" and a
+# "clip.vision.*"-prefixed metadata block (never a "<arch>.*"-prefixed one, so it
+# can never collide with gguf_embedding_signal's architecture check above).
+_GGUF_MMPROJ_ARCHITECTURE = "clip"
+
+
+def gguf_is_mmproj(path: Path) -> bool:
+    """True when *path*'s own GGUF metadata marks it as a vision projector
+    (mmproj) rather than a standalone text LLM: its ``general.architecture`` is
+    ``"clip"``. Hard metadata baked into the file itself by every llama.cpp
+    mmproj export - never a filename guess (contrast ``find_sibling_mmproj``
+    in registry.py, which only pairs a model with a co-located projector file
+    and is a filename heuristic by necessity). Used by
+    ``_detect_local_model_type`` (local add + folder auto-sync) and by
+    ``pull.py`` (a freshly-downloaded remote GGUF), the same two call sites as
+    ``gguf_embedding_signal``."""
+    meta = _gguf_metadata_probe(path)
+    return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
+

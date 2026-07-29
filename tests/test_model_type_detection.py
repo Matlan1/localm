@@ -24,7 +24,7 @@ import pytest
 
 from localm import model_manager as mm
 from localm.model_manager import gguf as _gguf_mod
-from localm.model_manager.gguf import gguf_embedding_signal
+from localm.model_manager.gguf import gguf_embedding_signal, gguf_is_mmproj
 from localm.model_manager.pull import _hf_pipeline_tag_to_type
 
 
@@ -526,6 +526,126 @@ def test_pull_model_explicit_llm_type_not_overridden(tmp_path, isolated_home, mo
 
     assert mm.pull_model("owner/repo:forced-llm.gguf", model_type="llm") is True
     assert mm.load_registry()["forced-llm"]["model_type"] == "llm"
+
+
+# --------------------------------------------------------------------------- #
+#  Branch A-mmproj: a distinct 'mmproj' MODEL_TYPES value, detected from HARD  #
+#  GGUF metadata (general.architecture == "clip"), never a filename guess.    #
+#  Covers gguf.py (gguf_is_mmproj), registry.py (_detect_local_model_type +    #
+#  sync_models_dir) and pull.py (the post-download auto-upgrade). Reproduces   #
+#  the reported bug: `localm pull ... --mmproj ...` deliberately leaves the    #
+#  projector unregistered on disk (it is not a standalone model), but          #
+#  sync_models_dir used to pick it back up as a plain 'llm' - offering "use"   #
+#  on a file that cannot load as a standalone chat model.                      #
+# --------------------------------------------------------------------------- #
+
+# ---------------------------- gguf_is_mmproj ------------------------------- #
+
+def test_gguf_is_mmproj_clip_architecture_true(tmp_path):
+    f = tmp_path / "mmproj-model.gguf"
+    f.write_bytes(_build_gguf_bytes("clip"))
+    assert gguf_is_mmproj(f) is True
+
+
+def test_gguf_is_mmproj_llama_architecture_false(tmp_path):
+    # A causal-chat architecture must never be flagged as a projector.
+    f = tmp_path / "llama-chat.gguf"
+    f.write_bytes(_build_gguf_bytes("llama"))
+    assert gguf_is_mmproj(f) is False
+
+
+def test_gguf_is_mmproj_embedding_architecture_false(tmp_path):
+    # Cross-contamination guard: an embedding architecture must not also read
+    # as a vision projector - the two are independent hard-metadata checks
+    # over the same probe, so nothing accidentally OR's them together.
+    f = tmp_path / "bert-embed.gguf"
+    f.write_bytes(_build_gguf_bytes("bert"))
+    assert gguf_is_mmproj(f) is False
+
+
+def test_gguf_is_mmproj_truncated_file_no_crash(tmp_path):
+    f = tmp_path / "truncated.gguf"
+    f.write_bytes(b"GGUF" + b"\x03\x00\x00")
+    assert gguf_is_mmproj(f) is False
+
+
+def test_gguf_is_mmproj_non_gguf_file_no_crash(tmp_path):
+    f = tmp_path / "not-a-model.bin"
+    f.write_bytes(b"this is definitely not a gguf file" * 50)
+    assert gguf_is_mmproj(f) is False
+
+
+# ------------------------------ add_local --------------------------------- #
+
+def test_add_local_gguf_clip_architecture_is_mmproj(tmp_path, isolated_home):
+    f = tmp_path / "my-mmproj.gguf"
+    f.write_bytes(_build_gguf_bytes("clip"))
+    assert mm.add_local(str(f)) is True
+    assert mm.load_registry()["my-mmproj"]["model_type"] == "mmproj"
+
+
+# --------------------------- sync_models_dir ------------------------------- #
+
+def test_sync_models_dir_discovers_mmproj_gguf(isolated_home):
+    dest = isolated_home / "models" / "mmproj-gemma-3-4b-it-f16.gguf"
+    dest.write_bytes(_build_gguf_bytes("clip"))
+    result = mm.sync_models_dir()
+    assert result.added == 1
+    assert mm.load_registry()["mmproj-gemma-3-4b-it-f16"]["model_type"] == "mmproj"
+
+
+# --------------------------------- pull_model ------------------------------ #
+
+def test_pull_model_auto_upgrades_gguf_to_mmproj(tmp_path, isolated_home, monkeypatch):
+    # Mirrors test_pull_model_auto_upgrades_gguf_to_embedding: pull_model's
+    # default model_type="auto" resolves a bare *.gguf spec to 'llm' up front,
+    # but _pull_gguf_file then probes the freshly-downloaded file's OWN
+    # metadata and upgrades an auto-resolved 'llm' to 'mmproj' when the bytes
+    # say so - the same classifier gap as sync_models_dir, reached instead by
+    # a direct pull of a projector file (no --mmproj co-pull involved).
+    import huggingface_hub
+    import requests
+
+    mmproj_bytes = _build_gguf_bytes("clip")
+
+    def _fake_download(repo_id, filename, local_dir, **kw):
+        p = Path(local_dir) / filename
+        p.write_bytes(mmproj_bytes)
+        return str(p)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
+    monkeypatch.setattr(
+        requests, "head",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+
+    assert mm.pull_model("owner/repo:auto-mmproj.gguf") is True
+    assert mm.load_registry()["auto-mmproj"]["model_type"] == "mmproj"
+
+
+def test_pull_model_explicit_llm_type_not_overridden_for_mmproj_bytes(
+        tmp_path, isolated_home, monkeypatch):
+    # Companion negative case: the SAME clip-architecture bytes pulled with an
+    # explicit model_type="llm" must stay 'llm' - the auto-upgrade is gated on
+    # type_is_auto and must never override an explicitly-passed --type.
+    import huggingface_hub
+    import requests
+
+    mmproj_bytes = _build_gguf_bytes("clip")
+
+    def _fake_download(repo_id, filename, local_dir, **kw):
+        p = Path(local_dir) / filename
+        p.write_bytes(mmproj_bytes)
+        return str(p)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
+    monkeypatch.setattr(
+        requests, "head",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+
+    assert mm.pull_model("owner/repo:forced-llm-mmproj.gguf", model_type="llm") is True
+    assert mm.load_registry()["forced-llm-mmproj"]["model_type"] == "llm"
 
 
 # ---------------------------------- CLI ------------------------------------ #
