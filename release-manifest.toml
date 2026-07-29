@@ -149,6 +149,9 @@ patterns = [
     "scripts/build_release.py",
     "scripts/make_release.py",
     "scripts/release_verify.py",
+    "scripts/codeql/",         # CodeQL residue tooling + the dismissal-fingerprint
+                               # record. Dev-only: reasons about code-scanning
+                               # alerts, never runs in the product.
     "release-manifest.toml",   # this file classifies itself: release tooling metadata
 ]
 

@@ -1,0 +1,289 @@
+{
+ "233": {
+  "rule": "py/path-injection",
+  "file": "localm/cli/models.py",
+  "line": 340,
+  "lineHash": "b53ecb4f251d6dd:1",
+  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "232": {
+  "rule": "py/path-injection",
+  "file": "localm/cli/models.py",
+  "line": 340,
+  "lineHash": "b53ecb4f251d6dd:1",
+  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "231": {
+  "rule": "py/path-injection",
+  "file": "localm/cli/models.py",
+  "line": 339,
+  "lineHash": "88aafd26fc77dc1f:1",
+  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "178": {
+  "rule": "py/path-injection",
+  "file": "scripts/sign_release.py",
+  "line": 80,
+  "lineHash": "57221c8c6d87fb7b:1",
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "177": {
+  "rule": "py/path-injection",
+  "file": "scripts/sign_release.py",
+  "line": 77,
+  "lineHash": "555e1c126cf8505c:1",
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "172": {
+  "rule": "py/path-injection",
+  "file": "scripts/rollback_update.py",
+  "line": 39,
+  "lineHash": "1f260c8bda79cf01:1",
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "142": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/coder/privacy.py",
+  "line": 144,
+  "lineHash": "2249bfa3195ec5:1",
+  "comment": "False positive: $HISTFILE comes from the shell that launched `localm coder`; anyone able to set it can already execute code as that user. Rewriting the history file at the shell's own location IS the privacy feature. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "128": {
+  "rule": "py/path-injection",
+  "file": "scripts/make_release.py",
+  "line": 391,
+  "lineHash": "a9fe77ef7cc42dce:1",
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "121": {
+  "rule": "py/path-injection",
+  "file": "localm/debuglog.py",
+  "line": 469,
+  "lineHash": "e9d3e0fa22ab58f3:1",
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "120": {
+  "rule": "py/path-injection",
+  "file": "localm/debuglog.py",
+  "line": 446,
+  "lineHash": "b9d62129c5a58edd:2",
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "115": {
+  "rule": "py/path-injection",
+  "file": "localm/media/comfy_client.py",
+  "line": 1169,
+  "lineHash": "f18df7cf642b7bad:1",
+  "comment": "False positive: HIP_PATH is localm's own process environment, reaching only an isdir() probe. Repo-wide grep confirms localm never writes it from config or any downloaded artifact. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "114": {
+  "rule": "py/path-injection",
+  "file": "localm/config.py",
+  "line": 646,
+  "lineHash": "3096fa03a05d31bf:1",
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "113": {
+  "rule": "py/path-injection",
+  "file": "localm/config.py",
+  "line": 66,
+  "lineHash": "821d4de29d8cc609:1",
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "112": {
+  "rule": "py/path-injection",
+  "file": "scripts/check_llama_abi.py",
+  "line": 256,
+  "lineHash": "95d308a363df34a9:1",
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "97": {
+  "rule": "py/stack-trace-exposure",
+  "file": "localm/inference/http_server.py",
+  "line": 2894,
+  "lineHash": "566bea2e158cc7a5:1",
+  "comment": "False positive (maintainer-approved): returning stacks IS the feature; the residual flow is by design. Boundary-crossing half FIXED: was unauthenticated in keyless mode, now needs a credential, 404s off loopback, abs paths 32/63 -> 0/65. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "87": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 416,
+  "lineHash": "621d263e46574fca:1",
+  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "86": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 414,
+  "lineHash": "8203dbe5f0f0e605:1",
+  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "85": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 374,
+  "lineHash": "8366a931db1e049:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "84": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 369,
+  "lineHash": "cbcc642963671e4d:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "83": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 363,
+  "lineHash": "1b79d2b060a96cc4:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "82": {
+  "rule": "py/path-injection",
+  "file": "localm/settings_schema.py",
+  "line": 1601,
+  "lineHash": "8d00f18ce2de2478:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "81": {
+  "rule": "py/path-injection",
+  "file": "localm/settings_schema.py",
+  "line": 1597,
+  "lineHash": "b55e6c47d405736a:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "80": {
+  "rule": "py/path-injection",
+  "file": "localm/settings_schema.py",
+  "line": 1594,
+  "lineHash": "fe162190700b1aaa:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "79": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 351,
+  "lineHash": "41cededfeae3c062:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "78": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 350,
+  "lineHash": "ec446e423e429900:1",
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "77": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/jobs/store.py",
+  "line": 196,
+  "lineHash": "9b71a181e4f0fbcc:1",
+  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "63": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/coder/plug.py",
+  "line": 493,
+  "lineHash": "a774173349f04b6e:1",
+  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "62": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/coder/plug.py",
+  "line": 389,
+  "lineHash": "c8b710d8fc9cb5f3:1",
+  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "61": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/coder/plug.py",
+  "line": 387,
+  "lineHash": "9f884f950af9d82a:1",
+  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "60": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/coder/plug.py",
+  "line": 382,
+  "lineHash": "7599b1c882aad8f7:1",
+  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "57": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/coder/plug.py",
+  "line": 177,
+  "lineHash": "e42acd754903349b:1",
+  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "47": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1767,
+  "lineHash": "fc4a29b8ba430794:1",
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "46": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1767,
+  "lineHash": "fc4a29b8ba430794:1",
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "23": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 245,
+  "lineHash": "44a1b8b9bab7c8e1:1",
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "22": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 242,
+  "lineHash": "ac1a0a1f774aab01:1",
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "9": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 213,
+  "lineHash": "3c6e74563544d86a:1",
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "8": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 212,
+  "lineHash": "192247c8b95b8be6:1",
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "7": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 210,
+  "lineHash": "d9d137d70f8d39bc:1",
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "6": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 207,
+  "lineHash": "6af2cdef53b3a5da:1",
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "5": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 205,
+  "lineHash": "d9d13a818365d301:1",
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+ },
+ "4": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 200,
+  "lineHash": "29d4edab3d88d10d:1",
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+ }
+}
