@@ -739,6 +739,73 @@ class TestVramEstimate:
         assert data["free"] is None
         assert data["fits"] is None
 
+    def test_estimate_uses_the_real_kv_shape_for_a_sparse_moe_gguf(
+            self, gui_app, tmp_path):
+        """AUDIT-KV-SYSSTATS: the route must charge KV from the GGUF header's
+        attention shape (#865), not from model_bytes // 100_000 - the file-size
+        heuristic #865 replaced everywhere else except this one leftover call
+        site. A sparse MoE's file is inflated by expert weights that cost no
+        KV, so the heuristic and the real shape disagree here."""
+        from tests.test_kv_bytes_from_gguf import _gguf, _shape
+        from localm.model_manager.gguf import gguf_kv_bytes_per_token
+        app, _ = gui_app
+        model_file = _gguf(tmp_path / "moe.gguf",
+                           _shape("qwen3moe", 48, 2048, 16, 4))
+        true_kv = gguf_kv_bytes_per_token(model_file)
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 4096}).json()
+        assert data["kv_cache"] == 4096 * true_kv
+        # Not the size-class floor a ~200-byte header file would hit if the
+        # route were still keying off file size.
+        assert data["kv_cache"] != 4096 * 16_000
+
+    def test_estimate_uses_the_real_kv_shape_for_a_wide_kv_dense_gguf(
+            self, gui_app, tmp_path):
+        """Same defect, the other direction: a wide-KV (large explicit head_dim)
+        dense model is UNDER-charged by the file-size heuristic (_sizing.py's
+        own docstring: ~2.6x low on a 12B), which could show 'fits' for a load
+        whose KV cache actually overflows VRAM."""
+        from tests.test_kv_bytes_from_gguf import _gguf, _shape, _T_UINT32
+        from localm.model_manager.gguf import gguf_kv_bytes_per_token
+        app, _ = gui_app
+        model_file = _gguf(tmp_path / "dense.gguf", _shape(
+            "gemma3", 26, 4096, 32, 4,
+            extra=[("gemma3.attention.key_length", _T_UINT32, 256),
+                   ("gemma3.attention.value_length", _T_UINT32, 256)]))
+        true_kv = gguf_kv_bytes_per_token(model_file)
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 8192}).json()
+        assert data["kv_cache"] == 8192 * true_kv
+        assert data["kv_cache"] != 8192 * 16_000
+
+    def test_estimate_falls_back_to_heuristic_when_header_is_unreadable(
+            self, gui_app, tmp_path):
+        """A registered file that is not a valid GGUF (corrupt, truncated, or
+        just not one) must still produce a usable estimate via the size-class
+        fallback - never a 500, and never a silently-zero kv_cache."""
+        app, _ = gui_app
+        model_file = tmp_path / "opaque.gguf"
+        model_file.write_bytes(b"\0" * 4096)
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 4096}).json()
+        assert data["kv_cache"] == 4096 * 16_000    # size-class floor for a tiny file
+        assert data["kv_cache"] > 0
+
 
 class TestStatsVramTrust:
     """The status-bar VRAM figure (/api/stats -> sysstats._vram) shows used/percent

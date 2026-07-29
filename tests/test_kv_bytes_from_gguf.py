@@ -253,3 +253,66 @@ class TestAutoGpuLayersUsesTheRealShape:
         assert b._kv_bytes_per_token() == 131072      # header path
         b._llm = type("L", (), {"kv_bytes_per_token": 4242})()
         assert b._kv_bytes_per_token() == 4242        # loaded model wins
+
+
+# --------------------------------------------------------------------------- #
+#  The GUI estimate (sysstats.estimate_vram): the SAME defect, a SEPARATE     #
+#  call site that #865 did not touch (AUDIT-KV-SYSSTATS)                      #
+# --------------------------------------------------------------------------- #
+
+class TestEstimateVramUsesTheRealShape:
+    """sysstats.estimate_vram powers /api/vram-estimate (the Settings performance
+    sliders' live readout). It used to derive bytes-per-token from model_bytes
+    directly - byte-identical to the heuristic #865 replaced everywhere else,
+    just left behind in a module #865 never touched. It cannot read a GGUF
+    header itself (it only ever sees a byte count), so the caller reads the
+    header and passes the result in via kv_bytes_per_token."""
+
+    def test_sparse_moe_lands_on_the_attention_shape_not_the_heuristic(
+            self, tmp_path):
+        from localm.inference.backends.gguf import GgufBackend
+        from localm.sysstats import estimate_vram
+        f = _gguf(tmp_path / "moe.gguf", _shape("qwen3moe", 48, 2048, 16, 4))
+        true_kv = gguf_kv_bytes_per_token(f)
+        # A big file (as a real MoE on disk would be) so the two paths disagree.
+        big_bytes = 18 * GB
+        heuristic_kv = GgufBackend._bytes_per_token(big_bytes)
+        assert heuristic_kv != true_kv, (
+            "precondition: the heuristic must disagree with the real shape, or "
+            "this test cannot tell the fix from the bug")
+
+        est = estimate_vram(big_bytes, n_ctx=4096, kv_bytes_per_token=true_kv)
+        assert est["kv_cache"] == 4096 * true_kv
+
+    def test_wide_kv_dense_lands_on_the_attention_shape_not_the_heuristic(
+            self, tmp_path):
+        from localm.inference.backends.gguf import GgufBackend
+        from localm.sysstats import estimate_vram
+        # A small file with a wide (large head_dim) KV shape - the direction the
+        # old file-size heuristic under-charged (_sizing.py docstring: ~2.6x low
+        # on a 12B).
+        f = _gguf(tmp_path / "dense.gguf", _shape(
+            "gemma3", 26, 4096, 32, 4,
+            extra=[("gemma3.attention.key_length", _T_UINT32, 256),
+                   ("gemma3.attention.value_length", _T_UINT32, 256)]))
+        true_kv = gguf_kv_bytes_per_token(f)
+        small_bytes = 2 * GB
+        heuristic_kv = GgufBackend._bytes_per_token(small_bytes)
+        assert heuristic_kv != true_kv, (
+            "precondition: the heuristic must disagree with the real shape")
+
+        est = estimate_vram(small_bytes, n_ctx=8192, kv_bytes_per_token=true_kv)
+        assert est["kv_cache"] == 8192 * true_kv
+
+    def test_falls_back_to_the_size_class_heuristic_when_no_header_was_read(
+            self, tmp_path):
+        # kv_bytes_per_token=0 is the caller's signal that no header was
+        # readable (missing file, non-GGUF, unresolved shape) - estimate_vram
+        # must still answer with the last-resort heuristic, not divide by
+        # zero or silently report 0 kv_cache.
+        from localm.inference.backends.gguf import GgufBackend
+        from localm.sysstats import estimate_vram
+        model_bytes = 6 * GB
+        est = estimate_vram(model_bytes, n_ctx=4096, kv_bytes_per_token=0)
+        assert est["kv_cache"] == 4096 * GgufBackend._bytes_per_token(model_bytes)
+        assert est["kv_cache"] > 0
