@@ -1,7 +1,8 @@
-<h1 align="center">
-  <img src=".github/images/logo.svg" width="72" alt="LocaLM"><br>
-  LocaL<font color="#4f9cf9">M</font>
-</h1>
+<p align="center">
+  <img src=".github/images/logo.svg" width="96" alt="LocaLM logo">
+</p>
+
+# LocaLM
 
 **Offline local LLM inference and extension platform - GGUF and HuggingFace models, OpenAI-compatible server, agentic coding, media generation, RAG, and more through a plugin engine.**
 
