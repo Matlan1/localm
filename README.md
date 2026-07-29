@@ -42,6 +42,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 - [GPU setup](#gpu-setup)
 - [Architecture](#architecture)
 - [Documentation](#documentation)
+- [Getting help](#getting-help)
 - [License](#license)
 
 ---
@@ -353,6 +354,12 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/native-app.md](docs/native-app.md) | The native `LocaLM.exe` launcher: how it works, `make-launcher`, the freeze trade-off |
 
 ---
+
+## Getting help
+
+- **Bugs and crashes:** open an [Issue](https://github.com/Matlan1/localm/issues), or run `localm bug-report -m "..."` first to attach a safe hardware/backend snapshot.
+- **Setup questions, GPU help (AMD/NVIDIA/Intel), "does this work with my card":** [Discussions](https://github.com/Matlan1/localm/discussions).
+- **Security vulnerabilities:** see [SECURITY.md](SECURITY.md); do not open a public issue.
 
 ## License
 
