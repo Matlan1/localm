@@ -100,8 +100,11 @@ opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 # per-token cost is quadratic in the buffer on a backtracking engine, measured
 # on the repetitive output that provoked it (rows of a markdown table):
 #
-#     5,700 chars ->   243 ms      22,800 chars -> 4,100 ms
-#    11,400 chars ->   975 ms      22,800 chars ->   0.007 ms  (this pattern)
+#     buffer          old pattern        this pattern
+#      5,700 chars         243 ms            0.061 ms
+#     11,400 chars         975 ms            0.008 ms
+#     22,800 chars       4,100 ms            0.007 ms
+#    102,600 chars      66,344 ms            0.000 ms
 #
 # On the MSVC STL that cost eventually hits an internal complexity limit and
 # throws `regex_error`, which crosses the ctypes boundary as WinError
