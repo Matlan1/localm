@@ -117,6 +117,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true",
                     help="actually post the dismissals (default is a dry run)")
+    ap.add_argument("--limit", type=int, default=0, metavar="N",
+                    help="with --apply, post at most N dismissals. For validating "
+                         "the path end to end on one alert before committing to "
+                         "the whole set.")
     args = ap.parse_args()
 
     table = json.loads((HERE / "dispositions.json").read_text(encoding="utf-8"))
@@ -184,6 +188,13 @@ def main() -> int:
     if not args.apply:
         print("\nDRY RUN. Re-run with --apply to post these dismissals.")
         return 1 if unadjudicated else 0
+
+    if args.limit:
+        # Say what was held back. A capped run that printed only its successes
+        # would read as a completed sweep.
+        print(f"\n--limit {args.limit}: posting {min(args.limit, len(planned))} "
+              f"of {len(planned)}; the rest are LEFT OPEN.")
+        planned = planned[:args.limit]
 
     failures = 0
     for a, group, comment, reason in planned:
