@@ -10,6 +10,7 @@ regression-detection logic itself is proven without needing --cov here.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -69,6 +70,18 @@ class TestCheckFloors:
         assert len(problems) == 1
         assert "not present" in problems[0]
 
+    def test_windows_backslash_keys_are_matched_not_reported_missing(self):
+        """REGRESSION (found live, 2026-07-29): coverage.json's file keys are the
+        file_reporter's relative_filename(), which uses the HOST's native path
+        separator. A real Windows --cov run produces keys like
+        'localm\\\\pathsafe.py' (backslash), not the forward slash
+        _MODULE_FLOORS uses. Before this was fixed, every floored module read as
+        "not present" on the one platform this check actually runs on - a gate
+        that LOOKS like it is checking coverage while actually checking nothing."""
+        floors = {"localm/pathsafe.py": 90}
+        report = {"files": {"localm\\pathsafe.py": _entry(95.0)}}
+        assert ccf.check_floors(report, floors) == []
+
     def test_reports_one_problem_per_offending_module_not_just_the_first(self):
         floors = {"localm/a.py": 90, "localm/b.py": 90}
         report = {"files": {"localm/a.py": _entry(50.0), "localm/b.py": _entry(60.0)}}
@@ -76,18 +89,22 @@ class TestCheckFloors:
         assert len(problems) == 2
 
     def test_real_module_floors_pass_against_their_own_measured_baseline(self):
-        """Each shipped floor is defined as at-or-below its 2026-07-29 measurement
-        (see the module docstring); feeding that exact baseline back in must pass -
-        proves the shipped dict is internally consistent with its own rationale."""
+        """Each shipped floor is one point below the ACTUAL value from a real
+        --cov run on merged master (d62b244b, 2026-07-29, Windows) - see the
+        module docstring for why a rounded display integer is not safe to floor
+        against directly (netpolicy and portmux both would have failed on day
+        one against their rounded figures). Feeding that exact real baseline
+        back in must pass - proves the shipped dict is internally consistent
+        with its own rationale, not just with a rounded approximation of it."""
         baseline = {
             "localm/bindhost.py": 100.0,
             "localm/scopes.py": 100.0,
-            "localm/pathsafe.py": 93.0,
-            "localm/netpolicy.py": 92.0,
-            "localm/auth.py": 91.0,
-            "localm/tls.py": 88.0,
-            "localm/config.py": 82.0,
-            "localm/portmux.py": 38.0,
+            "localm/pathsafe.py": 93.1034,
+            "localm/netpolicy.py": 91.5865,
+            "localm/auth.py": 91.0112,
+            "localm/tls.py": 88.3041,
+            "localm/config.py": 84.7032,
+            "localm/portmux.py": 37.7289,
         }
         report = {"files": {m: _entry(p) for m, p in baseline.items()}}
         assert ccf.check_floors(report) == []
@@ -114,7 +131,7 @@ class TestMain:
     def test_passing_report_exits_zero_and_names_the_module_count(self, tmp_path, capsys):
         report = {"files": {m: _entry(100.0) for m in ccf._MODULE_FLOORS}}
         p = tmp_path / "coverage.json"
-        p.write_text(__import__("json").dumps(report), encoding="utf-8")
+        p.write_text(json.dumps(report), encoding="utf-8")
         rc = ccf.main([str(p)])
         out = capsys.readouterr().out
         assert rc == 0
@@ -125,7 +142,7 @@ class TestMain:
         a gate must name what failed, not just that something did)."""
         report = {"files": {m: _entry(0.0) for m in ccf._MODULE_FLOORS}}
         p = tmp_path / "coverage.json"
-        p.write_text(__import__("json").dumps(report), encoding="utf-8")
+        p.write_text(json.dumps(report), encoding="utf-8")
         rc = ccf.main([str(p)])
         err = capsys.readouterr().err
         assert rc == 1

@@ -36,24 +36,35 @@ structural platform split as a regression the first time CI's Linux leg ran
 this check. The floors below were measured and verified (both pass and fail)
 on Windows only; see .github/workflows/ci.yml for where this runs.
 
-Floors are set at (or, for rounding safety, one point below) the measured
-value on 2026-07-29 (merged master d62b244b), so today passes and a floor can
-only be RAISED later, never silently lowered:
+Floors are set ONE POINT BELOW the ACTUAL value measured on a real
+`--cov=localm` run on merged master (d62b244b, 2026-07-29, Windows), not the
+rounded integer a report displays, so today passes and a floor can only be
+RAISED later, never silently lowered:
   - bindhost.py / scopes.py are pinned at the full 100: coverage.py's percent
     display only ever rounds TO "100" when the value is exactly 100.0 (see
     coverage/results.py Numbers.pc_covered_str), so there is no rounding risk
-    in holding these at the ceiling.
-  - Every other floor (pathsafe, netpolicy, auth, tls, config) is ONE POINT
-    BELOW its measured integer, not AT it: that integer is coverage.py's
-    rounded DISPLAY, not the exact float this script reads, so pinning the
-    floor to the display value risks a same-day spurious failure if the real
-    number rounds up (91.6 displays as "92" but is below a floor of 92). One
-    point of headroom absorbs that without giving up real protection - the
-    same reasoning pyproject.toml uses for the global floor.
-  - portmux.py is the deliberate exception: it is 38% and under active repair
-    in a separate unit, so its floor is pinned AT 38 rather than one below -
-    the point is only to stop it sliding further while that work lands, not
-    to hold it to a rounding buffer it does not need yet.
+    in holding these at the ceiling. Measured: both exactly 100.0000%.
+  - Every other floor is ONE POINT BELOW its measured value, not AT it, and
+    this is not theoretical caution - it was PROVEN necessary by the numbers
+    below. netpolicy.py measured 91.5865%: a floor of 92, the rounded
+    whole-percent figure, would have FAILED on the very first CI run, on
+    unchanged code, for no real regression. portmux.py measured 37.7289%: a
+    floor of exactly 38, the same kind of rounded figure, fails RIGHT NOW for
+    the same reason. Both were caught by actually running the suite once and
+    reading coverage.json, not by trusting a rounded figure. Measured values
+    (Windows, 2026-07-29, d62b244b): pathsafe.py 93.1034%, netpolicy.py
+    91.5865%, auth.py 91.0112%, tls.py 88.3041%, config.py 84.7032% (an
+    earlier estimate had put this one at 82%; the real figure is comfortably
+    higher, which only widens this floor's headroom, so the floor below is
+    still one point below the TRUE value, not the stale estimate), portmux.py
+    37.7289%.
+  - portmux.py gets no special casing versus the others above: it is under
+    active repair in a separate unit, but that only means its floor should
+    not be set ABOVE its current real value in anticipation of that work -
+    it does not exempt it from the same rounding-safety rule everything else
+    follows (floor = int(measured) - 1 = int(37.7289) - 1 = 36). A regression
+    below 36% still fails; the repair work raising it past 38%, 50%, etc. is
+    expected to land as its own floor bump later.
 
 Run after a --cov pytest run has produced coverage.json (`pytest --cov=localm
 --cov-report=json ...`, or `coverage json` against an existing .coverage
@@ -70,16 +81,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # module (coverage.json's repo-relative, forward-slash key) -> floor (percent,
-# combined statement+branch, matching coverage.py's `percent_covered`).
+# combined statement+branch, matching coverage.py's `percent_covered`). Each
+# is one point below its REAL measured value (see the module docstring for
+# why "one point below the rounded display" is not enough headroom).
 _MODULE_FLOORS: dict[str, int] = {
     "localm/bindhost.py": 100,
     "localm/scopes.py": 100,
     "localm/pathsafe.py": 92,
-    "localm/netpolicy.py": 91,
+    "localm/netpolicy.py": 90,
     "localm/auth.py": 90,
     "localm/tls.py": 87,
-    "localm/config.py": 81,
-    "localm/portmux.py": 38,
+    "localm/config.py": 83,
+    "localm/portmux.py": 36,
 }
 
 
@@ -87,11 +100,20 @@ def check_floors(coverage_json: dict, floors: dict[str, int] = _MODULE_FLOORS) -
     """Pure check over an already-parsed coverage.json ``dict``. Returns a list
     of human-readable problems (empty == every floor holds). Kept separate
     from all file/subprocess I/O so tests can feed a synthetic report instead
-    of a real coverage run."""
+    of a real coverage run.
+
+    coverage.json's ``files`` keys are the file_reporter's ``relative_filename()``,
+    which uses the HOST's native separator - measured on a real Windows run:
+    ``"localm\\\\pathsafe.py"``, backslash, not the forward slash this module's
+    keys use. A naive dict lookup would report every floored module "missing"
+    on Windows (the exact platform this check runs on - see the module
+    docstring), which is worse than silent: it reads as a real gate while
+    actually checking nothing. Normalize both sides to forward slash before
+    comparing so the lookup works regardless of which OS produced the report."""
     problems = []
-    files = coverage_json.get("files", {})
+    files = {k.replace("\\", "/"): v for k, v in coverage_json.get("files", {}).items()}
     for module, floor in floors.items():
-        entry = files.get(module)
+        entry = files.get(module.replace("\\", "/"))
         if entry is None:
             problems.append(
                 f"{module}: not present in the coverage report at all (floor "
