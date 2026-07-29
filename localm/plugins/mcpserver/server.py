@@ -716,7 +716,21 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result(
                 f"pulled and registered as {name!r}, but loading it failed: {e}",
                 is_error=True)
-        return _text_result(f"pulled, registered, and loaded {name!r} - ready to use")
+        msg = f"pulled, registered, and loaded {name!r} - ready to use"
+        # gpu_placement is None whenever the backend cannot report per-layer
+        # placement for this engine (see Engine.gpu_placement) - never fabricate
+        # a degraded warning without evidence a load actually happened. When it
+        # IS known and partial/zero, say so: a model too big to fully fit VRAM
+        # still loads (the backend's own sizing deliberately defers to a
+        # partial/zero GPU offload rather than refusing), and a bare "loaded"
+        # would hide that from an MCP client the same way the HTTP route's did
+        # (AGENTS.md rule 5).
+        placement = getattr(engine, "gpu_placement", None)
+        if placement and placement.get("degraded"):
+            msg += (f" ({placement['gpu_layers_offloaded']}/"
+                    f"{placement['gpu_layers_total']} layers on GPU, "
+                    f"the rest on CPU - slower)")
+        return _text_result(msg)
 
     def embed(args: dict) -> dict:
         texts = args.get("texts")

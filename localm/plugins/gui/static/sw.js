@@ -120,7 +120,12 @@
 // somewhere else (another tab/device, the CLI, an MCP client) - a stale-cached
 // client would keep the old poll and the estimate would stay stuck on whatever
 // model was active when Settings was opened.
-const CACHE = "localm-shell-v84";
+// v85: app/models-sidebar.js and pages/models.js now warn (instead of a plain
+// success toast) when a model load's own response reports a partial/zero GPU
+// offload (AGENTS.md rule 5 - a silent CPU fallback must not read as success).
+// A stale-cached client would keep toasting an unqualified "switched" even
+// when the server told it the load degraded to slow CPU layers.
+const CACHE = "localm-shell-v85";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

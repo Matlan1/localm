@@ -345,6 +345,17 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
     return False
 
 
+def _gpu_placement_fields(engine) -> dict:
+    """{"gpu_layers_offloaded", "gpu_layers_total", "degraded"} for *engine*'s
+    current load, or {} when the backend cannot report placement (no load
+    yet, or a backend without a layer-count knob - see Engine.gpu_placement).
+    Merged into every switch_engine()/load-route success payload so a caller
+    can tell a full GPU load from a silent CPU fallback (AGENTS.md rule 5)
+    instead of a bare "loaded"/"already_active" that hides it."""
+    placement = getattr(engine, "gpu_placement", None)
+    return dict(placement) if placement else {}
+
+
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
     global _engines, _engines_lru, _active_model_name, _engine_factory
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
@@ -378,7 +389,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             _inference_sem = sem
             if on_active is not None:
                 on_active(name)
-            return {"status": "already_active", "model": name}
+            return {"status": "already_active", "model": name,
+                    **_gpu_placement_fields(_engines[name])}
 
         # Perform VRAM check and eviction
         from localm import discover
@@ -953,7 +965,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         # the heartbeat below: registry file I/O plus, with a non-zero
         # main_gpu_index, a real GPU driver probe - keep it OFF the event loop.
         await loop.run_in_executor(None, _gpu_registry_sync)
-        return {"status": "loaded", "model": name}
+        return {"status": "loaded", "model": name,
+                **_gpu_placement_fields(new_engine)}
 
 
 async def get_engine(model_name: str, *, load: bool = True) -> Engine:
