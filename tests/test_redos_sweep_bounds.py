@@ -43,6 +43,20 @@ def _timed(fn, *a, **kw):
     return result, time.perf_counter() - start
 
 
+def _timed_cpu(fn, *a, **kw):
+    """Like _timed, but measures CPU time (time.process_time), not wall-clock.
+
+    Wall-clock elapsed time includes time this process spent DESCHEDULED while
+    an unrelated process on the same box used the CPU - exactly the shared-load
+    contention this box's test coordinator has to account for once targeted
+    test runs go concurrent. CPU time only counts cycles actually spent
+    executing this process, so a sibling process hogging a core cannot inflate
+    it."""
+    start = time.process_time()
+    result = fn(*a, **kw)
+    return result, time.process_time() - start
+
+
 # ---------------------------------------------------------------------------
 #  jobs/webtool.py - the second copy of the coder's tool-call patterns
 # ---------------------------------------------------------------------------
@@ -125,14 +139,20 @@ def test_top_level_objects_stays_linear_when_many_opens_never_balance():
     the very next character - O(n) per position, O(n^2) overall. Measured
     pre-fix on this project's venv: 0.01s at n=500, 3.1s at n=8000 (~4x per
     doubling, i.e. quadratic). Fixed, this should be near-instant, so 2.0s
-    leaves a wide margin against box load while still catching the 3+s
-    regression."""
+    leaves a wide margin while still catching the 3+s regression.
+
+    Asserted on CPU time (_timed_cpu), not wall-clock: this test can now run
+    concurrently with other targeted test-slot work on this box (the test
+    coordinator's budget model allows it), and a wall-clock bound would be
+    flaky under that shared load. CPU time only counts cycles this process
+    actually executed, so contention from a sibling process cannot inflate
+    it."""
     hostile = ("{" * 8_000) + "}"
-    result, elapsed = _timed(parse_web_call, hostile)
-    assert elapsed < 2.0, (
-        f"parse_web_call took {elapsed:.2f}s on 8,000 unbalanced opens plus "
-        "one stray closing brace - the per-position balance rescan is "
-        "quadratic again")
+    result, cpu_elapsed = _timed_cpu(parse_web_call, hostile)
+    assert cpu_elapsed < 2.0, (
+        f"parse_web_call used {cpu_elapsed:.2f}s of CPU time on 8,000 "
+        "unbalanced opens plus one stray closing brace - the per-position "
+        "balance rescan is quadratic again")
     assert result is None
 
 

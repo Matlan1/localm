@@ -59,6 +59,23 @@ def _timed(fn, *a, **kw):
     return result, time.perf_counter() - start
 
 
+def _timed_cpu(fn, *a, **kw):
+    """Like _timed, but measures CPU time (time.process_time), not wall-clock.
+
+    Wall-clock elapsed time includes time this process spent DESCHEDULED while
+    an unrelated process on the same box used the CPU - exactly the shared-load
+    contention this box's test coordinator has to account for once targeted
+    test runs go concurrent. CPU time only counts cycles actually spent
+    executing this process, so a sibling process hogging a core cannot inflate
+    it (an O(n) fix stays fast in CPU time even under heavy scheduling
+    contention; only true CPU starvation for the WHOLE run - not touched here -
+    would move it, and that would show as a near-total stall, not a partial
+    slowdown)."""
+    start = time.process_time()
+    result = fn(*a, **kw)
+    return result, time.process_time() - start
+
+
 # ---------------------------------------------------------------------------
 #  Wall-clock bounds (the CodeQL witnesses, verbatim)
 # ---------------------------------------------------------------------------
@@ -767,13 +784,19 @@ def test_marker_variant_stays_linear_when_none_of_many_markers_balance():
     (``pos = opener.end()``) retried the SAME scan from the very next marker -
     O(n) work per marker, O(n^2) overall. Measured pre-fix on this project's
     venv: 0.09s at n=500, 6.4s at n=4000 (~4x per doubling, i.e. quadratic).
-    The fixed version should complete in roughly 0.02-0.05s, so 2.0s leaves a
-    two-orders-of-magnitude margin against box load while still catching the
-    6+s regression."""
+
+    Asserted on CPU time (_timed_cpu), not wall-clock: this test can now run
+    concurrently with other targeted test-slot work on this box (the test
+    coordinator's budget model allows it), and a wall-clock bound would be
+    flaky under that shared load. CPU time only counts cycles this process
+    actually executed, so contention from a sibling process cannot inflate it.
+    The fixed version should cost roughly 0.02-0.05s of CPU time, so 2.0s
+    leaves a two-orders-of-magnitude margin while still catching the 6+s
+    regression."""
     hostile = ("<tool_call>{" * 4_000) + "}"
-    calls, elapsed = _timed(parse_tool_calls, hostile)
-    assert elapsed < 2.0, (
-        f"parse_tool_calls took {elapsed:.2f}s on 4,000 unbalanced markers "
-        "plus one stray closing brace - the per-marker balance rescan is "
-        "quadratic again")
+    calls, cpu_elapsed = _timed_cpu(parse_tool_calls, hostile)
+    assert cpu_elapsed < 2.0, (
+        f"parse_tool_calls used {cpu_elapsed:.2f}s of CPU time on 4,000 "
+        "unbalanced markers plus one stray closing brace - the per-marker "
+        "balance rescan is quadratic again")
     assert calls == []
