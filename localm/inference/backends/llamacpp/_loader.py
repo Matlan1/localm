@@ -392,6 +392,63 @@ def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
         os.environ.setdefault("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM", "1")
 
 
+def _warn_if_not_bundled(binary_dir: Path) -> None:
+    """Say WHERE the native runtime is being loaded from when it is not the
+    bundled ``localm-llama-runtime`` wheel directory.
+
+    Everything in *binary_dir* is about to be given native code execution in this
+    process: the directory is prepended to the OS loader search path, every
+    ``ggml*`` in it is CDLL()'d, and the main library is loaded from it. The two
+    ways to move that directory are the ``LLAMA_CPP_LIB`` process env var and the
+    ``binary_dir`` config key (now owner-only). Both are legitimate - the
+    maintainer's own box runs a custom build - so this is NOT an error and must
+    not fail the load. But an override that nobody expects is exactly the thing
+    that should be visible in the log rather than silent (AGENTS.md rule 5), so
+    it is announced once, at WARNING, naming the directory.
+
+    Best-effort by construction: a broken/missing wheel already produces its own
+    warning in _candidate_dirs, and a path comparison that itself raises must not
+    take down a load that would otherwise succeed."""
+    global _warned_foreign_binary_dir
+    if _warned_foreign_binary_dir:
+        return
+    try:
+        import localm_llama_runtime
+        bundled = localm_llama_runtime.lib_dir()
+        # Compared WITHOUT Path.resolve(). resolve() touches the filesystem (on
+        # Windows it calls _getfinalpathname), and this function only decides
+        # whether to emit a log line - it has no business making a syscall on a
+        # config-supplied directory, least of all in a unit whose whole point is
+        # that a path check must not hand a caller-named path to the OS. normcase
+        # + abspath is pure string work.
+        # The cost is that a symlinked-but-equivalent directory now compares
+        # UNEQUAL and warns spuriously. That is the harmless direction: an extra
+        # line saying where the runtime came from, versus a missing warning about
+        # an override nobody intended.
+        if bundled and (os.path.normcase(os.path.abspath(bundled))
+                        == os.path.normcase(os.path.abspath(binary_dir))):
+            return                       # the normal, self-contained case
+        why = ("the bundled runtime is overridden" if bundled
+               else "the wheel is installed but not provisioned")
+    except ImportError:
+        why = "no localm-llama-runtime wheel is installed"
+    except Exception:
+        return    # _candidate_dirs already warned about a broken wheel
+    _warned_foreign_binary_dir = True
+    source = ("the LLAMA_CPP_LIB environment variable"
+              if os.environ.get("LLAMA_CPP_LIB")
+              else "the binary_dir setting (owner-only)")
+    logger.warning(
+        "loading the native llama runtime from %s, NOT the bundled wheel "
+        "directory (%s; source: %s). Everything in that directory is loaded as "
+        "native code into this process. If you did not choose it, clear "
+        "binary_dir / LLAMA_CPP_LIB and run 'localm setup-llama'.",
+        binary_dir, why, source)
+
+
+_warned_foreign_binary_dir = False
+
+
 def load_lib() -> ctypes.CDLL:
     """Load (and cache) the native llama shared library.
 
@@ -418,6 +475,7 @@ def load_lib() -> ctypes.CDLL:
             f"  or set LLAMA_CPP_LIB=/path/to/{name} for a one-off."
         )
     lib_path = binary_dir / name
+    _warn_if_not_bundled(binary_dir)
 
     # Keep the Vulkan backend's model weights in DEDICATED VRAM (must be set before
     # ggml-vulkan initialises, i.e. before the preload below).

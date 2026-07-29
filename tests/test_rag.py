@@ -796,7 +796,14 @@ def test_rag_embedding_status_endpoint(monkeypatch):
     monkeypatch.setattr(emb, "loaded_dim", lambda: None)
     monkeypatch.setattr(emb, "last_error", lambda: None)
 
-    out = asyncio.run(plug.rag_embedding_status())
+    # The handler now takes the request: `installed` is a file-existence answer,
+    # so it is only reported to an owner or for a localm-managed identity. With no
+    # API key configured this is open mode, caller_scopes() is None, and the caller
+    # is the trusted local owner - so the reported values are unchanged.
+    from starlette.requests import Request
+    req = Request({"type": "http", "method": "GET",
+                   "path": "/api/rag/embedding", "headers": []})
+    out = asyncio.run(plug.rag_embedding_status(req))
     assert out["status"] == "not_installed" and out["installed"] is False
     assert out["default"] == "bge-small-en-v1.5"
     assert "bge-small-en-v1.5" in out["internal"]
@@ -806,5 +813,5 @@ def test_rag_embedding_status_endpoint(monkeypatch):
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
                         lambda *, allow_download=None: "/models/embeddings/bge.gguf")
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
-    out2 = asyncio.run(plug.rag_embedding_status())
+    out2 = asyncio.run(plug.rag_embedding_status(req))
     assert out2["status"] == "ready" and out2["installed"] is True and out2["dim"] == 384
