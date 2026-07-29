@@ -101,9 +101,15 @@ recommends for NVIDIA (the Linux CUDA build needs a system CUDA runtime present)
 For peak performance pick `--backend cuda`. On **Windows** this is a guided,
 self-contained path: setup checks your driver, then fetches BOTH the CUDA
 `llama` build and the matching `cudart` runtime bundle from the same llama.cpp
-release, so **you do not need to install the CUDA Toolkit** (needs CUDA >= 12.4).
-Setup checks your driver and, if it is too old or no NVIDIA is found, uses Vulkan
-for now and tells you what to do; after updating a driver, re-run
+release, so **you do not need to install the CUDA Toolkit** (needs CUDA >= 12.4
+for most GPUs). Setup also detects your GPU's own architecture and picks the
+CUDA asset line it actually needs: NVIDIA Blackwell (RTX 50-series and
+datacenter B100/B200) automatically gets the newer 13.x line - which needs a
+newer driver in turn (CUDA >= 13.3) - since the 12.x build has no kernels for
+Blackwell; every earlier architecture stays on the 12.x line. Setup checks
+your driver against whichever line your GPU needs and, if it is too old or no
+NVIDIA is found, uses Vulkan for now and tells you what to do; after updating a
+driver, re-run
 `localm setup-llama --backend cuda --force`.
 
 After provisioning, setup **load-tests** the library exactly as `localm run`

@@ -36,7 +36,10 @@ def test_ver_tuple_parses_and_tolerates_junk():
 
 def test_nvidia_preflight_parses_banner(monkeypatch):
     def fake_smi(*args):
-        if args and str(args[0]).startswith("--query-gpu"):
+        joined = " ".join(str(a) for a in args)
+        if "compute_cap" in joined:
+            return "8.9\n"
+        if "--query-gpu=name" in joined:
             return "NVIDIA GeForce RTX 4070\n"
         return ("|  NVIDIA-SMI 552.22   Driver Version: 552.22   "
                 "CUDA Version: 12.4  |\n")
@@ -46,6 +49,8 @@ def test_nvidia_preflight_parses_banner(monkeypatch):
     assert info.driver_version == "552.22"
     assert info.cuda_capability == "12.4"
     assert info.gpu_name == "NVIDIA GeForce RTX 4070"
+    assert info.compute_capability == "8.9"
+    assert info.cuda_line == "cuda-12"
     assert info.driver_ok is True
 
 
@@ -337,7 +342,7 @@ def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeyp
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     provisioned = []
 
-    def fake_provision_backend(backend, tgt, sha256, with_cudart):
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
         provisioned.append(backend)
         (tgt / sl._lib_name()).write_bytes(b"stub")
 
@@ -450,7 +455,7 @@ def _stub_provision(monkeypatch):
     is a no-op. Lets us drive the fallback purely via _native_loads_ok."""
     lib = sl._lib_name()
 
-    def fake_provision(backend, target, sha256, with_cudart):
+    def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
         (target / lib).write_bytes(b"x")
     monkeypatch.setattr(sl, "_provision_backend", fake_provision)
     monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg: True)
@@ -585,7 +590,7 @@ def test_provision_backend_cuda_fetches_build_and_cudart(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
     build = {"name": "llama-cuda-12.4.zip", "browser_download_url": "https://b", "size": 1}
     cudart = {"name": "cudart-12.4.zip", "browser_download_url": "https://c", "size": 1}
-    monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag: (build, cudart))
+    monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag, line=sl._CUDA_LINE: (build, cudart))
     fetched = []
     monkeypatch.setattr(sl, "_fetch_and_place",
                         lambda url, target, sha256=None: fetched.append(url))
@@ -593,11 +598,35 @@ def test_provision_backend_cuda_fetches_build_and_cudart(monkeypatch, tmp_path):
     assert fetched == ["https://b", "https://c"]
 
 
+def test_provision_backend_cuda_passes_selected_line(monkeypatch, tmp_path):
+    """The GPU-architecture-selected line must reach _resolve_cuda_pair, not
+    just the module default - proves the plumbing from cuda_line through to
+    the actual asset lookup, not merely that the default path still works."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
+    build = {"name": "llama-cuda-13.3.zip", "browser_download_url": "https://b13", "size": 1}
+    cudart = {"name": "cudart-13.3.zip", "browser_download_url": "https://c13", "size": 1}
+    seen_lines = []
+
+    def fake_resolve(tag, line=sl._CUDA_LINE):
+        seen_lines.append(line)
+        return build, cudart
+
+    monkeypatch.setattr(sl, "_resolve_cuda_pair", fake_resolve)
+    fetched = []
+    monkeypatch.setattr(sl, "_fetch_and_place",
+                        lambda url, target, sha256=None: fetched.append(url))
+    sl._provision_backend("cuda", tmp_path, None, with_cudart=True, cuda_line="cuda-13")
+    assert seen_lines == ["cuda-13"]
+    assert fetched == ["https://b13", "https://c13"]
+
+
 def test_provision_backend_cuda_no_assets_uses_templated_url(monkeypatch, tmp_path):
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
-    monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag: (None, None))
-    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend: ("https://templated/cuda.zip", "FALLBACK_SHA"))
+    monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag, line=sl._CUDA_LINE: (None, None))
+    monkeypatch.setattr(sl, "_resolve_backend_asset",
+                        lambda backend, cuda_line=sl._CUDA_LINE: ("https://templated/cuda.zip", "FALLBACK_SHA"))
     calls = []
     monkeypatch.setattr(sl, "_fetch_and_place",
                         lambda url, target, sha256=None: calls.append((url, sha256)))
