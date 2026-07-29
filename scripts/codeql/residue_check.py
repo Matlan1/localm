@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from pathlib import Path
 
 
 def load(path):
@@ -170,10 +171,24 @@ def barrier_spans(declared, repo_root="."):
     Measured on PR 845: 10 of 14 apparent passes were vacuous for exactly that
     reason. The barrier is the declared FUNCTION, not its file."""
     import ast
-    import os
     spans = []
+    root = Path(repo_root).resolve()
     for b in declared:
-        path = os.path.join(repo_root, b["file"])
+        # b["file"] is a path component read from the barriers JSON, i.e. from a
+        # DATA FILE rather than from this script's argv. A barriers.json
+        # containing {"file": "../../../etc/passwd"} would otherwise read outside
+        # the repo. Confine it, and SAY SO when it escapes rather than silently
+        # skipping - a barrier that was declared but never resolved must never
+        # look the same as one that verified nothing.
+        try:
+            path = (root / b["file"]).resolve()
+            if root != path and root not in path.parents:
+                raise ValueError("escapes the repo root")
+        except (OSError, ValueError) as e:
+            print(f"  WARNING: barrier {b['name']!r} declares file {b['file']!r} "
+                  f"which {e if isinstance(e, ValueError) else 'cannot be resolved'}"
+                  f" - REFUSED, and it will not verify anything")
+            continue
         try:
             tree = ast.parse(open(path, encoding="utf-8").read())
         except (OSError, SyntaxError):
