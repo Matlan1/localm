@@ -483,9 +483,13 @@ def _pull_gguf_file(
                 return False
         if register:
             reg_type = model_type
-            if type_is_auto and reg_type == "llm" and _mm.gguf_embedding_signal(dest):
-                console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
-                reg_type = "embedding"
+            if type_is_auto and reg_type == "llm":
+                if _mm.gguf_is_mmproj(dest):
+                    console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
+                    reg_type = "mmproj"
+                elif _mm.gguf_embedding_signal(dest):
+                    console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+                    reg_type = "embedding"
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  digest=verify_digest, model_type=reg_type)
         return True
@@ -573,9 +577,13 @@ def _pull_gguf_file(
 
     if register:
         reg_type = model_type
-        if type_is_auto and reg_type == "llm" and _mm.gguf_embedding_signal(base_dir / filename):
-            console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
-            reg_type = "embedding"
+        if type_is_auto and reg_type == "llm":
+            if _mm.gguf_is_mmproj(base_dir / filename):
+                console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
+                reg_type = "mmproj"
+            elif _mm.gguf_embedding_signal(base_dir / filename):
+                console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+                reg_type = "embedding"
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
                   sha256=verify_digest, model_type=reg_type)
         console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")

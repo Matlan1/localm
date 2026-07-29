@@ -379,6 +379,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   race against the still-reclaiming graphics driver. Restart now waits for
   the release the same way switching models already did, before relaunching;
   a restart with nothing loaded pays no extra delay.
+- **A vision model's projector file no longer shows up as its own, unusable
+  chat model.** Pulling a vision model with `--mmproj` deliberately keeps the
+  companion projector file out of the model list as its own entry - it cannot
+  answer chat requests on its own. But the next time the models folder was
+  rescanned, it was added back in anyway, labeled the same as a regular chat
+  model and offered a "use" button that could never actually work. It is now
+  recognized from its own file contents and labeled as what it is.
 
 ## [0.1.3] - 2026-07-23
 
