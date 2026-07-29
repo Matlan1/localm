@@ -41,6 +41,28 @@ UNC = r"\\192.0.2.1\share"
 UNC_FWD = "//192.0.2.1/share"
 DEVICE = r"\\.\PhysicalDrive0"
 
+# Upper bound for "the request returned without dialling the UNC host". A
+# BACKSTOP for the _unc_calls(fs_spy) assertions, not a duplicate of them: the
+# spy only sees calls through the surfaces it patches, so a dial down some
+# unpatched path would show up here as elapsed time and nowhere else.
+#
+# The value has to sit between two other numbers, and both matter:
+#   ABOVE runner and shared-box jitter. 192.0.2.1 is TEST-NET-1, guaranteed
+#   unroutable, so a passing run does no network work at all and the measured
+#   time is pure scheduling noise. This was 1.0 and went red on master at 1.04s
+#   (CI run for cb8bc936) with both security assertions already passed - the
+#   tightest wall-clock bound in the repo, where every other one is 2.0s+.
+#   FAR BELOW a real SMB connect timeout, which on Windows is tens of seconds.
+# 5.0 keeps the full detection power (a genuine dial cannot finish under it)
+# while leaving room for a noisy hosted runner.
+#
+# MUST STAY WALL-CLOCK. Do NOT "fix" flakiness here by switching to
+# time.process_time() the way tests/test_redos_bounds.py correctly does: those
+# tests detect a CPU-bound scan, this one detects a BLOCKING NETWORK WAIT, which
+# burns no CPU at all. Measured: a 1.2s block registers 0.000s of process_time.
+# The conversion would leave a green test that can never fire again.
+_NO_DIAL_SECONDS = 5.0
+
 
 # Every Path method here reaches the filesystem, and on Windows each one dials
 # SMB for a UNC path. resolve() is the one CodeQL flagged, but it is NOT the only
@@ -158,7 +180,7 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         assert _unc_calls(fs_spy) == [], (
             "the UNC string reached a filesystem call - the SMB dial (and the "
             "net-NTLMv2 leak) happens there, before any status code is chosen")
-        assert elapsed < 1.0, f"took {elapsed:.2f}s"
+        assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
 
     def test_forward_slash_unc_refused_on_windows(self, fs_app, fs_spy):
         """``//host/share`` is an equivalent UNC spelling on Windows. On POSIX a
@@ -247,9 +269,12 @@ class TestCreateLauncherAllowlistsBeforeResolving:
         assert _unc_calls(fs_spy) == [], (
             "the UNC string reached a filesystem call BEFORE the allowlist - which "
             "is the whole finding: the 403 is returned after the SMB dial")
-        assert elapsed < 1.0, f"took {elapsed:.2f}s"
-        # Nothing was written anywhere on the way to the refusal.
+        # Nothing was written anywhere on the way to the refusal. Ordered BEFORE
+        # the timing backstop deliberately: pytest stops at the first failure, so
+        # with the timing assert above it, a slow runner would mask this one and
+        # a real stray write would be reported as a timing flake.
         assert not list(wd.iterdir())
+        assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
 
     def test_unlisted_local_dir_is_refused_without_resolving_it(
             self, fs_app, tmp_path, fs_spy):
@@ -387,7 +412,7 @@ def test_logs_export_rejects_unc_destination(fs_app, fs_spy):
         elapsed = time.perf_counter() - t0
     assert r.status_code == 400, r.text
     assert _unc_calls(fs_spy) == []
-    assert elapsed < 1.0, f"took {elapsed:.2f}s"
+    assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
 
 
 # --------------------------------------------------------------------------- #
