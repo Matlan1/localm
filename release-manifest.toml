@@ -152,6 +152,10 @@ patterns = [
     "scripts/codeql/",         # CodeQL residue tooling + the dismissal-fingerprint
                                # record. Dev-only: reasons about code-scanning
                                # alerts, never runs in the product.
+    "scripts/tier2_gpu_split/", # Tier 2 real-hardware GPU-split pre-release gate
+                               # (issues.txt GPU-SPLIT-TESTING). Dev/test infra
+                               # only - runs against a rented cloud box, never
+                               # ships or runs in the product itself.
     "release-manifest.toml",   # this file classifies itself: release tooling metadata
 ]
 
