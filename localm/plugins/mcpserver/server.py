@@ -599,6 +599,16 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 # remove_model tool). Guards a hand-edited/half-written registry.
                 lines.append(f"{name}  [corrupt]  (malformed registry entry)")
                 continue
+            # These stats run INLINE on purpose. The sibling HTTP handlers
+            # (/api/models, /v1/models/{id}) push the same per-row filesystem work
+            # into the plugin executor because they are `async def` and a blocking
+            # syscall there stalls every other request the server is serving. This
+            # dispatcher has no event loop to protect: MCPStdioServer.run_stdio is
+            # a synchronous `for line in stdin` loop and handle() is a plain def,
+            # so a thread hop would only move the block, not remove it - the caller
+            # is already waiting on this one reply. What keeps a pathological row
+            # (a UNC path that blocks in the SMB redirector) out of this loop is
+            # the REGISTRATION gate, not a probe here.
             p = Path(epath)
             if p.is_dir():
                 size = "dir (HF format)"

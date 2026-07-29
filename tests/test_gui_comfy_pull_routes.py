@@ -153,12 +153,47 @@ class TestComfyRoutesAreScoped:
         assert r1.status_code == 403
         assert r2.status_code == 403
 
-    def test_models_write_key_reaches_both_routes(self, scoped_app):
+    def test_models_write_key_reaches_preflight(self, scoped_app):
+        """preflight is READ-ONLY (it reports which models ComfyUI is missing), so
+        models:write alone still reaches it."""
         from localm import auth
         writer = auth.create_key("writer", [S.MODELS_WRITE])["key"]
         with TestClient(scoped_app) as c:
             r1 = c.post("/api/media/image/preflight", json={}, headers=_hdr(writer))
-            r2 = c.post("/api/models/pull-comfy-source",
-                       json={"filename": "not-curated.gguf"}, headers=_hdr(writer))
         assert r1.status_code != 403
-        assert r2.status_code != 403   # reaches the route (400 for uncurated, not 403)
+
+    def test_pull_comfy_source_now_needs_host_fs_access(self, scoped_app):
+        """REVISED CONTRACT. This test previously asserted that a plain
+        models:write key REACHES this route (`!= 403`, "400 for uncurated, not
+        403"). That is no longer true, deliberately.
+
+        The route downloads into comfy_models_dest_dir(), which resolves through
+        `comfy_workdir` whenever the managed ComfyUI instance is not active - the
+        default on a fresh install. `comfy_workdir` carries no admin_only flag, so
+        a config:write key chooses that folder; the route then mkdir -p's it and
+        streams a multi-gigabyte download into it from the server process. Picking
+        the directory the server writes gigabytes into is host filesystem reach,
+        and a UNC value there draws outbound SMB authentication from the server -
+        the same capability /api/fs/dirs is gated on, and the same reason the
+        sibling /api/models/scan route is gated.
+
+        models:write governs WHICH MODELS may be added; it does not govern WHERE
+        ON THE DISK the server may write. Those came apart here."""
+        from localm import auth
+        writer = auth.create_key("writer", [S.MODELS_WRITE])["key"]
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source",
+                       json={"filename": "not-curated.gguf"}, headers=_hdr(writer))
+        assert r.status_code == 403
+
+    def test_pull_comfy_source_reaches_the_route_with_host_fs_access(self, scoped_app):
+        """Fires-control for the test above: with host filesystem access the
+        request gets PAST the gate and is answered on its merits (400 for an
+        uncurated name). Without this, the 403 above would also pass against a
+        route that had simply become unreachable for everyone."""
+        from localm import auth
+        writer = auth.create_key("hostwriter", [S.MODELS_WRITE], fs_access="host")["key"]
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source",
+                       json={"filename": "not-curated.gguf"}, headers=_hdr(writer))
+        assert r.status_code == 400, r.text
