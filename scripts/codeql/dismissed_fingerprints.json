@@ -42,7 +42,7 @@
  "251": {
   "rule": "py/path-injection",
   "file": "scripts/check_coverage_floors.py",
-  "line": 143,
+  "line": 217,
   "lineHash": "5d6a88fe0293d106:1",
   "comment": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
   "reason": "won't fix"
@@ -50,7 +50,7 @@
  "250": {
   "rule": "py/path-injection",
   "file": "scripts/check_coverage_floors.py",
-  "line": 137,
+  "line": 211,
   "lineHash": "f7a37db04ded0efd:1",
   "comment": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
   "reason": "won't fix"
@@ -58,7 +58,7 @@
  "249": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/pull.py",
-  "line": 1130,
+  "line": 1138,
   "lineHash": "558a75be02e6bb78:1",
   "comment": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
   "reason": "false positive"
@@ -170,7 +170,7 @@
  "230": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1472,
+  "line": 1476,
   "lineHash": "33998a7e7e46c747:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -178,7 +178,7 @@
  "229": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1470,
+  "line": 1474,
   "lineHash": "ac71e34ddb2b34f2:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -186,7 +186,7 @@
  "228": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1469,
+  "line": 1473,
   "lineHash": "ed1ee1441220e3c0:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -194,7 +194,7 @@
  "227": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1465,
+  "line": 1469,
   "lineHash": "8ae5994f38b92cef:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -202,7 +202,7 @@
  "226": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1406,
+  "line": 1410,
   "lineHash": "f5118baba1a47ea1:1",
   "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
   "reason": "false positive"
@@ -234,7 +234,7 @@
  "222": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 346,
+  "line": 350,
   "lineHash": "2fe654ab31b7fc69:1",
   "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
   "reason": "false positive"
@@ -442,7 +442,7 @@
  "171": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1482,
+  "line": 1486,
   "lineHash": "c0bd75fa01178286:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -450,7 +450,7 @@
  "170": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1480,
+  "line": 1484,
   "lineHash": "78ab2fc073825b1f:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -458,7 +458,7 @@
  "169": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1479,
+  "line": 1483,
   "lineHash": "6bb2e122a359fbc6:1",
   "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
   "reason": "false positive"
@@ -466,7 +466,7 @@
  "165": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 965,
+  "line": 969,
   "lineHash": "68134a57812ec9c1:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -474,7 +474,7 @@
  "164": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1066,
+  "line": 1070,
   "lineHash": "daeaff1565983dc6:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -482,7 +482,7 @@
  "163": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1047,
+  "line": 1051,
   "lineHash": "38a647c064676c93:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -490,7 +490,7 @@
  "161": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 861,
+  "line": 865,
   "lineHash": "47c7f6aa8180fdf3:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -498,7 +498,7 @@
  "160": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 779,
+  "line": 783,
   "lineHash": "85cba69236fdbe13:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -506,7 +506,7 @@
  "159": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 779,
+  "line": 783,
   "lineHash": "85cba69236fdbe13:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -514,7 +514,7 @@
  "158": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 737,
+  "line": 741,
   "lineHash": "5b5fbdb571e710c9:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -522,7 +522,7 @@
  "157": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 730,
+  "line": 734,
   "lineHash": "61e3cdc7e1b73d0f:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -530,7 +530,7 @@
  "156": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 617,
+  "line": 621,
   "lineHash": "f9fe0428fea1b1b5:1",
   "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
   "reason": "false positive"
@@ -538,7 +538,7 @@
  "155": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 582,
+  "line": 586,
   "lineHash": "82263556bcf71a7d:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -546,7 +546,7 @@
  "154": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 580,
+  "line": 584,
   "lineHash": "ee5ee8bbf913c3a8:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -554,7 +554,7 @@
  "153": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 576,
+  "line": 580,
   "lineHash": "8ea962e7b112404a:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -562,7 +562,7 @@
  "152": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 600,
+  "line": 604,
   "lineHash": "4ef9a7d1e49670ee:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -570,7 +570,7 @@
  "151": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 497,
+  "line": 501,
   "lineHash": "e2089bf21b74b2bc:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -578,7 +578,7 @@
  "150": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 465,
+  "line": 469,
   "lineHash": "a7ea34d72bde288c:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -586,7 +586,7 @@
  "149": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 464,
+  "line": 468,
   "lineHash": "bcb78b051f825fac:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -594,7 +594,7 @@
  "148": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 460,
+  "line": 464,
   "lineHash": "fb25e89f98797885:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -602,7 +602,7 @@
  "147": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 460,
+  "line": 464,
   "lineHash": "fb25e89f98797885:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -610,7 +610,7 @@
  "146": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 437,
+  "line": 441,
   "lineHash": "4c99deb88ac8b845:1",
   "comment": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
   "reason": "false positive"
@@ -618,7 +618,7 @@
  "143": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/pull.py",
-  "line": 798,
+  "line": 806,
   "lineHash": "8ff57bcea5303662:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -954,7 +954,7 @@
  "72": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1587,
+  "line": 1591,
   "lineHash": "af043587c387639e:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -962,7 +962,7 @@
  "71": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 1506,
+  "line": 1510,
   "lineHash": "2ae1bef1a7b1dbf:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -970,7 +970,7 @@
  "70": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 396,
+  "line": 400,
   "lineHash": "ade9e20966d39b2c:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -978,7 +978,7 @@
  "69": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 394,
+  "line": 398,
   "lineHash": "b3393c7283752795:1",
   "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
   "reason": "false positive"
@@ -986,7 +986,7 @@
  "68": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 371,
+  "line": 375,
   "lineHash": "fd3b9ca6e68ec7c8:1",
   "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
   "reason": "false positive"
@@ -994,7 +994,7 @@
  "67": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 367,
+  "line": 371,
   "lineHash": "6e10d688c214a13e:1",
   "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
   "reason": "false positive"
@@ -1002,7 +1002,7 @@
  "66": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 363,
+  "line": 367,
   "lineHash": "47fe97ddfdc4a5eb:1",
   "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
   "reason": "false positive"
@@ -1010,7 +1010,7 @@
  "65": {
   "rule": "py/path-injection",
   "file": "localm/model_manager/registry.py",
-  "line": 353,
+  "line": 357,
   "lineHash": "81e861ea6bf208ba:1",
   "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
   "reason": "false positive"
