@@ -362,6 +362,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   sync the same way the dropdown always was, picked up automatically within
   about 30 seconds regardless of where the switch came from.
 
+### Fixed
+- **Loading a model that only partly fits your GPU no longer reports plain
+  success.** A model too large for free VRAM still loads deliberately,
+  offloading as many layers as fit and running the rest on CPU - but the load
+  response, the GUI, and the MCP `pull_model` tool all reported the same
+  "loaded" success as a full GPU load. Loading a model now reports how many
+  layers actually reached the GPU whenever it is fewer than the model has:
+  the API response carries the counts, the GUI sidebar and Models page warn
+  instead of toasting a plain "switched", and `pull_model`'s reply says how
+  many layers landed on CPU. A model that fits fully is unaffected.
+- **Restarting the server could occasionally crash right after coming back
+  up.** The restart button unloaded the resident model and immediately
+  relaunched the server, with nothing waiting for the freed VRAM to actually
+  be reclaimed before the fresh process built a new model context in it - a
+  race against the still-reclaiming graphics driver. Restart now waits for
+  the release the same way switching models already did, before relaunching;
+  a restart with nothing loaded pays no extra delay.
+
 ## [0.1.3] - 2026-07-23
 
 ### Added
