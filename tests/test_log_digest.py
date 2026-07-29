@@ -60,6 +60,37 @@ class TestIsErrorRecord:
         rec = {"level": "", "logger": "", "lines": ["Traceback (most recent call last):"]}
         assert ld.is_error_record(rec)
 
+    def test_unleveled_continuation_with_native_crash_signal_counts_as_an_error(self):
+        # Raw native (ggml/CUDA/HIP) stderr is appended with no leveled prefix
+        # of its own (debuglog.py's dedup_native_stderr()/_write_debug()), so
+        # it always lands as a CONTINUATION of whatever benign record precedes
+        # it - here a routine DEBUG poll. Neither line contains the literal
+        # Python traceback marker.
+        rec = {"level": "DEBUG", "logger": "localm", "lines": [
+            "2026-07-13 15:25:39,000 DEBUG   localm: GET /api/stats -> 200 (7 ms)",
+            "CUDA error: operation not permitted when stream is capturing",
+        ]}
+        assert ld.is_error_record(rec)
+
+    def test_benign_continuation_with_no_crash_signal_is_not_an_error(self):
+        # A wrapped, genuinely benign continuation line must not be swept up
+        # by the broadened signal scan just because it has a second line.
+        rec = {"level": "DEBUG", "logger": "localm", "lines": [
+            "2026-07-13 15:25:39,000 DEBUG   localm: multi-line startup banner",
+            "    everything initialized without incident",
+        ]}
+        assert not ld.is_error_record(rec)
+
+    def test_signal_in_the_leveled_header_line_itself_does_not_trigger(self):
+        # The header line's own message came through a real "TIMESTAMP LEVEL
+        # NAME:" prefix, so its content is already correctly judged by
+        # rec["level"] - the broadened scan only applies to lines that never
+        # passed that check (continuations, or a level=="" record).
+        rec = {"level": "DEBUG", "logger": "localm", "lines": [
+            "2026-07-13 15:25:39,000 DEBUG   localm: 0 errors in the last batch",
+        ]}
+        assert not ld.is_error_record(rec)
+
 
 class TestCollapseNearDuplicates:
     def test_short_runs_are_not_collapsed(self):
@@ -121,6 +152,127 @@ class TestAllErrorsSurviveArbitraryTrailingNoise:
         digest = ld.build_digest(text)
         assert "first failure" in digest
         assert "second failure" in digest
+
+
+class TestNativeCrashContinuationSurvives:
+    """A native (ggml/CUDA/HIP) crash written via debuglog.py's raw stderr
+    append has no "TIMESTAMP LEVEL NAME:" prefix, so parse_records() always
+    attaches it as a CONTINUATION of whatever record precedes it - almost
+    always a routine DEBUG-level poll given how dense e.g. GET /api/stats
+    logging is in a real log. Before this fix, such a record silently
+    inherited the benign DEBUG level and was swept into collapse_records'
+    near-duplicate collapsing, and even the one surviving instance of a
+    collapsed run kept only its first line - so the crash text vanished
+    from the digest entirely, with no "omitted" notice, violating the
+    module's own "never drops an error record silently" guarantee. See the
+    #928 bug report investigation."""
+
+    def test_unformatted_cuda_crash_line_survives_dense_polling_noise(self):
+        lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
+                  for i in range(40)]
+        lines.insert(20, "CUDA error: operation not permitted when stream is capturing")
+        digest = ld.build_digest("\n".join(lines))
+        assert "CUDA error: operation not permitted when stream is capturing" in digest
+        # The polling run was split by the crash line, same as an explicit
+        # ERROR record splits a run - the two halves (20 + 20) each still
+        # collapse on their own.
+        assert "repeated 20x" in digest
+
+    def test_unrecognized_unleveled_continuation_still_not_collapsed_away(self):
+        # Even a continuation that matches none of the known crash-signal
+        # words must never be silently folded into a run of otherwise near-
+        # duplicate polling records: record_template() hashes the WHOLE
+        # record (continuation lines included), so this one record's uniquely
+        # different continuation gives it a template that matches none of its
+        # neighbors. With no run to join (run_len == 1, below
+        # _MIN_RUN_TO_COLLAPSE), it is emitted expanded, not folded away.
+        lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
+                  for i in range(40)]
+        lines.insert(20, "some totally novel native diagnostic line, no known keyword")
+        digest = ld.build_digest("\n".join(lines))
+        assert "some totally novel native diagnostic line, no known keyword" in digest
+
+    def test_benign_multiline_near_duplicates_still_collapse_well_and_keep_content(self):
+        # Real near-miss caught in review: an earlier draft of this fix simply
+        # excluded every multi-line (continuation-carrying) record from
+        # collapsing, to be safe. Measured against exactly this shape - dense
+        # upstream "CUDA Graph id N reused" native spam (see
+        # dedup_native_stderr's own docstring) attaching as a continuation of
+        # routine polling records, alternating between two ids - that
+        # exclusion defeated collapsing almost entirely: 200 such records
+        # produced ~6000 chars and 55 uncollapsed repeats instead of one
+        # collapsed line, reintroducing exactly the noise this module exists
+        # to remove, on the very reports (a CUDA-crashing box) that most need
+        # it removed. record_template() hashing the whole record fixes this
+        # correctly: these 200 records ARE genuine near-duplicates end to end
+        # (numbers masked), so they collapse - and the survivor keeps its own
+        # full content, so the repeated native line is not simply lost either.
+        lines = []
+        for i in range(200):
+            base = _polling_line(f"2026-07-13 15:{25 + i // 60:02d}:{i % 60:02d}", 7,
+                                  0.2 + i / 1000)
+            lines.append(base + f"\nCUDA Graph id {5 + i % 2} reused")
+        digest = ld.build_digest("\n".join(lines))
+        assert len(digest) < 500, f"benign near-duplicates failed to collapse ({len(digest)} chars)"
+        assert "CUDA Graph id" in digest, "the collapsed survivor lost its own content"
+        assert "repeated 200x" in digest
+
+    def test_record_template_reflects_continuation_content_not_just_the_header(self):
+        # Two records sharing an identical (masked) header but DIFFERENT
+        # continuation content must not be treated as near-duplicates of each
+        # other - that is what silently discarded a differing continuation
+        # under the pre-fix, header-only template.
+        header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
+        rec_a = {"level": "DEBUG", "logger": "localm",
+                  "lines": [header, "CUDA Graph id 5 reused"]}
+        rec_b = {"level": "DEBUG", "logger": "localm",
+                  "lines": [header, "CUDA Graph id 6 reused"]}
+        rec_c = {"level": "DEBUG", "logger": "localm",
+                  "lines": [header, "something completely unrelated"]}
+        # Same masked shape (only the number differs) -> same template.
+        assert ld.record_template(rec_a) == ld.record_template(rec_b)
+        # Genuinely different continuation content -> different template.
+        assert ld.record_template(rec_a) != ld.record_template(rec_c)
+
+    def test_known_tradeoff_unrecognized_differing_numeric_continuations_still_collapse(self):
+        # THIS TEST PASSES TODAY, asserting CURRENT, ACCEPTED behavior (see
+        # record_template's docstring) - it is not a "should eventually pass
+        # once X is added" placeholder. On POSIX, 137 and 139 are
+        # 128 + SIGKILL and 128 + SIGSEGV, so the two unleveled continuation
+        # lines this test collapses together stand for "the OOM killer took
+        # the worker" and "the worker segfaulted" - two different faults, read
+        # as one fault twice. That is the accepted trade-off: the alternative
+        # (disabling number-masking for continuation lines) was measured too
+        # and it breaks the CUDA-Graph-id collapsing this fix exists to keep
+        # working (see the sibling test above).
+        #
+        # A RED here means someone changed the masking behavior, on purpose
+        # or not. That is a trade-off decision to make again with full
+        # knowledge of what it costs (see record_template's docstring) - NOT
+        # a regression to chase back to green by construction alone.
+        lines = []
+        for i in range(6):
+            base = _polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2 + i / 100)
+            code = 137 if i % 2 == 0 else 139
+            lines.append(base + f"\nnative worker exit code {code}")
+        digest = ld.build_digest("\n".join(lines))
+        assert "repeated 6x" in digest
+        # Exactly one of the two values survives (the module never drops the
+        # kept instance's own real content) - which one is an implementation
+        # detail (the last record in the run), not a guarantee to pin.
+        assert ("137" in digest) != ("139" in digest), (
+            "expected exactly one of the two masked-equal values to survive")
+
+    def test_crash_line_survives_even_as_the_very_first_content_with_no_prior_record(self):
+        # If the debug log file itself starts mid-crash (no leveled record
+        # came before it at all), parse_records gives it level == "" and it
+        # must still be recognized rather than only being checked when it is
+        # a continuation of something else.
+        text = ("CUDA error: operation not permitted when stream is capturing\n"
+                + "\n".join(_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2)
+                            for i in range(10)))
+        digest = ld.build_digest(text)
+        assert "CUDA error: operation not permitted when stream is capturing" in digest
 
 
 class TestBudgetFitting:

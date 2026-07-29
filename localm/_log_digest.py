@@ -15,14 +15,25 @@ This module instead:
     CONTINUATION of the previous record, so a Python exception's full frames
     travel with the line that logged it.
   * Keeps EVERY WARNING/ERROR/CRITICAL record (or one containing a raw
-    traceback) from the whole file, not just the most recent one - the point
-    of a "digest" is that no error from the session goes missing.
+    traceback, or an unleveled continuation line that reads as a crash -
+    see _CONTINUATION_ERROR_SIGNAL_RE) from the whole file, not just the
+    most recent one - the point of a "digest" is that no error from the
+    session goes missing. This also covers raw native (ggml/CUDA/HIP)
+    stderr, which debuglog.py appends into the log file with no
+    "TIMESTAMP LEVEL NAME:" prefix of its own and so always lands as a
+    continuation of whatever benign record precedes it.
   * Collapses a run of 3+ consecutive BENIGN records that are near-duplicates
-    (same level/logger and message with the numbers masked out - so
+    END TO END - same level/logger and EVERY line's text with the numbers
+    masked out, continuation lines included (see record_template) - so
     ``GET /api/stats -> 200 (7 ms, loop_lag=0.26s)`` repeated every few
-    seconds collapses to one line + a repeat count) instead of listing each
+    seconds collapses to one line + a repeat count, instead of listing each
     one - the routine noise a report almost never needs, especially when it
-    is just "all is well" polling.
+    is just "all is well" polling. Matching on the WHOLE record rather than
+    just its header line means two records whose continuation content
+    actually differs are never wrongly called near-duplicates of each other,
+    and the survivor of a genuine collapse keeps ALL of its own lines, not
+    just the first - so nothing on the one kept instance is silently
+    discarded either.
   * If the digest is still over the size budget, trims from the OLDEST
     benign content first and never drops an error record silently - if even
     that is not enough, it says plainly how many earlier errors were omitted
@@ -54,6 +65,23 @@ _NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?")
 _ERROR_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
 _TRACEBACK_MARKER = "Traceback (most recent call last)"
 
+# Raw native (ggml/CUDA/HIP) stderr is appended straight into the debug log fd by
+# debuglog.py's dedup_native_stderr()/_write_debug() with NO "TIMESTAMP LEVEL NAME:"
+# prefix of its own, so parse_records() has no choice but to attach it as a
+# CONTINUATION of whichever record precedes it - almost always a routine
+# DEBUG-level poll, given how dense e.g. GET /api/stats logging is. The literal
+# traceback marker alone misses this entirely: a crash line like "CUDA error:
+# operation not permitted when stream is capturing" contains none of it, so the
+# combined record inherited the benign DEBUG level and was eligible for
+# collapse_records' near-duplicate collapsing - which silently discarded it
+# (see _CONTINUATION_ERROR_SIGNAL_RE's use in is_error_record). This is a second,
+# broader net alongside the exact traceback marker, not a replacement for it.
+_CONTINUATION_ERROR_SIGNAL_RE = re.compile(
+    r"\b(?:error|exception|fatal|crash(?:ed)?|segfault|segmentation fault|"
+    r"core dumped|assert(?:ion)?\s+fail\w*|panic|abort(?:ed)?)\b",
+    re.IGNORECASE,
+)
+
 # A run shorter than this is left expanded - collapsing "2 identical lines"
 # saves nothing and just makes a short, already-readable log harder to follow.
 _MIN_RUN_TO_COLLAPSE = 3
@@ -76,23 +104,74 @@ def parse_records(text: str) -> List[LogRecord]:
     return records
 
 
+def _unleveled_lines(rec: LogRecord) -> List[str]:
+    """The lines of *rec* that never went through the "TIMESTAMP LEVEL NAME:"
+    header check - i.e. the ones is_error_record cannot trust rec["level"] to
+    have already judged. When the record itself has no recognized header
+    (rec["level"] == ""), that covers every line, including lines[0] (see
+    parse_records' "file starts mid-record" branch). Otherwise it is every
+    CONTINUATION line glued on after the trusted header, lines[1:]."""
+    return rec["lines"] if not rec["level"] else rec["lines"][1:]
+
+
 def is_error_record(rec: LogRecord) -> bool:
-    """True for a WARNING+ record, or one carrying a raw traceback (a native
-    crash or a print()'d exception can land in the log with no leveled
-    prefix line of its own)."""
+    """True for a WARNING+ record, or one carrying a raw traceback or other
+    native-crash signal text in an unleveled line (a native ggml/CUDA crash or
+    a print()'d exception can land in the log with no leveled prefix line of
+    its own - see _CONTINUATION_ERROR_SIGNAL_RE)."""
     if rec["level"] in _ERROR_LEVELS:
         return True
-    return any(_TRACEBACK_MARKER in ln for ln in rec["lines"])
+    return any(_TRACEBACK_MARKER in ln or _CONTINUATION_ERROR_SIGNAL_RE.search(ln)
+               for ln in _unleveled_lines(rec))
 
 
 def record_template(rec: LogRecord) -> str:
-    """A near-duplicate key: level + logger + message with every number
-    masked out, so timestamps/latencies/counts that differ run to run do not
-    stop two otherwise-identical lines from collapsing together."""
-    first = rec["lines"][0]
+    """A near-duplicate key: level + logger + EVERY line's text (numbers
+    masked out), so timestamps/latencies/counts that differ run to run do not
+    stop two otherwise-identical records from collapsing together.
+
+    Keyed on the whole record, not just lines[0] - a record's continuation
+    lines can carry real, DIFFERING content (raw native stderr attaches as a
+    continuation of whatever benign record precedes it, so e.g. ggml-cuda's
+    "CUDA Graph id N reused" spam rides along with routine polling records).
+    Keying on the header alone would call two such records "near-duplicates"
+    whenever their headers merely mask to the same shape, even though their
+    continuations differ - which used to matter a lot, because the collapsed
+    survivor kept only lines[0] (see collapse_records) and every other line,
+    across every record in the run, was discarded. Hashing every line means
+    records only collapse when they are ACTUALLY near-duplicates end to end,
+    and the "\\x1e" join separator (vanishingly unlikely to appear in real log
+    text) stops two different line splits from concatenating to the same key.
+
+    KNOWN, ACCEPTED TRADE-OFF: numbers are masked in continuation lines too,
+    same as the header. This is NOT merely harmless in theory - measured, and
+    the concrete case is worse than "two numbers collapse": "native worker
+    exit code 137" vs "...139", neither containing a word
+    is_error_record's signal scan recognizes ("error"/"exception"/etc.), mask
+    to the SAME template and collapse together. On POSIX, 137 and 139 are
+    128 + SIGKILL and 128 + SIGSEGV - so what actually collapses into one
+    line with a repeat count is "the OOM killer took the worker" and "the
+    worker segfaulted": two DIFFERENT faults needing two different
+    investigations, read as one fault twice. (Windows carries no such
+    convention for those particular numbers, but the general risk is not
+    POSIX-specific, and localm ships on both.) The value itself is not lost -
+    the survivor keeps its own real line, so at least one instance's exact
+    number always survives - it is the DISTINCTION between two masked-equal-
+    but-different values that is. Turning masking off for continuation lines
+    is not a free fix either - it was measured too, and it breaks the exact
+    case this exists to serve: real
+    "CUDA Graph id 5 reused" / "id 6 reused" spam alternates, so without
+    masking no two consecutive records would ever match and nothing would
+    collapse at all. The escape valve is the signal scan, not the masking: if
+    a native diagnostic value needs to always be told apart, that is a reason
+    to widen _CONTINUATION_ERROR_SIGNAL_RE (which promotes the record to an
+    error, kept verbatim, never collapsed), not to weaken masking here."""
+    lines = rec["lines"]
+    first = lines[0]
     m = _LOG_LINE_RE.match(first)
     body = m.group(3) if m else first
-    return f"{rec['level']}|{rec['logger']}|{_NUMERIC_RE.sub('#', body)}"
+    masked = [_NUMERIC_RE.sub("#", body)] + [_NUMERIC_RE.sub("#", ln) for ln in lines[1:]]
+    return f"{rec['level']}|{rec['logger']}|" + "\x1e".join(masked)
 
 
 def _record_timestamp(rec: LogRecord) -> str:
@@ -101,8 +180,27 @@ def _record_timestamp(rec: LogRecord) -> str:
 
 def collapse_records(records: List[LogRecord]) -> List[str]:
     """Render *records* to lines: every error record kept verbatim; a run of
-    _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate BENIGN records collapses
-    into its last occurrence + a repeat count and timespan."""
+    _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate BENIGN records (now
+    matched on their FULL content via record_template, continuation lines
+    included - see its docstring) collapses into the survivor's own lines in
+    full, plus a repeat count and timespan on the last of them.
+
+    Earlier drafts of this fix excluded every multi-line (continuation-
+    carrying) record from collapsing at all, to stop a record's continuation
+    content from being silently discarded by a collapse. Measured against the
+    exact case this digest exists to help with - a CUDA-crashing box, where
+    raw native stderr rides as a continuation of routine polling records, so
+    ~all of them are multi-line - that blanket exclusion defeated collapsing
+    almost entirely: a 200-record run of otherwise near-duplicate "GET
+    /api/stream" polls, each carrying one alternating "CUDA Graph id N/N+1
+    reused" continuation line, produced a 5957-char digest with 55 uncollapsed
+    repeats instead of one collapsed line - reintroducing exactly the noise
+    this module exists to remove, on the reports that most need to be
+    readable. record_template hashing every line (not just the header) is the
+    correct fix: records only collapse when they are near-duplicates END TO
+    END, and the survivor below keeps ALL of its own lines rather than only
+    lines[0], so collapsing a genuine near-duplicate run no longer discards
+    the one kept instance's continuation content either."""
     out: List[str] = []
     i, n = 0, len(records)
     while i < n:
@@ -121,7 +219,9 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
             first_ts = _record_timestamp(records[i])
             last_ts = _record_timestamp(records[j - 1])
             span = f"{first_ts} .. {last_ts}" if first_ts and last_ts else f"x{run_len}"
-            out.append(f"{records[j - 1]['lines'][0]}  (repeated {run_len}x, {span})")
+            survivor = records[j - 1]["lines"]
+            out.extend(survivor[:-1])
+            out.append(f"{survivor[-1]}  (repeated {run_len}x, {span})")
         else:
             for k in range(i, j):
                 out.extend(records[k]["lines"])

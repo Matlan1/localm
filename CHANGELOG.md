@@ -381,6 +381,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   rescanned, it was added back in anyway, labeled the same as a regular chat
   model and offered a "use" button that could never actually work. It is now
   recognized from its own file contents and labeled as what it is.
+- **A bug report's log excerpt could drop a native crash entirely, leaving no
+  error visible in the report at all.** Raw native (CUDA/HIP/ggml) crash
+  output, such as `CUDA error: operation not permitted when stream is
+  capturing`, is appended to the debug log with no timestamp or level of its
+  own, so it always attaches to whichever ordinary log line came right before
+  it - usually a routine request logged every few seconds. The digest that
+  builds a report's log excerpt only recognized such an attached line as an
+  error when it was a Python traceback; anything else inherited the routine
+  line's harmless level and could be folded away as repeated noise, taking
+  the actual crash text with it. It now also recognizes crash-shaped text in
+  an unmarked line and never discards a log entry that carries one.
 
 ## [0.1.3] - 2026-07-23
 
