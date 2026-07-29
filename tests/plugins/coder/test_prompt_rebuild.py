@@ -160,9 +160,13 @@ class TestIncrementalMapRefreshCoverage:
         gaps-2026-07-29.md item 2 (deliberately deferred: needs the same
         git-diff detection already gated off the live path elsewhere for a
         blocking-subprocess-on-the-event-loop risk, not a quick fix here).
-        If this ever starts passing, it should be because that item was
-        deliberately closed, not because something else changed underneath
-        it unnoticed."""
+        THIS TEST ASSERTS A KNOWN-BROKEN BEHAVIOUR, so read its colours
+        backwards from a normal test. It PASSES today, on the gap. It goes
+        RED the day run_shell starts refreshing the map - which is the
+        DESIRED end state, not a regression: delete this test along with the
+        gap rather than making it green again. A red here that nobody
+        deliberately caused is the case worth investigating, because it
+        means the behaviour moved underneath the pin."""
         agent = _make_agent(tmp_path)
         call = _make_call("run_shell", command="echo hi")
         agent._refresh_map_for_tool(call)
