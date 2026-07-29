@@ -34,6 +34,14 @@ def _make_call(name: str, **args):
     c = MagicMock()
     c.name = name
     c.args = args
+    # A real ToolCall's start/end are text offsets; leaving them as unset
+    # MagicMock attributes broke the moment loop.py started calling
+    # split_response() unconditionally (previously interactive-only) -
+    # `call.start > pos` raised TypeError comparing a MagicMock to an int.
+    # 0/0 means "no leading segment, whole response is trailing leftover",
+    # which is harmless for every mocked response text used in this file.
+    c.start = 0
+    c.end = 0
     return c
 
 
@@ -231,6 +239,86 @@ class TestRepairTurn:
         assert result == "Done."
         ex.assert_called_once()          # the bare JSON was dispatched as a call
         assert self._repairs(agent) == []
+
+
+class TestPartialParseSurfacing:
+    """A tool-call-shaped block that fails to parse alongside a SIBLING call
+    that parses fine must not vanish silently.
+
+    parse_tool_calls only signals a parse problem via an EMPTY calls list
+    (which routes to TestRepairTurn's mechanism above) - it has no way to
+    say "N calls were attempted, only N-1 recovered". Measured live against
+    qwen2.5-coder-7b-instruct: an edit_file on an existing file (larger,
+    more escaping-prone content) silently vanished while a sibling
+    write_file and run_shell in the SAME turn executed for real - the model
+    never found out its edit never happened, and neither did anything else
+    in the session. loop.py now checks the text NOT consumed by the calls
+    that did parse (split_response) for a leftover tool-call-shaped
+    fragment and, if found, appends a notice to the results fed back.
+
+    The first <tool_call> below brace-balances fine (so it is NOT a #895-
+    style pairing/scan failure - deliberately, since that class of failure
+    is now recovered by the marker-variant fallback) but is semantically
+    rejected by _try_parse_body (name=123 is not a string), which no pass
+    in parser.py can ever recover - a stable, fix-independent way to force
+    exactly one call in a batch to be unrecoverable.
+    """
+    def _partial_notices(self, agent):
+        return [
+            m for m in agent._messages
+            if m["role"] == "user"
+            and "Part of this response looked like another tool call" in str(m.get("content", ""))
+        ]
+
+    def test_sibling_success_does_not_hide_an_unrecoverable_call(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        broken_and_good = (
+            '<tool_call>\n{"name": 123, "args": {"path": "a.py"}}\n</tool_call>\n\n'
+            '<tool_call>\n{"name": "read_file", "args": {"path": "b.py"}}\n</tool_call>\n'
+        )
+        responses = iter([broken_and_good, "Done."])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          return_value=["<result>ok</result>"]) as ex:
+            result = agent.run_task("read two files")
+        assert result == "Done."
+        ex.assert_called_once()
+        (dispatched,), _ = ex.call_args
+        assert len(dispatched) == 1
+        assert dispatched[0].name == "read_file"
+        assert dispatched[0].args["path"] == "b.py"
+        assert len(self._partial_notices(agent)) == 1
+
+    def test_no_partial_notice_when_everything_parsed(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        responses = iter([
+            '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>\n',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          return_value=["<result>ok</result>"]):
+            result = agent.run_task("read a file")
+        assert result == "Done."
+        assert self._partial_notices(agent) == []
+
+    def test_no_partial_notice_when_leftover_is_plain_prose(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        responses = iter([
+            'Sure, reading it now.\n\n'
+            '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>\n'
+            '\n\nThat should tell us what we need.',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          return_value=["<result>ok</result>"]):
+            result = agent.run_task("read a file")
+        assert result == "Done."
+        assert self._partial_notices(agent) == []
 
 
 class TestNoProgressBreaker:
