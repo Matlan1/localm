@@ -27,12 +27,25 @@ import struct
 import threading
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from localm.image_gen import comfy
+from localm.media.comfy_client import _comfy_output_root
 from localm.music_gen import comfy as music_comfy
+
+# Same non-routable RFC5737 (TEST-NET-1) address other UNC tests in this repo
+# use: guaranteed never to route anywhere, so even a total fix failure cannot
+# dial a real host from this machine or CI.
+_UNC = r"\\192.0.2.1\share"
+_UNC_FWD = "//192.0.2.1/share"
+_DEVICE = r"\\.\PhysicalDrive0"
+
+
+def _is_unc_or_device(s: str) -> bool:
+    return s[:2] in ("\\\\", "//", "\\/", "/\\")
 
 
 def _minimal_png() -> bytes:
@@ -356,6 +369,98 @@ class TestContainmentRejectsOutOfBoundsNames:
 
         assert target.exists(), "symlinked subfolder escaped containment"
         assert "WARNING" in warn
+
+
+class TestComfyOutputRootUncGuard:
+    """2026-07-29 sweep, M5: _comfy_output_root() is the read-time choke point
+    every caller of contain_comfy_artifacts goes through - comfy_output_dir is
+    settable by a config:write-scoped (privileged, not ADMIN) caller, and
+    reached Path(cand) with zero validation."""
+
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+    def test_unc_and_device_dir_returns_none(self, bad):
+        assert _comfy_output_root(bad) is None
+
+    def test_ordinary_dir_still_resolves(self, tmp_path):
+        assert _comfy_output_root(str(tmp_path)) == Path(tmp_path)
+
+    def test_env_var_source_is_also_guarded(self, monkeypatch):
+        monkeypatch.setenv("COMFY_OUTPUT_DIR", _UNC)
+        assert _comfy_output_root() is None
+
+    def test_config_source_is_also_guarded(self, monkeypatch):
+        monkeypatch.delenv("COMFY_OUTPUT_DIR", raising=False)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"comfy_output_dir": _UNC})
+        assert _comfy_output_root() is None
+
+
+class TestContainmentRejectsUntrustedRoot:
+    """2026-07-29 sweep, M6/M7: confined_under() only ever validates the
+    RELATIVE path handed to it - it never asks whether the BASE it is
+    confined under is itself safe. comfy_output_dir (the source of that base)
+    is settable by a config:write-scoped caller (privileged, but not ADMIN -
+    inference/routes/config.py's set_media_config ADMIN-gates launch_cmd/
+    api_url/workdir but deliberately not this key). Every test above this
+    class passes a trusted, test-fixed root (stub.output_dir), so none of
+    them could ever have caught a UNC-shaped comfy_output_dir reaching
+    confined_under's own .resolve() call - the SMB dial - before any
+    containment check runs."""
+
+    @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+    def test_unc_and_device_output_dir_rejected_without_touching_the_filesystem(
+            self, stub, monkeypatch, bad):
+        fn = "ComfyUI_00042_.png"
+        (stub.output_dir / fn).write_bytes(b"X")
+        stub.history["pidRoot"] = {"9": {"images": [
+            {"filename": fn, "subfolder": "", "type": "output"}]}}
+
+        real_resolve = Path.resolve
+        seen: list = []
+
+        def spy(self, *a, **kw):
+            s = str(self)
+            seen.append(s)
+            if _is_unc_or_device(s):
+                raise AssertionError(
+                    f"Path.resolve() reached the filesystem with a UNC/device "
+                    f"string: {s!r} - this is the SMB dial (and the "
+                    "net-NTLMv2 leak), which happens before any containment "
+                    "check can refuse it")
+            return real_resolve(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", spy)
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidRoot",
+            {"filename": fn, "subfolder": "", "type": "output"},
+            comfy_output_dir=bad,
+            delete_outputs=True,
+        )
+
+        assert "WARNING" in warn, "an unresolvable root must be surfaced, not silent"
+        assert (stub.output_dir / fn).exists(), (
+            "the real ComfyUI output must survive - containment must fail "
+            "safe, not touch an arbitrary path")
+        assert not any(_is_unc_or_device(s) for s in seen), (
+            "the UNC/device root reached Path.resolve() - the whole finding "
+            "is that this syscall happens before any containment check")
+
+    def test_ordinary_root_is_unaffected(self, stub):
+        """Control: an ordinary (non-UNC) root still resolves and contains
+        normally - the guard must not over-reject."""
+        fn = "ComfyUI_00043_.png"
+        (stub.output_dir / fn).write_bytes(b"X")
+        stub.history["pidOrd"] = {"9": {"images": [
+            {"filename": fn, "subfolder": "", "type": "output"}]}}
+
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidOrd",
+            {"filename": fn, "subfolder": "", "type": "output"},
+            comfy_output_dir=str(stub.output_dir),
+            delete_outputs=True,
+        )
+        assert warn == ""
+        assert not (stub.output_dir / fn).exists()
 
 
 def test_contain_skips_delete_for_temp_artifacts(stub):
