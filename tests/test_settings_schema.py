@@ -182,6 +182,45 @@ def test_rag_indexing_fields_are_owner_only():
 OUTBOUND_OWNER_KEYS = {"bugreport_upload_url", "bugreport_upload_token",
                        "update_url", "update_token"}
 
+# --- REC-MEDIA-CMD sweep of all CORE_FIELDS (2026-07-28) --------------------- #
+#
+# The sweep asked one question per field: what can a non-owner config:write key
+# DO by setting it? PATCH /v1/config gates on admin_only_keys() |
+# engine_managed_keys() and nothing else, so a capability-bearing field carrying
+# neither flag is reachable by any delegated key.
+#
+# Grouped into named constants rather than one long literal so that concurrent
+# work adds a line instead of editing a shared expression.
+
+# Code or process execution.
+EXEC_OWNER_KEYS = {
+    "binary_dir",            # -> ctypes.CDLL(): attacker NATIVE code IN-PROCESS
+    "comfy_launch_cmd",      # -> shlex.split -> Popen(argv), caller-chosen program
+    "comfy_workdir",         # -> launcher auto-discovered inside it -> Popen
+    "comfy_api_url",         # -> the render target every media job is sent to
+    "coder_reviewer",        # -> selects a cloud/URL/local reviewer backend
+    "coder_reviewer_model",  # -> registry.py falls through to Path(name): any GGUF
+}
+
+# The privacy contract: whether localm writes the user's content to disk at all.
+PRIVACY_OWNER_KEYS = {"mode", "chat_mode", "coder_mode", "keep_diagnostics"}
+
+# Selects a file the server OPENS and parses, with no path confinement. Not code
+# execution like EXEC_OWNER_KEYS, so it is kept separate rather than folded in:
+# embedder.py:262-264 accepts any caller-chosen path and hands it to llama.cpp's
+# native GGUF parser (a UNC path on Windows also makes the probe an outbound
+# SMB/NTLM auth). Requested by local_3df0c67b, whose independent live run
+# confirmed the 403 and the unchanged value on master's gate shape.
+LOAD_PATH_OWNER_KEYS = {"embedding_model"}
+
+# Controls whose only job is to be restrictive, so CLEARING one widens reach.
+GUARD_OWNER_KEYS = {
+    "require_auth",                 # latent fail-closed switch (see the field comment)
+    "net_deny",                     # clearing it un-blocks every denied host
+    "net_search_url",               # where every web search is sent
+    "coder_untrusted_provenance",   # indirect-prompt-injection hardening
+}
+
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
@@ -191,12 +230,34 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     # cors_origins names which browser origins may call the authenticated API -
     # the same class of trust-widening boundary - and must be owner-only too
     # (security-checkup finding 2026-07-23).
+    #
+    # EXACT SET EQUALITY, DELIBERATELY - do not weaken this to a subset check.
+    # The exactness is what makes a REMOVED flag fail loudly: drop admin_only in
+    # the schema and admin_only_keys() changes, so this assertion goes red. A
+    # subset check would make adding a key convenient and silently surrender the
+    # drop detection, which is the property worth having.
+    #
+    # WHY THIS FILE AND localm/settings_schema.py MUST BE EDITED TOGETHER, BY ONE
+    # OWNER, AND NEVER SPLIT ACROSS BRANCHES: the assertion catches an
+    # INCONSISTENT drop (schema loses a flag, this set keeps it). It CANNOT catch
+    # a CONSISTENT one. If a rebase or merge takes one side wholesale for BOTH
+    # files, a key vanishes from the schema AND from the expected set together,
+    # the suite stays green, and a security flag is gone with no failing test and
+    # no conflict marker. No assertion living in these two files can ever catch
+    # that, because the evidence and the oracle are both inside the blast radius.
+    # Single ownership of the pair is the control; this test is not. Resolve any
+    # conflict here ADDITIVELY, keeping both sides' keys.
     # hf_trust_remote_code lets a downloaded model directory run its OWN Python
     # inside the localm process, i.e. arbitrary code execution on this machine.
     # That is the widest boundary of the lot, so it is owner-only too (CodeQL 49).
+    # Kept on its own line: it arrived from another lane while this sweep was in
+    # flight, and the conflict was resolved ADDITIVELY exactly as the note above
+    # instructs, rather than by taking either side wholesale.
     assert ss.admin_only_keys() == (
-        RAG_OWNER_KEYS | {"net_allow_private", "cors_origins",
-                          "hf_trust_remote_code"} | OUTBOUND_OWNER_KEYS)
+        RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
+        | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS
+        | {"hf_trust_remote_code"}
+        | {"net_allow_private", "cors_origins"})
 
 
 def test_outbound_endpoint_keys_are_owner_only():
@@ -278,8 +339,15 @@ def test_schema_json_hides_admin_only_for_non_owner():
     guest = {f["key"] for f in ss.schema_json(is_owner=False)}
     assert RAG_OWNER_KEYS <= owner, "owner must see the owner-only fields"
     assert not (RAG_OWNER_KEYS & guest), "non-owner must NOT see any of them"
-    # A normal (non-admin_only) field is unaffected by the owner filter.
-    assert "mode" in owner and "mode" in guest
+    # A normal (non-admin_only) field is unaffected by the owner filter. This is
+    # the OVER-GATING control: without it the test would pass just as happily if
+    # the guest view were empty. `mode` used to play this role and no longer can -
+    # the REC-MEDIA-CMD sweep gated it (it is the privacy master switch, and
+    # flipping it to "full" makes the server start writing conversation content).
+    # `temperature` is a plain sampling knob a delegated key legitimately sets, so
+    # it is a durable choice for this control rather than another field a later
+    # sweep is likely to gate.
+    assert "temperature" in owner and "temperature" in guest
     # The owner view advertises the admin_only flag so the client/UI can label it.
     by_key = {f["key"]: f for f in ss.schema_json(is_owner=True)}
     assert by_key["rag_indexing_mode"].get("admin_only") is True
