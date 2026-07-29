@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/localm.svg" width="96" alt="LocaLM logo">
+</p>
+
 # LocaLM
 
 **Offline local LLM inference and extension platform - GGUF and HuggingFace models, OpenAI-compatible server, agentic coding, media generation, RAG, and more through a plugin engine.**
@@ -9,6 +13,13 @@
 LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll` (no `llama-cpp-python`), runs HuggingFace Transformers models, and exposes both through an OpenAI-compatible HTTP server. At its core it is a **model loader plus a plugin engine**: the only always-present feature is **chat**, shipped as a protected, preinstalled plugin. Everything else - the coder agent, image/music/video generation, Knowledge (RAG), web access, durable memory, voice, text-to-speech, scheduled jobs, and MCP - is a plugin you install when you want it. One CLI, no cloud required.
 
 Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist only as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat reach it through a single policy choke point: `off` / `ask` / `allow` modes, domain allow/deny lists, and a private-address SSRF guard ([guide](docs/network.md)).
+
+## Screenshots
+
+<p align="center">
+  <img src=".github/images/chat.png" width="640" alt="LocaLM chat: a streaming reply with markdown and syntax-highlighted code"><br>
+  <img src=".github/images/models.png" width="640" alt="LocaLM Models page: registered GGUF and HuggingFace models, color-coded by type">
+</p>
 
 ## Quick start
 
