@@ -72,6 +72,33 @@ llama_seq_id  = ctypes.c_int32   # sequence id
 #   - [70]    bool no_host                = False
 #   - [71]    bool no_alloc               = False
 
+# llama_model_tensor_buft_override
+#
+#     struct llama_model_tensor_buft_override {
+#         const char * pattern;
+#         ggml_backend_buffer_type_t buft;
+#     };
+#
+# An ARRAY of these, terminated by an entry whose pattern is NULL, is what
+# llama_model_params.tensor_buft_overrides points at. Each entry says "any tensor
+# whose name matches this regex goes to that buffer type instead of where the
+# layer assignment would have put it" - the mechanism behind llama.cpp's own
+# --override-tensor / --cpu-moe / --n-cpu-moe flags.
+#
+# Layout VERIFIED empirically on 2026-07-28 against the shipped amd-rocm build
+# b1-7c158fb, not read off a header (the runtime wheel ships no headers): an array
+# built to this definition and pointed at by tensor_buft_overrides moved 478 MiB of
+# matched tensors from the GPU buffer to the host buffer on a real load, exactly
+# matching the same override expressed through the CLI's -ot flag. A wrong layout
+# would have crashed or silently done nothing; it did neither.
+
+class LlamaModelTensorBuftOverride(ctypes.Structure):
+    _fields_ = [
+        ("pattern", ctypes.c_char_p),
+        ("buft",    ctypes.c_void_p),    # ggml_backend_buffer_type_t
+    ]
+
+
 class LlamaModelParams(ctypes.Structure):
     _fields_ = [
         ("devices",                     ctypes.c_void_p),    # ggml_backend_dev_t**

@@ -164,6 +164,12 @@ CORE_FIELDS: list = [
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    SettingField("n_cpu_moe", Widget.NUMBER, "MoE expert layers on CPU",
+                 "Mixture-of-Experts models only. Keeps the expert weights of "
+                 "this many layers in system RAM instead of GPU memory, so the "
+                 "model fits in a much smaller amount of VRAM at about the same "
+                 "speed. 0 turns it off. Has no effect on a normal (dense) model.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
     SettingField("n_gpu_layers_auto", Widget.TOGGLE, "Auto-size GPU layers from VRAM",
                  "When GPU layers is left at 99 (all), pick how many layers "
                  "actually fit from free VRAM at load: a model too big for the "
