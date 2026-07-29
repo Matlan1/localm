@@ -15,7 +15,7 @@ Scope and layering:
     API callers, and the coder agent pointed at localm). It does NOT run for the
     in-process ``localm run`` REPL, which calls the engine directly.
   - It runs at the kernel HTTP boundary, downstream of ``Engine.chat_stream``'s
-    marker scrubbing (``localm/inference/textnorm.py``), so a hook sees clean
+    marker scrubbing (``localm/textnorm.py``), so a hook sees clean
     content text, not model-internal control markers. A stream hook therefore
     receives a scrubbed text piece (possibly several characters), not a raw
     model token.

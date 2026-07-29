@@ -3352,7 +3352,7 @@ async def _stream_sse(
     **gen_kwargs,
 ) -> AsyncIterator[str]:
     from localm.inference.protocol import ChoiceDelta, StreamChoice
-    from localm.inference.textnorm import ThinkSplitter
+    from localm.textnorm import ThinkSplitter
 
     chunk_id = make_chunk_id()
     ts = int(time.time())
@@ -3877,7 +3877,7 @@ async def _complete(
     # Split the model's <think> reasoning out of the visible answer into a
     # separate field (H4), so API clients get clean content (token count stays on
     # the full generated text - reasoning was still generated).
-    from localm.inference.textnorm import split_think
+    from localm.textnorm import split_think
     answer, reasoning = split_think(text)
 
     completion_tokens = await asyncio.get_running_loop().run_in_executor(
