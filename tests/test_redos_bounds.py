@@ -941,3 +941,72 @@ def test_marker_variant_rescan_budget_keeps_cost_linear_not_quadratic():
         f"({growth ** 2}x) than linear ({growth}x); the expensive-rescan "
         "budget is no longer bounding total cost to a constant number of "
         "full rescans")
+
+
+# --------------------------------------------------------------------------- #
+#  gbnf.TOOL_CALL_TRIGGER - the lazy-grammar trigger (GitHub #928, #833)
+#
+#  A SEVENTH pattern of the same class, and the reason it was not in the
+#  2026-07-28 sweep is structural rather than an oversight: TOOL_CALL_TRIGGER is
+#  never compiled or run through Python's `re` in production. It is a bare
+#  string marshaled through ctypes into llama.cpp's native std::regex, so
+#  CodeQL's `py/polynomial-redos` - a Python-level query - cannot see it at all.
+#  Any regex string handed to native code is invisible to that whole query class.
+#
+#  llama.cpp appends every generated token to `grammar.trigger_buffer` with NO
+#  SIZE CAP and re-runs the whole pattern over the whole buffer on EVERY token
+#  until a trigger matches (src/llama-grammar.cpp, llama_grammar_accept_impl),
+#  so a quadratic pattern makes the generation-total cost cubic. Measured on the
+#  repetitive markdown-table output that provoked it in the field:
+#
+#      buffer     old pattern      this pattern
+#       5,700       243 ms           0.061 ms
+#      11,400       975 ms           0.008 ms
+#      22,800     4,100 ms           0.007 ms
+#
+#  The separation is five to six orders of magnitude, so an ABSOLUTE budget is
+#  the right instrument here (unlike the #895 test above, whose fixed-vs-broken
+#  gap was small enough to need a ratio). CPU time, not wall clock: this is
+#  pure CPU-bound regex work and targeted runs share the box.
+# --------------------------------------------------------------------------- #
+
+_TRIGGER_ROW = "| localm/inference/backends/llamacpp/_runner.py | 1234 |\n"
+
+
+def _trigger_buffer(n_rows: int) -> str:
+    """Unconstrained model output with NO trigger in it - the vulnerable state,
+    where llama.cpp is still rescanning the whole buffer on every token."""
+    return _TRIGGER_ROW * n_rows
+
+
+def test_tool_call_trigger_does_not_backtrack_on_long_untriggered_output():
+    from localm.inference.gbnf import TOOL_CALL_TRIGGER
+    haystack = _trigger_buffer(1_800)          # ~100,000 chars
+    pat = re.compile(TOOL_CALL_TRIGGER)
+    _, cpu = _timed_cpu(pat.search, haystack)
+    assert cpu < 0.5, (
+        f"TOOL_CALL_TRIGGER took {cpu:.3f}s CPU on {len(haystack):,} chars of "
+        "untriggered output. llama.cpp re-runs this on EVERY token against an "
+        "uncapped buffer, so a superlinear pattern here hangs or crashes the "
+        "worker mid-generation (#928). A leading `[\s\S]*?` is the usual cause "
+        "and is never needed - the native side matches with a search."
+    )
+
+
+def test_tool_call_trigger_still_captures_the_tag_itself():
+    """The bound is worthless if the pattern stops meaning what it meant.
+
+    llama.cpp feeds the grammar from CAPTURE GROUP 1, and TOOL_CALLS_ONLY's
+    first literal is "<tool_call>", so group 1 MUST still start at the tag. A
+    "faster" rewrite that captures only what FOLLOWS the tag passes the budget
+    above and silently breaks tool calling outright - which is exactly the fix
+    that was proposed for #928 before this assertion existed.
+    """
+    from localm.inference.gbnf import TOOL_CALL_TRIGGER
+    body = '\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>'
+    m = re.compile(TOOL_CALL_TRIGGER).search(_trigger_buffer(20) + "<tool_call>" + body)
+    assert m is not None, "the trigger no longer matches a real tool call"
+    assert m.group(1) == "<tool_call>" + body, (
+        "capture group 1 must START AT the <tool_call> tag - the grammar is fed "
+        "from it and its first literal is the tag itself"
+    )
