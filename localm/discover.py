@@ -1064,8 +1064,20 @@ def _torch_gpus_isolated() -> "Optional[list]":
                      "(%s); falling through to nvidia-smi", type(e).__name__)
         return None
     err = (proc.stderr or "").strip()
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        # The child ALWAYS prints one line, "[]" included on its own failure path,
+        # so empty stdout means it died before printing (killed, hard crash, a
+        # native fault taking the process down). That is COULD NOT ASK, not
+        # "torch sees no device" - collapsing the two would report "no GPU" on a
+        # box whose GPU torch can see perfectly well.
+        logger.debug("list_gpus: out-of-process torch probe printed nothing "
+                     "(rc=%s)%s; treating as unavailable, not as 'no device'",
+                     proc.returncode,
+                     f"; child said: {err[:200]}" if err else "")
+        return None
     try:
-        devices = json.loads((proc.stdout or "").strip() or "[]")
+        devices = json.loads(raw)
         if not isinstance(devices, list) or not all(
                 isinstance(d, dict) and isinstance(d.get("index"), int)
                 and isinstance(d.get("total"), int)

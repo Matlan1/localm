@@ -117,9 +117,23 @@ class TestIsolatedProbeDegradesHonestly:
         assert out is None
         assert "unusable" in caplog.text
 
-    def test_empty_reply_is_an_empty_list_not_a_crash(self, monkeypatch):
-        assert self._run(monkeypatch,
-                         return_value=MagicMock(stdout="", stderr="")) == []
+    def test_a_child_that_printed_nothing_is_unavailable_not_empty(
+            self, monkeypatch, caplog):
+        """The child always prints one line, "[]" included on its own failure
+        path. Empty stdout therefore means it DIED before printing, which is
+        could-not-ask. Calling that "no device" would report "no GPU" on a box
+        whose GPU torch can see perfectly well."""
+        caplog.set_level("DEBUG", logger=self._LOGGER)
+        out = self._run(monkeypatch,
+                        return_value=MagicMock(stdout="", stderr="", returncode=-9))
+        assert out is None, "a child that printed nothing was read as 'no device'"
+        assert "printed nothing" in caplog.text
+
+    def test_a_child_that_answered_empty_IS_empty(self, monkeypatch):
+        """The other side of the same line: an explicit "[]" is a real answer
+        (torch imported, no CUDA/HIP device) and must not be read as a failure."""
+        assert self._run(monkeypatch, return_value=MagicMock(
+            stdout="[]", stderr="", returncode=0)) == []
 
 
 class TestWedgedTorchIsNotRetriedForever:
