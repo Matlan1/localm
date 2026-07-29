@@ -3,6 +3,7 @@
 restored into a new session (owner / coder:full only); the GET /api/coder/resumable
 probe is owner-gated and reflects whether a checkpoint exists for a directory."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -257,6 +258,75 @@ def test_resumable_rejects_unc_and_device_cwd_without_touching_the_filesystem(
     assert _unc_calls(seen) == [], (
         "the UNC/device string reached Path.is_dir() - the whole finding is "
         "that this syscall happens before any status code is chosen")
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="HOMEDRIVE/HOMEPATH take precedence over USERPROFILE and this "
+           "repro clears them so USERPROFILE wins; POSIX expands ~ from the "
+           "password database and ignores USERPROFILE entirely, so this "
+           "mechanism is Windows-specific")
+def test_create_session_rejects_a_cwd_that_expands_into_unc_via_userprofile(
+        tmp_path, monkeypatch):
+    """Regression pin for the expanduser-then-check ORDERING, not just the
+    guard's existence: a raw `~`-prefixed cwd is NOT UNC-shaped as written, so
+    a guard that checked the RAW string (the ordering this fix replaced)
+    would pass it straight through - only AFTER expanduser() runs (which
+    resolves ~ against the server's own USERPROFILE) does it become a UNC
+    string. This is a real, if unusual, Windows configuration (a roaming
+    profile pointing the home directory at a network share), not attacker
+    input - the SERVER's own environment, not something a client controls.
+    The point is the invariant: the guard must check the string that
+    actually reaches the syscall, not an earlier form of it, which is what
+    silently breaks if the check is ever "simplified" back to pre-expansion.
+    Every other UNC test in this file uses an already-UNC-shaped raw string,
+    so none of them would fail if this ordering were reverted - this one is
+    designed to."""
+    monkeypatch.setenv("USERPROFILE", _UNC)
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+    # Confirm the environment actually produces a UNC string, rather than
+    # trusting env-var precedence blindly.
+    expanded = str(Path("~/proj").expanduser())
+    assert _is_unc_or_device(expanded), (
+        f"test setup did not produce a UNC path: expanduser() gave {expanded!r}")
+
+    seen = _install_fs_spy(monkeypatch, "is_dir")
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": "~/proj", "mode": "log"})
+    assert r.status_code == 400, r.text
+    assert _unc_calls(seen) == []
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="HOMEDRIVE/HOMEPATH take precedence over USERPROFILE and this "
+           "repro clears them so USERPROFILE wins; POSIX expands ~ from the "
+           "password database and ignores USERPROFILE entirely, so this "
+           "mechanism is Windows-specific")
+def test_resumable_rejects_a_cwd_that_expands_into_unc_via_userprofile(
+        tmp_path, monkeypatch):
+    """Same ordering-regression pin as create_session's version above, for
+    coder_resumable's independent guard."""
+    monkeypatch.setenv("USERPROFILE", _UNC)
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+    expanded = str(Path("~/proj").expanduser())
+    assert _is_unc_or_device(expanded), (
+        f"test setup did not produce a UNC path: expanduser() gave {expanded!r}")
+
+    seen = _install_fs_spy(monkeypatch, "is_dir")
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        r = client.get("/api/coder/resumable", headers=owner, params={"cwd": "~/proj"})
+    assert r.status_code == 400, r.text
+    assert _unc_calls(seen) == []
 
 
 def test_agent_persist_then_resume_roundtrip_offline(tmp_path, monkeypatch):
