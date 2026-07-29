@@ -134,6 +134,36 @@ class TestIsolatedProbeDegradesHonestly:
         (torch imported, no CUDA/HIP device) and must not be read as a failure."""
         assert self._run(monkeypatch, return_value=MagicMock(
             stdout="[]", stderr="", returncode=0)) == []
+    def test_child_failure_cause_reaches_the_log(self, monkeypatch, caplog):
+        """The child prints its cause to stderr before answering []; that reason
+        must not die with the discarded stream."""
+        caplog.set_level("DEBUG", logger=self._LOGGER)
+        out = self._run(monkeypatch, return_value=MagicMock(
+            stdout="[]", stderr="torch GPU probe failed: OSError: WinError 126"))
+        assert out == [], "the child ANSWERED (with []); that is not a cannot-ask"
+        assert "WinError 126" in caplog.text
+
+    def test_good_reply_is_passed_through(self, monkeypatch):
+        payload = [{"index": 0, "name": "RTX", "total": 8, "free": 4}]
+        assert self._run(monkeypatch, return_value=MagicMock(
+            stdout=json.dumps(payload), stderr="")) == payload
+
+    def test_child_is_spawned_via_the_localm_interpreter_resolver(self, monkeypatch):
+        """Bare sys.executable is the BASE interpreter inside a Windows
+        multiprocessing-spawn worker, whose children cannot import localm or
+        torch at all."""
+        fake = MagicMock(return_value=MagicMock(stdout="[]", stderr=""))
+        monkeypatch.setattr(subprocess, "run", fake)
+        monkeypatch.setattr("localm._mp_spawn.interpreter_for_localm_children",
+                            lambda: "SENTINEL-PY")
+        discover._torch_gpus_isolated()
+        argv = fake.call_args[0][0]
+        assert argv[0] == "SENTINEL-PY"
+        assert argv[-2:] == ["-m", "localm._torch_gpu_probe"]
+        assert fake.call_args.kwargs["timeout"] == \
+            discover._ISOLATED_TORCH_PROBE_TIMEOUT
+
+
 
 
 class TestWedgedTorchIsNotRetriedForever:
@@ -241,36 +271,6 @@ class TestWedgedTorchIsNotRetriedForever:
                 <= discover._GPU_PROBE_DEADLINE), (
             "the child timeout plus nvidia-smi's own timeout=5 must fit inside "
             "_GPU_PROBE_DEADLINE")
-
-    def test_child_failure_cause_reaches_the_log(self, monkeypatch, caplog):
-        """The child prints its cause to stderr before answering []; that reason
-        must not die with the discarded stream."""
-        caplog.set_level("DEBUG", logger=self._LOGGER)
-        out = self._run(monkeypatch, return_value=MagicMock(
-            stdout="[]", stderr="torch GPU probe failed: OSError: WinError 126"))
-        assert out == [], "the child ANSWERED (with []); that is not a cannot-ask"
-        assert "WinError 126" in caplog.text
-
-    def test_good_reply_is_passed_through(self, monkeypatch):
-        payload = [{"index": 0, "name": "RTX", "total": 8, "free": 4}]
-        assert self._run(monkeypatch, return_value=MagicMock(
-            stdout=json.dumps(payload), stderr="")) == payload
-
-    def test_child_is_spawned_via_the_localm_interpreter_resolver(self, monkeypatch):
-        """Bare sys.executable is the BASE interpreter inside a Windows
-        multiprocessing-spawn worker, whose children cannot import localm or
-        torch at all."""
-        fake = MagicMock(return_value=MagicMock(stdout="[]", stderr=""))
-        monkeypatch.setattr(subprocess, "run", fake)
-        monkeypatch.setattr("localm._mp_spawn.interpreter_for_localm_children",
-                            lambda: "SENTINEL-PY")
-        discover._torch_gpus_isolated()
-        argv = fake.call_args[0][0]
-        assert argv[0] == "SENTINEL-PY"
-        assert argv[-2:] == ["-m", "localm._torch_gpu_probe"]
-        assert fake.call_args.kwargs["timeout"] == \
-            discover._ISOLATED_TORCH_PROBE_TIMEOUT
-
 
 class TestChildProbeContract:
     """The child must mirror the in-process branch field for field, so a caller
