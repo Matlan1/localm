@@ -101,6 +101,48 @@ def compute_multifile_diff(cwd: Path, edits: object) -> Optional[str]:
     return "".join(chunks) if chunks else None
 
 
+def compute_search_replace_diff(cwd: Path, pattern: str, replacement: str,
+                                glob_pattern: str = "**/*") -> Optional[str]:
+    """
+    Unified diff a ``search_replace`` call would produce, concatenated over
+    every file it would touch, or None when nothing would change or the
+    pattern is invalid.
+
+    Unlike write_file/edit_file/edit_files, search_replace's target files are
+    discovered at RUNTIME (a glob + regex sweep) rather than named in the call
+    args, so there is no single old_content to diff against ahead of time.
+    Calls the real tool with its own ``dry_run=True`` instead of
+    re-implementing the sweep here - that is the SAME matching pass a real
+    apply would run (see ToolResult.changes), so patch mode's preview can
+    never see a different set of files, or different replacement text, than a
+    real apply would produce.
+    """
+    from .tools.files import tool_search_replace
+    result = tool_search_replace(cwd, pattern, replacement, glob_pattern, dry_run=True)
+    if not result.ok or not result.changes:
+        return None
+    chunks = []
+    for rel, old_bytes, new_text in result.changes:
+        old_text = old_bytes.decode("utf-8", errors="replace")
+        # Normalise CRLF/CR the same way text-mode read (and so the
+        # substitution ToolResult.changes' new_text is built from) already
+        # does: old_bytes is deliberately RAW (see ToolResult.changes' own
+        # docstring - the changed-files/undo tracker needs the exact on-disk
+        # bytes), but new_text is always LF-only, having been produced from
+        # a normalised read. Diffing raw CRLF against normalised LF would
+        # flag every line's ending as changed on a CRLF file, even where the
+        # sweep touched nothing on that line.
+        old_text = old_text.replace("\r\n", "\n").replace("\r", "\n")
+        diff_lines = list(difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{rel}", tofile=f"b/{rel}",
+        ))
+        if diff_lines:
+            chunks.append("".join(diff_lines))
+    return "".join(chunks) if chunks else None
+
+
 def compute_tool_diff(tool_name: str, args: dict, old_content: str) -> Optional[str]:
     """
     Unified diff a write_file/edit_file/patch_file tool call would produce

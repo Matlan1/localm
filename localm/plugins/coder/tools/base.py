@@ -17,13 +17,26 @@ class ToolResult:
     output:  str
     summary: str = ""       # one-line display shown in the console
     truncated: bool = False
+    # For a tool whose target files are discovered at RUNTIME rather than
+    # named in its call args (search_replace's glob+regex sweep has no
+    # `path` arg to read ahead of time), the (relative_path, old_bytes,
+    # new_text) of every file it touched - or would touch, when called with
+    # its own dry_run=True. None for every other tool, and None here too
+    # when nothing matched. The single source both a caller that must NOT
+    # touch disk (patch mode, previewing via dry_run) and a caller recording
+    # what a REAL write just changed (the changed-files/undo tracker) read
+    # from - the same matching pass feeds both, so preview and apply can
+    # never diverge the way two separate implementations would.
+    changes: "list[tuple[str, bytes, str]] | None" = None
 
     @classmethod
-    def success(cls, output: str, summary: str = "") -> "ToolResult":
-        return cls(ok=True, output=output, summary=summary)
+    def success(cls, output: str, summary: str = "",
+                changes: "list[tuple[str, bytes, str]] | None" = None) -> "ToolResult":
+        return cls(ok=True, output=output, summary=summary, changes=changes)
 
     @classmethod
-    def error(cls, message: str) -> "ToolResult":
+    def error(cls, message: str,
+              changes: "list[tuple[str, bytes, str]] | None" = None) -> "ToolResult":
         # summary is a ONE-LINE console display (see field comment). Keep the
         # full message in output and only a capped first line here, so a long
         # diagnostic (a timeout's partial output, git stderr) cannot flood the
@@ -31,7 +44,11 @@ class ToolResult:
         head = message.splitlines()[0] if message else ""
         if len(head) > 200:
             head = head[:200] + "..."
-        return cls(ok=False, output=message, summary=f"ERROR: {head}")
+        # changes: a PARTIAL apply (some files written before a mid-batch
+        # failure) still needs those files tracked/undoable - the ones that
+        # succeeded really did change on disk, and reporting the call as an
+        # error must not make that real mutation invisible (rule 5).
+        return cls(ok=False, output=message, summary=f"ERROR: {head}", changes=changes)
 
     def to_xml(self, tool_name: str) -> str:
         status = "ok" if self.ok else "error"
