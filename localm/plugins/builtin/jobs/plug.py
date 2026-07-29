@@ -157,7 +157,7 @@ def _caller_is_owner_key(request: Request) -> bool:
     Closing that needs the session to record at MINT time that the owner key
     minted it (sessions.create), which is outside this change's blast radius.
     """
-    from localm.auth import _fast_digest, _hash_key, ct_equal, get_api_key
+    from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
     from localm.inference.http_server import principal_id
     owner_key = get_api_key()
     if not owner_key:
@@ -178,7 +178,8 @@ def _caller_is_owner_key(request: Request) -> bool:
     # below is what triggers the derivation and re-link - so that one request
     # would fail to stamp a job as the owner's. This is an identity comparison
     # against an already-authenticated principal, not an authentication step.
-    return ct_equal(h, _hash_key(owner_key)) or ct_equal(h, _fast_digest(owner_key))
+    return (ct_equal(h, _hash_key(owner_key))
+            or ct_equal(h, _legacy_owner_identity(owner_key)))
 
 
 def _store() -> JobStore:

@@ -424,14 +424,55 @@ def owner_kdf_file() -> Path:
 
 
 def _fast_digest(key: str) -> str:
-    """Unsalted sha256 of *key*. Correct ONLY for a 256-bit generated token; for
-    anything a human may have chosen, use the KDF path.
+    """Unsalted sha256 of a GENERATED 256-bit token. Never call this on a secret
+    a human may have chosen - that is what the KDF path exists for.
+
+    The only value this produces that is ever PERSISTED is a keystore record's
+    hash, and create_key is the only writer of those: every one is
+    secrets.token_urlsafe(32). At 256 bits of CSPRNG entropy no dictionary and no
+    rainbow table applies, so hash speed is irrelevant there.
 
     surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
     UnicodeEncodeError on a lone surrogate, which would move the crash here from
     the compare. Byte-identical to encode("utf-8") for every key that encodes at
     all, so no stored digest changes."""
     return hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _legacy_owner_identity(key: str) -> str:
+    """The digest the owner key USED to be identified by, before the KDF landed.
+
+    Reproducing a historical value is inherently tied to the construction that
+    produced it, so this is the one place a possibly-user-chosen key still meets
+    a fast hash. It is confined to the MIGRATION path and is never persisted: it
+    is used to FIND rows still carrying the old identity so they can be rewritten
+    to the derived one (and, in the jobs plugin, to recognise a job stamped
+    before the upgrade so it is not orphaned). Nothing is stored under it and
+    nothing authenticates from it.
+
+    Separate function from _fast_digest despite the identical body, so the two
+    uses cannot be confused: one is "a generated token's permanent id", this one
+    is "a legacy value we are migrating AWAY from". When no supported install
+    predates the KDF any more, this function and its callers can be deleted
+    outright - _fast_digest cannot."""
+    return _fast_digest(key)
+
+
+# Per-process random MAC key for the in-memory memo. NOT a credential and never
+# persisted: it exists so the memo can be keyed by the presented secret WITHOUT
+# computing a bare fast hash of that secret. Two things follow. A memory scrape
+# of the memo yields values that mean nothing in any other process, and the
+# owner key no longer reaches a plain unsalted hash on the per-request path at
+# all - previously _hash_key computed _fast_digest(key) unconditionally, so the
+# hot path hashed a possibly-user-chosen secret on EVERY call even though it
+# then threw that value away for the owner.
+_MEMO_MAC_KEY = secrets.token_bytes(32)
+
+
+def _memo_key(key: str) -> str:
+    """Keyed lookup handle for the memo. Not invertible without _MEMO_MAC_KEY."""
+    return hmac.new(_MEMO_MAC_KEY, key.encode("utf-8", "surrogatepass"),
+                    hashlib.sha256).hexdigest()
 
 
 def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,
@@ -604,7 +645,7 @@ def _owner_digest_locked(key: str) -> str:
         logger.warning("could not persist the owner key derivation record %s "
                        "(%s); sessions and jobs stamped in this process may not "
                        "be recognised after a restart", owner_kdf_file(), e)
-    _migrate_legacy_owner_identity(_fast_digest(key), rec["digest"])
+    _migrate_legacy_owner_identity(_legacy_owner_identity(key), rec["digest"])
     return str(rec["digest"])
 
 
@@ -648,9 +689,13 @@ def _hash_key(key: str) -> str:
     The owner key (user-choosable, possibly human-memorable) gets a salted scrypt
     derivation; a generated keystore token gets the cheap unsalted digest, which
     is sound at 256 bits of CSPRNG entropy. The expensive path is memoised per
-    process, so it costs one derivation per key rather than one per request."""
-    fast = _fast_digest(key)
-    ck = fast + "@" + _cache_scope()
+    process, so it costs one derivation per key rather than one per request.
+
+    The memo is keyed by a per-process MAC (_memo_key), NOT by a fast hash of the
+    secret: the fast digest is now computed only on the branch that actually
+    returns one, so a possibly-user-chosen owner key never reaches an unsalted
+    hash here."""
+    ck = _memo_key(key) + "@" + _cache_scope()
     hit = _cache_get(ck)
     if hit is not None:
         return hit
@@ -658,7 +703,7 @@ def _hash_key(key: str) -> str:
         # A generated keystore token, or a token that matches nothing at all
         # (every wrong guess lands here). Cheap, and never cached, so an attacker
         # spraying tokens neither pays nor grows anything.
-        return fast
+        return _fast_digest(key)
     with _OWNER_KDF_LOCK:
         # Re-check under the lock: a concurrent request may have minted the
         # record (and warmed the memo) while we waited, and deriving again here
