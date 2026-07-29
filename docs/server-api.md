@@ -117,10 +117,53 @@ name and load state; 503 when no engine is initialised.
 
 Scope: `models:write`.
 
-`POST /v1/models/unload` releases the model from VRAM (e.g. before image
-generation hands the GPU to ComfyUI); `POST /v1/models/load` reloads it.
-Both wait for any in-flight generation to finish first. Unloading is
-implicit-recovery: the next chat request reloads automatically.
+`POST /v1/models/unload?model=<name>` releases model(s) from VRAM (e.g.
+before image generation hands the GPU to ComfyUI; omit `model` to unload
+everything currently loaded); `POST /v1/models/load?model=<name>` reloads one
+(omit `model` for the active or default model). Both wait for any in-flight
+generation to finish first, and for the freed VRAM to actually be reclaimed
+before returning.
+
+`POST /v1/models/load` returns:
+
+```json
+{"status": "loaded", "model": "mymodel",
+ "gpu_layers_offloaded": 24, "gpu_layers_total": 32, "degraded": true}
+```
+
+`status` is `"already_loaded"` when the model was resident already. The
+`gpu_layers_offloaded`/`gpu_layers_total`/`degraded` fields appear only when
+the backend can report per-layer placement (GGUF models, once the load has
+completed). A model too large to fully fit VRAM still loads deliberately,
+offloading as many layers as fit and running the rest on CPU rather than
+refusing outright; `degraded` is true whenever fewer than the full layer
+count landed on the GPU, so a caller can tell that apart from a full GPU
+load.
+
+`POST /v1/models/unload` returns `status` (`"unloaded"`, `"in_use"` when
+every loaded model was mid-request and none could be freed, or
+`"already_unloaded"`), `unloaded_models`, `embedder_unloaded`, and
+`skipped_in_use` when something was pinned by an in-flight request. Both
+routes add `vram_freed`, `vram_before_bytes`, and `vram_after_bytes` when a
+GPU free-memory reading is available, plus `vram_reading_uncertain` and a
+`vram_note` when that reading cannot be trusted (a stale probe, a driver that
+reports only this process's own allocations, or an unmeasurable post-unload
+reading). Unloading is implicit-recovery: the next chat request against an
+unloaded model reloads it automatically.
+
+## Server control
+
+Scope: `config:write`.
+
+`POST /v1/server/restart` unloads every resident model, waits for the freed
+VRAM to actually be reclaimed, then restarts the process in place on the
+same port (a fresh model load right after re-exec would otherwise race the
+still-reclaiming GPU driver). `POST /v1/server/shutdown` unloads and exits
+without relaunching - a clean alternative to force-closing the window or a
+Ctrl+C that does not always land. Both return immediately
+(`{"restarting": true}` / `{"stopping": true}`) while the actual
+restart/shutdown runs a moment later, so the response reaches the client
+first.
 
 ## Management endpoints
 
