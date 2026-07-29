@@ -125,6 +125,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   measured registered files on the same thread that answers every other request,
   so one unreachable path stalled everything until Windows gave up on it, which
   can take minutes. All three now measure off that thread.
+- **The status bar's GPU-utilisation reading no longer spawns a fresh `nvidia-smi`
+  process on every 2.5-second poll, and no longer risks blocking a poll on it.**
+  Utilisation (NVIDIA only) ran a bare `subprocess.run` inline on every poll with
+  no cap on how many could overlap; it now runs single-flighted on its own
+  background probe, so at most one `nvidia-smi` is ever in flight and a poll
+  always returns immediately with the most recent reading. An efficiency and
+  robustness fix scoped to this one reading - it does not touch how or when GPU
+  memory is enumerated, and is unrelated to the separate GPU-enumeration freeze
+  fixed elsewhere.
 
 ### Fixed
 - **Changing the embedding model no longer strands your knowledge collections.**
