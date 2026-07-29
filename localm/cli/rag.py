@@ -286,6 +286,61 @@ def rag_resync(collection, embed, url, prune_missing):
 
 
 
+@rag_group.command("reembed")
+@click.argument("collection")
+@click.option("--url", default=None,
+              help="Base URL of a running localm server (auto-detected otherwise).")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
+def rag_reembed(collection, url, yes):
+    """Recompute a collection's vectors with the CURRENT embedding model.
+
+    Use this after changing the embedding model. It re-embeds from the chunk text
+    already stored in the collection, so the ORIGINAL SOURCE FILES are not needed
+    and nothing is deleted or re-chunked - which is the difference from
+    `rag repair --embed`, that re-indexes from the source files and cannot help
+    when they have moved or the documents arrived as uploads.
+    """
+    from rich.console import Console
+    from localm.config import load_config
+    from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+    from localm.rag.store import Collection
+
+    console = Console()
+    coll = Collection(collection)
+    if not coll.exists():
+        console.print(f"[red]No collection named '{collection}'.[/red]")
+        raise SystemExit(1)
+
+    n = len(coll._chunks)
+    if not n:
+        console.print(f"[yellow]'{collection}' has no chunks to re-embed.[/yellow]")
+        return
+    model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
+    was = coll.embedding_model()
+    console.print(
+        f"Re-embedding [bold]{collection}[/bold]: {n} chunks"
+        + (f", built with {was}" if was else "")
+        + f" -> {model}.")
+    if not yes and not click.confirm("  Proceed?", default=True):
+        console.print("[dim]Cancelled - nothing changed.[/dim]")
+        return
+
+    with _refuse_if_locked(console):
+        try:
+            res = coll.reembed(embed_fn=_cli_rag_embed_fn(url), model_name=model,
+                               on_progress=lambda m: console.print(f"[dim]{m}[/dim]"))
+        except Exception as e:
+            # The previous index is intact by construction (reembed only swaps it
+            # in after the whole set is computed and validated), so say so - the
+            # user's next question is always "did I just lose my collection?".
+            console.print(f"[red]Re-embed failed: {e}[/red]")
+            console.print("[dim]The previous index was left untouched.[/dim]")
+            raise SystemExit(1)
+    console.print(
+        f"[green]Done.[/green] {res['chunks']} chunks re-embedded at "
+        f"{res['dim']} dimensions with {model}.")
+
+
 def _cli_rag_embed_fn(url):
     """Build a query embedder that calls a running localm server's
     /v1/embeddings (for `rag query --embed`), so the CLI gets the same hybrid

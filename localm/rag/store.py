@@ -40,6 +40,79 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
+from localm.jsonl import dumps_lines, split_jsonl
+
+# numpy is optional here: it is NOT in pyproject.toml, and CI installs from
+# pyproject rather than uv.lock, so on those runners it is simply absent and the
+# normal, correct state is a clean ModuleNotFoundError into the pure-Python path.
+# Bound ONCE at module import so this is decided at a single known point instead
+# of per call; absent -> None -> every caller degrades.
+#
+# THE REAL ROBUSTNESS IS THE (ImportError, AttributeError) CATCH AT EACH CALL
+# SITE, not this binding. An attribute-less `numpy` can appear with no import
+# error at all: a bare DIRECTORY named `numpy` on sys.path resolves as a PEP 420
+# implicit namespace package, so `import numpy` SUCCEEDS and yields a module with
+# no attributes and ``__file__`` of None. An injected stub module looks the same.
+# That is the state CI hit, reproduced with a control (no stray dir ->
+# ModuleNotFoundError; stray dir -> character-identical AttributeError).
+#
+# CORRECTION, kept deliberately because this comment previously asserted it and a
+# reader would otherwise copy it: an earlier diagnosis blamed a per-module
+# import-lock race across the plugin thread pool. That is FALSE and was falsified
+# from the CI logs - numpy is not installed there at all (you cannot
+# half-initialise a package that is not installed), the failing traceback has no
+# thread pool on it (memory/store.py, a plain synchronous call), and every failure
+# landed on gw0 and only gw0, which a first-import race cannot produce. Two CPython
+# details that diagnosis got backwards: a failed import does NOT leave a partial
+# module behind (``_bootstrap._load`` deletes ``sys.modules[name]`` on any
+# BaseException), and plain ``import x`` BLOCKS on the module lock rather than
+# handing a second thread a partial module - it accepts a partial one only on
+# _DeadlockError, i.e. a genuine circular import.
+#
+# So this binding NARROWS a lazy-import window that is a latent hazard regardless;
+# it does not close the hole that actually bit us, because it binds a namespace
+# stub just as readily as a lazy import would. What creates that stray directory
+# is an ENVIRONMENT defect, under separate investigation, and is not claimed here.
+try:
+    import numpy as _numpy
+except ImportError:      # optional dependency - every caller degrades to pure Python
+    _numpy = None
+
+#: True when numpy imported but is a namespace stub / attribute-less object rather
+#: than a real install. ``__file__`` is None for a PEP 420 namespace package, which
+#: is an EXACT discriminator - so the fallback can say WHICH case it hit instead of
+#: collapsing "numpy is legitimately absent" (routine) and "something has put a
+#: fake numpy on your path" (the install is broken) into one benign-sounding
+#: message. Same rule-5 branch as missing-vs-corrupt, applied to the message.
+_NUMPY_IS_STUB = _numpy is not None and getattr(_numpy, "__file__", None) is None
+
+
+def _warn_numpy_degrade(exc: Exception, operation: str) -> None:
+    """Announce the pure-Python fallback ONCE per process, saying which case it is.
+
+    "numpy unavailable, using the pure-Python path" reads as routine and would bury
+    the interesting case. An attribute-less numpy is NOT a missing dependency - it
+    means something has put a fake one on the import path, which will equally break
+    anything else in the environment that imports numpy. That deserves a message
+    naming the artefact so someone can go delete it, not a shrug.
+    """
+    if _NUMPY_DEGRADE_LOGGED:
+        return
+    _NUMPY_DEGRADE_LOGGED.add(True)
+    if _NUMPY_IS_STUB:
+        _log.warning(
+            "numpy imported as an EMPTY NAMESPACE PACKAGE from %s - it is not a real "
+            "install, and this will break anything else here that imports numpy. Most "
+            "likely a bare 'numpy' directory left on sys.path by a failed or "
+            "partially-removed install; find and remove it. Falling back to "
+            "pure-Python %s (%s: %s).",
+            getattr(_numpy, "__path__", None) or "an unknown path",
+            operation, type(exc).__name__, exc)
+    else:
+        _log.warning(
+            "numpy is present but unusable (%s: %s); falling back to pure-Python %s. "
+            "Results are identical, it is slower on large collections.",
+            type(exc).__name__, exc, operation)
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25, ENGLISH_STOP_WORDS
 from .collection_lock import (CollectionLockedError, collection_write_lock,
@@ -90,7 +163,9 @@ def _vectors_finite(vectors) -> bool:
     reason, never be trusted (AGENTS rule 5). Structure is already validated by
     ``_well_formed_vectors``; this checks the values."""
     try:
-        import numpy as np
+        np = _numpy
+        if np is None:
+            raise ImportError("numpy is not installed")
         for v in vectors:
             if not v:
                 continue
@@ -101,7 +176,14 @@ def _vectors_finite(vectors) -> bool:
             if not np.isfinite(arr).all():
                 return False
         return True
-    except ImportError:
+    # AttributeError as well as ImportError: this is the site where an unusable
+    # numpy did the MOST damage. _cosine returning a wrong score mis-ranks; THIS
+    # function returns the boolean that decides whether the vector store is
+    # trusted at all, and an escaping AttributeError does not degrade to BM25 with
+    # a surfaced reason (what the docstring promises) - it errors the whole query.
+    # CI only ever pointed at _cosine because it was reached first.
+    except (ImportError, AttributeError) as e:
+        _warn_numpy_degrade(e, "vector validation")
         for v in vectors:
             if not v:
                 continue
@@ -528,6 +610,27 @@ def _collection_lock(name: str):
 # Collection._quarantine_rejected_vectors.
 _REJECTED_VECTORS = "vectors.json.rejected"
 
+#: How many set-aside vector indexes to KEEP per collection. Each one is a full
+#: copy of the index (10 MB is ordinary, 68 MB was observed), and they accumulate
+#: with no upper bound in practice - a real install had three totalling 88 MB.
+#: Preserving the evidence is right (AGENTS rule 5); preserving EVERY generation
+#: of it forever is just an unbounded disk leak, and the oldest copies are the
+#: least useful ones. Keep the newest few, delete the rest LOUDLY.
+_MAX_REJECTED_KEPT = 3
+
+#: Set once when numpy has been found present-but-unusable, so the pure-Python
+#: cosine fallback announces itself exactly once per process instead of on every
+#: scored chunk. A set rather than a bool because rebinding a module-level bool
+#: from inside a function needs `global`, and this is read from a hot path.
+_NUMPY_DEGRADE_LOGGED: set = set()
+
+#: (collection dir, reason) pairs already logged in THIS process. _load() runs
+#: from __init__ and every request builds a fresh Collection, so an instance-level
+#: guard re-armed constantly and the same warning was emitted 25+ times a session.
+#: Process-scoped so the first occurrence is still loud and the rest are quiet.
+#: Never consulted for state - only for whether to LOG (see _note_vector_degrade).
+_WARNED_DEGRADES: set = set()
+
 
 class Collection:
     def __init__(self, name: str, base: Optional[Path] = None) -> None:
@@ -636,7 +739,17 @@ class Collection:
         chunks_file = self.dir / "chunks.jsonl"
         if chunks_file.is_file():
             bad_lines = 0
-            for line in chunks_file.read_text(encoding="utf-8").splitlines():
+            # split_jsonl, NOT str.splitlines(): JSONL is delimited by LINE FEED
+            # and nothing else, but splitlines() also breaks on U+0085/U+2028/
+            # U+2029, which json.dumps(ensure_ascii=False) writes RAW. That tore
+            # one record into two unparseable fragments, and the damage did not
+            # stop at a warning: the dropped records made the vector sidecar
+            # look stale (silent degrade to lexical), got it quarantined, and
+            # then _save() rewrote this file from the survivors - deleting the
+            # user's chunks. Measured on a real collection: 36 raw U+0085 turned
+            # 1192 records into 1228 lines, 62 unparseable, 26 chunks lost per
+            # load/save cycle. See localm/jsonl.py.
+            for line in split_jsonl(chunks_file.read_text(encoding="utf-8")):
                 if not line.strip():
                     continue
                 try:
@@ -768,8 +881,12 @@ class Collection:
     def _save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
-        self._atomic_write("chunks.jsonl", "\n".join(
-            json.dumps(c, ensure_ascii=False) for c in self._chunks))
+        # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
+        # would otherwise emit raw (U+0085/U+2028/U+2029), so a record can never
+        # again be split in half by a line-oriented reader - ours or anyone's.
+        # The reader above is fixed independently, so files written before this
+        # still load; this stops NEW ones being produced. See localm/jsonl.py.
+        self._atomic_write("chunks.jsonl", dumps_lines(self._chunks))
         # The fate of a REJECTED vectors.json is decided FIRST, before anything
         # below writes or unlinks that filename. Setting it aside from inside only
         # one branch loses the bytes on every other one, and the branch it lived in
@@ -903,10 +1020,52 @@ class Collection:
                          self.name, dest.name, e)
             return
         _log.warning("RAG collection %r: the unusable vectors.json was set aside "
-                     "as %s (%s). Nothing was deleted; rebuild the index with "
-                     "'localm rag repair %s --embed'.",
+                     "as %s (%s). Nothing was deleted; re-embed with "
+                     "'localm rag reembed %s' (no source files needed) or rebuild "
+                     "from source with 'localm rag repair %s --embed'.",
                      self.name, dest.name,
-                     self.vector_degrade_reason or "unusable", self.name)
+                     self.vector_degrade_reason or "unusable",
+                     self.name, self.name)
+        self._prune_rejected_vectors()
+
+    def _prune_rejected_vectors(self) -> None:
+        """Keep only the newest ``_MAX_REJECTED_KEPT`` set-aside indexes.
+
+        Each set-aside file is a full copy of the vector index, so an unbounded
+        pile is a disk leak: one real install had vectors.json.rejected,
+        .rejected.2 and .rejected.3 totalling 88 MB, and the allocator would have
+        gone on to twenty. Preserving the evidence is the rule; preserving every
+        generation of it forever is not what that rule asks for, and the OLDEST
+        copies are the least diagnostic.
+
+        Ordered by MTIME, deliberately not by name: ``_rejected_vector_files``
+        sorts lexicographically, which puts ``.rejected.20`` before ``.rejected.3``
+        and would make "oldest" wrong the moment a collection passed nine
+        rejections. Deletion is announced at WARNING level for the same reason
+        ``_discard_rejected_vectors`` announces its own - removing preserved
+        evidence must never happen quietly."""
+        files = self._rejected_vector_files()
+        if len(files) <= _MAX_REJECTED_KEPT:
+            return
+        try:
+            by_age = sorted(files, key=lambda p: p.stat().st_mtime)
+        except OSError as e:
+            _log.warning("RAG collection %r: could not order the set-aside vector "
+                         "indexes to prune them (%s); all are left in place",
+                         self.name, e)
+            return
+        for p in by_age[:-_MAX_REJECTED_KEPT]:
+            try:
+                size = p.stat().st_size
+                p.unlink()
+            except OSError as e:
+                _log.warning("RAG collection %r: could not prune %s (%s); it is "
+                             "left in place", self.name, p.name, e)
+                continue
+            _log.warning("RAG collection %r: pruned the oldest set-aside vector "
+                         "index %s (%.1f MB) - keeping the newest %d. The current "
+                         "index is unaffected.",
+                         self.name, p.name, size / 1048576.0, _MAX_REJECTED_KEPT)
 
     def _free_rejected_name(self):
         """An unused ``vectors.json.rejected[.N]`` path, or None if there is none.
@@ -1194,12 +1353,7 @@ class Collection:
                                 # would report just an error line while N-1 already-
                                 # embedded files vanish with no trace (AGENTS rule 5).
                                 self._save()
-                                raise ValueError(
-                                    f"Embedding dimension changed "
-                                    f"({self._vec_dim} -> {new_dim}): this "
-                                    f"collection was built with a different "
-                                    f"embedding model. Rebuild it (delete and "
-                                    f"re-add) or index with the original model.")
+                                raise ValueError(self._dim_mismatch_message(new_dim))
                             vectors = vecs
                             if self._vec_dim is None and new_dim is not None:
                                 self._vec_dim = new_dim
@@ -1624,12 +1778,7 @@ class Collection:
                                 # uploads before halting, so a mid-batch model switch
                                 # does not silently discard their work (AGENTS rule 5).
                                 self._save()
-                                raise ValueError(
-                                    f"Embedding dimension changed "
-                                    f"({self._vec_dim} -> {new_dim}): this collection "
-                                    f"was built with a different embedding model. "
-                                    f"Rebuild it (delete and re-add) or index with the "
-                                    f"original model.")
+                                raise ValueError(self._dim_mismatch_message(new_dim))
                             vectors = vecs
                             if self._vec_dim is None and new_dim is not None:
                                 self._vec_dim = new_dim
@@ -1656,6 +1805,107 @@ class Collection:
         self._save()
         return {"added": added, "updated": updated, "skipped": skipped,
                 "failed": failed, "chunks": len(self._chunks)}
+
+    def _dim_mismatch_message(self, new_dim: int) -> str:
+        """The refusal a user actually sees when they change embedding model.
+
+        It used to say "Rebuild it (delete and re-add)" - telling someone to DELETE
+        their collection, while naming neither the collection nor a command that
+        works. Worse, the two remedies it implied both failed: `rag repair --embed`
+        and the GUI reindex button hit this very guard, because neither reset
+        _vec_dim. Now it names the collection, both models where known, and the one
+        command that does the job without touching the source files.
+        """
+        was = self.embedding_model()
+        built = f" with {was}" if was else ""
+        return (
+            f"Embedding dimension changed ({self._vec_dim} -> {new_dim}): "
+            f"collection {self.name!r} was built{built} and its stored vectors "
+            f"cannot be mixed with a different model's. Re-embed it in place from "
+            f"the text already stored (no source files needed, nothing deleted):\n"
+            f"    localm rag reembed {self.name}\n"
+            f"or use 'Re-embed' on the Knowledge page. To keep the existing index "
+            f"instead, switch the embedding model back{built}.")
+
+    def reembed(self, *, embed_fn: EmbedFn, model_name: Optional[str] = None,
+                on_progress: Optional[ProgressFn] = None,
+                batch: int = 32) -> dict:
+        """Recompute EVERY vector from the stored chunk text, with a new model.
+
+        This is the answer to "I changed the embedding model, now my collection
+        refuses everything". The chunk text is already on disk in chunks.jsonl, so
+        nothing needs re-reading, re-chunking, or even to still exist: a collection
+        whose sources moved, were deleted, or arrived as uploads re-embeds exactly
+        the same as one whose files are all present. That is the difference from
+        ``rag repair --embed``, which re-indexes FROM THE ORIGINAL SOURCE FILES and
+        therefore cannot help when they are gone - and which could not help anyway,
+        because it never reset ``_vec_dim`` and so tripped the very dimension guard
+        it was supposed to resolve.
+
+        Crash-safe by construction: every vector is computed into a LOCAL list
+        first, and ``self._vectors`` is only replaced once the whole set is in hand
+        and validated. A failing embedder (model unloaded, VRAM gone, a bad batch)
+        therefore leaves the previous index exactly as it was, rather than a
+        half-dimension index that would mis-score every later query. The cost is
+        holding one full vector set in memory during the run, which is the same
+        order as the file it is about to write.
+        """
+        with _collection_lock(self.name), self._write_lock("reembed", on_progress):
+            self._load()
+            if not self._chunks:
+                return {"chunks": 0, "dim": None, "model": model_name,
+                        "note": "collection has no chunks; nothing to re-embed"}
+
+            texts = [c.get("text") or "" for c in self._chunks]
+            total = len(texts)
+            fresh: list = []
+            for i in range(0, total, max(1, batch)):
+                part = embed_fn(texts[i:i + max(1, batch)])
+                if part is None:
+                    raise RuntimeError(
+                        "the embedding function returned nothing for chunks "
+                        f"{i}-{i + len(texts[i:i + batch])} of {total}")
+                fresh.extend(part)
+                if on_progress:
+                    on_progress(f"re-embedding {min(i + batch, total)}/{total}")
+
+            # Validate BEFORE touching the live index. A short or ragged result is
+            # the failure mode that produces a silently mis-scoring collection, so
+            # it is refused loudly here rather than saved and discovered at query
+            # time (AGENTS rule 5).
+            if len(fresh) != total:
+                raise RuntimeError(
+                    f"embedder returned {len(fresh)} vectors for {total} chunks; "
+                    "the previous index has been left untouched")
+            dims = {len(v) for v in fresh if v is not None}
+            if len(dims) != 1 or not dims or next(iter(dims)) <= 0:
+                raise RuntimeError(
+                    f"embedder returned inconsistent vector sizes {sorted(dims)}; "
+                    "the previous index has been left untouched")
+
+            self._vectors = fresh
+            self._vec_dim = next(iter(dims))
+            # Record the model NAME, not only its dimension, so a later mismatch
+            # can say which model built this index instead of inferring it from a
+            # dimension count.
+            if model_name:
+                self._meta["embedding_model"] = str(model_name)
+            self._meta["embedding_dim"] = self._vec_dim
+            # A rebuilt full-coverage index makes any set-aside sidecar moot: this
+            # IS the rebuild those files were kept as evidence for.
+            self._vectors_file_rejected = False
+            self.vector_degrade_reason = None
+            self.corrupt = False
+            self._save()
+            self._discard_rejected_vectors(
+                f"re-embedded to {self._vec_dim} dimensions"
+                + (f" with {model_name}" if model_name else ""))
+            return {"chunks": total, "dim": self._vec_dim, "model": model_name}
+
+    def embedding_model(self) -> Optional[str]:
+        """The model NAME this collection's vectors were built with, if recorded."""
+        v = self._meta.get("embedding_model")
+        return str(v) if v else None
 
     def documents(self) -> list:
         """The source paths currently indexed in this collection (for repair)."""
@@ -1720,14 +1970,28 @@ class Collection:
 
         We do not hide problems (AGENTS rule 5): a corrupt, stale, or dimensionally
         mismatched vectors index must not silently vanish into BM25-only. Recording
-        the reason (exposed via ``stats()``) and logging genuine corruption once -
-        idempotent, so a per-query path does not spam the log - is the right
-        altitude: the lexical fallback still works, but the fault is discoverable."""
-        if self.vector_degrade_reason == reason:
-            return
+        the reason (exposed via ``stats()``) and logging genuine corruption once is
+        the right altitude: the lexical fallback still works, but the fault stays
+        discoverable.
+
+        "Once" has to mean once per PROCESS, not once per instance. This method was
+        already idempotent against ``self.vector_degrade_reason``, but ``_load``
+        runs from ``__init__`` and every request builds a FRESH Collection, so the
+        guard reset on each one and the same sentence was logged on essentially
+        every /api/rag call - measured at 25+ identical WARNING lines in one
+        session, several twice within a single request. The instance field is still
+        set unconditionally, so ``stats()`` and the GUI's "needs repair" state stay
+        exactly as accurate as before; only the duplicate LOG LINE is suppressed.
+        A genuinely NEW reason for the same collection still warns, so a fault that
+        changes shape is never hidden behind an earlier one."""
         self.vector_degrade_reason = reason
-        if warn:
-            _log.warning("RAG collection %r: %s", self.name, reason)
+        if not warn:
+            return
+        key = (str(self.dir), reason)
+        if key in _WARNED_DEGRADES:
+            return
+        _WARNED_DEGRADES.add(key)
+        _log.warning("RAG collection %r: %s", self.name, reason)
 
     def _vector_scores(self, text: str,
                        embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:
@@ -1834,11 +2098,27 @@ def _cosine(a: list, b: list) -> float:
             f"cosine similarity needs equal-length vectors "
             f"(got {len(a)} and {len(b)})")
     try:
-        import numpy as np
+        np = _numpy
+        if np is None:
+            raise ImportError("numpy is not installed")
         va, vb = np.asarray(a, dtype="float32"), np.asarray(b, dtype="float32")
         denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
         sim = float(va @ vb) / denom if denom else 0.0
-    except ImportError:
+    except (ImportError, AttributeError) as e:
+        # ImportError is the ordinary "numpy not installed" case. AttributeError is
+        # the one that broke Windows CI across several lanes: numpy is PARTIALLY
+        # INITIALISED on those runners, so `import numpy` SUCCEEDS while np.asarray
+        # is absent - the fallback below was never reached and the AttributeError
+        # escaped into every caller of a vector query.
+        #
+        # Deliberately NOT a bare `except`: that would also swallow a genuinely
+        # broken numpy and silently halve retrieval quality forever with nobody
+        # the wiser (AGENTS rule 5). These two are the exact shapes of "numpy is
+        # unusable HERE", and a usable-numpy failure (a real numerical error) still
+        # propagates. And the degrade is ANNOUNCED once per process rather than
+        # taken silently, because "semantic search got slower and nobody knows why"
+        # is exactly the invisible fault that rule exists to prevent.
+        _warn_numpy_degrade(e, "cosine similarity")
         dot = sum(x * y for x, y in zip(a, b))
         na = math.sqrt(sum(x * x for x in a))
         nb = math.sqrt(sum(y * y for y in b))
