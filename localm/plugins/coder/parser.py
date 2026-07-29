@@ -414,6 +414,41 @@ def _iter_top_level_json_objects(text: str, last_close: int = None):
         i = end
 
 
+# A real (i.e. text[i] == "{", in range) failed brace-balance scan in
+# _iter_marker_variant_calls costs O(last_close - i). #895 tried to make a
+# failed scan skip straight to last_close+1 on the theory that "this scan
+# already covered every position through last_close, so no marker before it
+# can balance either" - which is FALSE: a scan started fresh at a LATER
+# marker resets its own depth to 0, so it can balance at an EARLIER position
+# than last_close even though the scan from an EARLIER marker, carrying that
+# marker's own unclosed depth, never returned to 0. Measured directly: an
+# unclosed <tool_call> followed by a well-formed one later in the SAME
+# response went from 1 call recovered (pre-#895) to 0 (post-#895) - a real
+# tool call silently dropped, not merely a quadratic-input edge case (see
+# tests/test_parser_variants.py::test_marker_variant_recovers_a_later_call_
+# after_an_earlier_one_fails_to_balance).
+#
+# Retrying every failure from the very next marker (restoring pre-#895
+# behaviour) is correct but reintroduces the O(n^2) #895 measured on
+# thousands of CONSECUTIVE never-balancing markers before a single stray
+# closing brace. There is no cheap, general, and correct way to tell those
+# two shapes apart in advance: whether a later marker can balance depends on
+# whether the accumulated depth ever returns to THAT marker's own baseline,
+# which needs O(n) bookkeeping per candidate to answer without the string
+# hazard the module docstring's history warns about (a stray quote parses
+# differently depending on where string-tracking last reset). So: cap how
+# many EXPENSIVE retries a single call gets, not which markers are worth
+# retrying. Any genuine model turn realistically has a handful of tool-call
+# attempts at most; this cap is never reached by real output, and exists
+# only so a doctored/adversarial response cannot reintroduce the quadratic
+# blowup. Once exhausted, fall back to the fast (and, on adversarial input
+# only, lossy) skip - see test_marker_variant_stays_linear_when_none_of_
+# many_markers_balance for the bound this keeps: with this cap, n=4,000
+# never-balancing markers cost at most _MAX_EXPENSIVE_MARKER_RESCANS full
+# rescans instead of n, staying comfortably under the same 2.0s CPU budget.
+_MAX_EXPENSIVE_MARKER_RESCANS = 32
+
+
 def _iter_marker_variant_calls(text: str, last_close: int = None):
     r"""Yield ``(start, end, name, body)`` for the mangled ``<|tool_call>`` dialects.
 
@@ -431,10 +466,20 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
     dropped a real case: the coder editing its own parser docs or test fixtures
     emits a write_file whose CONTENT contains ``<tool_call>``. A brace-balanced,
     string-aware scan has no such trade: it knows the marker is inside a string.
+
+    Also the safety net for a well-formed canonical ``<tool_call>...</tool_call>``
+    that pass 1's strict opener/closer PAIRING (``_iter_xml_tool_calls``) mis-reads
+    because an EARLIER, unclosed ``<tool_call>`` stole its closing tag: pass 1
+    then treats everything between the two as one unparseable body and drops
+    both. ``_RE_TOOL_MARKER`` matches plain ``<tool_call>``/``</tool_call>`` too
+    (not just the ``<|...|>`` finetune dialects), so this pass gets a second,
+    independent try at the later call by brace-matching FROM ITS OWN MARKER
+    rather than from the broken opener pass 1 paired it with.
     """
     if last_close is None:
         last_close = text.rfind("}")
     pos = 0
+    expensive_retries_left = _MAX_EXPENSIVE_MARKER_RESCANS
     while True:
         opener = _RE_TOOL_MARKER.search(text, pos)
         if opener is None:
@@ -452,17 +497,16 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
         body_end = _object_end_from(text, i, last_close)
         if body_end < 0:
             if i < len(text) and text[i] == "{" and i <= last_close:
-                # A real brace-balance scan ran all the way through
-                # last_close and still failed to reach depth 0: that scan
-                # already covered every position through last_close, so no
-                # marker before last_close can balance either (mirrors
-                # _iter_top_level_json_objects below). Skip past last_close
-                # instead of retrying the identical scan from the next
-                # marker - that per-marker re-scan of the same suffix is
-                # what made this function quadratic on many-marker,
-                # none-balance input (n=4,000 markers measured at 6+s
-                # pre-fix, vs ~0.02-0.05s fixed).
-                pos = last_close + 1
+                # A real (expensive) failed scan. Retry from the very next
+                # marker - the only CORRECT recovery, see the module-level
+                # comment above _MAX_EXPENSIVE_MARKER_RESCANS - until the
+                # retry budget for this call runs out, then fall back to the
+                # fast skip to keep hostile many-marker input bounded.
+                if expensive_retries_left > 0:
+                    expensive_retries_left -= 1
+                    pos = opener.end()
+                else:
+                    pos = last_close + 1
             else:
                 # No object could ever start here (text[i] is not "{", or
                 # there is no closing brace left to reach at all) - that is
