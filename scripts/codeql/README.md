@@ -18,8 +18,19 @@ Three measured failures, all on this codebase:
    **10 / 16** - about 69 were pure noise.
 3. **A good fix can ADD alerts.** A shared helper introduced to centralise
    confinement becomes a sink in its own right.
+4. **Genuine hardening moves the number not at all.** Four real defects were
+   fixed on 2026-07-29 (a discarded confinement return in the RAG walk, a raw
+   registry `["path"]` read that decided an `unlink()`, an unguarded `mmproj`
+   path reaching the native loader, an eager unsalted hash of a possibly
+   user-chosen key). Measured on the same local database before and after:
+   **168 -> 168** path-injection, **1 -> 1** weak-hashing. Zero alerts closed.
 
-So alert COUNT is not a measure of progress in either direction.
+So alert COUNT is not a measure of progress in either direction. Four separate
+mechanisms move it, and NONE of them is code quality: a line shift, a relocation
+into a helper, a threat-model or config change, and - per (4) - nothing at all.
+Conversely `state: fixed` is never on its own evidence that a flow closed; check
+that no new alert covers the same STATEMENT, and compare alert NUMBERS, never
+counts.
 
 ## `residue_check.py`
 
