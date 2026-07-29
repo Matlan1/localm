@@ -1157,6 +1157,11 @@ class TestModelDiscoveryTools:
         assert "loaded" in r["result"]["content"][0]["text"]
         mock_pull.assert_called_once_with("owner/repo:m.Q4_K_M.gguf", name="m")
         assert engines._loaded_name == "m"
+        # AGENTS.md rule 5: "loaded ... ready to use" must mean an actual
+        # backend load, not just cache registration - engines.get() alone
+        # deliberately leaves the engine resident-but-unloaded (see
+        # EngineCache.get()'s "resident but not loaded" branch below).
+        engines._engines["m"].load.assert_called_once()
 
     def test_pull_model_load_false_skips_loading(self):
         # _server() eagerly resolves the default engine once already (the embed-
@@ -1194,6 +1199,25 @@ class TestModelDiscoveryTools:
         assert r["result"]["isError"] is True
         assert "loading it failed" in r["result"]["content"][0]["text"]
         assert "no GPU memory" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_load_step_failure_is_distinguished_from_pull_failure(self):
+        """Distinct from the case above: there get() itself raises. Here
+        get() succeeds (construction + cache registration), and the actual
+        .load() call - the step this fix added, previously never invoked by
+        pull_model at all - is what fails."""
+        def failing_load_factory(name):
+            engine = _stub_engine_factory(name)
+            engine.load.side_effect = RuntimeError("no GPU memory")
+            return engine
+
+        engines = EngineCache(default_model=None, engine_factory=failing_load_factory)
+        server = MCPStdioServer(build_tools(engines))
+        with patch("localm.model_manager.pull.pull_model", return_value=True):
+            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+        assert r["result"]["isError"] is True
+        assert "loading it failed" in r["result"]["content"][0]["text"]
+        assert "no GPU memory" in r["result"]["content"][0]["text"]
+        engines._engines["m"].load.assert_called_once()
 
 
 class TestRunCoderTask:

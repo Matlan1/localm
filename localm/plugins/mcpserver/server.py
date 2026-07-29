@@ -701,8 +701,17 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             # BUG-11: this load, like chat()/embed()'s, can print native sizing
             # diagnostics straight to stdout - the download above was already
             # guarded, but this post-download load step was not.
+            #
+            # engines.get() only constructs/registers the Engine and runs the
+            # VRAM-eviction gate (EngineCache.get(), engine.py) - it does NOT
+            # call Engine.load(), so the backend stays unloaded until some
+            # later caller (normally chat_stream()'s lazy-load path) touches
+            # it. The tool's own description promises "load it - blocks until
+            # ready", so pull_model must call .load() itself rather than
+            # leaving a resident-but-unloaded engine parked in the cache.
             with _quiet_stdout():
-                engines.get(name)
+                engine = engines.get(name)
+                engine.load()
         except Exception as e:
             return _text_result(
                 f"pulled and registered as {name!r}, but loading it failed: {e}",
