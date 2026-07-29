@@ -631,9 +631,9 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         "sub/dir/C:evil",
     ])
     def test_an_escaping_rfilename_is_rejected_before_the_stat(self, tmp_path, rfilename):
-        from localm import _pathcheck
+        from localm import pathsafe
         with pytest.raises(ValueError):
-            _pathcheck.confined_under(tmp_path, rfilename)
+            pathsafe.confined_under(tmp_path, rfilename)
 
     @pytest.mark.parametrize("rfilename", [
         # FALSE-POSITIVE TRAPS for confined_under. A hostile-only corpus passes an
@@ -655,8 +655,8 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         "sub/dir/deep/w.bin",                 # legitimately nested
     ])
     def test_legitimate_names_are_not_refused(self, tmp_path, rfilename):
-        from localm import _pathcheck
-        got = _pathcheck.confined_under(tmp_path, rfilename)
+        from localm import pathsafe
+        got = pathsafe.confined_under(tmp_path, rfilename)
         assert tmp_path.resolve() in got.resolve().parents
 
     @pytest.mark.parametrize("raw", [
@@ -671,8 +671,8 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         attached rather than surfacing as a mysterious rejection downstream."""
         import ntpath
         from pathlib import PureWindowsPath
-        from localm import _pathcheck
-        assert _pathcheck.is_unc_or_device_path(raw) is False, raw
+        from localm import pathsafe
+        assert pathsafe.is_unc_or_device_path(raw) is False, raw
         # The oracle for "is this really UNC" is the OS parser, not our opinion.
         assert PureWindowsPath(raw).drive == "", raw
         assert ntpath.splitdrive(raw)[0] == "", raw
@@ -689,8 +689,8 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         OS parser, same as the over-match test - these are SHARE paths, where
         `drive` is unambiguously the `\\\\host\\share` prefix."""
         from pathlib import PureWindowsPath
-        from localm import _pathcheck
-        assert _pathcheck.is_unc_or_device_path(raw) is True, raw
+        from localm import pathsafe
+        assert pathsafe.is_unc_or_device_path(raw) is True, raw
         assert PureWindowsPath(raw).drive != "", raw
 
     @pytest.mark.parametrize("raw", [
@@ -713,15 +713,25 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
         not depend on that question: a device path must never be treated as an
         ordinary relative component, because these routes reach `stat`, `mkdir`
         and `unlink`. So assert exactly that, and nothing about `drive`."""
-        from localm import _pathcheck
-        assert _pathcheck.is_unc_or_device_path(raw) is True, raw
+        from localm import pathsafe
+        assert pathsafe.is_unc_or_device_path(raw) is True, raw
 
     def test_nested_subpaths_are_still_permitted(self, tmp_path):
         """A real HF listing uses them, so confined_name's flat-only rule is wrong
-        here and confined_under must allow this."""
-        from localm import _pathcheck
-        got = _pathcheck.confined_under(tmp_path, "subdir/model-00001-of-2.safetensors")
-        assert got == tmp_path / "subdir" / "model-00001-of-2.safetensors"
+        here and confined_under must allow this.
+
+        Compared against the RESOLVED expectation: confined_under returns a
+        resolved path, so an unresolved join is not the same object on a host
+        where tmp_path is reached through a symlink or an 8.3 name. Resolving
+        both sides keeps this a test of "which file was named" rather than an
+        accidental test of the temp directory's spelling."""
+        from localm import pathsafe
+        got = pathsafe.confined_under(tmp_path, "subdir/model-00001-of-2.safetensors")
+        expected = (tmp_path / "subdir" / "model-00001-of-2.safetensors").resolve()
+        assert got == expected
+        # The point of the test is depth, so pin that explicitly too.
+        assert got.parent.name == "subdir"
+        assert tmp_path.resolve() in got.parents
 
     def test_snapshot_is_incomplete_rather_than_stat_ing_outside_dest(self, tmp_path):
         """End to end through pull.py: a repo whose listing escapes must make the
