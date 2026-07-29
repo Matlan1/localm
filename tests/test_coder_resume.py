@@ -5,10 +5,56 @@ probe is owner-gated and reflects whether a checkpoint exists for a directory.""
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm.plugins.coder.agent import Agent
+
+# Same non-routable RFC5737 (TEST-NET-1) address test_admin_fs_routes.py and
+# test_mcpserver.py use: guaranteed never to route anywhere, so even a total
+# fix failure cannot dial a real host from this machine or CI.
+_UNC = r"\\192.0.2.1\share"
+_UNC_FWD = "//192.0.2.1/share"
+_DEVICE = r"\\.\PhysicalDrive0"
+
+
+def _is_unc_or_device(s: str) -> bool:
+    """pathsafe.is_unc_or_device_path's forbidden-prefix check, judged by
+    Windows rules on every host, not gated on os.name - cwd here is client
+    (HTTP request) supplied, so the guard refuses `//host/share` everywhere,
+    unlike the local-path (`reject_unsafe_path_string`) policy."""
+    return s[:2] in ("\\\\", "//", "\\/", "/\\")
+
+
+def _unc_calls(seen) -> list:
+    """Filter, don't assert `seen == []`: an unrelated legitimate fs call
+    elsewhere in request handling must not fail a test about the malicious
+    string specifically."""
+    return [s for s in seen if _is_unc_or_device(s)]
+
+
+def _install_fs_spy(monkeypatch, method_name):
+    """Record every path string that reaches Path.<method_name>(), and
+    hard-fail the call when the string is UNC/device syntax - same discipline
+    as test_admin_fs_routes.py's fs_spy: assert on the absence of the
+    syscall, not merely on the returned status code, since the defect is the
+    syscall (an SMB dial that auto-authenticates), not the response body."""
+    seen: list = []
+    real = getattr(Path, method_name)
+
+    def spy(self, *a, **kw):
+        s = str(self)
+        seen.append(s)
+        if _is_unc_or_device(s):
+            raise AssertionError(
+                f"Path.{method_name}() reached the filesystem with a UNC/device "
+                f"string: {s!r} - this is the SMB dial (and the net-NTLMv2 "
+                "leak), which happens before any status code is chosen")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, method_name, spy)
+    return seen
 
 
 class _StubBackend:
@@ -167,6 +213,50 @@ def test_resumable_validates_cwd(tmp_path, monkeypatch):
         r = client.get("/api/coder/resumable", headers=owner,
                        params={"cwd": str(tmp_path / "nope")}).json()
         assert r["resumable"] is False
+
+
+@pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+def test_create_session_rejects_unc_and_device_cwd_without_touching_the_filesystem(
+        tmp_path, monkeypatch, bad):
+    """H1 (2026-07-29 sweep): the owner/coder:full branch called
+    Path(req.cwd).expanduser().is_dir()/.resolve() with no lexical check at
+    all. The `restricted` branch just above it already ignores req.cwd
+    entirely (uses root_dir instead), so this is the MORE-trusted branch -
+    not the less-trusted one - that was actually unguarded."""
+    seen = _install_fs_spy(monkeypatch, "is_dir")
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": bad, "mode": "log"})
+    assert r.status_code == 400, r.text
+    assert bad not in r.json().get("detail", ""), (
+        "the raw client string must not be echoed back unsanitised")
+    assert _unc_calls(seen) == [], (
+        "the UNC/device string reached Path.is_dir() - the whole finding is "
+        "that this syscall happens before any status code is chosen")
+
+
+@pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
+def test_resumable_rejects_unc_and_device_cwd_without_touching_the_filesystem(
+        tmp_path, monkeypatch, bad):
+    """H2 (2026-07-29 sweep): coder_resumable is a GET route with no CSRF
+    check (CSRF only applies to unsafe methods), so an unguarded cwd here is
+    reachable via a plain cross-origin request from any page the user has
+    open - no local foothold on the machine required."""
+    seen = _install_fs_spy(monkeypatch, "is_dir")
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    owner = {"Authorization": "Bearer ownersecret"}
+    with TestClient(app) as client:
+        r = client.get("/api/coder/resumable", headers=owner, params={"cwd": bad})
+    assert r.status_code == 400, r.text
+    assert bad not in r.json().get("detail", ""), (
+        "the raw client string must not be echoed back unsanitised")
+    assert _unc_calls(seen) == [], (
+        "the UNC/device string reached Path.is_dir() - the whole finding is "
+        "that this syscall happens before any status code is chosen")
 
 
 def test_agent_persist_then_resume_roundtrip_offline(tmp_path, monkeypatch):
