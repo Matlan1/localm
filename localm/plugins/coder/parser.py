@@ -451,7 +451,26 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
                 i += 1
         body_end = _object_end_from(text, i, last_close)
         if body_end < 0:
-            pos = opener.end()
+            if i < len(text) and text[i] == "{" and i <= last_close:
+                # A real brace-balance scan ran all the way through
+                # last_close and still failed to reach depth 0: that scan
+                # already covered every position through last_close, so no
+                # marker before last_close can balance either (mirrors
+                # _iter_top_level_json_objects below). Skip past last_close
+                # instead of retrying the identical scan from the next
+                # marker - that per-marker re-scan of the same suffix is
+                # what made this function quadratic on many-marker,
+                # none-balance input (n=4,000 markers measured at 6+s
+                # pre-fix, vs ~0.02-0.05s fixed).
+                pos = last_close + 1
+            else:
+                # No object could ever start here (text[i] is not "{", or
+                # there is no closing brace left to reach at all) - that is
+                # an O(1) check, not a scan, so it is both cheap and
+                # necessary to keep looking for the next marker: a marker
+                # followed by plain prose must not stop recovery of a real
+                # tool call further on in the same response.
+                pos = opener.end()
             continue
         j = body_end
         while j < len(text) and text[j].isspace():

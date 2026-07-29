@@ -43,6 +43,20 @@ def _timed(fn, *a, **kw):
     return result, time.perf_counter() - start
 
 
+def _timed_cpu(fn, *a, **kw):
+    """Like _timed, but measures CPU time (time.process_time), not wall-clock.
+
+    Wall-clock elapsed time includes time this process spent DESCHEDULED while
+    an unrelated process on the same box used the CPU - exactly the shared-load
+    contention this box's test coordinator has to account for once targeted
+    test runs go concurrent. CPU time only counts cycles actually spent
+    executing this process, so a sibling process hogging a core cannot inflate
+    it."""
+    start = time.process_time()
+    result = fn(*a, **kw)
+    return result, time.process_time() - start
+
+
 # ---------------------------------------------------------------------------
 #  jobs/webtool.py - the second copy of the coder's tool-call patterns
 # ---------------------------------------------------------------------------
@@ -106,6 +120,40 @@ def test_top_level_objects_still_finds_real_objects():
     assert list(_top_level_objects(text)) == ['{"a": 1}', '{"b": {"c": 2}}']
     # A trailing unmatched opener must not suppress the objects before it.
     assert list(_top_level_objects('{"a": 1} then {')) == ['{"a": 1}']
+
+
+def test_top_level_objects_stays_linear_when_many_opens_never_balance():
+    """The gap ``unmatched_braces`` above does NOT cover.
+
+    ``"{" * 16_000`` (the existing witness) has NO closing brace anywhere, so
+    the fast path (``if i > last_close: return``) fires on the very first
+    unmatched opener and nothing after it is ever scanned - O(1) per
+    remaining character. That never exercises the OTHER failure path: a scan
+    from ``i`` that runs all the way through ``last_close`` and never
+    balances, even though a closing brace exists somewhere ahead.
+
+    ``"{" * n + "}"`` forces exactly that: n opens, one stray close far away.
+    ``last_close`` sits at the very end, so every one of the n opens passes
+    the ``i > last_close`` guard and pays a real scan through last_close that
+    fails, and the pre-fix recovery (``i += 1``) retried the SAME scan from
+    the very next character - O(n) per position, O(n^2) overall. Measured
+    pre-fix on this project's venv: 0.01s at n=500, 3.1s at n=8000 (~4x per
+    doubling, i.e. quadratic). Fixed, this should be near-instant, so 2.0s
+    leaves a wide margin while still catching the 3+s regression.
+
+    Asserted on CPU time (_timed_cpu), not wall-clock: this test can now run
+    concurrently with other targeted test-slot work on this box (the test
+    coordinator's budget model allows it), and a wall-clock bound would be
+    flaky under that shared load. CPU time only counts cycles this process
+    actually executed, so contention from a sibling process cannot inflate
+    it."""
+    hostile = ("{" * 8_000) + "}"
+    result, cpu_elapsed = _timed_cpu(parse_web_call, hostile)
+    assert cpu_elapsed < 2.0, (
+        f"parse_web_call used {cpu_elapsed:.2f}s of CPU time on 8,000 "
+        "unbalanced opens plus one stray closing brace - the per-position "
+        "balance rescan is quadratic again")
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
