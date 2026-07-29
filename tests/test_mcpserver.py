@@ -1372,10 +1372,17 @@ class TestMcpCliWiring:
 
 class TestNewToolCalls:
     def test_setup_embeddings(self):
+        """The happy path now needs a REAL model identity: over MCP the `model`
+        argument must be a known embedding key or an already-registered name, not
+        a free-form path, because the client driving it is normally a model acting
+        on text it read. "fake-model" was fine when the tool accepted anything;
+        it is now refused, so use a known key to exercise the same success path.
+        The refusal itself is covered in tests/test_config_admin_gating.py."""
         server, _ = _server()
         with patch("localm.inference.embedder.resolve_embedding_model_path", return_value="fake-path") as mock_resolve:
             resp = _req(server, "tools/call",
-                        {"name": "setup_embeddings", "arguments": {"model": "fake-model"}})
+                        {"name": "setup_embeddings",
+                         "arguments": {"model": "bge-small-en-v1.5"}})
         assert resp["result"]["isError"] is False
         assert "ready" in resp["result"]["content"][0]["text"]
         mock_resolve.assert_called_once()
