@@ -31,7 +31,7 @@ from pydantic import BaseModel
 
 from localm.plugins.builtin.jobs import runner as _runner
 from localm.plugins.builtin.jobs.scheduler import JobScheduler
-from localm.plugins.builtin.jobs.store import Job, JobStore
+from localm.plugins.builtin.jobs.store import Job, JobStore, cwd_unc_error
 
 
 def _run_job(job, *, engine=None):
@@ -95,6 +95,25 @@ def _check_model_name(model) -> None:
     persisted by an older build)."""
     from localm.model_manager import unregistered_model_error
     err = unregistered_model_error(model)
+    if err:
+        raise HTTPException(400, err)
+
+
+def _check_cwd(cwd) -> None:
+    """Refuse a coder job's ``cwd`` when it is UNC or device syntax.
+
+    Same shape as _check_model_name above, sharing store.cwd_unc_error's
+    wording the same way _check_model_name shares unregistered_model_error's:
+    checked HERE, at the write, so a poisoned row never persists via this
+    route. This is early rejection only, not the authoritative guard - a row
+    written before this check existed (or added straight to the store) is
+    still on disk, and the autonomous scheduler tick has no caller to gate
+    here. _run_coder's own check is authoritative because it runs immediately
+    before the filesystem call, for every job regardless of when or how its
+    cwd was set (mirrors the model-name re-check in runner.py's _load_engine,
+    and PR #893's fix for the identical gap in the MCP server's
+    pull_model/run_coder_task/generate_image tools)."""
+    err = cwd_unc_error(cwd)
     if err:
         raise HTTPException(400, err)
 
@@ -255,6 +274,7 @@ async def create_job(req: JobCreate, request: Request):
             403, "allow_shell needs the owner key or a coder:full key; a scheduled "
             "coder job otherwise runs restricted (read + confined edit, no shell).")
     _check_model_name(req.model)
+    _check_cwd(req.cwd)
     from localm.inference.http_server import principal_id
     try:
         job = Job(
@@ -307,10 +327,13 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
     if getattr(job, "allow_shell", False) and not can_shell:
         raise HTTPException(
             403, "editing a shell-enabled job needs the owner key or a coder:full key.")
-    # PUT is the second write path into `model` and needs the same gate as POST,
-    # or the create-time check is simply routed around with an update.
+    # PUT is the second write path into `model` (and `cwd`) and needs the same
+    # gates as POST, or the create-time checks are simply routed around with an
+    # update.
     if "model" in changes:
         _check_model_name(changes["model"])
+    if "cwd" in changes:
+        _check_cwd(changes["cwd"])
     try:
         job = store.update(job_id, **changes)
     except KeyError:
