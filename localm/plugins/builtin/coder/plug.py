@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from localm.pathsafe import confined_file as _confined_file
+from localm.pathsafe import is_unc_or_device_path as _is_unc_or_device_path
 from localm.plugins.coder.sessions import CoderSession
 from localm.executor import get_plugin_executor
 
@@ -174,7 +175,25 @@ async def create_session(req: CreateSessionRequest, request: Request):
         if not cwd.is_dir():
             raise HTTPException(400, f"Project root is not a directory: {cwd}")
     else:
+        # req.cwd is client-supplied (HTTP request body) - refuse UNC/device
+        # syntax unconditionally, BEFORE cwd.is_dir()/.resolve() below ever
+        # run. Checked on the EXPANDED string, not the raw one: expanduser()
+        # is pure string/env-var work (no syscall), so it is safe to run
+        # first, and a `~` value whose configured home directory is itself a
+        # UNC path (a real roaming-profile configuration) would otherwise
+        # expand INTO a UNC string after a pre-expansion check had already
+        # cleared it - the check must see the same string that reaches
+        # is_dir()/resolve(). Same guard, same reasoning, as the already-
+        # fixed run_coder_task in mcpserver/server.py (PR #893). This is the
+        # branch the OWNER (or open-mode's default-owner caller) and
+        # coder:full keys take - the `restricted` branch above already
+        # ignores req.cwd entirely and uses root_dir instead, so it needs no
+        # guard of its own; the MORE-trusted branch is the one that actually
+        # touches the string, not the less-trusted one.
         cwd = Path(req.cwd).expanduser()
+        if _is_unc_or_device_path(str(cwd)):
+            raise HTTPException(
+                400, "'cwd' must be a local directory path, not a UNC or device path.")
         if not cwd.is_dir():
             raise HTTPException(400, f"Not a directory: {req.cwd}")
         cwd = cwd.resolve()
@@ -493,6 +512,15 @@ async def coder_resumable(request: Request, cwd: str = ""):
         p = Path(cwd).expanduser()
     except (OSError, ValueError, RuntimeError):
         raise HTTPException(400, "Invalid cwd")
+    # `cwd` is a raw HTTP query parameter, and this is a GET route with no CSRF
+    # check on it (CSRF only applies to unsafe methods) - refuse UNC/device
+    # syntax unconditionally, BEFORE p.is_dir()/.resolve() below ever run.
+    # Checked on the EXPANDED string (see create_session's cwd guard for why:
+    # expanduser() is pure string/env-var work, no syscall, so it is safe to
+    # run first and check what actually reaches is_dir()/resolve()).
+    if _is_unc_or_device_path(str(p)):
+        raise HTTPException(
+            400, "'cwd' must be a local directory path, not a UNC or device path.")
     if not p.is_dir():
         return {"resumable": False}
     from localm.plugins.coder.agent import checkpoint_info
