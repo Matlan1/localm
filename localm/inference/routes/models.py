@@ -185,7 +185,15 @@ def register(app: FastAPI, ctx) -> None:
         already = False
         if name in _hs._engines and _hs._engines[name].loaded:
             already = True
-            
+
         engine = await _hs.get_engine(name)
         status = "already_loaded" if already else "loaded"
-        return {"status": status, "model": engine.display_name}
+        # gpu_layers_offloaded/gpu_layers_total/degraded, when the backend can
+        # report them: a model too big to fully fit VRAM still loads (the
+        # backend's own sizing deliberately defers to a partial/zero GPU
+        # offload rather than refusing - see llamacpp/_sizing.py), and without
+        # this a caller cannot tell that "loaded" apart from a full GPU load
+        # (AGENTS.md rule 5 - a silent downgrade must not report unqualified
+        # success).
+        return {"status": status, "model": engine.display_name,
+                **_hs._gpu_placement_fields(engine)}

@@ -182,5 +182,62 @@ class TestEngineLoadSerialization(unittest.TestCase):
             self.assertTrue(e.loaded)
 
 
+class TestEngineGpuPlacement(unittest.TestCase):
+    """Engine.gpu_placement: whether the last load's transformer layers ended
+    up on GPU or CPU, so a caller can tell a full GPU load from a silent CPU
+    fallback (AGENTS.md rule 5) instead of a bare "loaded" that hides it."""
+
+    def _make_engine(self, *, gpu_layers_offloaded=None, gpu_layers_total=None):
+        from localm.inference.engine import Engine
+        engine = object.__new__(Engine)
+        engine.model_path = "/fake/model.gguf"
+        engine.display_name = "fake-model"
+        backend = MagicMock()
+        backend.gpu_layers_offloaded = gpu_layers_offloaded
+        backend.gpu_layers_total = gpu_layers_total
+        engine._backend = backend
+        return engine
+
+    def test_none_before_any_load(self):
+        engine = self._make_engine()
+        self.assertIsNone(engine.gpu_placement)
+
+    def test_none_when_backend_has_no_layer_count_knob(self):
+        # An HF backend (device_map="auto") has no gpu_layers_offloaded/total
+        # attributes at all - getattr's default keeps this None rather than
+        # fabricating a placement claim it cannot back up.
+        from localm.inference.engine import Engine
+        engine = object.__new__(Engine)
+        engine.model_path = "/fake/model.gguf"
+        engine.display_name = "fake-model"
+        engine._backend = object()   # no gpu_layers_* attributes at all
+        self.assertIsNone(engine.gpu_placement)
+
+    def test_full_offload_is_not_degraded(self):
+        engine = self._make_engine(gpu_layers_offloaded=32, gpu_layers_total=32)
+        self.assertEqual(engine.gpu_placement, {
+            "gpu_layers_offloaded": 32, "gpu_layers_total": 32,
+            "degraded": False,
+        })
+
+    def test_partial_offload_is_degraded(self):
+        engine = self._make_engine(gpu_layers_offloaded=12, gpu_layers_total=32)
+        placement = engine.gpu_placement
+        self.assertEqual(placement["gpu_layers_offloaded"], 12)
+        self.assertEqual(placement["gpu_layers_total"], 32)
+        self.assertTrue(placement["degraded"])
+
+    def test_zero_offload_is_degraded(self):
+        engine = self._make_engine(gpu_layers_offloaded=0, gpu_layers_total=32)
+        self.assertTrue(engine.gpu_placement["degraded"])
+
+    def test_zero_total_is_treated_as_unknown_not_degraded(self):
+        # A total of 0 (or None) means the true layer count is unknowable,
+        # not that the model has zero layers - never divide/compare against
+        # a total we do not actually have.
+        engine = self._make_engine(gpu_layers_offloaded=0, gpu_layers_total=0)
+        self.assertIsNone(engine.gpu_placement)
+
+
 if __name__ == "__main__":
     unittest.main()
