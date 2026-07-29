@@ -1,289 +1,1378 @@
 {
+ "249": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/pull.py",
+  "line": 1130,
+  "lineHash": "558a75be02e6bb78:1",
+  "comment": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
+  "reason": "false positive"
+ },
+ "247": {
+  "rule": "py/weak-sensitive-data-hashing",
+  "file": "localm/auth.py",
+  "line": 440,
+  "lineHash": "582ff397a8e549c:1",
+  "comment": "False positive: the only human-chosen secret, the owner key, goes through scrypt and its record declares that construction. Everything else hashed here is a generated 256-bit token or a failed guess. See scripts/codeql/dispositions.json, group weak-hash-generated-token.",
+  "reason": "false positive"
+ },
+ "245": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/gguf.py",
+  "line": 419,
+  "lineHash": "6072055163ba35cf:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "244": {
+  "rule": "py/path-injection",
+  "file": "localm/media/paths.py",
+  "line": 180,
+  "lineHash": "db76fad27913cda1:1",
+  "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+  "reason": "false positive"
+ },
+ "242": {
+  "rule": "py/path-injection",
+  "file": "localm/media/paths.py",
+  "line": 244,
+  "lineHash": "d73550054daf42d8:1",
+  "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+  "reason": "false positive"
+ },
+ "241": {
+  "rule": "py/path-injection",
+  "file": "scripts/codeql/residue_check.py",
+  "line": 214,
+  "lineHash": "d1f42aefded6b166:1",
+  "comment": "False positive: containment checking inherently requires building the path first, so the construction is always the sink and the guard follows it. Guarded by _unsafe_declared_path (lexical, pre-syscall) plus resolve-and-confine. See scripts/codeql/README.md",
+  "reason": "false positive"
+ },
+ "239": {
+  "rule": "py/path-injection",
+  "file": "scripts/codeql/residue_check.py",
+  "line": 200,
+  "lineHash": "4304adf0ac328d00:1",
+  "comment": "False positive: open() on a path from this dev script's own argv. Same class already dismissed for scripts/sign_release.py and check_llama_abi.py - the operator's own command line. release-exclude tooling, never runs in the product. See scripts/codeql/README.md",
+  "reason": "false positive"
+ },
+ "238": {
+  "rule": "py/path-injection",
+  "file": "scripts/codeql/residue_check.py",
+  "line": 408,
+  "lineHash": "26e939b3f286c5cf:1",
+  "comment": "False positive: open() on a path from this dev script's own argv. Same class already dismissed for scripts/sign_release.py and check_llama_abi.py - the operator's own command line. release-exclude tooling, never runs in the product. See scripts/codeql/README.md",
+  "reason": "false positive"
+ },
+ "237": {
+  "rule": "py/path-injection",
+  "file": "scripts/codeql/residue_check.py",
+  "line": 287,
+  "lineHash": "50aa8c0c6e400b2f:1",
+  "comment": "False positive: open() on a path from this dev script's own argv. Same class already dismissed for scripts/sign_release.py and check_llama_abi.py - the operator's own command line. release-exclude tooling, never runs in the product. See scripts/codeql/README.md",
+  "reason": "false positive"
+ },
+ "236": {
+  "rule": "py/path-injection",
+  "file": "scripts/codeql/residue_check.py",
+  "line": 223,
+  "lineHash": "cfe9ffe6f0dc86d0:1",
+  "comment": "False positive: containment checking inherently requires building the path first, so the construction is always the sink and the guard follows it. Guarded by _unsafe_declared_path (lexical, pre-syscall) plus resolve-and-confine. See scripts/codeql/README.md",
+  "reason": "false positive"
+ },
+ "235": {
+  "rule": "py/path-injection",
+  "file": "scripts/codeql/residue_check.py",
+  "line": 69,
+  "lineHash": "63a2d3923ca8996f:1",
+  "comment": "False positive: open() on a path from this dev script's own argv. Same class already dismissed for scripts/sign_release.py and check_llama_abi.py - the operator's own command line. release-exclude tooling, never runs in the product. See scripts/codeql/README.md",
+  "reason": "false positive"
+ },
  "233": {
   "rule": "py/path-injection",
   "file": "localm/cli/models.py",
   "line": 340,
   "lineHash": "b53ecb4f251d6dd:1",
-  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "232": {
   "rule": "py/path-injection",
   "file": "localm/cli/models.py",
   "line": 340,
   "lineHash": "b53ecb4f251d6dd:1",
-  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "231": {
   "rule": "py/path-injection",
   "file": "localm/cli/models.py",
   "line": 339,
   "lineHash": "88aafd26fc77dc1f:1",
-  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: three read-only stat calls whose ONLY output is a click.confirm string on the local user's own terminal. Nothing read, written or deleted; remove_model re-derives its own gate. Supersedes #139-141, retired by #842. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "230": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1472,
+  "lineHash": "33998a7e7e46c747:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "229": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1470,
+  "lineHash": "ac71e34ddb2b34f2:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "228": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1469,
+  "lineHash": "ed1ee1441220e3c0:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "227": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1465,
+  "lineHash": "8ae5994f38b92cef:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "226": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1406,
+  "lineHash": "f5118baba1a47ea1:1",
+  "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+  "reason": "false positive"
+ },
+ "225": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/residency.py",
+  "line": 70,
+  "lineHash": "d0b9f8ac23c5a195:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "224": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/residency.py",
+  "line": 69,
+  "lineHash": "b4ec01ad47d35a47:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "223": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/residency.py",
+  "line": 68,
+  "lineHash": "9876643232bd7170:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "222": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 346,
+  "lineHash": "2fe654ab31b7fc69:1",
+  "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
+  "reason": "false positive"
+ },
+ "221": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 164,
+  "lineHash": "18c9fdd33606c61a:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "220": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 162,
+  "lineHash": "528df1da6887ed5:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "219": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/residency.py",
+  "line": 73,
+  "lineHash": "801c41d829e474d6:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "218": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/hf.py",
+  "line": 88,
+  "lineHash": "23a031609f4c980d:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "217": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/hf.py",
+  "line": 81,
+  "lineHash": "ce52a3aa82604463:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "216": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/hf.py",
+  "line": 65,
+  "lineHash": "16f5ba3d0764d919:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "215": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1042,
+  "lineHash": "fee5445dcf18574:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "214": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1042,
+  "lineHash": "fee5445dcf18574:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "213": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1037,
+  "lineHash": "90db63caefe50042:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "212": {
+  "rule": "py/path-injection",
+  "file": "localm/media/comfy_client.py",
+  "line": 1901,
+  "lineHash": "b9aecb46d2f89505:1",
+  "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
+  "reason": "false positive"
+ },
+ "211": {
+  "rule": "py/path-injection",
+  "file": "localm/media/comfy_client.py",
+  "line": 1900,
+  "lineHash": "f1ae8e032b14302c:1",
+  "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
+  "reason": "false positive"
+ },
+ "210": {
+  "rule": "py/path-injection",
+  "file": "localm/media/comfy_client.py",
+  "line": 1869,
+  "lineHash": "af1933f396353ecf:1",
+  "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
+  "reason": "false positive"
+ },
+ "209": {
+  "rule": "py/path-injection",
+  "file": "localm/media/comfy_client.py",
+  "line": 1868,
+  "lineHash": "b1d276c5239256af:1",
+  "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
+  "reason": "false positive"
+ },
+ "208": {
+  "rule": "py/path-injection",
+  "file": "localm/pathsafe.py",
+  "line": 117,
+  "lineHash": "ae3db697e333ed30:1",
+  "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+  "reason": "false positive"
+ },
+ "207": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1296,
+  "lineHash": "64bcdca5e6f53469:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
+ },
+ "206": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1067,
+  "lineHash": "cc7468924a63ddc:1",
+  "comment": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "205": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 129,
+  "lineHash": "edf2c7b748893343:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
+ },
+ "204": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 127,
+  "lineHash": "40f3818aa35642dc:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
  },
  "178": {
   "rule": "py/path-injection",
   "file": "scripts/sign_release.py",
   "line": 80,
   "lineHash": "57221c8c6d87fb7b:1",
-  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "177": {
   "rule": "py/path-injection",
   "file": "scripts/sign_release.py",
   "line": 77,
   "lineHash": "555e1c126cf8505c:1",
-  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "176": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/mcpserver/server.py",
+  "line": 616,
+  "lineHash": "6acdc374c7275538:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "175": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/mcpserver/server.py",
+  "line": 615,
+  "lineHash": "396d028ab1c7da7e:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "174": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/mcpserver/server.py",
+  "line": 613,
+  "lineHash": "cc9cae0d89d54793:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "173": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/scan.py",
+  "line": 81,
+  "lineHash": "ab86b9149fbbd7ea:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
  },
  "172": {
   "rule": "py/path-injection",
   "file": "scripts/rollback_update.py",
   "line": 39,
   "lineHash": "1f260c8bda79cf01:1",
-  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "171": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1482,
+  "lineHash": "c0bd75fa01178286:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "170": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1480,
+  "lineHash": "78ab2fc073825b1f:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "169": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1479,
+  "lineHash": "6bb2e122a359fbc6:1",
+  "comment": "False positive: the delete is gated by is_owned_model_path(target), inline and dominating, on a path resolved once and used throughout; the path itself arrives via _entry_path. See scripts/codeql/dispositions.json, group guarded-delete-model.",
+  "reason": "false positive"
+ },
+ "165": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 965,
+  "lineHash": "68134a57812ec9c1:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "164": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1066,
+  "lineHash": "daeaff1565983dc6:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "163": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1047,
+  "lineHash": "38a647c064676c93:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "161": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 861,
+  "lineHash": "47c7f6aa8180fdf3:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "160": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 779,
+  "lineHash": "85cba69236fdbe13:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "159": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 779,
+  "lineHash": "85cba69236fdbe13:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "158": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 737,
+  "lineHash": "5b5fbdb571e710c9:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "157": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 730,
+  "lineHash": "61e3cdc7e1b73d0f:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "156": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 617,
+  "lineHash": "f9fe0428fea1b1b5:1",
+  "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+  "reason": "false positive"
+ },
+ "155": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 582,
+  "lineHash": "82263556bcf71a7d:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "154": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 580,
+  "lineHash": "ee5ee8bbf913c3a8:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "153": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 576,
+  "lineHash": "8ea962e7b112404a:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "152": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 600,
+  "lineHash": "4ef9a7d1e49670ee:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "151": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 497,
+  "lineHash": "e2089bf21b74b2bc:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "150": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 465,
+  "lineHash": "a7ea34d72bde288c:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "149": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 464,
+  "lineHash": "bcb78b051f825fac:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "148": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 460,
+  "lineHash": "fb25e89f98797885:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "147": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 460,
+  "lineHash": "fb25e89f98797885:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "146": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 437,
+  "lineHash": "4c99deb88ac8b845:1",
+  "comment": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
+  "reason": "false positive"
+ },
+ "143": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/pull.py",
+  "line": 798,
+  "lineHash": "8ff57bcea5303662:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
  },
  "142": {
   "rule": "py/path-injection",
   "file": "localm/plugins/coder/privacy.py",
   "line": 144,
   "lineHash": "2249bfa3195ec5:1",
-  "comment": "False positive: $HISTFILE comes from the shell that launched `localm coder`; anyone able to set it can already execute code as that user. Rewriting the history file at the shell's own location IS the privacy feature. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: $HISTFILE comes from the shell that launched `localm coder`; anyone able to set it can already execute code as that user. Rewriting the history file at the shell's own location IS the privacy feature. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "129": {
+  "rule": "py/path-injection",
+  "file": "localm/model_meta.py",
+  "line": 47,
+  "lineHash": "2507e8cd3cad6c2e:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
  },
  "128": {
   "rule": "py/path-injection",
   "file": "scripts/make_release.py",
   "line": 391,
   "lineHash": "a9fe77ef7cc42dce:1",
-  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "127": {
+  "rule": "py/path-injection",
+  "file": "localm/cli/maintenance.py",
+  "line": 129,
+  "lineHash": "449f5ec787441442:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "126": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/http_server.py",
+  "line": 1261,
+  "lineHash": "10913945e7b7b395:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "125": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/embedder.py",
+  "line": 946,
+  "lineHash": "fcf4cc2672666517:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "124": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/embedder.py",
+  "line": 896,
+  "lineHash": "331ac09727e16328:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "123": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/embedder.py",
+  "line": 629,
+  "lineHash": "d1b77831c406556d:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "122": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/embedder.py",
+  "line": 325,
+  "lineHash": "122bbafa529354ab:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
  },
  "121": {
   "rule": "py/path-injection",
   "file": "localm/debuglog.py",
   "line": 469,
   "lineHash": "e9d3e0fa22ab58f3:1",
-  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "120": {
   "rule": "py/path-injection",
   "file": "localm/debuglog.py",
   "line": 446,
   "lineHash": "b9d62129c5a58edd:2",
-  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "115": {
   "rule": "py/path-injection",
   "file": "localm/media/comfy_client.py",
   "line": 1169,
   "lineHash": "f18df7cf642b7bad:1",
-  "comment": "False positive: HIP_PATH is localm's own process environment, reaching only an isdir() probe. Repo-wide grep confirms localm never writes it from config or any downloaded artifact. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: HIP_PATH is localm's own process environment, reaching only an isdir() probe. Repo-wide grep confirms localm never writes it from config or any downloaded artifact. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "114": {
   "rule": "py/path-injection",
   "file": "localm/config.py",
-  "line": 646,
+  "line": 659,
   "lineHash": "3096fa03a05d31bf:1",
-  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "113": {
   "rule": "py/path-injection",
   "file": "localm/config.py",
   "line": 66,
   "lineHash": "821d4de29d8cc609:1",
-  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reads localm's OWN process environment. Only the principal that LAUNCHES the process can set it, and that already implies control of the process at the same OS privilege. Nothing network-derived participates. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "112": {
   "rule": "py/path-injection",
   "file": "scripts/check_llama_abi.py",
   "line": 256,
   "lineHash": "95d308a363df34a9:1",
-  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: the operator's own argv for the release-signing key / dev header path. No CI path reaches these (no workflow invokes them), and a wrong key cannot forge a release - the build is re-verified against a pinned public key. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "111": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_sizing.py",
+  "line": 465,
+  "lineHash": "65f186ba1506b852:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "110": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_sizing.py",
+  "line": 465,
+  "lineHash": "65f186ba1506b852:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "109": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_sizing.py",
+  "line": 462,
+  "lineHash": "7ea49e8c2aa1eae4:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "108": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_sizing.py",
+  "line": 463,
+  "lineHash": "24ac68e51aa3e75f:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "107": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_sizing.py",
+  "line": 64,
+  "lineHash": "46cf87064d08e112:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "106": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 502,
+  "lineHash": "6934e0f0c0ff2148:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "105": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 477,
+  "lineHash": "fe8dd58c12c5afc8:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "104": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 396,
+  "lineHash": "74d337be11604917:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "103": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 395,
+  "lineHash": "bc80b05792c90e97:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "102": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 348,
+  "lineHash": "11d47539c1428d0d:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "101": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 303,
+  "lineHash": "f07d1898e2cd6248:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "100": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/llamacpp/_loader.py",
+  "line": 233,
+  "lineHash": "da3f1cb63303b7b1:1",
+  "comment": "Won't fix, accepted by threat model rather than closed by a barrier: LLAMA_CPP_LIB comes from localm's own environment and names the library to load; only the launching principal can set it, and it already runs code as that user. See dispositions.json, group operator-env.",
+  "reason": "won't fix"
+ },
+ "99": {
+  "rule": "py/full-ssrf",
+  "file": "scripts/report_issue.py",
+  "line": 301,
+  "lineHash": "54f94cea5e7fd2b9:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
+ },
+ "98": {
+  "rule": "py/stack-trace-exposure",
+  "file": "localm/plugins/builtin/rag/plug.py",
+  "line": 729,
+  "lineHash": "359d0979125fe72d:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
  },
  "97": {
   "rule": "py/stack-trace-exposure",
   "file": "localm/inference/http_server.py",
   "line": 2894,
   "lineHash": "566bea2e158cc7a5:1",
-  "comment": "False positive (maintainer-approved): returning stacks IS the feature; the residual flow is by design. Boundary-crossing half FIXED: was unauthenticated in keyless mode, now needs a credential, 404s off loopback, abs paths 32/63 -> 0/65. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive (maintainer-approved): returning stacks IS the feature; the residual flow is by design. Boundary-crossing half FIXED: was unauthenticated in keyless mode, now needs a credential, 404s off loopback, abs paths 32/63 -> 0/65. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "87": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 416,
+  "line": 501,
   "lineHash": "621d263e46574fca:1",
-  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "86": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 414,
+  "line": 499,
   "lineHash": "8203dbe5f0f0e605:1",
-  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "85": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 374,
+  "line": 459,
   "lineHash": "8366a931db1e049:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "84": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 369,
+  "line": 454,
   "lineHash": "cbcc642963671e4d:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "83": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 363,
+  "line": 448,
   "lineHash": "1b79d2b060a96cc4:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "82": {
   "rule": "py/path-injection",
   "file": "localm/settings_schema.py",
-  "line": 1601,
+  "line": 1607,
   "lineHash": "8d00f18ce2de2478:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "81": {
   "rule": "py/path-injection",
   "file": "localm/settings_schema.py",
-  "line": 1597,
+  "line": 1603,
   "lineHash": "b55e6c47d405736a:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "80": {
   "rule": "py/path-injection",
   "file": "localm/settings_schema.py",
-  "line": 1594,
+  "line": 1600,
   "lineHash": "fe162190700b1aaa:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "79": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 351,
+  "line": 436,
   "lineHash": "41cededfeae3c062:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "78": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 350,
+  "line": 435,
   "lineHash": "ec446e423e429900:1",
-  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: job id is rewritten by _ID_RE.sub (store.py:49, '..' collapses to 'job'), then _confine() resolve+is_relative_to, then an additional parent==results_root assert. Three independent barriers CodeQL does not model. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "77": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/jobs/store.py",
-  "line": 196,
+  "line": 247,
   "lineHash": "9b71a181e4f0fbcc:1",
-  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: fields are admin_only=True (settings_schema.py:1337-1344) AND pass _tts_relative_asset, which rejects ':', leading '/' or '\\\\', backslashes, '..' and empty segments, then requires containment in the plugin asset root. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "72": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1587,
+  "lineHash": "af043587c387639e:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "71": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 1506,
+  "lineHash": "2ae1bef1a7b1dbf:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "70": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 396,
+  "lineHash": "ade9e20966d39b2c:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "69": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 394,
+  "lineHash": "b3393c7283752795:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "68": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 371,
+  "lineHash": "fd3b9ca6e68ec7c8:1",
+  "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
+  "reason": "false positive"
+ },
+ "67": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 367,
+  "lineHash": "6e10d688c214a13e:1",
+  "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
+  "reason": "false positive"
+ },
+ "66": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 363,
+  "lineHash": "47fe97ddfdc4a5eb:1",
+  "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
+  "reason": "false positive"
+ },
+ "65": {
+  "rule": "py/path-injection",
+  "file": "localm/model_manager/registry.py",
+  "line": 353,
+  "lineHash": "81e861ea6bf208ba:1",
+  "comment": "False positive: the registry branch routes through _entry_path; the direct-path branch needs allow_direct_path=True and every reported flow leaves it at its refusing default, checked inline. See scripts/codeql/dispositions.json, group model-lookup-gate.",
+  "reason": "false positive"
  },
  "63": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
   "line": 493,
   "lineHash": "a774173349f04b6e:1",
-  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "62": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
   "line": 389,
   "lineHash": "c8b710d8fc9cb5f3:1",
-  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "61": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
   "line": 387,
   "lineHash": "9f884f950af9d82a:1",
-  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "60": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
   "line": 382,
   "lineHash": "7599b1c882aad8f7:1",
-  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: caller path must be a member of session.changed_files() AND pass resolved-path confinement to the session root (coder/plug.py:374-390). The resolved test also defeats symlinks. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "59": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/builtin/rag/plug.py",
+  "line": 429,
+  "lineHash": "6fda2672265a3dad:1",
+  "comment": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
+  "reason": "false positive"
  },
  "57": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
   "line": 177,
   "lineHash": "e42acd754903349b:1",
-  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: reachable only by an owner or coder:full principal, which already holds run_shell/write_file, i.e. arbitrary code execution as the server user. Choosing the working directory grants nothing it did not already have. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "53": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/http_server.py",
+  "line": 158,
+  "lineHash": "8177a85f63f2bf8e:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "52": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/http_server.py",
+  "line": 157,
+  "lineHash": "4ae5d352bf8fd662:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "51": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/http_server.py",
+  "line": 156,
+  "lineHash": "1928f31418545db7:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "50": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/http_server.py",
+  "line": 155,
+  "lineHash": "ece36424ce441cd4:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "49": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/hf.py",
+  "line": 339,
+  "lineHash": "924432fe352503f1:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "48": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/backends/gguf.py",
+  "line": 59,
+  "lineHash": "a9cc05b97f618a66:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
  },
  "47": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
   "line": 1767,
   "lineHash": "fc4a29b8ba430794:1",
-  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "46": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
   "line": 1767,
   "lineHash": "fc4a29b8ba430794:1",
-  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "44": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1211,
+  "lineHash": "32cc8f5bc40f2ef0:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "43": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1187,
+  "lineHash": "3383460c8d925db9:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "42": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1184,
+  "lineHash": "64166dad0c6d366a:2",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "41": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1182,
+  "lineHash": "64e5bb081b334b40:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "40": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1177,
+  "lineHash": "566b81613dc898e9:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "39": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1174,
+  "lineHash": "9355b687e0ee7567:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "38": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1170,
+  "lineHash": "64166dad0c6d366a:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "37": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1168,
+  "lineHash": "5fd5f8d778f71f8b:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "36": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1168,
+  "lineHash": "5fd5f8d778f71f8b:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "35": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1161,
+  "lineHash": "2af70029240c6726:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "34": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1158,
+  "lineHash": "8063bd2b95c72443:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "33": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1158,
+  "lineHash": "8063bd2b95c72443:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "32": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1157,
+  "lineHash": "32e781f3827fb110:1",
+  "comment": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
+  "reason": "false positive"
+ },
+ "31": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1106,
+  "lineHash": "53eda2fcd2add5ac:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "30": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1076,
+  "lineHash": "8bb7183096b16dc0:1",
+  "comment": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "29": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1075,
+  "lineHash": "593cd2336620742e:1",
+  "comment": "False positive: the flagged containment test is itself a path expression on the tainted value, and it dominates the rmtree below it. Confines by resolved parent so a non-identifier plugin stays uninstallable. See scripts/codeql/dispositions.json, group guarded-delete-plugin.",
+  "reason": "false positive"
+ },
+ "26": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 1041,
+  "lineHash": "690d74e8eac9f761:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "24": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 798,
+  "lineHash": "46d4566658129c83:1",
+  "comment": "False positive: the guard is inline in the sink's own function and dominates it (runs first on every path, no branch around it, raises). No cross-function traversal exists for a barrier to observe. See scripts/codeql/dispositions.json, group inline-dominating.",
+  "reason": "false positive"
  },
  "23": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
   "line": 245,
   "lineHash": "44a1b8b9bab7c8e1:1",
-  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "22": {
   "rule": "py/path-injection",
   "file": "localm/plugins/engine.py",
   "line": 242,
   "lineHash": "ac1a0a1f774aab01:1",
-  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive (maintainer-approved): naming the source dir IS the endpoint's purpose. PLUGINS_ADMIN already grants installing third-party code localm imports and runs, so constraining WHICH dir restores no boundary. Sibling #45 was FIXED. dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "21": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 215,
+  "lineHash": "9b0918fd9bfe03dc:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "20": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 203,
+  "lineHash": "a7c4a9afd62abfa9:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "19": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 202,
+  "lineHash": "b5f5fdf5f827342d:1",
+  "comment": "False positive: the id is validated by _is_valid_plugin_name wherever it becomes a path component (_installed_dir, _store_dir, and _swap_in_store_copy's staging assertion), so no separator, drive letter or '..' survives. See dispositions.json, group plugin-id-choke.",
+  "reason": "false positive"
+ },
+ "18": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/engine.py",
+  "line": 175,
+  "lineHash": "deb35dbd39f4b71e:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
+ },
+ "15": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 160,
+  "lineHash": "4928e0aa44c681d:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "14": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 61,
+  "lineHash": "48e0f6466c432fce:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "13": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 53,
+  "lineHash": "beaa6a6f816b6793:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "12": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 52,
+  "lineHash": "8606fd455adb2959:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "11": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/engine.py",
+  "line": 41,
+  "lineHash": "a053f6af238ae510:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "10": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 277,
+  "lineHash": "37ec4d333afe049f:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
  },
  "9": {
   "rule": "py/path-injection",
   "file": "localm/plugins/gui/routes/admin.py",
-  "line": 213,
+  "line": 221,
   "lineHash": "3c6e74563544d86a:1",
-  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "8": {
   "rule": "py/path-injection",
   "file": "localm/plugins/gui/routes/admin.py",
-  "line": 212,
+  "line": 220,
   "lineHash": "192247c8b95b8be6:1",
-  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "7": {
   "rule": "py/path-injection",
   "file": "localm/plugins/gui/routes/admin.py",
-  "line": 210,
+  "line": 218,
   "lineHash": "d9d137d70f8d39bc:1",
-  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "6": {
   "rule": "py/path-injection",
   "file": "localm/plugins/gui/routes/admin.py",
-  "line": 207,
+  "line": 215,
   "lineHash": "6af2cdef53b3a5da:1",
-  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "5": {
   "rule": "py/path-injection",
   "file": "localm/plugins/gui/routes/admin.py",
-  "line": 205,
+  "line": 213,
   "lineHash": "d9d13a818365d301:1",
-  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
  },
  "4": {
   "rule": "py/path-injection",
   "file": "localm/plugins/gui/routes/admin.py",
-  "line": 200,
+  "line": 208,
   "lineHash": "29d4edab3d88d10d:1",
-  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md"
+  "comment": "False positive: all six sinks are downstream of an EXACT-MATCH allowlist of resolved configured workdirs (admin.py:135-137). Exact-set membership is strictly stronger than path confinement. NOTE sibling alert #3 was FIXED, not dismissed. See dev-notes/codeql-triage-2026-07-28.md",
+  "reason": "false positive"
+ },
+ "3": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 202,
+  "lineHash": "516ee4e8b2f08562:1",
+  "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
+  "reason": "false positive"
+ },
+ "2": {
+  "rule": "py/path-injection",
+  "file": "localm/plugins/gui/routes/admin.py",
+  "line": 81,
+  "lineHash": "763ebafc44cda087:1",
+  "comment": "Won't fix: the destination is unconstrained because naming it IS the feature; authorization gates it, not confinement. Open mode is owner-equivalent but loopback-only (a bind past loopback without auth exits 2 unless --insecure). See dispositions.json: authorization-gated.",
+  "reason": "won't fix"
  }
 }
