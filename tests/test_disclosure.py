@@ -477,9 +477,15 @@ class TestKeyDigestFilePermsWindows:
         assert "Everyone" not in out, out
 
     def test_corrupt_backup_is_owner_only(self, tmp_path, monkeypatch):
-        """The quarantine copy is a VERBATIM copy of jobs.json, digests and all,
-        and nothing ever deletes it - so restricting only the live file would
-        leave the exposure behind permanently on the first corrupt read."""
+        """The quarantine copy still describes the user's jobs, so restricting
+        only the live file would leave that behind on the first corrupt read.
+
+        This covers the ACL half only. The copy is NO LONGER verbatim: issue
+        #859 redacts the owner digest out of it, so the original premise line
+        here ("the backup really does carry the digest") now asserts the very
+        bug that fixed - it is replaced below, and the digest's absence is
+        covered by tests/test_jobs_quarantine_digest.py. The ACL is still
+        needed: redaction removes the credential, not the job data."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "h"))
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "h")
@@ -498,8 +504,11 @@ class TestKeyDigestFilePermsWindows:
         backups = list(store._defs_file.parent.glob("jobs.json.corrupt-*"))
         assert backups, "no quarantine copy was written"
         for b in backups:
-            assert "deadbeef" in b.read_text(encoding="utf-8"), (
-                "premise check: the backup really does carry the digest")
+            text = b.read_text(encoding="utf-8")
+            # Premise: the copy carries the user's JOB DATA (which is why it
+            # needs an ACL at all), and NOT the owner digest (#859).
+            assert "chat" in text, "premise: the copy holds the job def"
+            assert "deadbeef" * 8 not in text, "the owner digest was not redacted"
             out = _icacls(b)
             assert _has_explicit_user_ace(out), out
             assert "BUILTIN\\Users" not in out, out
