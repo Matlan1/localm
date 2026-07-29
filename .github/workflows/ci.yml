@@ -1,35 +1,36 @@
 name: CI
 
 on:
-  # Push runs only on master (post-merge verification). PRs deliberately do NOT
-  # run this workflow: the two-OS pytest matrix costs roughly 7 minutes per side,
-  # which is too slow to sit in front of every PR.
+  # THIS WORKFLOW RUNS ONLY WHEN A HUMAN ASKS FOR IT. No push trigger, no
+  # pull_request trigger. Maintainer's directive, 2026-07-29, stated as: no
+  # 7-minute runs on PRs, and that means no runs on merge either.
   #
-  # State the consequence rather than let it be discovered later: a PR is no
-  # longer gated by CI. That makes the AGENTS.md "Test-run cadence" rule load
-  # bearing instead of belt-and-braces - the full suite MUST be run locally
-  # before opening a PR, because master's post-merge run is now the first
-  # automated signal, and it arrives after the merge rather than before it. Use
-  # workflow_dispatch to run the suite against a branch on demand.
+  # READ THE DIRECTIVE AS BEING ABOUT COST, NOT ABOUT WHICH TRIGGER. That
+  # distinction is the whole reason this comment exists. When the pull_request
+  # trigger was removed, the push trigger was treated as the approved substitute
+  # and workflow_dispatch as "free because it costs the dev box nothing" - which
+  # accounted for the wrong resource and preserved the exact spend the removal
+  # was meant to eliminate. Measured on the day this was written: 51 push runs
+  # plus 9 dispatches in a single session, two platforms each, roughly 7 minutes
+  # a side. Adding any automatic trigger back, or routinely dispatching in place
+  # of one, re-creates that and is the same mistake wearing a different name.
   #
-  # AND THE PART THAT COMMENT ORIGINALLY MISSED: that local run is not equivalent
-  # to this one. It differs along TWO independent axes, neither visible from the
-  # local run itself.
-  #   PLATFORM. Contributors run Windows; this matrix runs Windows AND Linux. A
-  #   Linux-only regression reached master exactly this way (#845: three
-  #   test_scope.py purity tests failing on os.lstat('/opt'), invisible on
-  #   Windows because Path.resolve() only lstats every component on POSIX).
-  #   DEPENDENCY SET. This job installs `.[dev,rag]`, which has no numpy; a dev
-  #   venv usually does. A failure that needs numpy absent cannot appear locally.
-  # So a green local suite does not predict this job. Dispatch it against the
-  # branch and read the JOB conclusions. WSL (Ubuntu, python 3.12) reproduces
-  # both axes and is the cheapest real pre-merge Linux signal available.
+  # SO: do not add `push:` or `pull_request:` back without asking him. Do not
+  # dispatch this as a routine pre-merge or post-merge gate. A dispatch is for
+  # when someone decides a specific change needs the two-platform matrix and
+  # accepts the cost, not for every unit.
   #
-  # Code scanning is unaffected and still runs per-PR (.github/workflows/
-  # codeql.yml): it is about a minute per language and its whole value is
-  # catching a newly introduced alert BEFORE it lands on master.
-  push:
-    branches: [master]
+  # WHAT GATES A PR NOW: code scanning only, per-PR, via codeql.yml (about a
+  # minute per language). Everything else is the local targeted run.
+  #
+  # WHAT THAT COSTS, stated so it is not rediscovered as a surprise: a local run
+  # diverges from this job along three axes, none visible from the local run -
+  # PLATFORM (this matrix runs Linux too; a Linux-only regression reached master
+  # that way in #845), DEPENDENCY SET (`.[dev,rag]` has no numpy; a dev venv
+  # usually does), and DEPENDENCY VERSION (CI resolves the newest allowed dev
+  # tool; ruff 0.16 reddened master while local venvs on 0.15 were green). WSL
+  # (Ubuntu, python 3.12) reproduces the first two at no cost to anyone.
+  #
   # NO `pull_request` TRIGGER. This is the maintainer's standing decision, made
   # twice (#839, and again here after #860 restored it): a two-OS pytest matrix
   # costing ~7 minutes per side does not belong in front of every PR. Do not add
