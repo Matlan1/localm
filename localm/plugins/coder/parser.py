@@ -236,6 +236,15 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
     Handles both:
     - Full JSON: {"name": "...", "args": {...}}
     - Args-only JSON (when name_attr is provided): {"path": "..."}
+
+    SECOND CONSUMER, outside this module: agent/context.py's
+    ``_stream_hiding_tool_calls`` (the live streaming hider shared by the CLI
+    and the GUI) imports and calls this directly, so it decides whether a
+    name-gated fence is a real call using the EXACT SAME rule this module's
+    own ``parse_tool_calls`` uses - deliberately, so the two can never
+    disagree (see coder-display-vs-execution-two-detectors in project
+    memory). A change to this function's contract (return shape, what counts
+    as a match) reaches that consumer too; check it before changing this.
     """
     body = body.strip()
     obj = _lenient_json(body)

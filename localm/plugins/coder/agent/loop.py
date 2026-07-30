@@ -305,6 +305,29 @@ class _LoopMixin:
                         if isinstance(seg, str) and seg.strip():
                             console.print(seg.strip())
 
+                # The event-sink (GUI) surface already streamed the RAW response
+                # live, token by token, WHILE it was still generating - long before
+                # parse_tool_calls (just above) could know which spans were real
+                # calls. _stream_and_record's live hider (context.py) only
+                # recognises the unconditional <tool_call>/<|tool_call> wrapper
+                # dialects, so a call written in one of parser.py's OTHER
+                # recognised shapes (an explicit ```tool_call/```tool_code fence, a
+                # name-gated ```json/bare fence, or a bare top-level JSON object)
+                # streamed to the browser as plain visible text even though it is
+                # about to be EXECUTED by _execute_tools below - the harness runs
+                # it, but the already-rendered chat bubble never learns that. This
+                # is the authoritative fix-up: `calls`/`segments` just above are
+                # the single source of truth for what was actually consumed as a
+                # real call, so tell the GUI to replace whatever it streamed with
+                # the real leftover text, for every shape, instead of teaching a
+                # second, streaming-constrained detector every format parser.py
+                # grows (the exact copy-drift this codebase avoids elsewhere - see
+                # strip_xml_tool_calls's docstring). A no-op when nothing leaked:
+                # the live hider already got the common <tool_call> case right, so
+                # this usually just re-sends the same text the browser already has.
+                self._emit("assistant_text",
+                          text="".join(seg for seg in segments if isinstance(seg, str)))
+
                 self._add_assistant(response)
 
                 # Execute tools - run non-destructive batches in parallel

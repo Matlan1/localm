@@ -339,6 +339,21 @@ export function handleCoderEvent(s, ev) {
       renderLiveBlock(s);
       break;
     }
+    case "assistant_text": {
+      // Authoritative fix-up, sent once the harness knows which spans of the
+      // just-streamed response were REAL tool calls (loop.py, right before
+      // dispatching them): replaces whatever streamed live with the actual
+      // leftover text, so a call written in a shape the live "token" stream
+      // does not know how to hide (e.g. a ```json fence) does not linger in
+      // the bubble as visible raw JSON once it has been executed. Usually a
+      // no-op - the live stream already got the common <tool_call> shape
+      // right, so this just re-sends the same text the bubble already shows.
+      if (!s.liveBody && !ev.text) break;   // nothing streamed, nothing to fix
+      if (!s.liveBody) startAssistantBlock(s);
+      s.liveText = ev.text || "";
+      renderLiveBlock(s);
+      break;
+    }
     case "turn": {
       flushAssistantBlock(s);
       s.busy = true;
