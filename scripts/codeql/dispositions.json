@@ -1,8 +1,8 @@
 {
   "_about": [
-    "Adjudication of every open py/path-injection alert on this repo, keyed on",
-    "(file :: enclosing function) rather than alert number or line, because both of",
-    "those move whenever a fix edits a sink line and a dismissal keyed on either",
+    "Adjudication of every open code-scanning alert this repo has triaged, keyed",
+    "on (file :: enclosing function) rather than alert number or line, because",
+    "both of those move whenever a fix edits a sink line and a dismissal keyed on either",
     "silently detaches. See sweep_dismissals.py for what that failure looks like.",
     "",
     "Each key's text is the dismissal justification posted to the alert. It has to",
@@ -29,7 +29,8 @@
     "plugin-swap-invariant": "False positive. This function holds sinks of two kinds and the comment covers both. The plugin id was validated at the _installed_dir / _store_dir choke point before reaching here, and the function re-asserts the containment invariant inline, dominating all of its own sinks. CodeQL has no sanitizer model for the identifier-shaped id check, and no traversal to observe for the inline re-assertion.",
     "confinement-fixed-2026-07-29": "The check-then-use gap here was fixed on 2026-07-29: the sink now consumes the value the guard returned instead of the caller's original. The alert persists because the flagged expression is the path construction that the check necessarily follows (see the choke-point note), not because the flow is unguarded.",
     "weak-hash-generated-token": "False positive. The only human-chosen secret this system holds is the owner key, and it is routed to scrypt: _owner_identity derives it, and its keystore record declares the KDF construction, so the fast digest is never the value that authenticates it. Every other key reaching this hash is either a keystore token, which create_key generates as secrets.token_urlsafe(32) and is therefore 256 bits of CSPRNG output where no dictionary or rainbow table applies and hash speed is irrelevant, or a failed guess, which is hashed and discarded. The remaining traced flow is the migration helper _legacy_owner_identity, whose output is never persisted and never authenticates anything: it exists to FIND rows still carrying the old identity so they can be rewritten to the derived one.",
-    "dev-cli-argv": "Not sanitized, and deliberately so: naming which coverage.json to check IS the feature, documented in the module's own docstring ('python scripts/check_coverage_floors.py [path/to/coverage.json]'). scripts/check_coverage_floors.py is dev-only tooling (release-excluded in release-manifest.toml, never ships); its only two callers are CI's own workflow step, which passes no argument at all (falls back to REPO/coverage.json), and a developer running it locally by hand, supplying the path themselves. Only the principal that invokes the script can set argv, and that principal is already running arbitrary code as the local OS user - there is no remote or lower-privileged actor this could expose a file to. Confining the argument to a fixed root would also break the documented workflow of pointing the script at a coverage.json produced anywhere on disk (used during this feature's own verification, at a scratch path outside the repository)."
+    "dev-cli-argv": "Not sanitized, and deliberately so: naming which coverage.json to check IS the feature, documented in the module's own docstring ('python scripts/check_coverage_floors.py [path/to/coverage.json]'). scripts/check_coverage_floors.py is dev-only tooling (release-excluded in release-manifest.toml, never ships); its only two callers are CI's own workflow step, which passes no argument at all (falls back to REPO/coverage.json), and a developer running it locally by hand, supplying the path themselves. Only the principal that invokes the script can set argv, and that principal is already running arbitrary code as the local OS user - there is no remote or lower-privileged actor this could expose a file to. Confining the argument to a fixed root would also break the documented workflow of pointing the script at a coverage.json produced anywhere on disk (used during this feature's own verification, at a scratch path outside the repository).",
+    "trigger-probe-validator": "False positive (py/regex-injection, PR #936). localm/inference/_trigger_probe.py is the standalone daemon that safety-tests a CALLER-SUPPLIED lazy-grammar trigger pattern before it is allowed anywhere near llama.cpp's native std::regex matcher (see gbnf.py's validate_trigger_patterns and GitHub #928/#933, the incident this file exists to prevent a recurrence of). _check_one's re.compile(pattern) at the flagged line is exactly the operation CodeQL's query is modelled to catch - an unsanitized pattern reaching a regex engine - but escaping it here would defeat the function's entire purpose: it exists specifically to determine whether the CANDIDATE pattern, exactly as written, is dangerous, not to test an always-safe, always-literal string manufactured by re.escape. The containment is architectural, not textual, and CodeQL's data-flow model has no way to see it: this daemon is a disposable, single-purpose subprocess (spawned by gbnf.py's _spawn_trigger_probe_daemon, one per validation cycle, holding no state shared with anything else in the parent process) whose own return value is never trusted blindly by its caller. If a pattern hangs this daemon inside .search(), the CALLER's own round-trip timeout (gbnf.py's _TRIGGER_PROBE_TIMEOUT / _TRIGGER_PROBE_SPAWN_TIMEOUT) detects the missing reply and kills this process outright - the hang is contained to a subprocess built to be killed, never reaching the caller's own thread or any other request. The alert fires on the code that IS the fix for #928/#933, not on a residual instance of that vulnerability."
   },
   "dispositions": {
     "localm/cli/maintenance.py::setup_embeddings": "registry-path-chain",
@@ -97,7 +98,8 @@
     "localm/plugins/mcpserver/server.py::list_models": "registry-path-chain",
     "scripts/report_issue.py::opener": "authorization-gated",
     "localm/auth.py::_fast_digest": "weak-hash-generated-token",
-    "scripts/check_coverage_floors.py::main": "dev-cli-argv"
+    "scripts/check_coverage_floors.py::main": "dev-cli-argv",
+    "localm/inference/_trigger_probe.py::_check_one": "trigger-probe-validator"
   },
   "reasons": {
     "registry-path-chain": "false positive",
@@ -113,7 +115,8 @@
     "plugin-swap-invariant": "false positive",
     "confinement-fixed-2026-07-29": "false positive",
     "weak-hash-generated-token": "false positive",
-    "dev-cli-argv": "won't fix"
+    "dev-cli-argv": "won't fix",
+    "trigger-probe-validator": "false positive"
   },
   "_limit": "GitHub caps dismissed_comment at 280 characters (422 above it, measured). 'short' is what gets POSTED; 'justifications' is the full reasoning and lives here, in version control, where it can be reviewed and corrected. The short text must name its group so the two can be tied together from the alert.",
   "short": {
@@ -130,6 +133,7 @@
     "plugin-swap-invariant": "False positive: the id was validated at the _installed_dir / _store_dir choke point, and this function re-asserts containment inline (dest, tmp and backup all in the installed root), dominating its own sinks. See dispositions.json, group plugin-swap-invariant.",
     "confinement-fixed-2026-07-29": "Fixed 2026-07-29: the sink now consumes the value the guard returned. The alert persists because the flagged expression is the path construction the check necessarily follows, not because the flow is unguarded. See scripts/codeql/dispositions.json.",
     "weak-hash-generated-token": "False positive: the only human-chosen secret, the owner key, goes through scrypt and its record declares that construction. Everything else hashed here is a generated 256-bit token or a failed guess. See scripts/codeql/dispositions.json, group weak-hash-generated-token.",
-    "dev-cli-argv": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv."
+    "dev-cli-argv": "Won't fix, accepted by threat model, not a barrier: this dev-only CLI script (release-excluded, never ships) reads the path its own invoker supplies via argv; only that same local principal can set it, already running as that OS user. See dispositions.json: dev-cli-argv.",
+    "trigger-probe-validator": "False positive: this is the ReDoS safety validator itself (#928/#933) - runs the caller's unescaped pattern in an isolated subprocess to test if it is dangerous; a hang is killed by the caller's own timeout. See dispositions.json: trigger-probe-validator."
   }
 }
