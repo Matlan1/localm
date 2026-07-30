@@ -502,6 +502,9 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[bool, str]":
             proc = None
 
     if proc is None:
+        # Read _PREWARM_THREAD outside _TRIGGER_PROBE_LOCK: safe because
+        # thread references in Python are atomic object assignments, and
+        # joining an already-finished thread is a harmless no-op.
         prewarm = _PREWARM_THREAD
         if prewarm is not None and prewarm.is_alive():
             prewarm.join(timeout=_TRIGGER_PROBE_SPAWN_TIMEOUT)
