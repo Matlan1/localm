@@ -13,7 +13,255 @@ from ..display import (
     print_assistant_label, print_info, print_reasoning_token,
     print_streaming_done, print_streaming_token, print_thinking,
 )
+from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
 from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS
+
+_JSON_WS = " \t\r\n"
+
+
+class _NameKeyGate:
+    """Incremental scanner for ONE name-gated fence body: does this object
+    have a top-level ``"name"`` key, and does its value prefix-match a
+    registered tool?
+
+    Finds ``"name"`` wherever it appears among the object's top-level keys
+    (not only as the first key), correctly SKIPPING every other key's value
+    - string, number, bool, null, or a nested object/array (depth-tracked,
+    string/escape-aware, mirroring parser.py's ``_object_end_from``) - so a
+    JSON example whose first key happens to be something else (the common
+    case: almost no legitimate example is shaped exactly like a tool call)
+    is not mistaken for one just because it starts with an unrelated key.
+
+    ``pos`` is the ONLY cursor and it only ever moves forward through the
+    body text supplied to :func:`_advance_name_key_gate` call after call -
+    every sub-step (skip whitespace, match a literal, accumulate a value) is
+    its OWN persistent state, resumed from exactly where the previous call
+    left off. A call that returns ``None`` (need more data) MUST leave every
+    field in a state such that the next call, given more text appended to
+    the SAME buffer, continues correctly - collapsing two sequential
+    sub-steps into one state is exactly the bug this design already caught
+    once (see the class-level comment above ``_advance_name_key_gate``).
+    """
+
+    __slots__ = ("state", "pos", "key_buf", "name_val", "depth", "in_str", "esc",
+                "for_name")
+
+    def __init__(self, pos: int) -> None:
+        self.state = "seek_key"
+        self.pos = pos
+        self.key_buf = ""
+        self.name_val = ""
+        self.depth = 0
+        self.in_str = False
+        self.esc = False
+        self.for_name = False   # which key the colon/value steps are for
+
+
+def _advance_name_key_gate(g: "_NameKeyGate", buf: str, tool_names) -> "str | None":
+    """Advance *g* as far as *buf* (the fence body, from right after its
+    opening ``{``) allows. Returns:
+
+    - ``None`` - need more data.
+    - ``"confirmed"`` - a top-level ``"name"`` key's value is an EXACT match
+      in *tool_names*. The caller still runs the real, authoritative
+      ``_try_parse_body`` once the fence closes (args must parse too); this
+      only says the name half is settled.
+    - ``"release"`` - definitively not a call (object closed with no "name"
+      key, or "name" is present but not a string, or its value can never
+      become any registered tool name).
+    - ``"fallback"`` - something this scanner does not model (malformed
+      JSON, or a value shape it does not recognise). The caller falls back
+      to buffering to the fence close and deciding there, exactly as if
+      this gate had never run - NEVER a way to guess towards releasing a
+      real call early.
+
+    BUG THIS DESIGN ALREADY CAUGHT ONCE, so the shape is not repeated
+    elsewhere: the four steps between a key's closing quote and its value's
+    first significant character (skip ws, expect ':', skip ws, look at the
+    value) were originally one state that assumed it could complete all
+    four before ever needing to return None. A call that ran out of data
+    right after consuming the colon, before any post-colon whitespace had
+    arrived, resumed by re-checking "is the next character a colon" against
+    a character that came AFTER the colon already consumed, and wrongly
+    fell back on ordinary JSON that had done nothing wrong. Each of those
+    four steps is its own state below for exactly this reason.
+    """
+    n = len(buf)
+    while True:
+        if g.state == "seek_key":
+            while g.pos < n and buf[g.pos] in _JSON_WS:
+                g.pos += 1
+            if g.pos >= n:
+                return None
+            c = buf[g.pos]
+            if c == "}":
+                return "release"     # object closed, no "name" key ever found
+            if c != '"':
+                return "fallback"    # malformed - let the authoritative path decide
+            g.pos += 1
+            g.key_buf = ""
+            g.state = "read_key"
+            continue
+
+        if g.state == "read_key":
+            while g.pos < n:
+                c = buf[g.pos]
+                if g.esc:
+                    g.key_buf += c
+                    g.esc = False
+                    g.pos += 1
+                    continue
+                if c == "\\":
+                    g.esc = True
+                    g.pos += 1
+                    continue
+                if c == '"':
+                    g.pos += 1
+                    g.for_name = (g.key_buf == "name")
+                    g.state = "ws_before_colon"
+                    break
+                g.key_buf += c
+                g.pos += 1
+            else:
+                return None
+            continue
+
+        if g.state == "ws_before_colon":
+            while g.pos < n and buf[g.pos] in _JSON_WS:
+                g.pos += 1
+            if g.pos >= n:
+                return None
+            g.state = "expect_colon"
+            continue
+
+        if g.state == "expect_colon":
+            if buf[g.pos] != ":":
+                return "fallback"
+            g.pos += 1
+            g.state = "ws_after_colon"
+            continue
+
+        if g.state == "ws_after_colon":
+            while g.pos < n and buf[g.pos] in _JSON_WS:
+                g.pos += 1
+            if g.pos >= n:
+                return None
+            if g.for_name:
+                if buf[g.pos] != '"':
+                    return "release"   # "name" present but not a string
+                g.pos += 1
+                g.name_val = ""
+                g.state = "read_name"
+            else:
+                g.state = "skip_value_start"
+            continue
+
+        if g.state == "skip_value_start":
+            # Only reached with pos < n already guaranteed by ws_after_colon
+            # in this SAME pass - never resumed independently across calls.
+            c = buf[g.pos]
+            if c == '"':
+                g.pos += 1
+                g.state = "skip_str"
+            elif c in "{[":
+                g.depth = 1
+                g.in_str = False
+                g.esc = False
+                g.pos += 1
+                g.state = "skip_bracketed"
+            elif c in "-0123456789tfn":   # number / true / false / null
+                g.state = "skip_bare"
+            else:
+                return "fallback"
+            continue
+
+        if g.state == "skip_str":
+            while g.pos < n:
+                c = buf[g.pos]
+                if g.esc:
+                    g.esc = False
+                    g.pos += 1
+                    continue
+                if c == "\\":
+                    g.esc = True
+                    g.pos += 1
+                    continue
+                if c == '"':
+                    g.pos += 1
+                    g.state = "after_value"
+                    break
+                g.pos += 1
+            else:
+                return None
+            continue
+
+        if g.state == "skip_bracketed":
+            while g.pos < n:
+                c = buf[g.pos]
+                if g.in_str:
+                    if g.esc:
+                        g.esc = False
+                    elif c == "\\":
+                        g.esc = True
+                    elif c == '"':
+                        g.in_str = False
+                    g.pos += 1
+                    continue
+                if c == '"':
+                    g.in_str = True
+                elif c in "{[":
+                    g.depth += 1
+                elif c in "}]":
+                    g.depth -= 1
+                    if g.depth == 0:
+                        g.pos += 1
+                        g.state = "after_value"
+                        break
+                g.pos += 1
+            else:
+                return None
+            continue
+
+        if g.state == "skip_bare":
+            while g.pos < n and buf[g.pos] not in (_JSON_WS + ",}"):
+                g.pos += 1
+            if g.pos >= n:
+                return None   # could still be mid-literal
+            g.state = "after_value"
+            continue
+
+        if g.state == "after_value":
+            while g.pos < n and buf[g.pos] in _JSON_WS:
+                g.pos += 1
+            if g.pos >= n:
+                return None
+            c = buf[g.pos]
+            if c == ",":
+                g.pos += 1
+                g.state = "seek_key"
+                continue
+            if c == "}":
+                return "release"   # object closed; that key was not "name"
+            return "fallback"
+
+        if g.state == "read_name":
+            while g.pos < n:
+                c = buf[g.pos]
+                if c == "\\":
+                    # A real tool name never needs escaping - but rather
+                    # than assert that here, fall back to the safe default.
+                    return "fallback"
+                if c == '"':
+                    g.pos += 1
+                    return "confirmed" if g.name_val in tool_names else "release"
+                candidate = g.name_val + c
+                if not any(t.startswith(candidate) for t in tool_names):
+                    return "release"
+                g.name_val = candidate
+                g.pos += 1
+            return None
+
+        raise AssertionError(f"unreachable _NameKeyGate state: {g.state!r}")
 
 
 class _ContextMixin:
@@ -226,16 +474,86 @@ ws     ::= [ \t\n\r]*
 
     _TC_CLOSERS = ("</tool_call>", "<tool_call|>", "<|/tool_call>", "<|tool_call|>")
 
+    # A fence-open LINE longer than this before its terminating newline ever
+    # arrives is not a real fence header (parser.py's own _RE_FENCE_OPEN caps
+    # the lang token to word-characters, so a real one is always short) - give
+    # up waiting rather than holding text back indefinitely for a stray ``` in
+    # prose that never resolves into anything fence-shaped.
+    _MAX_PENDING_FENCE_HEADER = 200
+
+    # A fence body buffered this long with no closing ``` found yet is not
+    # worth holding back any further - release it and resume plain scanning.
+    # Mirrors _MAX_EXPENSIVE_MARKER_RESCANS's reasoning (parser.py): a real
+    # tool call's JSON body (even a large write_file content) is realistically
+    # far under this; it exists only to bound a stream that never closes.
+    # PER-STREAM, not a system-wide total: each concurrent _call_llm stream
+    # buffers independently, so N concurrent streams can hold up to N times
+    # this much at once (16 concurrent coder turns -> 32 MB worst case, not
+    # 2 MB) - acceptable (bounded by how many streams the server admits at
+    # all, not by this constant), but read the number as a per-request cap.
+    _MAX_PENDING_FENCE_BODY = 2_000_000
+
     @classmethod
-    def _stream_hiding_tool_calls(cls, pieces):
+    def _stream_hiding_tool_calls(cls, pieces, tool_names=None):
         """
         Yield displayable text tokens from a stream, silently buffering
-        tool-call blocks (canonical <tool_call>...</tool_call> and mangled
-        <|tool_call>...<tool_call|> variants) so raw JSON never hits the
-        terminal.
+        tool-call blocks so raw call syntax never hits the terminal or the
+        GUI's live "token" events.
 
-        Yields (token, is_hidden) pairs where is_hidden=True means the
-        token belongs to a tool-call block and should not be displayed.
+        Hides, unconditionally (the wrapper itself signals intent, same as
+        parse_tool_calls treats them - see parser.py's docstring):
+          - canonical <tool_call>...</tool_call> and mangled <|tool_call>
+            marker dialects
+          - an explicit ```tool_call / ```tool_code fence
+
+        Hides, only when *tool_names* is given and a top-level key of the
+        object equals ``"name"`` with a value that matches one of them
+        (mirrors parse_tool_calls' own name-gate, via the SAME
+        _try_parse_body it uses for the final decision - not a second,
+        drifting copy of the check):
+          - any OTHER fenced block (```json, a bare ```, or even an
+            unrelated lang tag) whose body is JSON-object-shaped
+
+        DECIDED INCREMENTALLY, not by buffering the whole body to the fence
+        close: a name-gated fence's body is scanned key by key as it
+        arrives (see _NameKeyGate), releasing the moment the answer is
+        knowable rather than always holding text back until the fence
+        closes. A JSON example that is not a call is typically released
+        within the first few characters of wherever its actual content
+        diverges from being a real call (a "name" key whose value cannot
+        match any registered tool - the overwhelming common shape a
+        coding assistant would show), or at worst once the OBJECT itself
+        closes (a plain data object with no "name" key at all, e.g. a list
+        of records) - never later than that, and never later than a
+        buffer-to-close design would have taken. Only a body that turns out
+        to genuinely be a call is held all the way to the fence close,
+        which is the harness executing it anyway. The scanner falls back to
+        buffering-to-close only when it hits something it does not cleanly
+        model (malformed JSON) - it never guesses towards an early release
+        of a real call.
+
+        A fence is only ever buffered while it might still be a call: an
+        explicit ``` tool_call/```tool_code fence is held unconditionally
+        (the wrapper itself signals intent); anything else is only even
+        considered when the body's first non-whitespace character is ``{``,
+        so an ordinary ```python/```diff/etc. explanatory fence (the
+        overwhelming majority of fences a coding assistant emits) is
+        released immediately, never delayed at all.
+
+        There is no way to hide a bare, un-fenced top-level JSON object (the
+        last of parser.py's five recognised shapes): with no fence marker to
+        anchor on, every ``{`` in ordinary prose or code would have to be
+        treated as a candidate, which would delay far more ordinary text
+        than it would ever protect. That shape is not hidden here; loop.py's
+        post-parse "assistant_text" correction (agent/loop.py) is the
+        backstop for it in the GUI. A CLI terminal has no equivalent - it
+        cannot un-print - so that one narrow shape can still flash raw in
+        the CLI. See coder-display-vs-execution-two-detectors in project
+        memory for the full reasoning and the measured release-latency
+        numbers for the shapes above.
+
+        Yields (token, is_hidden) pairs where is_hidden=True means the token
+        belongs to a tool-call block and should not be displayed.
         """
         def _find_first(haystack, needles, offset=0):
             best = -1
@@ -246,34 +564,115 @@ ws     ::= [ \t\n\r]*
                     best, best_len = idx, len(needle)
             return best, best_len
 
+        _FENCE = "```"
+
         def _partial_opener_at_end(haystack):
-            """Length of a trailing fragment that could grow into an opener."""
-            max_keep = max(len(n) for n in cls._TC_OPENERS) - 1
+            """Length of a trailing fragment that could grow into a
+            <tool_call>-family opener OR a bare ``` fence marker, whichever is
+            longer - a chunk boundary landing mid-marker must never be misread
+            as ordinary text."""
+            max_keep = max(max(len(n) for n in cls._TC_OPENERS), len(_FENCE)) - 1
             for k in range(min(max_keep, len(haystack)), 0, -1):
                 tail = haystack[-k:]
-                if any(needle.startswith(tail) for needle in cls._TC_OPENERS):
+                if (any(needle.startswith(tail) for needle in cls._TC_OPENERS)
+                        or _FENCE.startswith(tail)):
                     return k
             return 0
 
+        def _fence_header(buf, fence_start):
+            """(lang, body_start) once buf[fence_start:] holds a COMPLETE
+            fence-open line (```[lang]\\n). (None, -1) if more data is needed.
+            (None, -2) if this ``` definitely does not open a fence at all
+            (the header line is implausibly long, or contains a character a
+            real lang tag never would)."""
+            hdr_from = fence_start + len(_FENCE)
+            nl = buf.find("\n", hdr_from)
+            if nl == -1:
+                if len(buf) - hdr_from > cls._MAX_PENDING_FENCE_HEADER:
+                    return None, -2
+                return None, -1
+            lang = buf[hdr_from:nl].rstrip("\r").strip()
+            if len(lang) > 32 or not all(c.isalnum() or c in "_+.-" for c in lang):
+                return None, -2
+            return lang, nl + 1
+
         buf = ""
-        in_call = False
+        in_call = False        # inside a <tool_call>-family block (always hidden)
+        # None | "explicit" (unconditional fence) | "gating" (incremental
+        # name-key scan in progress) | "confirmed" (name matched; buffering
+        # to the fence close for the real decision) | "buffer_to_close"
+        # (gate hit something it does not model; same as "confirmed" from
+        # here on, just not yet known to be a real call)
+        fence_state = None
+        body_start = 0         # buf index where the current fence's BODY starts
+        gate = None             # active _NameKeyGate while fence_state == "gating"
         for piece in pieces:
             buf += piece
             while True:
-                if not in_call:
-                    start, _ = _find_first(buf, cls._TC_OPENERS)
-                    if start == -1:
+                if not in_call and fence_state is None:
+                    tc_start, _ = _find_first(buf, cls._TC_OPENERS)
+                    fence_start = buf.find(_FENCE)
+                    if tc_start != -1 and (fence_start == -1 or tc_start <= fence_start):
+                        if tc_start > 0:
+                            yield buf[:tc_start], False
+                        buf = buf[tc_start:]
+                        in_call = True
+                        continue
+                    if fence_start == -1:
                         # Hold back a tail that might be a split opener
                         keep = _partial_opener_at_end(buf)
                         if len(buf) > keep:
                             yield buf[:len(buf) - keep], False
                             buf = buf[len(buf) - keep:]
                         break
-                    if start > 0:
-                        yield buf[:start], False
-                    buf = buf[start:]
-                    in_call = True
-                else:
+                    lang, bstart = _fence_header(buf, fence_start)
+                    if bstart == -1:
+                        # Header line not complete yet - release anything BEFORE
+                        # the ```, hold the ``` itself back for more data.
+                        if fence_start > 0:
+                            yield buf[:fence_start], False
+                            buf = buf[fence_start:]
+                        break
+                    if bstart == -2:
+                        # Not a real fence opener - release the ``` and resume
+                        # scanning right after it (never get stuck retrying it).
+                        resume = fence_start + len(_FENCE)
+                        yield buf[:resume], False
+                        buf = buf[resume:]
+                        continue
+                    if fence_start > 0:
+                        yield buf[:fence_start], False
+                    buf = buf[fence_start:]
+                    bstart -= fence_start
+                    if lang.lower() in _EXPLICIT_FENCE_LANGS:
+                        fence_state, body_start = "explicit", bstart
+                    elif not tool_names:
+                        # No registry to gate against - never worth waiting.
+                        yield buf[:bstart], False
+                        buf = buf[bstart:]
+                    elif bstart >= len(buf):
+                        # The header line just completed but the body's FIRST
+                        # character has not arrived in this buffer yet (a real
+                        # bug this exact case caught: a header ending right at
+                        # a chunk boundary must not be judged "not gate-able"
+                        # before we have even seen one byte of the body) - wait
+                        # for the next piece instead of releasing prematurely.
+                        # Resolves in at most one more piece: bstart is fixed
+                        # and any non-empty next piece makes len(buf) > bstart.
+                        break
+                    elif buf[bstart] == "{":
+                        fence_state, body_start = "gating", bstart
+                        gate = _NameKeyGate(bstart + 1)
+                    else:
+                        # Not gate-able (the body plainly is not JSON) -
+                        # release the header line and go straight back to
+                        # plain scanning; nothing to wait for, so an ordinary
+                        # code fence is never delayed.
+                        yield buf[:bstart], False
+                        buf = buf[bstart:]
+                    continue
+
+                if in_call:
                     # Search past the opener so <|tool_call|> as an opener
                     # is not immediately matched as its own closer
                     end, end_len = _find_first(buf, cls._TC_CLOSERS, 2)
@@ -283,8 +682,69 @@ ws     ::= [ \t\n\r]*
                     yield buf[:end], True
                     buf = buf[end:]
                     in_call = False
+                    continue
+
+                if fence_state == "gating":
+                    if len(buf) - body_start > cls._MAX_PENDING_FENCE_BODY:
+                        # Adversarial: a structure that keeps returning "need
+                        # more data" without ever resolving (e.g. brace depth
+                        # that never returns to 0). Same safety valve as the
+                        # old buffer-to-close design - release rather than
+                        # buffer without limit; verified against a genuinely
+                        # infinite input, not merely one that happens to end.
+                        yield buf, False
+                        buf = ""
+                        fence_state = None
+                        continue
+                    verdict = _advance_name_key_gate(gate, buf, tool_names)
+                    if verdict is None:
+                        break
+                    if verdict == "release":
+                        yield buf, False
+                        buf = ""
+                        fence_state = None
+                        continue
+                    if verdict == "fallback":
+                        fence_state = "buffer_to_close"
+                        continue
+                    # "confirmed": the name half is settled - fall through to
+                    # the same authoritative close-time decision as always
+                    # (args must still parse for this to be a real call).
+                    fence_state = "confirmed"
+                    continue
+
+                # fence_state is "explicit", "confirmed", or "buffer_to_close":
+                # wait for the closer, then make (or re-confirm) the decision.
+                close = buf.find("\n" + _FENCE, max(body_start - 1, 0))
+                if close == -1:
+                    if len(buf) - body_start > cls._MAX_PENDING_FENCE_BODY:
+                        # Never resolved - give up and show what was buffered
+                        # rather than withholding it forever.
+                        yield buf, False
+                        buf = ""
+                        fence_state = None
+                    break
+                end = close + len("\n" + _FENCE)
+                if fence_state == "explicit":
+                    hide = True
+                else:
+                    parsed = _try_parse_body(buf[body_start:close], None)
+                    hide = parsed is not None and parsed[0] in tool_names
+                yield buf[:end], hide
+                buf = buf[end:]
+                fence_state = None
         if buf:
-            yield buf, in_call   # unclosed tag at stream end - display as-is
+            # Unclosed at stream end. A <tool_call>-family marker or an
+            # explicit fence keeps whatever hidden state it was in (matches
+            # the pre-existing behaviour for an unclosed <tool_call> - and
+            # looks_like_tool_attempt() in parser.py already recognises both
+            # shapes, so the repair-turn machinery still gets a chance at it).
+            # An unclosed name-gated fence (gating/confirmed/buffer_to_close)
+            # is released instead: parse_tool_calls can never treat an
+            # unclosed fence as a real call either way, so hiding it here
+            # could hide genuine, truncated prose forever with nothing
+            # downstream that would ever reveal it again.
+            yield buf, in_call or (fence_state == "explicit")
 
     def _tool_call_grammar(self) -> Optional[tuple]:
         """(grammar, trigger_patterns) for LAZY tool-call enforcement, or None.
@@ -327,7 +787,10 @@ ws     ::= [ \t\n\r]*
         Shared by ``_call_llm``'s event-sink and interactive branches (CODER-3)
         - previously each duplicated this entire consume-and-record loop, a
         divergence that already caused a real bug once (see the historical note
-        on the lazy tool-call grammar at the interactive call site below).
+        on the lazy tool-call grammar at the interactive call site below). Being
+        shared also means the tool-call hiding fix below reaches BOTH: a call
+        written in a name-gated fence is hidden from the terminal exactly as it
+        is from the GUI, not just the surface that happened to report the leak.
 
         *on_interrupt*, when given, is called on a ``KeyboardInterrupt`` raised
         mid-stream instead of letting it propagate (the interactive terminal's
@@ -341,13 +804,19 @@ ws     ::= [ \t\n\r]*
             reasoning_parts.append(piece)
             on_reasoning(piece)
 
+        # The same name-gate parse_tool_calls uses (loop.py), so a fenced call
+        # the live hider decides to hide is exactly the set parse_tool_calls
+        # will later execute - never a hider-only guess that could diverge.
+        tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
+
         try:
             # _llm_kwargs (not raw gen_kwargs): every dispatch branch must get
             # the lazy tool-call grammar - the terminal REPL branch previously
             # skipped it, a divergence this shared helper closes for good.
             for piece, hidden in self._stream_hiding_tool_calls(
                 self.backend.chat_stream(
-                    messages, on_reasoning=_capture_reasoning, **self._llm_kwargs())
+                    messages, on_reasoning=_capture_reasoning, **self._llm_kwargs()),
+                tool_names=tool_names,
             ):
                 full += piece
                 if not hidden:

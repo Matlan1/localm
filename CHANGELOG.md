@@ -550,6 +550,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   line's harmless level and could be folded away as repeated noise, taking
   the actual crash text with it. It now also recognizes crash-shaped text in
   an unmarked line and never discards a log entry that carries one.
+- **A coder session's reply, in both the GUI and the CLI terminal, could keep
+  showing a tool call's raw text even after the tool had actually run.** Both
+  stream a model's reply live as it is generated, before the harness can know
+  which parts are real tool calls; a call written in some of the accepted
+  formats (for example a ```` ```json ```` block) streamed through as plain
+  visible text and then ran for real once the full reply arrived, leaving the
+  raw JSON on screen right alongside the record of the tool that actually
+  ran. Recognized tool-call formats are now hidden from the live stream as
+  they arrive, in both the GUI and the CLI, not just corrected afterward. One
+  narrow shape - a call written with no wrapper at all, just a bare `{...}`
+  object, the least common way a model writes one - can still flash briefly
+  in the CLI terminal, which has no way to un-print text it already showed;
+  the GUI corrects even that case. Deciding is incremental, not a wait for
+  the whole block: a genuine ```` ```json ```` example the model shows you
+  (not a call) is recognized as not-a-call within about the first twenty
+  characters in the common case and streams normally from there. The one
+  remaining exception is a JSON example with no `"name"` field anywhere in
+  it at all - that still appears all at once once the block closes, rather
+  than line by line, because nothing can rule it out until every field has
+  been seen. Ordinary code fences in other languages are unaffected and
+  always stream normally.
 
 ## [0.1.3] - 2026-07-23
 
