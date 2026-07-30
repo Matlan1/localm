@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
-from .parser import strip_xml_tool_calls
+from .parser import strip_tool_calls
 from .verify import VerifyCommand as _VerifyCommand, command_text as _verify_text
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
@@ -402,18 +402,26 @@ class CoderSession:
                     "text": f"Resumed your last session here (saved {when}, "
                             f"{data.get('turns', 0)} turns). Continue where you "
                             "left off."})
+        # Live-attribute access (not a top-level import) so a test patching
+        # agent.TOOL_REGISTRY is honoured, matching every read site inside the
+        # agent package itself; local because sessions.py otherwise only reaches
+        # into the agent package lazily, at the point of use (see __init__).
+        import localm.plugins.coder.agent as _agent
+        tool_names = set(_agent.TOOL_REGISTRY) - self.agent.disabled_tools
         for m in self.agent._messages:
             role = m.get("role")
             content = m.get("content")
             if role not in ("user", "assistant") or not isinstance(content, str):
                 continue
-            # Same splitter as the Markdown transcript. This was a THIRD private
-            # copy of the tool_call regex (an inline
-            # ``<tool_call>.*?</tool_call>``) carrying the same defect the other
-            # two had: a lazy body scans to end-of-text from EVERY unterminated
-            # opener, so hostile model text recovered from a checkpoint made the
-            # resume recap quadratic. Copies are what let that survive two fixes.
-            _calls, text = strip_xml_tool_calls(content)
+            # Same splitter as the Markdown transcript (parser.strip_tool_calls):
+            # recognises every shape parse_tool_calls does, not just the XML
+            # wrapper, so a persisted ```json-fenced or bare-JSON call is removed
+            # here exactly like an XML one always was, instead of surviving into
+            # the recap as raw fence markers or a raw JSON blob. _calls and the
+            # malformed count are discarded, same as _calls always was: this
+            # recap has never synthesised a tool-name summary line, only
+            # surfaced surviving prose (or dropped the row entirely).
+            _calls, text, _malformed = strip_tool_calls(content, tool_names=tool_names)
             text = text.strip()
             if not text or text.startswith("<tool_result") \
                     or "[user steering note" in text:

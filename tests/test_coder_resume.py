@@ -354,3 +354,70 @@ def test_agent_persist_then_resume_roundtrip_offline(tmp_path, monkeypatch):
         assert data is not None
         b.resume_checkpoint(data)
         assert b._messages == [{"role": "user", "content": "hi"}]
+
+
+def test_resume_recap_strips_a_fenced_json_tool_call(tmp_path, monkeypatch):
+    """CODER-2 recap parity: a ```json-fenced call (one of the 5 shapes
+    parse_tool_calls recognises, name-gated) used to survive into the recap
+    as raw fence markers and JSON because resume_from_checkpoint only knew
+    the <tool_call> XML wrapper. It must now be removed exactly like an XML
+    call always was, leaving only the surviving prose."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+    from localm.plugins.coder.sessions import CoderSession
+
+    a = CoderSession(proj, _StubBackend(), auto_approve=True, auto_verify=False,
+                     mode="log")
+    a.agent._messages = [
+        {"role": "user", "content": "read a.py please"},
+        {"role": "assistant", "content": (
+            'Sure, reading it now.\n'
+            '```json\n{"name": "read_file", "args": {"path": "a.py"}}\n```'
+        )},
+    ]
+    a.agent._turns = 2
+    a.persist_checkpoint()
+
+    b = CoderSession(proj, _StubBackend(), auto_approve=True, auto_verify=False,
+                     mode="log")
+    assert b.resume_from_checkpoint() is True
+
+    texts = [e["text"] for e in b.history if e.get("type") == "history"]
+    assert texts == ["read a.py please", "Sure, reading it now."]
+
+
+def test_resume_recap_strips_a_bare_json_tool_call(tmp_path, monkeypatch):
+    """The other shape that used to leak raw: a bare top-level JSON object
+    with no wrapper at all. A pure-call message (no prose) must vanish from
+    the recap exactly like a pure XML tool-call message always has; prose
+    alongside one must survive while the JSON itself does not."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"; proj.mkdir()
+    from localm.plugins.coder.sessions import CoderSession
+
+    a = CoderSession(proj, _StubBackend(), auto_approve=True, auto_verify=False,
+                     mode="log")
+    a.agent._messages = [
+        {"role": "user", "content": "write it out"},
+        {"role": "assistant", "content": (
+            'Let me check that file.\n'
+            '{"name": "read_file", "args": {"path": "a.py"}}'
+        )},
+        {"role": "assistant", "content": (
+            '{"name": "write_file", "args": {"path": "out.py", "content": "x"}}'
+        )},
+    ]
+    a.agent._turns = 3
+    a.persist_checkpoint()
+
+    b = CoderSession(proj, _StubBackend(), auto_approve=True, auto_verify=False,
+                     mode="log")
+    assert b.resume_from_checkpoint() is True
+
+    texts = [e["text"] for e in b.history if e.get("type") == "history"]
+    # The pure-call third message (no prose) contributes no row at all -
+    # matching how a pure <tool_call>...</tool_call> message has always
+    # been dropped.
+    assert texts == ["write it out", "Let me check that file."]
