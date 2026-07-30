@@ -358,6 +358,13 @@ class HFBackend(BaseBackend):
         # GGUF-only build, where _require_torch would otherwise raise first and
         # hide it. See _check_custom_code_allowed.
         _check_custom_code_allowed(self.model_path)
+        # Also before _require_torch(), same reason, plus this check needs no
+        # torch at all: a dangerous tokenizer.json regex is refused before either
+        # AutoProcessor or AutoTokenizer below ever compiles it (NEW-HF-TOKENIZER-
+        # REDOS - see hf_tokenizer_safety.py's module docstring for the full
+        # mechanism and the measurements behind probing Oniguruma, not Python re).
+        from localm.inference.hf_tokenizer_safety import validate_tokenizer_json
+        validate_tokenizer_json(self.model_path)
         trust_remote_code = _trust_remote_code_enabled()
         torch = _require_torch()
         tr = _require_transformers()

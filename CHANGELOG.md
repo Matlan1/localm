@@ -157,6 +157,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ever used, so a pattern that would hang stays contained to that check and
   never reaches your request. An oversized pattern is now also rejected
   outright before any of those checks run.
+- **A downloaded HuggingFace model's own tokenizer could crash or hang the
+  server.** Loading a model that ships a `tokenizer.json` compiles patterns
+  from that file into a native matcher that then runs against every message
+  you send it. Those patterns are not localm's own; they come from whatever
+  produced the model. A pattern shaped to backtrack badly could freeze the
+  whole server rather than one request, since this loader runs in the main
+  process rather than a separate worker, and some shapes crash the matcher
+  outright instead of hanging. A pulled model's tokenizer patterns are now
+  tested against adversarial input in an isolated process before the model is
+  used, and a model whose tokenizer fails that check is refused.
 
 ### Changed
 - **Three model routes now require host filesystem access:** scanning for ComfyUI
