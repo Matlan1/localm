@@ -244,6 +244,28 @@ CORE_FIELDS: list = [
                  "can legitimately take minutes. Raise it only if a slow machine "
                  "needs longer than the default.",
                  group="Engine", min=10, step=60),
+    SettingField("hf_load_timeout_s", Widget.NUMBER,
+                 "HuggingFace load timeout (s)",
+                 "How long a HuggingFace-format model load may run in its "
+                 "isolated worker process before it is treated as hung and "
+                 "cancelled. Raise this only if a genuinely huge model on slow "
+                 "storage needs longer than the default.",
+                 group="Engine", min=10, step=60),
+    SettingField("hf_first_token_timeout_s", Widget.NUMBER,
+                 "HuggingFace first-token timeout (s)",
+                 "How long a HuggingFace-format model's reply may take to "
+                 "produce its first token before it is treated as hung. This "
+                 "covers reading your whole prompt, not one token, so it is "
+                 "generous by default. Raise it only if a slow machine needs "
+                 "longer than the default.",
+                 group="Engine", min=10, step=60),
+    SettingField("hf_embed_timeout_s", Widget.NUMBER,
+                 "HuggingFace embed timeout (s)",
+                 "How long a HuggingFace-format model's embedding request may "
+                 "run in its isolated worker process before it is treated as "
+                 "hung. Raise this if you regularly embed large batches of "
+                 "text against a HuggingFace embedding model.",
+                 group="Engine", min=10, step=60),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),

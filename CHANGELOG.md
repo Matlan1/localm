@@ -167,6 +167,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   outright instead of hanging. A pulled model's tokenizer patterns are now
   tested against adversarial input in an isolated process before the model is
   used, and a model whose tokenizer fails that check is refused.
+- **A single stuck request to a HuggingFace-format model could eventually
+  freeze every model on the server, not just that one request.** Background
+  work (loading a model, counting tokens, computing embeddings) shares one
+  fixed-size pool of worker threads, and a HuggingFace model's native
+  tokenizer and generation calls could not be interrupted once started - so
+  one request that triggered a hang permanently used up a thread, with no
+  way to get it back short of restarting. Enough of those (about a dozen and
+  a half) exhausted the pool entirely, which then blocked every other
+  model's requests, embeddings, and model loads too. HuggingFace-format
+  models now run in their own isolated worker process, matching how GGUF
+  models are already handled - a hang is now contained to that one request
+  and cleaned up automatically, and the rest of the server keeps working.
 
 ### Changed
 - **Three model routes now require host filesystem access:** scanning for ComfyUI

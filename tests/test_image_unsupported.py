@@ -78,13 +78,22 @@ class TestHFRejectsImagesWhenTextOnly:
         backend = HFBackend("does-not-need-to-exist")
         assert backend.can_be_multimodal is True
         assert backend.supports_images is False        # not loaded / text-only
-        backend._is_multimodal = True
+        # supports_images is cached from the isolated child's load response
+        # (see hf.py) rather than a live self._is_multimodal read - the real
+        # HFWorker instance now lives in a separate process. Fake a completed
+        # load the same way GgufBackend's own tests do: setting _loaded=True
+        # with no real self._runner hits the defensive "is_alive is None ->
+        # True" branch of the loaded property (mirrors GgufBackend.loaded).
+        backend._loaded = True
+        backend._supports_images = True
         assert backend.supports_images is True
 
     def test_text_only_chat_stream_raises_on_image(self):
         from localm.inference.backends.hf import HFBackend
         backend = HFBackend("does-not-need-to-exist")
-        # _is_multimodal is False; guard runs before transformers is imported.
+        # Never loaded (supports_images is therefore False); the backend-level
+        # guard fires before self._runner is ever touched, importing nothing
+        # heavier than base.py - see HFBackend.chat_stream's ordering.
         with pytest.raises(UnsupportedInputError):
             next(backend.chat_stream(_IMAGE_MSG))
 

@@ -184,12 +184,18 @@ def test_engine_embed_chat_decoder_without_embedder_raises(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  HFBackend.can_embed - honest capability reporting                           #
+#  HFWorker.can_embed - honest capability reporting                            #
 # --------------------------------------------------------------------------- #
+# Tests HFWorker (_hf_worker.py), not the HFBackend proxy (hf.py): the
+# can_embed COMPUTATION logic below runs only in the isolated child process
+# now (see the thread-pool-exhaustion fix) - HFBackend.can_embed just returns
+# a value this same logic already computed once at load time and cached. The
+# proxy's own "unloaded -> True" contract is covered separately by
+# test_hf_embed_integration.py::test_unloaded_hf_backend_reports_unknown_as_capable.
 
 def _hf_backend(model=None):
-    from localm.inference.backends.hf import HFBackend
-    be = HFBackend("does-not-need-to-exist")
+    from localm.inference.backends._hf_worker import HFWorker
+    be = HFWorker("does-not-need-to-exist")
     be._model = model
     return be
 

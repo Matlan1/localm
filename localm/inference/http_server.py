@@ -2699,6 +2699,26 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("hang watchdog startup failed (continuing): %s", e)
 
+        # Executor thread-pool saturation watch (dev-notes/decisions-2026-07-30-
+        # release-gate.md, Q2, the "make exhaustion detectable, not silent" half
+        # of the thread-pool-exhaustion fix): a separate off-loop daemon thread,
+        # always on (unlike the hang watchdog it sits beside, it logs only pool
+        # names and integer counts - no paths, no chat content - so it carries
+        # none of the privacy-mode considerations that gate the stack-trace
+        # capture above). Skipped under pytest so no thread lingers, matching
+        # the hang watchdog's own guard. Best-effort: a startup failure must
+        # never block serving.
+        sat_stop = sat_thread = None
+        if "pytest" not in sys.modules:
+            try:
+                from localm.inference._executor_health import start_executor_saturation_watch
+                sat_stop, sat_thread = start_executor_saturation_watch(
+                    asyncio.get_running_loop())
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("executor saturation watch startup failed "
+                          "(continuing): %s", e)
+
         # Cross-install GPU/VRAM coordination (see localm.gpu_registry): register
         # this instance in the machine-wide registry, but ONLY for a real,
         # non-isolated, advertise()'d server (instance_id + port/scheme are set by
@@ -2748,6 +2768,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 hang_stop.set()
                 if hang_thread is not None:
                     hang_thread.join(timeout=2)
+            if sat_stop is not None:
+                sat_stop.set()
+                if sat_thread is not None:
+                    sat_thread.join(timeout=2)
             if gpu_task is not None:
                 gpu_task.cancel()
                 try:
@@ -2962,9 +2986,18 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 })
         except RuntimeError:
             pass   # no running loop (should not happen inside an async handler)
+        # Thread-pool saturation numbers (dev-notes/decisions-2026-07-30-
+        # release-gate.md, Q2's "make exhaustion detectable" half) - live
+        # here too, not just in the periodic warning log, so a diagnosis in
+        # progress does not have to wait for the threshold to trip a line.
+        try:
+            from localm.inference._executor_health import executors_snapshot
+            executors = executors_snapshot(asyncio.get_running_loop())
+        except Exception:
+            executors = {}
         return {"pid": os.getpid(),
                 "loop_lag_s": round(time.monotonic() - _hb_monotonic, 2),
-                "threads": threads, "tasks": tasks}
+                "threads": threads, "tasks": tasks, "executors": executors}
 
     # CORS: localhost-only by default. A wildcard here would let ANY website
     # the user visits call this API from browser JS and read the responses
