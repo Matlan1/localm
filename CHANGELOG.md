@@ -120,6 +120,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **A crashed model-loading process could point you to a debug log that had
+  nothing in it.** The isolated process that loads and runs a GGUF model
+  already told you to check the debug log when it crashed - but for most
+  crash causes (anything other than a fault during the brief moment a reply
+  was actively streaming) nothing was actually written there, because the
+  process's own crash report was produced after the debug log had already
+  stopped capturing it. It is now captured for a crash at any point in that
+  process's life, not just while a reply is streaming.
 - **Detecting your graphics card no longer freezes the app for several seconds
   on Windows.** The first time localm looked up your GPU it loaded PyTorch's
   graphics libraries inside the server itself. Windows only lets one thing load
