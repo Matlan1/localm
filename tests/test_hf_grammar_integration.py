@@ -15,6 +15,7 @@ here would be theater - the whole point is that the masking is exercised for rea
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
@@ -28,7 +29,7 @@ _MINIMAL_CHAT_TEMPLATE = "{% for m in messages %}{{ m['content'] }}\n{% endfor %
 
 
 @pytest.fixture(scope="module")
-def hf_backend():
+def hf_backend(tmp_path_factory):
     # exc_type=ImportError on all three: each can raise a plain ImportError
     # (not ModuleNotFoundError) for a reason other than "not installed" - e.g.
     # transformers' own internal tokenizers version-gate, or a version-clashed
@@ -47,9 +48,24 @@ def hf_backend():
 
     from localm.inference.backends.hf import HFBackend
 
-    be = HFBackend(local_dir, device="cpu")
+    # The chat_template can no longer be poked onto a live tokenizer object
+    # after load(): the real tokenizer now lives inside HFBackend's isolated
+    # child process (see the thread-pool-exhaustion fix), not directly
+    # reachable from this test's process. Inject it at the SOURCE instead -
+    # tokenizer_config.json's own "chat_template" key, which
+    # AutoTokenizer.from_pretrained reads at load time regardless of which
+    # process calls it - into a COPY of the snapshot (never the shared HF hub
+    # cache directory snapshot_download returned: mutating that would leak
+    # across every other test/use of this cached model on the machine).
+    model_dir = tmp_path_factory.mktemp("tiny_gpt2_with_chat_template")
+    shutil.copytree(local_dir, model_dir, dirs_exist_ok=True)
+    config_path = model_dir / "tokenizer_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["chat_template"] = _MINIMAL_CHAT_TEMPLATE
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    be = HFBackend(str(model_dir), device="cpu")
     be.load()
-    be._tokenizer.chat_template = _MINIMAL_CHAT_TEMPLATE
     yield be
     be.unload()
 

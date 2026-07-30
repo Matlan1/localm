@@ -75,7 +75,10 @@ def test_declared_arch_suffixes_match_transformers_own_generation_mixin():
     import transformers as tr
     from transformers.generation import GenerationMixin
 
-    from localm.inference.backends.hf import _GENERATIVE_ARCH_SUFFIXES
+    # _GENERATIVE_ARCH_SUFFIXES now lives on HFWorker (_hf_worker.py), not the
+    # HFBackend proxy (hf.py) - the naming-convention logic it backs runs only
+    # in the isolated child process (see the thread-pool-exhaustion fix).
+    from localm.inference.backends._hf_worker import _GENERATIVE_ARCH_SUFFIXES
 
     # Real declared architectures: the encoders localm must keep embedding with,
     # and the generative heads it must route to the dedicated embedder.
@@ -99,19 +102,34 @@ def test_real_bert_encoder_is_still_embedding_capable(hf_encoder_backend):
     """A REAL encoder embedding model must NOT be misrouted to the dedicated
     embedder: it embeds well itself, and refusing it would regress a working path.
 
-    This is the case a mocked model cannot express. HFBackend.load() tries
+    This is the case a mocked model cannot express. HFWorker.load() tries
     AutoModelForCausalLM before AutoModel, and transformers registers bert as a
     causal LM, so this pure encoder loads as BertLMHeadModel and answers
     can_generate() True. Asserting on the real object is what proves can_embed
     reads the DECLARED architecture instead.
+
+    The real loaded model object now lives in HFBackend's isolated child
+    process, not directly accessible from here - so this loads a second,
+    RAW HFWorker in-process (the identical loading code HFBackend's own child
+    runs) purely to inspect ._model directly for the ground-truth assertions,
+    while hf_encoder_backend (the actual HFBackend proxy fixture) proves the
+    SAME facts hold through the real, isolated production path below.
     """
-    model = hf_encoder_backend._model
-    assert model.config.architectures == ["BertModel"]      # a pure encoder
-    assert model.can_generate() is True, (
-        "if this ever goes False, transformers stopped registering bert as a "
-        "causal LM and can_embed's declared-architecture check is why this "
-        "encoder was rescued - see HFBackend._declared_generative")
-    assert not hasattr(model, "encode")
+    from localm.inference.backends._hf_worker import HFWorker
+
+    worker = HFWorker(hf_encoder_backend.model_path, device="cpu")
+    worker.load()
+    try:
+        model = worker._model
+        assert model.config.architectures == ["BertModel"]      # a pure encoder
+        assert model.can_generate() is True, (
+            "if this ever goes False, transformers stopped registering bert as a "
+            "causal LM and can_embed's declared-architecture check is why this "
+            "encoder was rescued - see HFWorker._declared_generative")
+        assert not hasattr(model, "encode")
+    finally:
+        worker.unload()
+
     assert hf_encoder_backend.can_embed is True
 
     vecs = hf_encoder_backend.embed(["hello world"])
@@ -157,14 +175,28 @@ def hf_chat_backend():
 
 
 def test_real_causal_lm_reports_it_cannot_embed(hf_chat_backend):
-    """The real checkpoint is a generative decoder, so can_embed is False."""
-    model = hf_chat_backend._model
-    # Ground the test in what the real model actually is, so a transformers
-    # change that breaks the discriminator fails HERE with a clear reason.
-    assert model.can_generate() is True
-    assert not hasattr(model, "encode"), (
-        "the pre-fix .encode() probe was the only embedder check, and a causal "
-        "LM does not expose it - that is exactly why it missed this case")
+    """The real checkpoint is a generative decoder, so can_embed is False.
+
+    Same raw-HFWorker-load pattern as test_real_bert_encoder_is_still_
+    embedding_capable above, for the same reason: the real model object lives
+    in hf_chat_backend's isolated child process, not directly accessible here.
+    """
+    from localm.inference.backends._hf_worker import HFWorker
+
+    worker = HFWorker(hf_chat_backend.model_path, device="cpu")
+    worker.load()
+    try:
+        model = worker._model
+        # Ground the test in what the real model actually is, so a transformers
+        # change that breaks the discriminator fails HERE with a clear reason.
+        assert model.can_generate() is True
+        assert not hasattr(model, "encode"), (
+            "the pre-fix .encode() probe was the only embedder check, and a "
+            "causal LM does not expose it - that is exactly why it missed "
+            "this case")
+    finally:
+        worker.unload()
+
     assert hf_chat_backend.can_embed is False
 
 
