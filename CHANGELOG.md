@@ -155,7 +155,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   every caller-supplied pattern is now checked against known-dangerous shapes
   and run against adversarial test input in an isolated process before it is
   ever used, so a pattern that would hang stays contained to that check and
-  never reaches your request.
+  never reaches your request. An oversized pattern is now also rejected
+  outright before any of those checks run.
 
 ### Changed
 - **Three model routes now require host filesystem access:** scanning for ComfyUI

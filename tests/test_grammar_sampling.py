@@ -407,6 +407,59 @@ def test_static_shape_rejection_catches_nested_quantifiers():
         assert reason is not None, f"{pattern!r} should have been flagged as nested-quantified"
 
 
+def test_static_shape_rejection_catches_oversized_pattern():
+    """No length cap existed anywhere on a caller-supplied trigger pattern
+    before it reached re.compile() in the isolated daemon (_trigger_probe.py)
+    - found in cross-session review after the grammar_triggers fix landed.
+    An uncapped pattern still costs real CPU before any adversarial-shape
+    logic runs: _static_shape_rejection's own paren-depth scan, and (had it
+    passed the static filter) _pattern_derived_probes' character-frequency
+    scan in the daemon, are both O(len(pattern)); the pattern string is also
+    the cache key in _VALIDATED_TRIGGER_PATTERNS, so an oversized pattern is
+    retained in memory up to _MAX_CACHED_TRIGGER_PATTERNS times. Real trigger
+    patterns are tiny (TOOL_CALL_TRIGGER is ~30 chars); MAX_TRIGGER_PATTERN_
+    BYTES is far above any legitimate need while still bounding the above."""
+    from localm.inference.gbnf import MAX_TRIGGER_PATTERN_BYTES, _static_shape_rejection
+
+    oversized = "a" * (MAX_TRIGGER_PATTERN_BYTES + 1)
+    reason = _static_shape_rejection(oversized)
+    assert reason is not None and (
+        "length" in reason or "byte" in reason), reason
+
+
+def test_static_shape_rejection_accepts_pattern_at_the_length_boundary():
+    """The cap must not be off-by-one against itself: exactly
+    MAX_TRIGGER_PATTERN_BYTES, in an otherwise-safe shape, must pass the
+    length check (it may still legitimately fail some OTHER static check,
+    but not this one - a benign flat literal run avoids that ambiguity)."""
+    from localm.inference.gbnf import MAX_TRIGGER_PATTERN_BYTES, _static_shape_rejection
+
+    at_boundary = "a" * MAX_TRIGGER_PATTERN_BYTES
+    reason = _static_shape_rejection(at_boundary)
+    assert reason is None, f"a pattern exactly at the cap was rejected: {reason}"
+
+
+def test_oversized_pattern_rejected_without_reaching_the_probe():
+    """The actual DoS-relevant property, proven directly (same technique as
+    test_n_distinct_known_shape_attacks_never_reach_the_probe above): an
+    oversized pattern must reject in CPU time that could only be explained
+    by the cheap static filter, never by spawning or querying the daemon
+    (which would cost at least the production spawn timeout)."""
+    import time
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import MAX_TRIGGER_PATTERN_BYTES, validate_trigger_patterns
+
+    oversized = "a" * (MAX_TRIGGER_PATTERN_BYTES * 4)
+    t0 = time.process_time()
+    with pytest.raises(InvalidGrammarError):
+        validate_trigger_patterns([oversized])
+    elapsed = time.process_time() - t0
+    assert elapsed < 0.5, (
+        f"rejecting an oversized pattern took {elapsed:.2f}s CPU time - "
+        "the length cap is not actually preventing daemon/probe cost")
+
+
 def test_n_distinct_known_shape_attacks_never_reach_the_probe():
     """The actual DoS-amplification fix, proven directly: N distinct
     catastrophic patterns (same historical shape, different literals so

@@ -216,6 +216,25 @@ def check_grammar_structure(grammar: str) -> None:
 
 import threading as _threading
 
+# No caller-supplied trigger pattern is bounded in size before this point -
+# found in cross-session review after the fix below first landed (GitHub
+# #928/#833's own PR only bounded the GRAMMAR string, via MAX_GRAMMAR_BYTES
+# above; the TRIGGER pattern had no equivalent). An uncapped pattern still
+# costs real, unbounded work before any adversarial-shape logic runs:
+# _static_shape_rejection's own paren-depth scan below is O(len(pattern));
+# _pattern_derived_probes in _trigger_probe.py (the isolated daemon) scans
+# every character to build a frequency table, also O(len(pattern)), for
+# whatever survives the static filter; and the pattern string is itself the
+# cache key in _VALIDATED_TRIGGER_PATTERNS, so an oversized pattern is
+# retained in memory up to _MAX_CACHED_TRIGGER_PATTERNS times over. None of
+# this is catastrophic-backtracking-class cost (compiling and scanning a
+# long but simple string is linear, not exponential), but it is real,
+# unbounded cost for zero legitimate reason: real trigger patterns are tiny
+# (TOOL_CALL_TRIGGER is ~30 characters). Checked FIRST in
+# _static_shape_rejection, before any other scan, so an oversized pattern
+# never reaches even that function's own O(n) work, let alone the daemon.
+MAX_TRIGGER_PATTERN_BYTES = 4096
+
 _TRIGGER_PROBE_PROC = None
 _TRIGGER_PROBE_LOCK = _threading.Lock()
 
@@ -383,6 +402,12 @@ def _static_shape_rejection(pattern: str) -> "str | None":
     traffic - which is the only way to make repeated attack traffic cheap
     to reject rather than merely SAFE to reject.
 
+    A length check runs first (see MAX_TRIGGER_PATTERN_BYTES above), before
+    either shape check below even scans the pattern once - real trigger
+    patterns are tiny, so this costs nothing for legitimate traffic while
+    bounding the two shape checks' own O(len(pattern)) scan cost, and the
+    daemon-side probe-derivation cost of whatever survives this function.
+
     Two shapes, chosen because they are provably useless-or-dangerous
     rather than merely "look risky" (avoiding the false-positive trap that
     would violate "keep the feature working" as much as removing the
@@ -412,6 +437,11 @@ def _static_shape_rejection(pattern: str) -> "str | None":
        benign pattern using literal unescaped braces in an unexpected way.
        Documented as a heuristic, not a proof, same honesty as this whole
        mechanism's module docstring."""
+    if len(pattern) > MAX_TRIGGER_PATTERN_BYTES:
+        return (
+            f"pattern is {len(pattern)} bytes, over the "
+            f"{MAX_TRIGGER_PATTERN_BYTES}-byte limit for a trigger pattern")
+
     if re.match(r"^(?!\^)(\.\*\??|\.\+\??|\[[^\]]*\][*+]\??)", pattern):
         return ("leading unanchored wildcard (.*, .+, or a character-class "
                  "equivalent) - redundant under search() and the exact shape "
