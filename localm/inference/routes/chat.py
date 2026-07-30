@@ -443,7 +443,20 @@ def register(app: FastAPI, ctx) -> None:
 
             # Count tokens on the (possibly inlet-transformed) messages - what
             # inference actually sees, matching the chat path.
-            prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
+            # OFF THE EVENT LOOP, for the reason already written out at the
+            # embeddings path above ("count_tokens is a native tokenizer call
+            # ... summing it on the single-threaded loop would freeze every
+            # other request"): this is the SAME native call on caller-supplied
+            # text, and it ran inline here while its sibling 130 lines up was
+            # correctly offloaded. On the HF backend the tokenizer is a native
+            # Oniguruma regex loaded from the model's own tokenizer.json, so its
+            # cost is bounded by nothing localm controls - a slow one froze the
+            # whole server, not just this request. The reason existed and was
+            # documented; only the guard was missing here.
+            loop = asyncio.get_running_loop()
+            prompt_text = _messages_prompt_text(messages)
+            prompt_tokens = await loop.run_in_executor(
+                None, lambda t=prompt_text: engine.count_tokens(t))
 
             async with sem:
                 # Cancelable on client disconnect (same as /v1/chat/completions'
@@ -458,7 +471,10 @@ def register(app: FastAPI, ctx) -> None:
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_audit, _transcript, messages, text)
 
-            completion_tokens = engine.count_tokens(text)
+            # Same reason as prompt_tokens above. Bound through a default arg so
+            # the closure cannot pick up a later rebinding of `text`.
+            completion_tokens = await loop.run_in_executor(
+                None, lambda t=text: engine.count_tokens(t))
             ts  = int(time.time())
             cid = make_chunk_id()
             return {

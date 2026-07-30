@@ -216,3 +216,60 @@ def test_completion_audited_streaming(env, monkeypatch):
     assert _sse_text(r) == "audit-stream"
     assert len(calls) == 1, "streamed completion exchange was not audited"
     assert calls[0]["reply"] == "audit-stream"
+
+
+# --------------------------------------------------------------------------- #
+#  count_tokens must not run ON the event loop
+#
+#  The embeddings path in the same module has carried a comment since it was
+#  written explaining why this exact call has to be offloaded: it is a NATIVE
+#  tokenizer call on caller-supplied text, and running it inline on the
+#  single-threaded loop freezes every other request for its duration. The
+#  /v1/completions path called it inline anyway, 130 lines below that comment.
+#
+#  On the HF backend the tokenizer is a native Oniguruma regex loaded out of the
+#  model's own tokenizer.json, so its cost is bounded by nothing localm controls.
+#  A slow one did not slow one request, it stalled the server.
+#
+#  ASSERTED DETERMINISTICALLY, not on a timer: asyncio.get_running_loop() raises
+#  RuntimeError when called from a thread that is not running the loop. So
+#  "did this run off the loop thread" is a clean yes/no with no wall-clock
+#  budget to go flaky under load - which matters because a timing test for this
+#  would be exactly the kind of proxy assertion that passes for the wrong reason.
+# --------------------------------------------------------------------------- #
+
+def _loop_witness_engine():
+    """Engine stub whose count_tokens records whether it ran ON the loop thread."""
+    import asyncio as _asyncio
+    engine = _echo_engine()
+    seen = []
+
+    def _count(text):
+        try:
+            _asyncio.get_running_loop()
+            seen.append("ON_LOOP")
+        except RuntimeError:
+            seen.append("OFF_LOOP")
+        return 5
+
+    engine.count_tokens.side_effect = _count
+    return engine, seen
+
+
+def test_completion_count_tokens_runs_off_the_event_loop(env):
+    from localm.inference.http_server import create_app
+    engine, seen = _loop_witness_engine()
+    app = create_app(engine)
+    with TestClient(app) as c:
+        r = _post(c, {"prompt": "hi"})
+    assert r.status_code == 200
+
+    assert seen, "count_tokens was never called - this test would pass vacuously"
+    # Both sites: prompt_tokens before generation and completion_tokens after.
+    assert len(seen) >= 2, f"expected both token counts, saw {seen}"
+    assert all(s == "OFF_LOOP" for s in seen), (
+        f"count_tokens ran on the event loop: {seen}. It is a native call on "
+        "caller-supplied text - inline on the loop it blocks every other "
+        "request for its whole duration. Offload it with run_in_executor, the "
+        "way the embeddings path in the same module already does."
+    )
