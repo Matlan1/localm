@@ -140,6 +140,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   process's own crash report was produced after the debug log had already
   stopped capturing it. It is now captured for a crash at any point in that
   process's life, not just while a reply is streaming.
+- **A plain-text completion request could freeze every other request on the
+  server while it counted tokens.** `/v1/completions` counted the prompt and
+  reply tokens with a direct call to the model's tokenizer, which runs on
+  Python's single request-handling thread - so a large prompt or reply could
+  briefly stall every other concurrent request. `/v1/embeddings` already ran
+  this off that thread; `/v1/completions` now does too.
 - **Detecting your graphics card no longer freezes the app for several seconds
   on Windows.** The first time localm looked up your GPU it loaded PyTorch's
   graphics libraries inside the server itself. Windows only lets one thing load
