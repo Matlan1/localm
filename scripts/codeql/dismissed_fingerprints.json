@@ -1,4 +1,28 @@
 {
+ "259": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/hf_tokenizer_safety.py",
+  "line": 172,
+  "lineHash": "134accad015c44e:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "258": {
+  "rule": "py/path-injection",
+  "file": "localm/inference/hf_tokenizer_safety.py",
+  "line": 169,
+  "lineHash": "5ea646794bd13dcf:1",
+  "comment": "False positive: registry.json -> _entry_path (refuses non-dict, null, empty, and any '..' under both Windows and POSIX flavours) -> get_model_info(allow_direct_path=False) -> a read-only probe. Full reasoning: scripts/codeql/dispositions.json, group registry-path-chain.",
+  "reason": "false positive"
+ },
+ "257": {
+  "rule": "py/regex-injection",
+  "file": "localm/inference/_trigger_probe.py",
+  "line": 183,
+  "lineHash": "9ed8eb73ac83940f:1",
+  "comment": "False positive: this is the ReDoS safety validator itself (#928/#933) - runs the caller's unescaped pattern in an isolated subprocess to test if it is dangerous; a hang is killed by the caller's own timeout. See dispositions.json: trigger-probe-validator.",
+  "reason": "false positive"
+ },
  "256": {
   "rule": "py/path-injection",
   "file": "localm/plugins/builtin/coder/plug.py",
@@ -314,7 +338,7 @@
  "212": {
   "rule": "py/path-injection",
   "file": "localm/media/comfy_client.py",
-  "line": 1901,
+  "line": 1928,
   "lineHash": "b9aecb46d2f89505:1",
   "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
   "reason": "false positive"
@@ -322,7 +346,7 @@
  "211": {
   "rule": "py/path-injection",
   "file": "localm/media/comfy_client.py",
-  "line": 1900,
+  "line": 1927,
   "lineHash": "f1ae8e032b14302c:1",
   "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
   "reason": "false positive"
@@ -330,7 +354,7 @@
  "210": {
   "rule": "py/path-injection",
   "file": "localm/media/comfy_client.py",
-  "line": 1869,
+  "line": 1896,
   "lineHash": "af1933f396353ecf:1",
   "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
   "reason": "false positive"
@@ -338,7 +362,7 @@
  "209": {
   "rule": "py/path-injection",
   "file": "localm/media/comfy_client.py",
-  "line": 1868,
+  "line": 1895,
   "lineHash": "b1d276c5239256af:1",
   "comment": "False positive: every flow passes pathsafe.confined_under (rejects empty, absolute, per-component drive-qualified, '..', and anything not strictly below base). Confirmed by declaring it a barrier offline. See scripts/codeql/dispositions.json, group confined-under.",
   "reason": "false positive"
@@ -346,7 +370,7 @@
  "208": {
   "rule": "py/path-injection",
   "file": "localm/pathsafe.py",
-  "line": 117,
+  "line": 124,
   "lineHash": "ae3db697e333ed30:1",
   "comment": "False positive, structurally unclosable: this alert IS the confinement helper. The flagged expression is the path construction the containment test needs, so the guard can never precede its own sink. See scripts/codeql/dispositions.json, group choke-point.",
   "reason": "false positive"

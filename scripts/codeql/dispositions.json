@@ -51,6 +51,7 @@
     "localm/inference/engine.py::_is_gguf": "registry-path-chain",
     "localm/inference/engine.py::_is_hf_dir": "registry-path-chain",
     "localm/inference/engine.py::model_display_name": "registry-path-chain",
+    "localm/inference/hf_tokenizer_safety.py::_extract_unique_patterns": "registry-path-chain",
     "localm/inference/http_server.py::_model_file_size": "registry-path-chain",
     "localm/inference/http_server.py::_unload_embedder_if_matches": "registry-path-chain",
     "localm/inference/residency.py::model_footprint_bytes": "registry-path-chain",
