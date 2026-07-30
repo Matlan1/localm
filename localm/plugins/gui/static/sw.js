@@ -125,7 +125,12 @@
 // offload (AGENTS.md rule 5 - a silent CPU fallback must not read as success).
 // A stale-cached client would keep toasting an unqualified "switched" even
 // when the server told it the load degraded to slow CPU layers.
-const CACHE = "localm-shell-v86";
+// v87: app/coder.js handles a new "assistant_text" event (a post-parse fix-up
+// the agent loop now sends so a tool call written in a shape the live token
+// stream cannot hide, e.g. a ```json fence, does not linger as raw JSON in
+// the chat bubble once it has actually been executed). A stale-cached client
+// would silently drop this event and keep showing the leaked JSON forever.
+const CACHE = "localm-shell-v87";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
