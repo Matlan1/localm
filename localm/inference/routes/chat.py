@@ -442,8 +442,14 @@ def register(app: FastAPI, ctx) -> None:
                 )
 
             # Count tokens on the (possibly inlet-transformed) messages - what
-            # inference actually sees, matching the chat path.
-            prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
+            # inference actually sees, matching the chat path. Off the event
+            # loop: count_tokens is a native tokenizer call, same reasoning as
+            # the /v1/embeddings usage count above (this route's own
+            # docstring-equivalent - a direct call here freezes every other
+            # request for the duration of the native call).
+            loop = asyncio.get_running_loop()
+            prompt_tokens = await loop.run_in_executor(
+                None, engine.count_tokens, _messages_prompt_text(messages))
 
             async with sem:
                 # Cancelable on client disconnect (same as /v1/chat/completions'
@@ -458,7 +464,7 @@ def register(app: FastAPI, ctx) -> None:
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_audit, _transcript, messages, text)
 
-            completion_tokens = engine.count_tokens(text)
+            completion_tokens = await loop.run_in_executor(None, engine.count_tokens, text)
             ts  = int(time.time())
             cid = make_chunk_id()
             return {
