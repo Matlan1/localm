@@ -13,6 +13,7 @@ from ..display import (
     print_assistant_label, print_info, print_reasoning_token,
     print_streaming_done, print_streaming_token, print_thinking,
 )
+from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
 from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS
 
 
@@ -226,16 +227,70 @@ ws     ::= [ \t\n\r]*
 
     _TC_CLOSERS = ("</tool_call>", "<tool_call|>", "<|/tool_call>", "<|tool_call|>")
 
+    # A fence-open LINE longer than this before its terminating newline ever
+    # arrives is not a real fence header (parser.py's own _RE_FENCE_OPEN caps
+    # the lang token to word-characters, so a real one is always short) - give
+    # up waiting rather than holding text back indefinitely for a stray ``` in
+    # prose that never resolves into anything fence-shaped.
+    _MAX_PENDING_FENCE_HEADER = 200
+
+    # A fence body buffered this long with no closing ``` found yet is not
+    # worth holding back any further - release it and resume plain scanning.
+    # Mirrors _MAX_EXPENSIVE_MARKER_RESCANS's reasoning (parser.py): a real
+    # tool call's JSON body (even a large write_file content) is realistically
+    # far under this; it exists only to bound a stream that never closes.
+    # PER-STREAM, not a system-wide total: each concurrent _call_llm stream
+    # buffers independently, so N concurrent streams can hold up to N times
+    # this much at once (16 concurrent coder turns -> 32 MB worst case, not
+    # 2 MB) - acceptable (bounded by how many streams the server admits at
+    # all, not by this constant), but read the number as a per-request cap.
+    _MAX_PENDING_FENCE_BODY = 2_000_000
+
     @classmethod
-    def _stream_hiding_tool_calls(cls, pieces):
+    def _stream_hiding_tool_calls(cls, pieces, tool_names=None):
         """
         Yield displayable text tokens from a stream, silently buffering
-        tool-call blocks (canonical <tool_call>...</tool_call> and mangled
-        <|tool_call>...<tool_call|> variants) so raw JSON never hits the
-        terminal.
+        tool-call blocks so raw call syntax never hits the terminal or the
+        GUI's live "token" events.
 
-        Yields (token, is_hidden) pairs where is_hidden=True means the
-        token belongs to a tool-call block and should not be displayed.
+        Hides, unconditionally (the wrapper itself signals intent, same as
+        parse_tool_calls treats them - see parser.py's docstring):
+          - canonical <tool_call>...</tool_call> and mangled <|tool_call>
+            marker dialects
+          - an explicit ```tool_call / ```tool_code fence
+
+        Hides, only when *tool_names* is given and the parsed name matches one
+        of them (mirrors parse_tool_calls' own name-gate, via the SAME
+        _try_parse_body it uses - not a second, drifting copy of the check):
+          - any OTHER fenced block (```json, a bare ```, or even an unrelated
+            lang tag) whose body is exactly a ``{"name": ..., "args": ...}``
+            object
+
+        A fence is only ever BUFFERED (not shown, not hidden) while we do not
+        yet know whether it will turn out to be a call: the header line (to
+        learn the language) and, for a name-gated fence, the body up to its
+        closing ``` (to parse and check the name) - and only when the body's
+        first non-whitespace character is ``{``, so an ordinary ```python/
+        ```diff/etc. explanatory fence (the overwhelming majority of fences a
+        coding assistant emits) is released immediately rather than delayed
+        waiting for its close. This close-then-check is why a NAME-GATED
+        fence "pops in" as one block once it turns out not to be a call,
+        instead of streaming character by character like ordinary text - the
+        same trade this file already makes for a <tool_call> marker that
+        turns out to be malformed.
+
+        There is no way to hide a bare, un-fenced top-level JSON object (the
+        last of parser.py's five recognised shapes): every ``{`` in ordinary
+        prose or code would have to be treated as a candidate, which would
+        delay far more ordinary text than it would ever protect. That shape
+        is not hidden here; loop.py's post-parse "assistant_text" correction
+        (agent/loop.py) is the backstop for it in the GUI. A CLI terminal has
+        no equivalent - it cannot un-print - so that one narrow shape can
+        still flash raw in the CLI. See coder-display-vs-execution-two-
+        detectors in project memory for the full reasoning.
+
+        Yields (token, is_hidden) pairs where is_hidden=True means the token
+        belongs to a tool-call block and should not be displayed.
         """
         def _find_first(haystack, needles, offset=0):
             best = -1
@@ -246,34 +301,108 @@ ws     ::= [ \t\n\r]*
                     best, best_len = idx, len(needle)
             return best, best_len
 
+        _FENCE = "```"
+
         def _partial_opener_at_end(haystack):
-            """Length of a trailing fragment that could grow into an opener."""
-            max_keep = max(len(n) for n in cls._TC_OPENERS) - 1
+            """Length of a trailing fragment that could grow into a
+            <tool_call>-family opener OR a bare ``` fence marker, whichever is
+            longer - a chunk boundary landing mid-marker must never be misread
+            as ordinary text."""
+            max_keep = max(max(len(n) for n in cls._TC_OPENERS), len(_FENCE)) - 1
             for k in range(min(max_keep, len(haystack)), 0, -1):
                 tail = haystack[-k:]
-                if any(needle.startswith(tail) for needle in cls._TC_OPENERS):
+                if (any(needle.startswith(tail) for needle in cls._TC_OPENERS)
+                        or _FENCE.startswith(tail)):
                     return k
             return 0
 
+        def _fence_header(buf, fence_start):
+            """(lang, body_start) once buf[fence_start:] holds a COMPLETE
+            fence-open line (```[lang]\\n). (None, -1) if more data is needed.
+            (None, -2) if this ``` definitely does not open a fence at all
+            (the header line is implausibly long, or contains a character a
+            real lang tag never would)."""
+            hdr_from = fence_start + len(_FENCE)
+            nl = buf.find("\n", hdr_from)
+            if nl == -1:
+                if len(buf) - hdr_from > cls._MAX_PENDING_FENCE_HEADER:
+                    return None, -2
+                return None, -1
+            lang = buf[hdr_from:nl].rstrip("\r").strip()
+            if len(lang) > 32 or not all(c.isalnum() or c in "_+.-" for c in lang):
+                return None, -2
+            return lang, nl + 1
+
         buf = ""
-        in_call = False
+        in_call = False        # inside a <tool_call>-family block (always hidden)
+        fence_state = None     # None | "explicit" (unconditional) | "check" (name-gated)
+        body_start = 0         # buf index where the current fence's BODY starts
         for piece in pieces:
             buf += piece
             while True:
-                if not in_call:
-                    start, _ = _find_first(buf, cls._TC_OPENERS)
-                    if start == -1:
+                if not in_call and fence_state is None:
+                    tc_start, _ = _find_first(buf, cls._TC_OPENERS)
+                    fence_start = buf.find(_FENCE)
+                    if tc_start != -1 and (fence_start == -1 or tc_start <= fence_start):
+                        if tc_start > 0:
+                            yield buf[:tc_start], False
+                        buf = buf[tc_start:]
+                        in_call = True
+                        continue
+                    if fence_start == -1:
                         # Hold back a tail that might be a split opener
                         keep = _partial_opener_at_end(buf)
                         if len(buf) > keep:
                             yield buf[:len(buf) - keep], False
                             buf = buf[len(buf) - keep:]
                         break
-                    if start > 0:
-                        yield buf[:start], False
-                    buf = buf[start:]
-                    in_call = True
-                else:
+                    lang, bstart = _fence_header(buf, fence_start)
+                    if bstart == -1:
+                        # Header line not complete yet - release anything BEFORE
+                        # the ```, hold the ``` itself back for more data.
+                        if fence_start > 0:
+                            yield buf[:fence_start], False
+                            buf = buf[fence_start:]
+                        break
+                    if bstart == -2:
+                        # Not a real fence opener - release the ``` and resume
+                        # scanning right after it (never get stuck retrying it).
+                        resume = fence_start + len(_FENCE)
+                        yield buf[:resume], False
+                        buf = buf[resume:]
+                        continue
+                    if fence_start > 0:
+                        yield buf[:fence_start], False
+                    buf = buf[fence_start:]
+                    bstart -= fence_start
+                    if lang.lower() in _EXPLICIT_FENCE_LANGS:
+                        fence_state, body_start = "explicit", bstart
+                    elif not tool_names:
+                        # No registry to gate against - never worth waiting.
+                        yield buf[:bstart], False
+                        buf = buf[bstart:]
+                    elif bstart >= len(buf):
+                        # The header line just completed but the body's FIRST
+                        # character has not arrived in this buffer yet (a real
+                        # bug this exact case caught: a header ending right at
+                        # a chunk boundary must not be judged "not gate-able"
+                        # before we have even seen one byte of the body) - wait
+                        # for the next piece instead of releasing prematurely.
+                        # Resolves in at most one more piece: bstart is fixed
+                        # and any non-empty next piece makes len(buf) > bstart.
+                        break
+                    elif buf[bstart] == "{":
+                        fence_state, body_start = "check", bstart
+                    else:
+                        # Not gate-able (the body plainly is not JSON) -
+                        # release the header line and go straight back to
+                        # plain scanning; nothing to wait for, so an ordinary
+                        # code fence is never delayed.
+                        yield buf[:bstart], False
+                        buf = buf[bstart:]
+                    continue
+
+                if in_call:
                     # Search past the opener so <|tool_call|> as an opener
                     # is not immediately matched as its own closer
                     end, end_len = _find_first(buf, cls._TC_CLOSERS, 2)
@@ -283,8 +412,38 @@ ws     ::= [ \t\n\r]*
                     yield buf[:end], True
                     buf = buf[end:]
                     in_call = False
+                    continue
+
+                # fence_state is "explicit" or "check": wait for the closer.
+                close = buf.find("\n" + _FENCE, max(body_start - 1, 0))
+                if close == -1:
+                    if len(buf) - body_start > cls._MAX_PENDING_FENCE_BODY:
+                        # Never resolved - give up and show what was buffered
+                        # rather than withholding it forever.
+                        yield buf, False
+                        buf = ""
+                        fence_state = None
+                    break
+                end = close + len("\n" + _FENCE)
+                if fence_state == "explicit":
+                    hide = True
+                else:
+                    parsed = _try_parse_body(buf[body_start:close], None)
+                    hide = parsed is not None and parsed[0] in tool_names
+                yield buf[:end], hide
+                buf = buf[end:]
+                fence_state = None
         if buf:
-            yield buf, in_call   # unclosed tag at stream end - display as-is
+            # Unclosed at stream end. A <tool_call>-family marker or an
+            # explicit fence keeps whatever hidden state it was in (matches
+            # the pre-existing behaviour for an unclosed <tool_call> - and
+            # looks_like_tool_attempt() in parser.py already recognises both
+            # shapes, so the repair-turn machinery still gets a chance at it).
+            # An unclosed NAME-GATED fence is released instead: parse_tool_calls
+            # can never treat an unclosed fence as a real call either way, so
+            # hiding it here could hide genuine, truncated prose forever with
+            # nothing downstream that would ever reveal it again.
+            yield buf, in_call or (fence_state == "explicit")
 
     def _tool_call_grammar(self) -> Optional[tuple]:
         """(grammar, trigger_patterns) for LAZY tool-call enforcement, or None.
@@ -327,7 +486,10 @@ ws     ::= [ \t\n\r]*
         Shared by ``_call_llm``'s event-sink and interactive branches (CODER-3)
         - previously each duplicated this entire consume-and-record loop, a
         divergence that already caused a real bug once (see the historical note
-        on the lazy tool-call grammar at the interactive call site below).
+        on the lazy tool-call grammar at the interactive call site below). Being
+        shared also means the tool-call hiding fix below reaches BOTH: a call
+        written in a name-gated fence is hidden from the terminal exactly as it
+        is from the GUI, not just the surface that happened to report the leak.
 
         *on_interrupt*, when given, is called on a ``KeyboardInterrupt`` raised
         mid-stream instead of letting it propagate (the interactive terminal's
@@ -341,13 +503,19 @@ ws     ::= [ \t\n\r]*
             reasoning_parts.append(piece)
             on_reasoning(piece)
 
+        # The same name-gate parse_tool_calls uses (loop.py), so a fenced call
+        # the live hider decides to hide is exactly the set parse_tool_calls
+        # will later execute - never a hider-only guess that could diverge.
+        tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
+
         try:
             # _llm_kwargs (not raw gen_kwargs): every dispatch branch must get
             # the lazy tool-call grammar - the terminal REPL branch previously
             # skipped it, a divergence this shared helper closes for good.
             for piece, hidden in self._stream_hiding_tool_calls(
                 self.backend.chat_stream(
-                    messages, on_reasoning=_capture_reasoning, **self._llm_kwargs())
+                    messages, on_reasoning=_capture_reasoning, **self._llm_kwargs()),
+                tool_names=tool_names,
             ):
                 full += piece
                 if not hidden:

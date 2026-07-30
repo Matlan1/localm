@@ -540,16 +540,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   line's harmless level and could be folded away as repeated noise, taking
   the actual crash text with it. It now also recognizes crash-shaped text in
   an unmarked line and never discards a log entry that carries one.
-- **A coder session's reply could keep showing a tool call's raw text even
-  after the tool had actually run.** The GUI streams a model's reply live as
-  it is generated, before the harness can know which parts are real tool
-  calls; a call written in some of the accepted formats (for example a
-  ```` ```json ```` block) streamed through as plain visible text and then
-  ran for real once the full reply arrived, leaving the chat bubble showing
-  the call's own raw JSON as if it were part of the answer, alongside the
-  card for the tool that actually ran. Any tool call the harness executes is
-  now removed from what you see in the reply, whichever of the accepted
-  formats the model wrote it in.
+- **A coder session's reply, in both the GUI and the CLI terminal, could keep
+  showing a tool call's raw text even after the tool had actually run.** Both
+  stream a model's reply live as it is generated, before the harness can know
+  which parts are real tool calls; a call written in some of the accepted
+  formats (for example a ```` ```json ```` block) streamed through as plain
+  visible text and then ran for real once the full reply arrived, leaving the
+  raw JSON on screen right alongside the record of the tool that actually
+  ran. Recognized tool-call formats are now hidden from the live stream as
+  they arrive, in both the GUI and the CLI, not just corrected afterward. One
+  narrow shape - a call written with no wrapper at all, just a bare `{...}`
+  object, the least common way a model writes one - can still flash briefly
+  in the CLI terminal, which has no way to un-print text it already showed;
+  the GUI corrects even that case. One consequence worth knowing: a genuine
+  ```` ```json ```` code block the model shows you as an EXAMPLE (not a call)
+  now appears all at once when it closes rather than streaming line by line,
+  because there is no way to tell the two apart before the block is
+  complete. Ordinary code fences in other languages are unaffected and still
+  stream normally.
 
 ## [0.1.3] - 2026-07-23
 
