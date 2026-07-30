@@ -23,6 +23,39 @@ permanent public record of what shipped and are never rewritten; the in-progress
   so instead of silently doing nothing.
 
 ### Security
+- **Starting the coder in your home folder no longer puts your account name into
+  its prompt.** The coder shows its working directory as `~/.` when that folder
+  IS your home directory, specifically so the prompt never carries your OS user
+  name. A clarifying note added beside it worked the folder name out separately,
+  and for the home directory that name is exactly the account name - so it went
+  into every system prompt and every sub-agent brief, and from there into
+  anything that saves or logs one. The note now takes its name from the same
+  text the model was shown, and says nothing at all when there is no folder name
+  to mention. Projects anywhere else were never affected.
+- **A file shared to localm can no longer be written somewhere localm cannot see
+  it.** Sharing into localm from another app passes that app's own filename
+  through. A name like `photo:stream.png` was used as-is, and on Windows a colon
+  means "alternate data stream": the share landed in a hidden stream attached to
+  a zero-byte file, so the pending-shares list showed an empty `photo` while the
+  actual content sat somewhere the app cannot read. A name containing a NUL byte
+  failed with a bare server error instead. Shared names now go through the same
+  check uploads already used, and every name in a batch is checked before
+  anything is written, so a refused share leaves no half-written entry behind.
+- **A corrupt scheduled-jobs file is no longer copied aside with your key's
+  fingerprint inside it.** When `jobs.json` cannot be parsed, localm copies it to
+  `jobs.json.corrupt-<timestamp>` rather than lose your scheduled jobs. That copy
+  was verbatim, so it carried each job's owner fingerprint - the same hash the
+  keystore holds - and nothing ever removed old copies, so one could outlive the
+  move to the slower key derivation indefinitely. The fingerprint is stripped
+  from the copy now, and only the newest few copies are kept.
+- **A model can no longer hang the coder with a search pattern.** The coder's
+  `grep` and `search_replace` tools compile a regular expression the MODEL
+  writes, so its shape is not under your control. Measured against a real
+  repository: a 24-character pattern took 1.7 seconds, quadrupling every two
+  characters - roughly 31 hours at 40 characters. Both tools are reachable by a
+  restricted, shareable key, and `grep` asks for no confirmation because it
+  changes nothing. Patterns are now capped in size and the match itself is
+  time-bounded, with the cap set so an ordinary search never reaches the timeout.
 - **An owner key you chose yourself is no longer stored as a fast, unsalted
   fingerprint.** localm lets you pick your own key (`localm key set`, the
   `LOCALM_API_KEY` variable, or writing `auth.key` by hand), and a key you chose
@@ -132,6 +165,79 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **The coder no longer skips a valid tool call that follows a malformed one.**
+  When a reply contained a botched tool call before a good one, the scanner's
+  recovery could step past the valid call so it never ran - the model believed it
+  had acted and carried on. Smaller local models are affected most, being the
+  likeliest to produce the malformed attempt in the first place.
+- **The coder no longer writes doubled paths like `proj/proj/file.py`.** When
+  your project sits outside your home folder its "working directory" line showed
+  only the bare folder name, and models read that name as a prefix to put in
+  front of every path they wrote - so every read and edit failed on a path that
+  does not exist, over and over, until the run gave up. The line now says
+  explicitly that paths are relative to that folder. Reproduced identically on a
+  1.5B and a 7B model, so it was the wording rather than the model's size.
+- **The coder now tells you when part of a reply looked like a tool call it could
+  not read.** If one call in a reply parsed and another did not, the broken one
+  was dropped in silence: it never ran, the model was never told, and nothing
+  recorded it. It is reported back now, so the model can send it again.
+- **Resuming a coder session no longer loses track of what it already changed.**
+  After a server restart or a GUI reconnect, the list of files changed so far in
+  that session came back empty, so both undo and the changed-files view were
+  wrong about work that had already happened.
+- **The "part of that looked like a tool call" notice no longer repeats every
+  turn.** The notice quotes the correct format, and that quote is itself
+  tool-call-shaped, so a model that echoed it back triggered the notice again on
+  the next turn, indefinitely. It now appears at most twice per task and then
+  says so once; every later occurrence still goes to the debug log rather than
+  disappearing.
+- **The coder's final answer now ends with a short factual record of what it
+  did.** A line naming how many files actually changed - and your verify
+  command's result, if you set one - is appended to every final answer, taken
+  from what the session recorded rather than from anything the model wrote. A
+  confident "done, tests pass" from a small model can now be checked against it
+  at a glance.
+- **`--patch-mode` no longer writes your files for real when the coder searches
+  and replaces across them.** Patch mode promises to capture every file write as
+  a diff and leave your files alone. That held for every edit tool except the
+  across-files search-and-replace, which wrote straight to disk with patch mode
+  on - the one tool that can rewrite a hundred files from a single pattern. Those
+  writes were also missing from the session's changed-files record and could not
+  be undone. All three now work for it as they do for every other edit tool.
+- **Two more edit tools now update the coder's internal file index.** Applying a
+  patch file and editing a notebook cell both wrote to disk without refreshing
+  the map the coder reads, so it could serve a stale summary of a file it had
+  just changed itself.
+- **The Knowledge page's re-embed button now actually re-embeds.** Switching the
+  embedding model leaves existing collections refusing new documents until their
+  vectors are recomputed, and the fix for that shipped as a command and an API
+  call - but the button re-read your original files instead of using it. That
+  tripped the very mismatch you were trying to get past, needed the source folder
+  to still exist, and silently skipped every document you had uploaded rather
+  than pointed localm at on disk. It now calls the same re-embed the command line
+  does: no original files needed, uploads included, nothing deleted.
+- **A plugin that fails to uninstall now says so.** Removing a plugin's folder
+  can fail on Windows - a locked file, antivirus holding a handle, a permission
+  denial - and that failure was discarded silently, so localm reported the plugin
+  uninstalled while its folder was still on disk. The failure is logged with the
+  path now, and the reported outcome reflects whether the folder actually went.
+- **A quarantined scheduled-jobs file now reports honestly what happened to it.**
+  Three things were off at once: a leftover credential-shaped value in the copy
+  was only noted in the debug log, so you never saw it; the copy's permissions
+  were tightened without checking whether that worked, unlike everywhere else
+  doing the same thing; and the message claimed localm was "refusing to silently
+  discard" your jobs when in fact it warns and continues with an empty list. All
+  three now match what the code actually does.
+- **localm no longer reports "no GPU" when it simply could not ask.** After
+  graphics-card detection moved out of process, a card whose driver library
+  wedges left localm reporting an empty GPU list - indistinguishable from a
+  machine with no GPU at all. Those two are now told apart, so a card that cannot
+  be probed is reported as unknown rather than as absent.
+- **A plugin whose dependencies fail to install no longer reports success.**
+  Installing a plugin over MCP said "successfully installed and enabled" even
+  when its Python extras had failed - a network problem, a version conflict. The
+  plugin still stays enabled, matching what the command line does, but the reply
+  now says the dependency step failed and names what went wrong.
 - **A crashed model-loading process could point you to a debug log that had
   nothing in it.** The isolated process that loads and runs a GGUF model
   already told you to check the debug log when it crashed - but for most
