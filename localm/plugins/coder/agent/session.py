@@ -10,7 +10,7 @@ from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
 from ..memory import cap_user_instructions, forget, remember
-from ..parser import strip_xml_tool_calls
+from ..parser import strip_tool_calls
 from ..prompts import build_subagent_system_prompt, build_system_prompt
 from ..audit import SessionMode
 
@@ -314,16 +314,26 @@ class _SessionMixin:
             lines.append(tokens_line)
         lines += ["", "---", ""]
 
-        # The transcript strips tool_call blocks with the PARSER's splitter rather
-        # than a private copy of the regex. The copy that used to live here was the
-        # same ambiguous ``>\s*(.*?)\s*</tool_call>`` shape (cubic: measured
-        # 0.11 / 0.88 / 5.49s on a bare <tool_call> followed by 500 / 1000 / 2000
-        # spaces, min of 3 on a quiet box) and it runs over EVERY
-        # stored assistant message at teardown, so a single poisoned response
-        # re-hung the export on every later close. Two copies also meant two things
-        # to fix and a drift risk; the parser's is a strict superset (it also
-        # matches the ``name=`` attribute form and is case-insensitive), so the
-        # transcript now renders mangled calls it previously dumped as raw XML.
+        # tool_names mirrors the live agentic loop's own gate (loop.py's _loop
+        # passes the exact same expression to parse_tool_calls) so the name-gated
+        # ```json/bare-JSON call shapes are recognised here exactly as they were
+        # when the model actually called them, not a hardcoded or stale subset.
+        # Computed once, not per message: neither operand changes while this
+        # method runs.
+        tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
+
+        # The transcript strips every recognised tool-call shape with the PARSER's
+        # own strip_tool_calls rather than a private copy of the regex. The copy
+        # that used to live here was the same ambiguous ``>\s*(.*?)\s*</tool_call>``
+        # shape (cubic: measured 0.11 / 0.88 / 5.49s on a bare <tool_call> followed
+        # by 500 / 1000 / 2000 spaces, min of 3 on a quiet box) and it ran over
+        # EVERY stored assistant message at teardown, so a single poisoned response
+        # re-hung the export on every later close. strip_tool_calls is a strict
+        # superset of the old strip_xml_tool_calls-only splitter (it also
+        # recognises the fenced ```json/```tool_call and bare top-level JSON
+        # shapes parse_tool_calls does), so a call written in one of THOSE shapes
+        # is now summarised here too instead of surviving as raw fence markers or
+        # a raw JSON blob.
         for msg in self._messages:
             role    = msg.get("role", "")
             content = msg.get("content", "")
@@ -345,45 +355,38 @@ class _SessionMixin:
 
             elif role == "assistant":
                 # Strip tool_call blocks and extract summaries
-                calls, clean = strip_xml_tool_calls(content)
+                calls, clean, malformed = strip_tool_calls(content, tool_names=tool_names)
                 clean = clean.strip()
 
                 if clean:
                     lines.append(f"**{self.name}**: {clean[:2000]}")
-                elif calls:
+                elif calls or malformed:
                     lines.append(f"**{self.name}**:")
 
-                for name_attr, raw_json in calls:
-                    try:
-                        import json as _json
-                        obj  = _json.loads(raw_json)
-                        # Two body shapes, same split _try_parse_body makes: a
-                        # full {"name":..., "args":...}, or an args-ONLY body
-                        # whose tool name lives on the name= attribute. Those
-                        # tagged blocks used to survive into the transcript as
-                        # raw XML that at least named the tool, so without the
-                        # name_attr fallback stripping them renders a bare "?".
-                        if "name" in obj:
-                            tool = obj.get("name") or "?"
-                            args = obj.get("args")
-                            if args is None:
-                                args = obj.get("arguments", {})
-                        else:
-                            tool = name_attr or "?"
-                            args = obj
-                        if not isinstance(args, dict):
-                            args = {}
-                        # Show path/command arg if present, else first arg value
-                        hint = (
-                            args.get("path")
-                            or args.get("command")
-                            or args.get("url")
-                            or (next(iter(args.values()), None) if args else None)
-                        )
-                        hint_str = f" `{str(hint)[:60]}`" if hint else ""
-                        lines.append(f"  - `{tool}`{hint_str}")
-                    except Exception:
-                        lines.append("  - (tool call)")
+                for call in calls:
+                    args = call.args
+                    # Show path/command arg if present, else first arg value
+                    hint = (
+                        args.get("path")
+                        or args.get("command")
+                        or args.get("url")
+                        or (next(iter(args.values()), None) if args else None)
+                    )
+                    hint_str = f" `{str(hint)[:60]}`" if hint else ""
+                    lines.append(f"  - `{call.name}`{hint_str}")
+                # A block that LOOKED like a tool call but whose JSON body never
+                # parsed (loop.py's tool-call repair path persists the raw attempt
+                # to history before the repair succeeds, a real and not rare
+                # local-model failure mode) - the same generic placeholder this
+                # path has always shown, now counted by strip_tool_calls instead
+                # of a bare json.loads try/except here. Rendered after `calls` in
+                # a separate pass, so if one message somehow mixed a validly
+                # parsed call with a SEPARATE malformed block, bullet order could
+                # diverge from strict textual order - an accepted, purely
+                # cosmetic quirk for a doubly-rare combination, not worth the
+                # extra span-tracking it would take to solve precisely.
+                for _ in range(malformed):
+                    lines.append("  - (tool call)")
 
                 lines.append("")
 
