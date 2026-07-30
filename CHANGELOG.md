@@ -111,6 +111,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   satisfied by files localm never downloaded, and that half-present folder was
   then registered as a ready model. Names that point outside the download folder
   are refused and the snapshot is re-downloaded.
+- **A chat request could crash or hang the model worker with a single
+  carefully-shaped request.** Tool-call detection hands a pattern to the native
+  model runtime to watch for while it generates, and that matching had no size
+  or time bound: a pattern shaped to make it backtrack badly could take the
+  worker down or freeze it, whether the pattern came from localm's own
+  tool-call detection on ordinary (if awkwardly repetitive) model output, or
+  was supplied directly in a request's `grammar_triggers` field. Both are
+  fixed: localm's own pattern no longer has the shape that triggers it, and
+  every caller-supplied pattern is now checked against known-dangerous shapes
+  and run against adversarial test input in an isolated process before it is
+  ever used, so a pattern that would hang stays contained to that check and
+  never reaches your request.
 
 ### Changed
 - **Three model routes now require host filesystem access:** scanning for ComfyUI

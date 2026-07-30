@@ -331,3 +331,323 @@ def test_invalid_grammar_does_not_poison_later_valid_grammars():
         assert constrained() in ("yes", "no")
     finally:
         backend.unload()
+
+
+#  Caller-supplied grammar_triggers validation (GitHub #928, #833, #933)
+#
+#  #933 fixed localm's OWN hardcoded TOOL_CALL_TRIGGER, which turned out to be
+#  catastrophically backtracking-prone. But grammar_triggers is documented,
+#  caller-supplied public API (docs/server-api.md), and nothing validated an
+#  arbitrary caller's own trigger pattern before it reached the identical
+#  native std::regex path. validate_trigger_patterns (gbnf.py) closes that -
+#  these tests pin it at both the unit level (the function itself) and the
+#  route level (matching test_route_rejects_pathologically_nested_grammar_
+#  before_any_native_call's shape above, for the sibling LM-FZ-001 guard).
+
+def _fast_trigger_probe_timeout(monkeypatch):
+    """Shrink BOTH probe timeouts for tests that deliberately trigger a
+    rejection, so the test does not need to wait out the production timeout
+    to prove the same property - the spawn timeout matters too, since
+    whichever test in the run happens to trigger the daemon's first spawn
+    pays THAT bound, not the steady-state one. Production values are
+    unaffected outside the test."""
+    import localm.inference.gbnf as gbnf
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 0.5)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 0.5)
+
+
+#  Static shape pre-filter (the cheap layer in front of the daemon probe)
+#
+#  Added after a live measurement showed the probe ALONE is a DoS-
+#  amplification vector: rejecting a pattern costs the FULL probe timeout by
+#  construction, and every rejection also kills and respawns the daemon, so
+#  N distinct attacker-supplied patterns serialize behind one lock at close
+#  to the SPAWN timeout each (MEASURED: ~10s per pattern with a 1s
+#  steady-state timeout configured, because every rejection forces the next
+#  check - attacker or legitimate - to pay the slow spawn path). These tests
+#  pin that the cheap filter actually removes the known shapes from that
+#  queue, and that it does not become a false-positive trap.
+
+def test_static_shape_rejection_accepts_legitimate_patterns():
+    """The filter must not be so eager it rejects real, safe patterns -
+    checked against every pattern the OTHER tests in this file rely on
+    being accepted, so a regression here would show up as a false 400 on
+    real traffic, not just fail its own test."""
+    from localm.inference.gbnf import TOOL_CALL_TRIGGER, _static_shape_rejection
+
+    for pattern in (
+        TOOL_CALL_TRIGGER,
+        r"(<function_call>[\s\S]*)",
+        r"^<tool_call>",
+        r"(<start>.*<end>)",   # a wildcard INSIDE a group - not the nested-
+                                # quantifier shape (the group has no *internal*
+                                # top-level quantifier of its own)
+    ):
+        assert _static_shape_rejection(pattern) is None, (
+            f"{pattern!r} was rejected by the cheap filter - false positive")
+
+
+def test_static_shape_rejection_catches_the_928_pattern_shape():
+    """The exact historical #928/#833 shape - a leading unanchored wildcard -
+    must be caught here, for free, without ever touching the daemon."""
+    from localm.inference.gbnf import _static_shape_rejection
+
+    reason = _static_shape_rejection(r"[\s\S]*?(<tool_call>[\s\S]*)")
+    assert reason is not None and "leading" in reason
+
+
+def test_static_shape_rejection_catches_nested_quantifiers():
+    """The other textbook catastrophic-backtracking shape, independent of
+    this codebase's own history: a group with its own top-level quantifier,
+    itself immediately re-quantified."""
+    from localm.inference.gbnf import _static_shape_rejection
+
+    for pattern in (r"(a+)+", r"(a*)*b", r"(x{2,})+"):
+        reason = _static_shape_rejection(pattern)
+        assert reason is not None, f"{pattern!r} should have been flagged as nested-quantified"
+
+
+def test_n_distinct_known_shape_attacks_never_reach_the_probe():
+    """The actual DoS-amplification fix, proven directly: N distinct
+    catastrophic patterns (same historical shape, different literals so
+    none share a cache entry) must reject in a time that could ONLY be
+    explained by the static filter - the production probe timeout alone
+    (seconds each) would make N of them take N times that.
+
+    CPU time (time.process_time()), not wall-clock: an upper-bound elapsed
+    assertion on a shared box is exactly the flake shape this repo already
+    hit and fixed the same night in test_redos_bounds.py's Unit A tests
+    (dev-notes/FIX-LOOP-2026-07-29.md) - contention inflates wall-clock
+    without inflating the actual (tiny, pure-Python) CPU work this loop
+    does, so a wall-clock upper bound can fail under load for reasons that
+    have nothing to do with the property under test."""
+    import time
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import validate_trigger_patterns
+
+    patterns = [r"[\s\S]*?(<attack_marker_%d>[\s\S]*)" % i for i in range(20)]
+    t0 = time.process_time()
+    for p in patterns:
+        with pytest.raises(InvalidGrammarError):
+            validate_trigger_patterns([p])
+    elapsed = time.process_time() - t0
+    assert elapsed < 0.5, (
+        f"20 distinct known-shape attack patterns took {elapsed:.2f}s CPU time - "
+        "the static filter is not actually preventing the probe/lock DoS")
+
+
+def test_pattern_derived_probes_are_single_character_not_interleaved():
+    """Regression pin for a real bug caught in this session before it
+    shipped: an earlier version concatenated ALL of a pattern's extracted
+    characters into one repeated probe (e.g. "aabaabaab..." for a pattern
+    naming 'a' and 'b'), which defeats itself - the interleaved 'b' acts as
+    a periodic terminator that resets the backtracking search space before
+    it can blow up, so the dangerous (a|a)*b pattern completed in ~2ms
+    against that probe despite taking 131.9s against 30 PURE 'a' characters
+    with no 'b' at all. Each derived probe must be ONE character alone,
+    repeated - never a mix."""
+    from localm.inference._trigger_probe import _pattern_derived_probes
+
+    probes = _pattern_derived_probes(r"(a|a)*b")
+    assert len(probes) == 2   # distinct alnum chars: 'a' and 'b'
+    for probe in probes:
+        assert len(set(probe)) == 1, (
+            f"a derived probe must be a single character repeated, got "
+            f"{len(set(probe))} distinct characters - interleaving defeats "
+            "the alternation-ambiguity shape this probe exists to catch")
+
+
+def test_pattern_derived_probes_catches_ambiguous_alternation_not_caught_by_static_filter(monkeypatch):
+    """The other half of the composition: an ambiguous-alternation pattern
+    like (a|a)*b is genuinely catastrophic (131.9s measured on 30 raw 'a'
+    characters) but matches NEITHER static shape (no leading wildcard, and
+    the group has no quantifier of its OWN - only alternation, which
+    _static_shape_rejection does not and cannot cheaply analyze). It must
+    still be caught, by the probe layer, using a probe DERIVED from the
+    pattern's own characters (see _pattern_derived_probes) - proving the
+    two layers are not redundant, each catches what the other cannot."""
+    import time
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import _static_shape_rejection, validate_trigger_patterns
+
+    pattern = r"(a|a)*b"
+    assert _static_shape_rejection(pattern) is None, (
+        "this pattern is the test's whole point BECAUSE the static filter "
+        "cannot see it - if this assertion fails, pick a different pattern "
+        "that still bypasses the static filter")
+
+    _fast_trigger_probe_timeout(monkeypatch)
+    t0 = time.perf_counter()
+    with pytest.raises(InvalidGrammarError):
+        validate_trigger_patterns([pattern])
+    elapsed = time.perf_counter() - t0
+    # Must have gone through the (slow) probe path, not the static one - the
+    # inverse assertion from the DoS-fix tests above.
+    assert elapsed > 0.05, (
+        f"rejected in {elapsed:.3f}s - suspiciously fast for a pattern "
+        "that should only be catchable via the daemon probe")
+
+
+def test_validate_trigger_patterns_accepts_the_fixed_tool_call_trigger():
+    """Dogfood check: localm's OWN production trigger pattern (post-#933) must
+    pass its own validator - proves the validator is not so tight it rejects
+    the exact pattern this codebase ships, and stands as a regression guard
+    against a FUTURE dangerous pattern being reintroduced into
+    TOOL_CALL_TRIGGER without anyone noticing."""
+    from localm.inference.gbnf import TOOL_CALL_TRIGGER, validate_trigger_patterns
+
+    validate_trigger_patterns([TOOL_CALL_TRIGGER])  # must not raise
+
+
+def test_validate_trigger_patterns_accepts_a_different_legitimate_pattern():
+    """The validator must not be tuned so narrowly that it only accepts
+    localm's own pattern - a caller-supplied, differently-shaped but SAFE
+    pattern must also pass. Proves this is a real safety check, not a
+    disguised allowlist of one string."""
+    from localm.inference.gbnf import validate_trigger_patterns
+
+    validate_trigger_patterns([r"(<function_call>[\s\S]*)"])  # must not raise
+
+
+def test_validate_trigger_patterns_rejects_the_old_catastrophic_pattern():
+    """Regression pin: the EXACT pre-#933 TOOL_CALL_TRIGGER pattern - the one
+    that actually crashed #928/#833 - must be rejected by the validator, not
+    merely fixed in localm's own copy. Proves the general defense catches the
+    specific historical defect, not just a synthetic example of it.
+
+    Also a regression pin for the DoS-amplification fix: this exact shape
+    (leading unanchored wildcard) must be caught by _static_shape_rejection,
+    the cheap in-process layer, NOT the daemon probe - proven by requiring
+    the rejection to complete near-instantly with NO monkeypatched timeout
+    (the production timeouts are seconds; a fast completion here can only
+    mean the probe was never reached). MEASURED live before this static
+    layer existed: rejecting this exact pattern took ~10s (the probe's
+    SPAWN timeout, not even the steady-state one, because every prior
+    rejection kills and respawns the daemon) - and N distinct such patterns
+    serialize behind the probe's single lock at that cost EACH, which is
+    the DoS this static layer exists to remove from the queue entirely."""
+    import time
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import validate_trigger_patterns
+
+    old_pattern = r"[\s\S]*?(<tool_call>[\s\S]*)"
+    t0 = time.perf_counter()
+    with pytest.raises(InvalidGrammarError, match="rejected"):
+        validate_trigger_patterns([old_pattern])
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.05, (
+        f"rejection took {elapsed:.3f}s - too slow to have gone through the "
+        "static shape filter; this pattern must never reach the daemon probe")
+
+
+def test_validate_trigger_patterns_rejects_invalid_regex_syntax():
+    """A syntactically invalid pattern must be a clean typed rejection, not an
+    unhandled re.error escaping to the caller."""
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import validate_trigger_patterns
+
+    with pytest.raises(InvalidGrammarError, match="invalid regex"):
+        validate_trigger_patterns(["(unclosed"])
+
+
+def test_validate_trigger_patterns_caches_by_exact_pattern_string():
+    """A pattern already validated safe in this process must not pay another
+    daemon round-trip - proven by making a second validation of the SAME
+    pattern complete near-instantly relative to a fresh (uncached) one, using
+    a probe timeout short enough that a real round-trip would visibly cost
+    more than a cache hit but long enough not to flake under shared-box load."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+
+    pattern = r"(<a_pattern_unique_to_this_test>[\s\S]*)"
+    gbnf._VALIDATED_TRIGGER_PATTERNS.pop(pattern, None)  # ensure a clean start
+
+    gbnf.validate_trigger_patterns([pattern])  # first call: real probe round-trip
+    assert pattern in gbnf._VALIDATED_TRIGGER_PATTERNS
+
+    t0 = time.perf_counter()
+    gbnf.validate_trigger_patterns([pattern])  # second call: cache hit
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.05, (
+        f"cached validation took {elapsed:.3f}s - too slow for a dict lookup, "
+        "the cache is not actually being hit")
+
+
+def test_route_rejects_catastrophic_grammar_trigger_before_any_native_call(monkeypatch):
+    """The API-facing sibling of test_route_rejects_pathologically_nested_
+    grammar_before_any_native_call above: a caller-supplied grammar_triggers
+    pattern shaped like the actual #928/#833 defect must be rejected with a
+    clean 400 by validate_trigger_patterns BEFORE it reaches the native
+    sampler, proven by asserting chat_stream is never called - not merely
+    turned into a 400 after a native call/crash, which would still be able to
+    hang or take down a real backend."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    _fast_trigger_probe_timeout(monkeypatch)
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.chat_stream.side_effect = AssertionError(
+        "generation must not start on a caller-supplied catastrophic trigger pattern")
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    r = client.post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "grammar": 'root ::= "x"',
+        "grammar_lazy": True,
+        "grammar_triggers": [r"[\s\S]*?(<tool_call>[\s\S]*)"],
+        "max_tokens": 4,
+    })
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert "trigger" in r.text.lower(), r.text
+    engine.chat_stream.assert_not_called()
+
+
+def test_route_accepts_safe_grammar_trigger_and_reaches_generation():
+    """The positive case: a legitimate grammar_triggers pattern must NOT be
+    blocked by the new validation - the request proceeds to generation
+    exactly as it did before this defense existed. Guards against the
+    validator becoming a false-positive trap that would violate "keep the
+    feature working" as much as removing it would have."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.count_tokens.return_value = 2   # _tokens_per_sec needs a real int
+
+    def _fake_stream(*a, **kw):
+        yield "ok"   # a real generator, not a plain iterator - the non-stream
+                     # response path calls gen.close() on this in a finally block
+
+    engine.chat_stream.side_effect = _fake_stream
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    r = client.post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "grammar": 'root ::= "x"',
+        "grammar_lazy": True,
+        "grammar_triggers": [r"(<function_call>[\s\S]*)"],
+        "max_tokens": 4,
+        "stream": False,
+    })
+    assert r.status_code == 200, (r.status_code, r.text)
+    engine.chat_stream.assert_called_once()

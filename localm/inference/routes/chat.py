@@ -26,7 +26,7 @@ from fastapi.responses import StreamingResponse
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import InvalidGrammarError, messages_contain_image
 from localm.inference.chat_pipeline import ChatHookContext
-from localm.inference.gbnf import check_grammar_structure
+from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.protocol import (
     ChatRequest, CompletionRequest, EmbeddingRequest, make_chunk_id,
 )
@@ -124,6 +124,25 @@ def register(app: FastAPI, ctx) -> None:
                 if not req.grammar or not req.grammar_triggers:
                     raise HTTPException(
                         400, "grammar_lazy requires both grammar and grammar_triggers")
+                # GitHub #928/#933: a trigger pattern reaches native std::regex
+                # matching against an uncapped, ever-growing buffer on every
+                # token. localm's own pattern was catastrophically backtracking-
+                # prone; a CALLER-supplied one (this field) is unvalidated caller
+                # input reaching the identical path, so it gets the identical
+                # up-front rejection before any of it reaches generation.
+                #
+                # run_in_executor, not a direct call: an unsafe pattern's probe
+                # can legitimately take up to _TRIGGER_PROBE_TIMEOUT/_SPAWN_TIMEOUT
+                # seconds to time out (see gbnf.py). Calling that synchronously
+                # here would block THIS event loop for the whole wait, freezing
+                # every OTHER concurrent request on this server for one caller's
+                # bad pattern - exactly the class of failure this whole defense
+                # exists to prevent, just moved from the native layer to this one.
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, validate_trigger_patterns, req.grammar_triggers)
+                except InvalidGrammarError as e:
+                    raise HTTPException(400, f"Invalid grammar trigger: {e}")
                 gen_kwargs["grammar_lazy"] = True
                 gen_kwargs["grammar_triggers"] = req.grammar_triggers
 
@@ -377,6 +396,15 @@ def register(app: FastAPI, ctx) -> None:
                 if not req.grammar or not req.grammar_triggers:
                     raise HTTPException(
                         400, "grammar_lazy requires both grammar and grammar_triggers")
+                # Same up-front trigger-pattern validation as /v1/chat/completions,
+                # same run_in_executor reasoning (a probe can block for real
+                # seconds; a direct call would freeze this whole event loop for
+                # every concurrent request, not just this one) - see that route.
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, validate_trigger_patterns, req.grammar_triggers)
+                except InvalidGrammarError as e:
+                    raise HTTPException(400, f"Invalid grammar trigger: {e}")
                 gen_kwargs["grammar_lazy"] = True
                 gen_kwargs["grammar_triggers"] = req.grammar_triggers
 
