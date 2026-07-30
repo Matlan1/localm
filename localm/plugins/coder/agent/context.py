@@ -445,7 +445,24 @@ ws     ::= [ \t\n\r]*
             self._last_turn_tokens += n
 
     def _build_messages(self) -> list[dict]:
-        """Build the full message list with system prompt prepended."""
+        """Build the full message list with system prompt prepended.
+
+        Called once per turn, right before the LLM call - the one place
+        guaranteed to run before the model sees anything again, which makes it
+        the right spot to catch up on a project map a run_shell command marked
+        dirty (see ProjectMap.mark_dirty / execution._refresh_map_for_tool).
+        Rebuilding only `if dirty` (rather than unconditionally every turn)
+        keeps a clean turn free: _rebuild_system_prompt's own cost, plus the
+        map's stat-diff rescan it triggers, only pays when something actually
+        needs reconciling.
+
+        The check is `is True`, not plain truthiness: a test that mocks
+        ProjectMap wholesale gets a MagicMock back for `.dirty` when nothing
+        set it explicitly, and a MagicMock is truthy - `is True` is false for
+        it, so those tests are not left spuriously rebuilding every turn.
+        """
+        if self._project_map.dirty is True:
+            self._rebuild_system_prompt()
         return [
             {"role": "system", "content": self._system_prompt},
             *self._messages,

@@ -15,12 +15,24 @@ The map includes:
 The whole thing is kept under ~3 000 characters so it doesn't dominate
 context.  When the agent writes/edits a file, the map is refreshed for
 that file only (cheap incremental update).
+
+run_shell can write anything a `command` string cannot resolve to a `path`
+arg ahead of time, so it cannot get the same eager per-file refresh - see
+mark_dirty(). Instead it flags the whole map dirty, and the next read
+(to_context_string / file_count) reconciles it against the filesystem with a
+bounded stat-diff (see _rescan_if_dirty): every currently-tracked file is
+stat()-ed for a moved mtime/size, and - unless build() already left files
+uncounted on a repo bigger than max_files (files_capped) - every directory
+that already has a tracked file is listdir()-ed once for names not yet
+tracked there. No git, no subprocess, no full re-walk - and no cost at all
+when nothing is dirty.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,6 +94,15 @@ _MAX_SYMBOLS    = 12      # max symbol names shown per file
 # Overridable per call (and via the coder_index_timeout config key); pass
 # deadline_s=None to disable.
 _BUILD_DEADLINE_S = 20.0
+
+
+def _lang_for_ext(ext: str) -> str:
+    """Map a lowercased suffix to its language tag, or "text" / "unknown".
+
+    Shared by build(), refresh_file() and _rescan_if_dirty() so the three
+    per-file passes can never drift out of sync with each other.
+    """
+    return _SYMBOL_LANGS.get(ext) or ("text" if ext in _TEXT_EXTS else "unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +179,13 @@ class FileSummary:
     lang:    str           # "python", "markdown", "unknown", …
     lines:   int
     symbols: list[str] = field(default_factory=list)
+    # mtime/size captured from the same stat() call build()/refresh_file() already
+    # do - the staleness baseline _rescan_if_dirty() compares against after a
+    # run_shell command (which can write anything, unlike write_file/edit_file's
+    # already-known target). Defaulted so existing positional/keyword callers that
+    # predate this field are unaffected.
+    mtime:   float = 0.0
+    size:    int = 0
 
     def one_line(self) -> str:
         """Compact one-liner for the map."""
@@ -212,6 +240,22 @@ class ProjectMap:
     root:   Path
     files:  list[FileSummary] = field(default_factory=list)
     truncated: bool = False   # True if we hit _MAX_FILE_COUNT or _MAX_MAP_CHARS
+    # True ONLY when build() itself left matching files on disk uncounted (the
+    # candidate cap, max_files, or the deadline cut the WALK short) - narrower
+    # than `truncated`, which to_context_string() ALSO sets for a too-long
+    # rendered STRING even when every file WAS indexed. _rescan_if_dirty()
+    # needs the narrow signal: on a repo bigger than max_files (measured live
+    # on this repo: 300 tracked out of 1000+), a directory with one tracked
+    # file can have dozens more that were never candidates at all, and a
+    # listdir sweep cannot tell those apart from a genuinely run_shell-created
+    # file - see _rescan_if_dirty's own comment.
+    files_capped: bool = False
+    # Set by mark_dirty() after a tool that can write files with no resolvable
+    # `path` arg (run_shell). Consumed by _rescan_if_dirty(), which every read
+    # (to_context_string / file_count) calls first - so a run_shell write is
+    # reflected the next time anything actually looks at the map, and N shell
+    # calls before that next look cost one rescan, not N.
+    dirty: bool = False
 
     # ------------------------------------------------------------------
     #  Build
@@ -244,7 +288,7 @@ class ProjectMap:
 
         for dirpath, dirnames, filenames in os.walk(root):
             if deadline_s is not None and (time.monotonic() - start) > deadline_s:
-                pm.truncated = True
+                pm.truncated = pm.files_capped = True
                 break
             # Prune in place so os.walk never DESCENDS into these dirs (the real
             # fix - this is what stops a C:\ scan dead). Sorted for a deterministic
@@ -267,7 +311,7 @@ class ProjectMap:
                     continue
                 candidates.append(abs_path)
                 if len(candidates) >= candidate_cap:
-                    pm.truncated = True
+                    pm.truncated = pm.files_capped = True
                     hit_cap = True
                     break
             if on_progress is not None:
@@ -281,17 +325,24 @@ class ProjectMap:
         count = 0
         for abs_path in sorted(candidates):
             if count >= max_files:
-                pm.truncated = True
+                pm.truncated = pm.files_capped = True
                 break
             try:
                 rel = abs_path.relative_to(root)
             except ValueError:
                 continue
-            if not abs_path.is_file():
+
+            # One stat() call covers the is_file() check AND the mtime/size
+            # _rescan_if_dirty() later compares against - not a second syscall.
+            try:
+                st = abs_path.stat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
                 continue
 
             ext  = abs_path.suffix.lower()
-            lang = _SYMBOL_LANGS.get(ext) or ("text" if ext in _TEXT_EXTS else "unknown")
+            lang = _lang_for_ext(ext)
 
             # Skip truly binary files fast
             if lang == "unknown" and ext not in ("", ".lock"):
@@ -307,7 +358,8 @@ class ProjectMap:
             if lang in _SYMBOL_LANGS.values():
                 syms = _extract_symbols(text, lang)
 
-            pm.files.append(FileSummary(path=rel, lang=lang, lines=lines, symbols=syms))
+            pm.files.append(FileSummary(path=rel, lang=lang, lines=lines, symbols=syms,
+                                         mtime=st.st_mtime, size=st.st_size))
             count += 1
 
         return pm
@@ -317,19 +369,24 @@ class ProjectMap:
     # ------------------------------------------------------------------
 
     def refresh_file(self, abs_path: Path) -> None:
-        """Re-index one file after a write or edit."""
+        """Re-index one file after a write or edit (or, via _rescan_if_dirty,
+        a run_shell command). Also the removal path: a path that no longer
+        exists is dropped from the map and nothing is re-added; a path not
+        previously tracked is simply added (the filter below is a no-op)."""
         try:
             rel  = abs_path.relative_to(self.root)
         except ValueError:
             return
 
         ext  = abs_path.suffix.lower()
-        lang = _SYMBOL_LANGS.get(ext) or ("text" if ext in _TEXT_EXTS else "unknown")
+        lang = _lang_for_ext(ext)
 
         self.files = [f for f in self.files if f.path != rel]
 
-        if not abs_path.exists():
-            return   # file was deleted
+        try:
+            st = abs_path.stat()
+        except OSError:
+            return   # file was deleted (or otherwise inaccessible)
 
         try:
             text  = abs_path.read_text(encoding="utf-8", errors="ignore")
@@ -341,8 +398,103 @@ class ProjectMap:
         if lang in _SYMBOL_LANGS.values():
             syms = _extract_symbols(text, lang)
 
-        self.files.append(FileSummary(path=rel, lang=lang, lines=lines, symbols=syms))
+        self.files.append(FileSummary(path=rel, lang=lang, lines=lines, symbols=syms,
+                                       mtime=st.st_mtime, size=st.st_size))
         self.files.sort(key=lambda f: f.path)
+
+    # ------------------------------------------------------------------
+    #  Deferred refresh after a run_shell command
+    # ------------------------------------------------------------------
+
+    def mark_dirty(self) -> None:
+        """Flag that files may have changed outside the write/edit tools.
+
+        run_shell can write anything - unlike write_file/edit_file it has no
+        `path`-shaped arg a caller can resolve ahead of time - so instead of a
+        per-file refresh_file() call, the whole map is marked dirty. Cheap: one
+        bool, no stat, no subprocess. The actual reconciliation is deferred to
+        the next read (see _rescan_if_dirty), so however many run_shell calls
+        happen before that next read, they cost one rescan, not one each.
+        """
+        self.dirty = True
+
+    def _rescan_if_dirty(self) -> None:
+        """Reconcile the map against the filesystem if mark_dirty() was called
+        since the last read. Two bounded passes, no subprocess and no full
+        re-walk of the tree:
+
+          1. Stat every currently-tracked file. refresh_file() whatever is
+             gone (deleted) or whose mtime/size moved (edited) - a changed
+             stat is treated as "moved" without re-reading the content first,
+             since reading it IS the refresh. Always runs, regardless of
+             files_capped: a tracked file's own stat is meaningful either way.
+          2. listdir() every directory that has at least one tracked file, for
+             names not already tracked there (created) - exact, unlike a
+             coarser dir-mtime heuristic. SKIPPED when files_capped is True:
+             on a repo bigger than max_files, a known directory can hold many
+             files that were never candidates at all (measured live: 79 of
+             them on this repo's own tree, a 45ms surprise), and listdir
+             cannot tell those apart from one a shell command genuinely just
+             created - so treating every one as "new" would silently grow the
+             map past max_files, a little more with every dirty read. A file
+             inside a brand-new directory (no previously-tracked file at all)
+             is not discovered this way either, capped or not; only a full
+             reindex() picks up either case. Documented, not hidden - the same
+             trade-off _MAX_FILE_COUNT / the build deadline already make
+             elsewhere in this class.
+
+        Runs once per dirty period regardless of how many files actually
+        changed: bounded by O(tracked files [+ tracked dirs, when pass 2
+        runs]), never O(whole tree).
+        """
+        if not self.dirty:
+            return
+        self.dirty = False
+
+        known_dirs: dict[Path, set[str]] = {}
+        stale: list[Path] = []
+        for f in self.files:
+            abs_path = self.root / f.path
+            known_dirs.setdefault(abs_path.parent, set()).add(f.path.name)
+            try:
+                st = abs_path.stat()
+            except OSError:
+                stale.append(abs_path)                      # deleted
+                continue
+            if st.st_mtime != f.mtime or st.st_size != f.size:
+                stale.append(abs_path)                       # edited
+
+        # Gate: if build() left files uncounted, a known dir can hold many that
+        # were never candidates at all, and listdir cannot tell one of THOSE
+        # apart from a file run_shell genuinely just created - so skip new-file
+        # discovery entirely rather than flood previously-excluded files back in
+        # as fake-new (see this method's own docstring, point 2, for the measured
+        # cost of getting this wrong: 79 files / 45ms on this repo alone).
+        if not self.files_capped:
+            gi_patterns = _load_gitignore_patterns(self.root)
+            for abs_dir, known_names in known_dirs.items():
+                try:
+                    entries = os.listdir(abs_dir)
+                except OSError:
+                    continue                                 # directory itself is gone
+                for name in entries:
+                    if name in known_names or name.startswith("."):
+                        continue
+                    abs_path = abs_dir / name
+                    try:
+                        rel = abs_path.relative_to(self.root)
+                    except ValueError:
+                        continue
+                    if _is_ignored(rel, gi_patterns):
+                        continue
+                    ext  = abs_path.suffix.lower()
+                    lang = _lang_for_ext(ext)
+                    if lang == "unknown" and ext not in ("", ".lock"):
+                        continue                              # binary - build() skips these too
+                    stale.append(abs_path)
+
+        for abs_path in stale:
+            self.refresh_file(abs_path)
 
     # ------------------------------------------------------------------
     #  Render
@@ -353,6 +505,7 @@ class ProjectMap:
         Produce the block injected into the agent's system prompt.
         Capped at _MAX_MAP_CHARS to avoid dominating context.
         """
+        self._rescan_if_dirty()
         # HOME-ANCHORED, for the same reason as the prompt's identity line: this
         # block lands in the SAME system prompt, so printing the raw root here
         # handed back the absolute machine path and OS username that
@@ -382,4 +535,5 @@ class ProjectMap:
         return "\n".join(lines)
 
     def file_count(self) -> int:
+        self._rescan_if_dirty()
         return len(self.files)

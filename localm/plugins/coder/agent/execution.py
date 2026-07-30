@@ -763,7 +763,21 @@ class _ExecutionMixin:
         are not knowable from the call args alone: search_replace's paths
         come from its own glob+regex sweep, reported post-call via
         ToolResult.changes, not from a `path`-shaped arg _call_target_paths()
-        could resolve ahead of time."""
+        could resolve ahead of time.
+
+        run_shell is a step further: it has no `path`-shaped arg AT ALL (only
+        a free-form `command` string), so there is no path to resolve even
+        post-call. Mark the whole map dirty instead and return - deliberately
+        NOT calling _rebuild_system_prompt() here, unlike every other branch
+        below. That rebuild is what actually reconciles the map (see
+        ProjectMap._rescan_if_dirty via context._build_messages, called once
+        per turn), so triggering it eagerly on every run_shell call would scan
+        on every call instead of once for however many run_shell calls happen
+        before the map is next actually read.
+        """
+        if call.name == "run_shell":
+            self._project_map.mark_dirty()
+            return
         paths = dict.fromkeys(_call_target_paths(call.name, call.args))
         if result is not None and result.changes:
             for rel, _old, _new in result.changes:

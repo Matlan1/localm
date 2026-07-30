@@ -73,6 +73,14 @@ def _per_write_refresh(agent, tmp_path):
     agent._refresh_map_for_tool(_make_call("write_file", path="x.py"))
 
 
+def _build_messages_when_dirty(agent, tmp_path):
+    # The other rebuild-trigger sites call _rebuild_system_prompt directly;
+    # this one is reached only through _build_messages's own dirty check
+    # (context.py) - a distinct call site that must keep the same docs.
+    agent._project_map.dirty = True
+    agent._build_messages()
+
+
 @pytest.mark.parametrize(
     "action",
     [
@@ -81,6 +89,7 @@ def _per_write_refresh(agent, tmp_path):
         pytest.param(_reload_memory, id="reload_memory"),
         pytest.param(_set_cwd, id="set_cwd"),
         pytest.param(_per_write_refresh, id="per_write_refresh"),
+        pytest.param(_build_messages_when_dirty, id="build_messages_when_dirty"),
     ],
 )
 def test_rebuild_keeps_plugin_and_skill_docs(tmp_path, action):
@@ -152,21 +161,98 @@ class TestIncrementalMapRefreshCoverage:
         agent._project_map.refresh_file.assert_called_once_with(
             (tmp_path / "a.py").resolve())
 
-    def test_run_shell_does_not_refresh_the_map_pinned_as_a_known_gap(self, tmp_path):
-        """PINNED, not silently left unverified: run_shell has no
-        `path`-shaped arg at all (only `command`), so despite its
-        _MUTATING_TOOLS membership this is currently a no-op - see that
-        constant's own comment and dev-notes/coder-changed-files-tracking-
-        gaps-2026-07-29.md item 2 (deliberately deferred: needs the same
-        git-diff detection already gated off the live path elsewhere for a
-        blocking-subprocess-on-the-event-loop risk, not a quick fix here).
-
-        This test asserts today's KNOWN-BROKEN behaviour, so it PASSES now
-        and is meant to go RED the day that item is closed for real (a shell
-        command finally does update the map). A failure here is the GOOD
-        outcome, not a regression to chase - delete this test as part of
-        that fix rather than "fixing" it back to green."""
+    def test_run_shell_marks_the_map_dirty_instead_of_refreshing(self, tmp_path):
+        """run_shell has no `path`-shaped arg at all (only `command`), so a
+        per-file refresh_file() call is not possible ahead of time - see
+        _MUTATING_TOOLS's own comment. Marking the whole map dirty is the fix
+        that replaced the old known-gap (a real ProjectMap's resulting
+        stat-diff rescan is exercised directly in test_indexer.py)."""
         agent = _make_agent(tmp_path)
         call = _make_call("run_shell", command="echo hi")
         agent._refresh_map_for_tool(call)
+        agent._project_map.mark_dirty.assert_called_once()
         agent._project_map.refresh_file.assert_not_called()
+
+    def test_run_shell_does_not_eagerly_rebuild_the_prompt(self, tmp_path):
+        """Marking dirty must NOT be immediately followed by a rebuild here,
+        unlike every other tool this method handles - see this method's own
+        docstring for why: an eager rebuild would scan on every run_shell call
+        instead of once for however many happen before the map is next
+        actually read (context._build_messages, once per turn)."""
+        agent = _make_agent(tmp_path)
+        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
+            call = _make_call("run_shell", command="echo hi")
+            agent._refresh_map_for_tool(call)
+            mock_rebuild.assert_not_called()
+
+
+class TestBuildMessagesDeferredRescan:
+    """_build_messages (context.py) is where a run_shell-dirtied map actually
+    gets reconciled - the one place guaranteed to run before the model's next
+    turn. These pin the gate itself, separately from the "docs preserved"
+    property already covered by build_messages_when_dirty above."""
+
+    def test_rebuilds_when_dirty(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        agent._project_map.dirty = True
+        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
+            agent._build_messages()
+            mock_rebuild.assert_called_once()
+
+    def test_does_not_rebuild_when_clean(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        agent._project_map.dirty = False
+        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
+            agent._build_messages()
+            mock_rebuild.assert_not_called()
+
+    def test_a_mocked_project_map_never_spuriously_rebuilds(self, tmp_path):
+        """A MagicMock's un-configured `.dirty` attribute is itself a
+        MagicMock, which is truthy - if the gate used plain truthiness instead
+        of `is True`, every test in this file (and any other that mocks
+        ProjectMap wholesale) would rebuild on every _build_messages call."""
+        agent = _make_agent(tmp_path)
+        assert not isinstance(agent._project_map.dirty, bool)   # sanity: it's a MagicMock
+        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
+            agent._build_messages()
+            mock_rebuild.assert_not_called()
+
+
+class TestRunShellEndToEnd:
+    """A REAL Agent with a REAL ProjectMap (unlike _make_agent above, which
+    mocks ProjectMap entirely) driven through the actual dispatch path -
+    the integration-level regression test for the bug the unit-level tests
+    above and in test_indexer.py exercise piece by piece. Runs a real
+    `echo` via the real run_shell tool; nothing here is mocked except the
+    LLM backend, which is never called."""
+
+    def _make_real_agent(self, tmp_path: Path):
+        from localm.plugins.coder.agent import Agent
+        backend = MagicMock()
+        backend.model_id = "test-model"
+        backend.native_tools = False
+        return Agent(backend=backend, cwd=tmp_path, auto_approve=True)
+
+    def test_file_created_by_run_shell_is_stale_mid_turn_fresh_next_turn(self, tmp_path):
+        from localm.plugins.coder.parser import ToolCall
+
+        (tmp_path / "a.py").write_text("def existing():\n    pass\n", encoding="utf-8")
+        agent = self._make_real_agent(tmp_path)
+        assert agent._project_map.file_count() == 1
+
+        # What a real `run_shell(command="echo ... > b.py")` would leave behind.
+        (tmp_path / "b.py").write_text("def brand_new():\n    pass\n", encoding="utf-8")
+        call = ToolCall(name="run_shell", args={"command": "echo done"},
+                         raw="", start=0, end=0)
+        result = agent._execute_tool(call, interactive=False)
+        assert result.ok
+
+        # Same turn: still stale by design (mark_dirty defers the rescan).
+        assert agent._project_map.dirty is True
+        assert "brand_new" not in agent._system_prompt
+
+        # The next turn's _build_messages call is where it catches up.
+        agent._build_messages()
+        assert agent._project_map.dirty is False
+        assert agent._project_map.file_count() == 2
+        assert "brand_new" in agent._system_prompt
