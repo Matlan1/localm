@@ -1,49 +1,55 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HuggingFace Transformers backend - supports text-only and multimodal models.
+"""HuggingFace Transformers backend - parent-side proxy.
 
-Tested with:
-  - Gemma4UnifiedForConditionalGeneration (text + image + audio)
-  - AutoModelForCausalLM (text only)
-  - Any model with apply_chat_template support
+Drives an isolated child process (see ``_hf_runner.py``'s module docstring)
+that owns one real ``HFWorker`` (``_hf_worker.py``) for its whole lifetime -
+this class never imports torch/transformers or touches a model handle
+itself. Mirrors ``backends/gguf.py``'s ``GgufBackend`` (PR #606) applied to
+the one backend that was still fully in-process: every HF native call
+(tokenizer regex, a torch forward pass, ``model.generate()``) is
+uninterruptible from Python, so a hang used to burn a slot in the server's
+shared thread pool PERMANENTLY (see ``dev-notes/decisions-2026-07-30-release-
+gate.md``, Q2, and ``_hf_runner.py``'s module docstring for the full
+mechanism). Isolating it is what makes a hang killable without a restart.
 
-GPU: uses torch.cuda (which maps to ROCm on AMD systems with PyTorch+ROCm).
+``create_backend()`` (``engine.py``) needs no changes: this class keeps the
+exact same import path, class name, and constructor signature the in-process
+version had - the whole ``BaseBackend`` public contract is preserved.
 """
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 from typing import Iterator, List, Optional
 
 from localm.console import console
 from localm.debuglog import logger
 
-from .base import BaseBackend
-
-
-def _require_torch():
-    try:
-        import torch
-        return torch
-    except ImportError:
-        console.print(
-            "[red]torch not installed.[/red]\n"
-            "Install for AMD GPU: [bold]uv pip install -e '.[gpu]'[/bold]"
-        )
-        raise
+from ._hf_runner import (
+    EMBED_TIMEOUT_DEFAULT,
+    FIRST_TOKEN_TIMEOUT_DEFAULT,
+    LOAD_TIMEOUT_DEFAULT,
+    HFRunner,
+    RunnerBusy,
+)
+from .base import (
+    IMAGE_UNSUPPORTED_MESSAGE,
+    BaseBackend,
+    UnsupportedInputError,
+    messages_contain_image,
+)
 
 
 def _trust_remote_code_enabled() -> bool:
     """Whether transformers may import and execute a model directory's own .py.
 
-    Config-driven and DEFAULT OFF (config key ``hf_trust_remote_code``, owner-only
-    to set). This flag used to be hard-coded ON at every from_pretrained call in
-    this module, which meant loading a model directory executed whatever
-    Python that directory shipped, via its ``auto_map`` (CodeQL alert 49). A model
-    name that reached this backend from an untrusted caller therefore gave remote
-    code execution as the server user; `localm pull owner/repo` also downloaded a
-    repo's .py, so the file could arrive entirely legitimately and run on load.
-    """
+    Config-driven and DEFAULT OFF (config key ``hf_trust_remote_code``,
+    owner-only to set) - see ``_check_custom_code_allowed`` below for the
+    full history/rationale. A second, independent copy of this exact
+    function lives in ``_hf_worker.py``, needed there for the
+    ``trust_remote_code=`` kwarg every ``from_pretrained`` call takes - see
+    that copy's docstring for why this is deliberately duplicated rather
+    than cross-imported between the parent and child modules."""
     try:
         from localm.config import load_config
         return bool(load_config().get("hf_trust_remote_code", False))
@@ -100,11 +106,14 @@ def _check_custom_code_allowed(model_path: str) -> None:
     """Refuse, with an actionable message, a model that needs custom code when
     ``hf_trust_remote_code`` is off. No-op for an ordinary model.
 
-    Called at the TOP of load(), deliberately BEFORE ``_require_torch()``. A
-    torch-less (GGUF-only) build raises at _require_torch first, so a check placed
-    after it would be dead on exactly the builds where it is easiest to test, and
-    the refusal would differ per build. Before it, the answer is the same
-    everywhere.
+    Called at the TOP of load(), deliberately BEFORE spawning a child (and,
+    when this ran in-process, before ``_require_torch()`` - a torch-less
+    GGUF-only build must refuse identically, not differ by build). Now runs
+    in the PARENT rather than inside the isolated worker: this needs no
+    torch/transformers and nothing only the child can see, so gatekeeping it
+    here means a refused model never pays the cost of spawning a child at
+    all - the same reasoning as ``validate_tokenizer_json`` right below it in
+    ``load()``.
     """
     if not _declares_custom_code(model_path):
         return
@@ -120,210 +129,10 @@ def _check_custom_code_allowed(model_path: str) -> None:
         "Only do that for a model you obtained from a source you trust.")
 
 
-def _require_transformers():
-    try:
-        import transformers
-        return transformers
-    except ImportError:
-        console.print(
-            "[red]transformers not installed.[/red]\n"
-            "Install: [bold]uv pip install -e '.[gpu]'[/bold]"
-        )
-        raise
-
-
-def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
-    """Build the ``device_map`` (+ optional ``max_memory``) load kwargs for a
-    CUDA load, honouring ``gpu_split_indices`` / ``main_gpu_index`` the same
-    way the GGUF backend's native params do (see
-    ``discover.apply_gpu_split`` / ``discover.apply_main_gpu``) - closing a
-    real gap where this backend used to hardcode ``device_map="auto"``
-    regardless of either setting, so "Main GPU = 1" silently did nothing for
-    an HF (transformers) load:
-
-    - 2+ valid ``gpu_split_indices`` -> ``"auto"`` sharded ONLY across those
-      devices. Any GPU id absent from ``max_memory`` is excluded from
-      accelerate's auto-shard - the standard technique for restricting
-      ``device_map="auto"`` to a device subset.
-    - no split, but a valid ``main_gpu_index`` -> ``"auto"`` confined to that
-      ONE device by the same technique (its id is the only GPU in
-      ``max_memory``), instead of auto-sharding across every visible card.
-    - neither configured -> ``"auto"`` across every visible device, exactly
-      today's default (existing installs see no behavior change).
-
-    Every ``max_memory`` we build also carries a ``"cpu"`` budget, because
-    passing a max_memory at all suppresses the one accelerate would otherwise
-    build for itself: ``accelerate.utils.get_max_memory()`` populates a "cpu"
-    entry from ``psutil.virtual_memory().available`` ONLY when the caller passes
-    no dict. Without it, weights that do not fit the chosen GPU(s) are mapped to
-    "disk" (verified against the real ``infer_auto_device_map``), which then
-    needs an ``offload_folder`` and errors without one. With it, the overflow
-    spills to CPU exactly as plain "auto" does - the graceful degradation an
-    oversized HF model has always relied on, and which the GGUF backend keeps
-    too (n_gpu_layers is auto-sized to free VRAM and llama.cpp holds the rest in
-    system RAM). REG-528: confining the model to the user's chosen device must
-    not also mean refusing to load it.
-    """
-    from localm.config import load_config
-    from localm.discover import resolve_gpu_split, resolve_main_gpu_index
-    cfg = config if config is not None else load_config()
-
-    headroom = int(0.5e9)   # leave a little free per device, like the GGUF backend
-
-    def _free_minus_headroom(idx: int) -> Optional[int]:
-        try:
-            free, _total = torch.cuda.mem_get_info(idx)
-        except Exception:
-            return None
-        return max(0, int(free) - headroom)
-
-    def _cpu_budget() -> int:
-        """Mirrors accelerate's own default for the "cpu" entry."""
-        import psutil
-        return int(psutil.virtual_memory().available)
-
-    pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"))
-    if len(pairs) >= 2:
-        max_memory: dict = {}
-        for idx, _ratio in pairs:
-            budget = _free_minus_headroom(idx)
-            if budget is None:
-                continue   # one device failing to report never blocks the rest
-            max_memory[idx] = budget
-        if len(max_memory) >= 2:
-            max_memory["cpu"] = _cpu_budget()
-            return {"device_map": "auto", "max_memory": max_memory}
-        logger.warning(
-            "gpu_split_indices is configured but free VRAM could not be read "
-            "for enough devices (only %s usable); falling back to the "
-            "default device_map", sorted(max_memory))
-
-    if cfg.get("main_gpu_index") is not None:
-        idx = resolve_main_gpu_index(cfg.get("main_gpu_index"))
-        budget = _free_minus_headroom(idx)
-        if budget is None:
-            # No readable free VRAM means no budget to build, so there is no way
-            # to express "this device, with CPU overflow". Honour the user's
-            # explicit selection anyway by pinning (never silently ignore it),
-            # but say so: this is the one path with no CPU fallback, so an
-            # oversized model here still OOMs (rule 5 - do not hide it).
-            logger.warning(
-                "main_gpu_index=%s is configured but its free VRAM could not be "
-                "read; pinning the whole model to that device. A model larger "
-                "than its free VRAM will fail to load rather than offloading to "
-                "CPU.", idx)
-            return {"device_map": {"": idx}}
-        return {"device_map": "auto",
-                "max_memory": {idx: budget, "cpu": _cpu_budget()}}
-
-    return {"device_map": "auto"}
-
-
-def _auto_device(torch, override: Optional[str] = None) -> str:
-    """Pick the HF inference device: an explicit *override*, else the best available
-    GPU, else CPU. CUDA (which also covers AMD ROCm via PyTorch) is preferred, then
-    Intel XPU (torch.xpu) so an Intel Arc/Xe GPU is used instead of silently falling
-    back to CPU. torch.xpu is absent on older PyTorch, hence the getattr guard.
-    Pure + torch-injected so it is testable without a GPU."""
-    if override:
-        return override
-    if torch.cuda.is_available():
-        return "cuda"
-    xpu = getattr(torch, "xpu", None)
-    if xpu is not None and xpu.is_available():
-        return "xpu"
-    return "cpu"
-
-
-class _SafeGrammarProcessor:
-    """Wrap an xgrammar HF LogitsProcessor so a RUNTIME failure during generation
-    (for example xgrammar needing Triton, which is not available on Windows)
-    degrades to unconstrained decoding instead of raising inside the generate()
-    thread - which crashes the thread and hangs the HTTP request indefinitely.
-
-    The grammar compiles fine, so the build-time soft-degrade cannot catch this;
-    the failure only surfaces on the first token's logits call. We catch it there,
-    warn once, and pass logits through unchanged for the rest of the generation.
-    """
-
-    def __init__(self, inner):
-        self._inner = inner
-        self._failed = False
-
-    def __call__(self, input_ids, scores):
-        if self._failed:
-            return scores
-        try:
-            return self._inner(input_ids, scores)
-        except Exception as e:
-            console.print(
-                f"[yellow]grammar constraint disabled mid-generation "
-                f"({type(e).__name__}: {e}); continuing without constraint.[/yellow]"
-            )
-            self._failed = True
-            return scores
-
-
-def _grammar_processor(grammar: Optional[str], tokenizer, model):
-    """Build an xgrammar LogitsProcessor that masks any token which would violate
-    *grammar* at the current parse position (so output is structurally valid by
-    construction, not by post-hoc repair).
-
-    *grammar* is a GBNF/EBNF string with a ``root`` rule - see
-    ``localm.inference.gbnf`` for ready-made JSON / tool-call grammars.
-
-    Returns a one-element ``LogitsProcessorList`` or ``None``. ``None`` means
-    "generate unconstrained": either no grammar was requested, or xgrammar is
-    not installed / could not compile the grammar - in which case we warn and
-    proceed rather than fail the request (soft-degrade). A FRESH processor is
-    built per call because the underlying grammar matcher is stateful.
-    """
-    if not grammar:
-        return None
-    try:
-        import xgrammar as xgr
-        from xgrammar.contrib.hf import LogitsProcessor
-        from transformers import LogitsProcessorList
-    except ImportError:
-        console.print(
-            "[yellow]A grammar was requested but the [grammar] extra is not "
-            "installed (pip install 'localm[gpu,grammar]'); generating without "
-            "constraint.[/yellow]"
-        )
-        return None
-    try:
-        vocab = getattr(getattr(model, "config", None), "vocab_size", None)
-        info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab)
-        compiled = xgr.GrammarCompiler(info).compile_grammar(grammar)
-        return LogitsProcessorList([_SafeGrammarProcessor(LogitsProcessor(compiled))])
-    except Exception as e:   # malformed grammar, tokenizer mismatch, etc.
-        console.print(
-            f"[yellow]grammar ignored ({type(e).__name__}: {e}); generating "
-            f"without constraint.[/yellow]"
-        )
-        return None
-
-
-# transformers' naming convention for a GENERATIVE task head. A checkpoint whose
-# declared architecture ends in one of these generates text; anything else (the
-# bare ``*Model`` encoders: BertModel, XLMRobertaModel, NomicBertModel,
-# T5EncoderModel, DistilBertModel, MPNetModel) is an encoder that embeds. See
-# HFBackend._declared_generative for why this is matched by name rather than by
-# importing transformers, and tests/test_hf_embed_integration.py for the test that
-# pins this list against transformers' own GenerationMixin.
-_GENERATIVE_ARCH_SUFFIXES = (
-    "ForCausalLM",
-    "LMHeadModel",
-    "ForConditionalGeneration",
-    "ForSeq2SeqLM",
-    "ForImageTextToText",
-    "ForVision2Seq",
-)
-
-
 class HFBackend(BaseBackend):
     """
-    Loads any HuggingFace-format model directory.
+    Parent-side handle to a HuggingFace-format model loaded in an isolated
+    child process.
 
     Multimodal detection is automatic: if the model directory ships a processor
     that handles images/audio, multimodal content in messages is handled.
@@ -338,399 +147,226 @@ class HFBackend(BaseBackend):
     def __init__(self, model_path: str, device: Optional[str] = None) -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
-        self._model = None
-        self._processor = None     # AutoProcessor (multimodal)
-        self._tokenizer = None     # AutoTokenizer fallback
-        self._is_multimodal = False
+        # The isolated worker process holding the real model - see
+        # _hf_runner.py. None until load() succeeds.
+        self._runner: Optional[HFRunner] = None
         self._loaded = False
+        # Cached from the child's load response - the real HFWorker instance
+        # now lives in the child, so these can no longer be read live off it.
+        self._supports_images = False
+        # Unloaded -> True ("unknown, load to find out"): unlike
+        # supports_images, this is NOT gated on current liveness once known -
+        # see the can_embed property below for why that distinction matters.
+        self._can_embed = True
+
+    @property
+    def loaded(self) -> bool:
+        """A backend whose isolated worker is GONE is not loaded, whatever
+        ``_loaded`` says - mirrors ``GgufBackend.loaded`` exactly (REG-606):
+        the worker can die out from under this object on a timeout or a
+        crash without any exception ever reaching a caller that would clear
+        ``_loaded`` (a killed ``chat_stream`` generator raises
+        ``GeneratorExit``, not a catchable error). Reporting the truth here
+        is what makes ``Engine.chat_stream``/``Engine.embed``'s ``if not
+        self._backend.loaded: self._backend.load()`` auto-reload actually
+        fire, instead of calling straight into a dead runner."""
+        if not self._loaded:
+            return False
+        is_alive = getattr(self._runner, "is_alive", None)
+        return True if is_alive is None else bool(is_alive())
 
     @property
     def supports_images(self) -> bool:
-        """True once a multimodal processor has been detected at load time."""
-        return self._is_multimodal
+        """True once loaded with a working multimodal processor.
+
+        Cached from the child's load response (self._supports_images) rather
+        than read live off a real HFWorker instance - that instance now
+        lives in the isolated worker process, not here. Gated on ``loaded``
+        (a live worker check, mirroring ``GgufBackend.supports_images``): a
+        dead worker safely reports no vision rather than a stale cached
+        True - the caller (routes/chat.py) already reloads-then-rechecks
+        when `not engine.loaded and engine.can_be_multimodal`, so this never
+        strands a genuinely multimodal model, it only ever costs one extra
+        reload."""
+        return bool(self.loaded and self._supports_images)
+
+    @property
+    def can_embed(self) -> bool:
+        """True only when the LOADED model is a GENUINE embedding model (an
+        architectural fact about the checkpoint, computed once by the child
+        right after load - see HFWorker.can_embed for the full reasoning
+        and the measurements behind it).
+
+        Deliberately NOT gated on current liveness, unlike supports_images
+        above - this is a real behavioral difference, not an oversight.
+        Engine.embed()'s flow is: check can_embed -> reload if not loaded ->
+        check can_embed again -> embed(). If this gated on liveness, a
+        confirmed real HF embedder whose worker merely crashed between calls
+        would report can_embed=False at the FIRST check (before the reload
+        attempt ever runs) and get silently, permanently rerouted to the
+        dedicated on-device embedder instead of ever being reloaded - a
+        worse outcome than the transient crash itself, since the user's
+        actually-configured embedding model would stop being used. The
+        underlying architectural fact (does this checkpoint's structure
+        support embedding) does not change when the worker dies, so the
+        cached value stays valid across a crash; Engine.embed()'s own
+        `not self._backend.loaded` check is what triggers the reload."""
+        return self._can_embed
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
     # ------------------------------------------------------------------ #
 
     def load(self) -> None:
-        # BEFORE _require_torch(): the refusal must be identical on a torch-less
-        # GGUF-only build, where _require_torch would otherwise raise first and
-        # hide it. See _check_custom_code_allowed.
+        # Two pre-flight refusals, BEFORE a child is ever spawned - neither
+        # needs torch/transformers or anything only the child can see, so a
+        # refused model never pays the cost of a child spawn:
+        #   1. Custom code (auto_map) the user has not explicitly trusted.
+        #   2. A tokenizer.json regex pattern that fails the Oniguruma safety
+        #      probe (NEW-HF-TOKENIZER-REDOS - see hf_tokenizer_safety.py's
+        #      module docstring for the full mechanism and the measurements
+        #      behind probing Oniguruma specifically, not Python re).
         _check_custom_code_allowed(self.model_path)
-        # Also before _require_torch(), same reason, plus this check needs no
-        # torch at all: a dangerous tokenizer.json regex is refused before either
-        # AutoProcessor or AutoTokenizer below ever compiles it (NEW-HF-TOKENIZER-
-        # REDOS - see hf_tokenizer_safety.py's module docstring for the full
-        # mechanism and the measurements behind probing Oniguruma, not Python re).
         from localm.inference.hf_tokenizer_safety import validate_tokenizer_json
         validate_tokenizer_json(self.model_path)
-        trust_remote_code = _trust_remote_code_enabled()
-        torch = _require_torch()
-        tr = _require_transformers()
 
-        device = _auto_device(torch, self._device)
-        dtype = torch.bfloat16 if device in ("cuda", "xpu") else torch.float32
-        device_map_kwargs = (_cuda_device_map(torch) if device == "cuda"
-                              else {"device_map": "cpu"})
-
-        console.print(f"[dim]  device   : {device}[/dim]")
-        if device == "cuda":
-            dm = device_map_kwargs["device_map"]
-            if isinstance(dm, dict):   # pinned to one explicit device: {"": idx}
-                idx = dm[""]
-                console.print(
-                    f"[dim]  gpu      : {torch.cuda.get_device_name(idx)} "
-                    f"(pinned, device {idx})[/dim]")
-            elif "max_memory" in device_map_kwargs:
-                # Only the int keys are GPUs - max_memory also carries a "cpu"
-                # overflow budget (see _cuda_device_map), which is neither a
-                # device to name nor sortable against an int.
-                gpus = sorted(i for i in device_map_kwargs["max_memory"]
-                              if isinstance(i, int))
-                names = ", ".join(f"{i}:{torch.cuda.get_device_name(i)}" for i in gpus)
-                where = f"split across {names}" if len(gpus) > 1 else names
-                console.print(
-                    f"[dim]  gpu      : {where} (overflow to CPU if needed)[/dim]")
-            else:
-                console.print(f"[dim]  gpu      : {torch.cuda.get_device_name(0)}[/dim]")
-        elif device == "xpu":
-            try:
-                console.print(f"[dim]  gpu      : {torch.xpu.get_device_name(0)}[/dim]")
-            except Exception:
-                pass
-        console.print(f"[dim]  dtype    : {dtype}[/dim]")
-
-        # --- Processor / tokenizer ---
-        console.print("[dim]  loading processor…[/dim]")
-        try:
-            self._processor = tr.AutoProcessor.from_pretrained(
-                self.model_path, trust_remote_code=trust_remote_code
-            )
-            # A processor that wraps only a tokenizer is not "multimodal"
-            has_image = hasattr(self._processor, "image_processor")
-            has_audio = hasattr(self._processor, "feature_extractor") or hasattr(
-                self._processor, "audio_processor"
-            )
-            self._is_multimodal = has_image or has_audio
-            self._tokenizer = getattr(self._processor, "tokenizer", self._processor)
-        except Exception as e:
-            # Fall back to plain tokenizer. This is intentional for text-only
-            # models (no processor to load), but a logged failure here may mean
-            # a genuine multimodal model lost its image/audio capability, so
-            # surface it rather than swallowing it silently.
-            logger.warning(
-                "processor load failed (%s: %s); falling back to text-only tokenizer",
-                type(e).__name__, e,
-            )
-            self._processor = None
-            self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                self.model_path, trust_remote_code=trust_remote_code
-            )
-
-        # --- Model ---
-        console.print("[dim]  loading weights…[/dim]")
-        load_kwargs = {
-            **device_map_kwargs,
-            "torch_dtype": dtype,
-            "trust_remote_code": trust_remote_code,
-        }
-
-        # Try Auto classes in order: multimodal (vision/audio + text), then
-        # encoder-decoder, then causal LM (text-only), then generic fallback.
-        # getattr-with-default skips a class that this transformers version does
-        # not expose (the names drift between major releases) instead of raising.
-        errors: list[str] = []
-        for cls_name in (
-            "AutoModelForImageTextToText",   # modern multimodal, transformers 5+
-            "AutoModelForSeq2SeqLM",         # encoder-decoder
-            "AutoModelForCausalLM",          # text-only decoder
-            "AutoModel",                     # generic fallback
-        ):
-            cls = getattr(tr, cls_name, None)
-            if cls is None:
-                continue
-            try:
-                self._model = cls.from_pretrained(self.model_path, **load_kwargs)
-                console.print(f"[dim]  class    : {cls_name}[/dim]")
-                break
-            except (ValueError, OSError, RuntimeError, KeyError) as e:
-                # Record why each class was rejected so the final error names
-                # the actual failures instead of a bare "could not load".
-                errors.append(f"{cls_name}: {type(e).__name__}: {e}")
-                continue
-
-        if self._model is None:
-            detail = "; tried: " + "; ".join(errors) if errors else ""
-            raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
-
-        if device == "xpu":
-            # The model loaded on CPU (device_map "cpu" above); move it to the Intel
-            # GPU explicitly. device_map="auto" is unreliable on consumer Arc (many
-            # parts do not implement the free-memory query accelerate needs), so we
-            # place the whole model with .to("xpu") rather than auto-sharding it.
-            # A single-device "cpu" map attaches no accelerate hook, so this .to()
-            # moves the whole model (verified vs accelerate dispatch_model + the HF
-            # Intel-Arc guide). PENDING real-Arc verification (dev box is AMD): that
-            # this move, and the model.device-based input placement in chat_stream/
-            # embed, actually run on the Intel GPU end to end.
-            try:
-                self._model = self._model.to("xpu")
-            except Exception as e:
-                raise RuntimeError(
-                    f"loaded the model but could not place it on the Intel GPU (xpu): "
-                    f"{e}. Check the Intel GPU driver and that torch was installed from "
-                    "the xpu wheel index.") from e
-
+        self._runner = HFRunner()
+        params = {"model_path": self.model_path, "device": self._device}
+        meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
+        self._supports_images = bool(meta.get("supports_images"))
+        self._can_embed = bool(meta.get("can_embed", True))
         self._loaded = True
-        mm_note = " (multimodal)" if self._is_multimodal else ""
+        # Printed HERE, in the parent, not inside the child - mirrors
+        # GgufBackend.load()'s identical choice (gguf.py's "Model loaded"
+        # line runs in the parent too; GgufWorker prints nothing at all).
+        # The child's own stdout inherits whatever codepage the spawn gave
+        # it, not the parent's console configuration - a rich/Unicode
+        # console.print from inside the child hard-failed with
+        # UnicodeEncodeError against a 'charmap' codec during real-model
+        # verification. See _hf_worker.py's load() for the fuller note.
+        mm_note = " (multimodal)" if self._supports_images else ""
+        device = meta.get("device") or "?"
+        console.print(f"[green]✓[/green] Model loaded{mm_note} (device: {device})")
 
-        # VRAM usage after load
-        if device == "cuda":
-            try:
-                for i in range(torch.cuda.device_count()):
-                    allocated = torch.cuda.memory_allocated(i) / 1024**3
-                    reserved  = torch.cuda.memory_reserved(i)  / 1024**3
-                    console.print(
-                        f"[dim]  vram     : {allocated:.2f} GB allocated / "
-                        f"{reserved:.2f} GB reserved (device {i})[/dim]"
-                    )
-            except Exception as e:
-                # VRAM readout is cosmetic; a failure here must not fail the
-                # load, but surface it under --debug so a broken stat is visible.
-                logger.debug("could not read VRAM after load (%s)", type(e).__name__)
-        elif device == "xpu":
-            try:
-                allocated = torch.xpu.memory_allocated() / 1024**3
-                reserved  = torch.xpu.memory_reserved()  / 1024**3
-                console.print(
-                    f"[dim]  vram     : {allocated:.2f} GB allocated / "
-                    f"{reserved:.2f} GB reserved (xpu)[/dim]"
-                )
-            except Exception as e:
-                # Some consumer Arc parts do not implement the memory query; cosmetic.
-                logger.debug("could not read XPU VRAM after load (%s)", type(e).__name__)
+    @staticmethod
+    def _load_timeout_seconds() -> float:
+        """Model-load timeout, from config (``hf_load_timeout_s``) or the
+        generous built-in default. Mirrors ``GgufBackend._load_timeout_seconds``
+        exactly - a stalled load has no safe "unmeasurable" fallback, so this
+        always raises rather than silently reporting not-loaded. Configurable
+        because HF loads read full-precision safetensors from disk (no
+        quantized-mmap fast path), so a large checkpoint on slow storage can
+        legitimately need longer than the generous default."""
+        from localm.config import load_config
+        raw = load_config().get("hf_load_timeout_s")
+        try:
+            return float(raw or LOAD_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            # A present-but-unparseable value (e.g. "abc", a list) is a real
+            # misconfiguration, distinct from the benign missing/empty case
+            # (None/0 -> the default above with no exception). Surface it
+            # under --debug rather than silently masking a typo'd config
+            # (rule 5).
+            logger.warning("hf_load_timeout_s is set but not a valid number "
+                           "(%r); using the default %.0fs", raw, LOAD_TIMEOUT_DEFAULT)
+            return LOAD_TIMEOUT_DEFAULT
 
-        console.print(f"[green]✓[/green] Model loaded{mm_note}")
+    @staticmethod
+    def _first_token_timeout_seconds() -> float:
+        """How long to wait for a reply's FIRST token, from config
+        (``hf_first_token_timeout_s``) or the generous built-in default.
+        Mirrors ``GgufBackend._first_token_timeout_seconds`` exactly - see
+        its docstring for why this covers prompt PREFILL, not one token's
+        decode."""
+        from localm.config import load_config
+        raw = load_config().get("hf_first_token_timeout_s")
+        try:
+            return float(raw or FIRST_TOKEN_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            logger.warning("hf_first_token_timeout_s is set but not a valid "
+                           "number (%r); using the default %.0fs",
+                           raw, FIRST_TOKEN_TIMEOUT_DEFAULT)
+            return FIRST_TOKEN_TIMEOUT_DEFAULT
+
+    @staticmethod
+    def _embed_timeout_seconds() -> float:
+        """Bounded wait for one embed() RPC, from config
+        (``hf_embed_timeout_s``) or the generous built-in default - see
+        ``_hf_runner.EMBED_TIMEOUT_DEFAULT`` for why this is sized
+        independently from both the GGUF simple-RPC bound and the dedicated
+        embedder's own timeout."""
+        from localm.config import load_config
+        raw = load_config().get("hf_embed_timeout_s")
+        try:
+            return float(raw or EMBED_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            logger.warning("hf_embed_timeout_s is set but not a valid number "
+                           "(%r); using the default %.0fs", raw, EMBED_TIMEOUT_DEFAULT)
+            return EMBED_TIMEOUT_DEFAULT
 
     def unload(self) -> None:
-        import gc
-        self._model = None
-        self._processor = None
-        self._tokenizer = None
+        # Ask the isolated worker to close cleanly, killing it if it does not
+        # exit promptly. Safe to call when the worker already crashed or was
+        # never spawned - HFRunner.shutdown() is a no-op in both cases.
+        if self._runner is not None:
+            try:
+                self._runner.shutdown()
+            except Exception as e:
+                # Leftover VRAM/context here can make a later load fail
+                # mysteriously, so log a correlatable line rather than
+                # swallowing it. Teardown is best-effort, so we still drop
+                # the reference below instead of escalating to a hard
+                # failure.
+                logger.debug("hf worker shutdown failed (%s); its process "
+                             "may not be fully torn down", type(e).__name__)
+        self._runner = None
         self._loaded = False
-        gc.collect()
-        try:
-            import torch
-            torch.cuda.empty_cache()
-        except Exception as e:
-            # Best-effort cache release; log under --debug so a failed reclaim
-            # (cache may not be cleared) is discoverable without failing unload.
-            logger.debug("empty_cache failed (%s); cache may not be cleared", type(e).__name__)
-        try:
-            import torch
-            xpu = getattr(torch, "xpu", None)
-            if xpu is not None and xpu.is_available():
-                xpu.empty_cache()
-        except Exception as e:
-            logger.debug("xpu empty_cache failed (%s); cache may not be cleared", type(e).__name__)
-
-    @property
-    def loaded(self) -> bool:
-        return self._loaded
 
     # ------------------------------------------------------------------ #
     #  Tokenisation                                                        #
     # ------------------------------------------------------------------ #
 
     def count_tokens(self, text: str) -> int:
-        """Return exact token count using the loaded HF tokenizer."""
-        if self._tokenizer is not None:
+        """Return exact token count using the loaded model's tokenizer (an
+        RPC to the isolated worker), or the chars/4 heuristic when the
+        worker is busy streaming or the model is not loaded yet. Mirrors
+        ``GgufBackend.count_tokens`` exactly."""
+        if self.loaded and self._runner is not None:
             try:
-                ids = self._tokenizer.encode(text, add_special_tokens=False)
-                return max(1, len(ids))
-            except Exception as e:
-                # Surface the failure under --debug: the return below is then a
-                # chars/4 ESTIMATE, not an exact count, and context-budgeting
-                # downstream is trusting an approximation.
-                logger.debug(
-                    "tokenizer.encode failed (%s); using heuristic estimate",
-                    type(e).__name__,
-                )
+                return self._runner.count_tokens(text)
+            except RunnerBusy:
+                logger.debug("hf count_tokens: worker busy with a live "
+                             "stream; using the chars/4 estimate")
         return max(1, len(text) // 4)
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
-        """Return exact token count of the structured messages formatted with the
-        HF tokenizer/processor's chat template."""
-        if self._tokenizer is not None:
+        """Return exact token count of the structured messages formatted
+        with the HF tokenizer/processor's chat template (an RPC), or the
+        base heuristic when the worker is busy or not loaded. Mirrors
+        ``GgufBackend.count_messages_tokens``'s shape."""
+        if self.loaded and self._runner is not None:
             try:
-                template_messages = []
-                for msg in messages:
-                    content = msg.get("content")
-                    if isinstance(content, list):
-                        parts = []
-                        for part in content:
-                            ptype = part.get("type", "text")
-                            if ptype == "text":
-                                parts.append({"type": "text", "text": part.get("text", "")})
-                            elif ptype == "image_url" and self._is_multimodal:
-                                parts.append({"type": "image"})
-                            elif ptype == "input_audio" and self._is_multimodal:
-                                parts.append({"type": "audio"})
-                        template_messages.append({"role": msg.get("role", "user"), "content": parts})
-                    else:
-                        template_messages.append(msg)
-
-                if self._processor and self._is_multimodal:
-                    text = self._processor.apply_chat_template(
-                        template_messages, tokenize=False, add_generation_prompt=True
-                    )
-                else:
-                    text = self._tokenizer.apply_chat_template(
-                        template_messages, tokenize=False, add_generation_prompt=True
-                    )
-                return len(self._tokenizer.encode(text, add_special_tokens=False))
-            except Exception as e:
-                # Surface under --debug (mirroring count_tokens above): the
-                # super() return below is then a heuristic ESTIMATE, not an
-                # exact count, so context-budgeting downstream is trusting an
-                # approximation. Never a silent pass (rule 5).
-                logger.debug(
-                    "chat-template token count failed (%s); using heuristic estimate",
-                    type(e).__name__,
-                )
+                return self._runner.count_messages_tokens(messages)
+            except RunnerBusy:
+                logger.debug("hf count_messages_tokens: worker busy with a "
+                             "live stream; using the base heuristic")
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def _declared_generative(self) -> Optional[bool]:
-        """Whether the CHECKPOINT declares a generative architecture, or None when
-        it declares none.
-
-        The checkpoint's own ``config.architectures`` is the reliable signal, NOT
-        the class ``load()`` happened to pick. ``load()`` tries
-        ``AutoModelForCausalLM`` BEFORE ``AutoModel``, and transformers registers
-        the pure-encoder families in ``MODEL_FOR_CAUSAL_LM_MAPPING_NAMES``
-        (verified on transformers 5.12.1: bert -> BertLMHeadModel, roberta ->
-        RobertaForCausalLM, xlm-roberta, electra). So a real embedding checkpoint
-        declaring ``["BertModel"]`` - bge-small, all-MiniLM, e5, bge-m3, i.e.
-        localm's OWN default embedding model - loads as ``BertLMHeadModel`` and
-        answers ``can_generate()`` True despite being an encoder that embeds
-        perfectly well. Asking the loaded class is therefore the wrong question.
-
-        Matched on transformers' task-head NAMING convention rather than by
-        resolving the class, deliberately: resolving would mean importing
-        transformers here, and that import pulls in torch, whose ROCm init
-        (``rocm_sdk.preload_libraries``) dies with ``OSError: [WinError 127]``
-        in any process that already loaded the bundled llama.dll (reproduced
-        2026-07-15). This property must not be the thing that triggers that, and
-        it never needs to: it only ever runs on an already-loaded model.
-        ``test_declared_arch_suffixes_match_transformers_own_generation_mixin``
-        pins the convention against ``GenerationMixin`` - transformers' own
-        definition of "this generates" - so a naming change upstream fails a test
-        instead of silently misrouting a model.
-        """
-        archs = getattr(getattr(self._model, "config", None), "architectures", None)
-        if not archs:
-            return None
-        return any(str(a).endswith(_GENERATIVE_ARCH_SUFFIXES) for a in archs)
-
-    @property
-    def can_embed(self) -> bool:
-        """True only when the LOADED model is a GENUINE embedding model.
-
-        Unlike GgufBackend's fixed ``can_embed = False``, an HF checkpoint may be
-        either: a sentence-transformer or a plain encoder (a real embedder, which
-        ``embed()`` below serves well), or a chat decoder (which it does not).
-
-        Mean-pooling a chat decoder's last hidden states returns healthy,
-        non-zero, plausible-looking vectors that nevertheless cannot separate
-        related from unrelated text. Measured 2026-07-15 against this repo's own
-        embedding path: Qwen2.5-0.5B's max UNRELATED cosine (0.7523) EXCEEDS its
-        min RELATED cosine (0.7518), so NO threshold splits the two, versus
-        bge-small's +0.29 margin. That is decoder anisotropy (no contrastive
-        training objective), not a pooling artifact: LAST-token pooling was
-        measured too and scored WORSE. Reporting a decoder as embedding-capable
-        is what let Engine.embed silently serve those vectors to /v1/embeddings
-        and RAG instead of the dedicated embedder.
-
-        Unloaded -> True ("unknown, load to find out"): the capability is only
-        knowable once the weights are in, and answering False here would stop
-        routes/chat.py from ever loading a genuine HF embedding model. Engine.embed
-        re-checks after the load, which is where a chat decoder is caught.
-        """
-        model = self._model
-        if model is None:
-            return True                      # unknown until loaded; the load decides
-        if hasattr(model, "encode"):
-            return True                      # sentence-transformer: purpose-built
-        declared = self._declared_generative()
-        if declared is not None:
-            return not declared              # the checkpoint's own word (see above)
-        # Nothing declared and nothing resolvable: fall back to what the loaded
-        # class says about itself. Weaker (it is the very signal the encoder
-        # families defeat above), but with no declared architecture it is the only
-        # evidence there is - and an undeclared checkpoint is not one of them.
-        can_generate = getattr(model, "can_generate", None)
-        if not callable(can_generate):
-            # Not a transformers PreTrainedModel (or a version without the API):
-            # absence of proof is not proof of an embedder. Prefer the dedicated
-            # embedder over silently pooling what may be a chat decoder (rule 5).
-            logger.debug(
-                "HF model %s declares no architecture and exposes no "
-                "can_generate(); treating it as NOT an embedding model",
-                type(model).__name__)
-            return False
-        try:
-            return not can_generate()
-        except Exception as e:
-            logger.debug(
-                "HF model %s: can_generate() raised (%s: %s); treating it as NOT "
-                "an embedding model", type(model).__name__, type(e).__name__, e)
-            return False
-
     def embed(self, texts: List[str]) -> List[List[float]]:
         """
-        Return embedding vectors via mean-pooling of the last hidden states.
-
-        Works for any AutoModel-style ENCODER that outputs hidden states; for
-        dedicated sentence-transformer models that expose `.encode()`, that
-        method is preferred. Callers must gate on ``can_embed`` above: this is
-        NOT a valid embedding path for a chat decoder (see that docstring for
-        the measurements), and Engine.embed routes those to the dedicated
+        Return embedding vectors for *texts* via the isolated worker.
+        Callers must gate on ``can_embed`` above: this is NOT a valid
+        embedding path for a chat decoder (see HFWorker.embed's docstring
+        for the measurements) - Engine.embed routes those to the dedicated
         on-device embedder instead.
         """
-        import torch
-        tokenizer = self._tokenizer
-        model = self._model
-
-        if tokenizer is None or model is None:
+        if self._runner is None or not self.loaded:
             raise RuntimeError("Model not loaded - call load() first")
-
-        # Sentence-transformer style models (e.g. nomic-embed, bge)
-        if hasattr(model, "encode"):
-            vecs = model.encode(texts, convert_to_tensor=False)
-            return [v.tolist() for v in vecs]
-
-        embeddings: list[list[float]] = []
-        model.train(False)
-        with torch.no_grad():
-            for text in texts:
-                enc = tokenizer(
-                    text,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=512,
-                ).to(model.device)
-                out = model(**enc, output_hidden_states=True)
-                # Mean-pool the last hidden state over non-padding tokens
-                hidden = out.hidden_states[-1]          # (1, seq, dim)
-                mask   = enc["attention_mask"].unsqueeze(-1).float()
-                vec    = (hidden * mask).sum(1) / mask.sum(1)
-                embeddings.append(vec[0].cpu().tolist())
-        return embeddings
+        return self._runner.embed(texts, timeout=self._embed_timeout_seconds())
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #
@@ -745,140 +381,39 @@ class HFBackend(BaseBackend):
         top_p: float = 0.95,
         top_k: int = 40,
         repeat_penalty: float = 1.1,
-        grammar: Optional[str] = None,   # GBNF/EBNF; masks output via xgrammar ([grammar] extra)
+        grammar: Optional[str] = None,
         grammar_lazy: bool = False,
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
-        # xgrammar has no trigger/lazy mode: a lazy request must not silently
-        # become a STRICT constraint (a strict grammar stalls thinking models),
-        # so drop the grammar with a trace and generate unconstrained - the
-        # same soft-degrade contract as everywhere else on this backend.
-        if grammar and grammar_lazy:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("lazy grammar is not supported on the HF backend; "
-                       "generating unconstrained")
-            grammar = None
-        # Refuse images on a text-only checkpoint instead of silently dropping
-        # them (a processor-less model would otherwise ignore the picture and
-        # answer from the text alone). Checked before importing transformers so
-        # it fails fast and clearly.
-        if not self._is_multimodal:
-            from .base import (
-                IMAGE_UNSUPPORTED_MESSAGE,
-                UnsupportedInputError,
-                messages_contain_image,
-            )
-            if messages_contain_image(messages):
-                raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
-
-        from transformers import TextIteratorStreamer
-
-        tokenizer = self._tokenizer
-        model = self._model
-
-        # --- Extract and decode media, rebuild messages for the chat template ---
-        images = []
-        audios = []
-        template_messages = []
-
-        for msg in messages:
-            if isinstance(msg.get("content"), list):
-                parts = []
-                for part in msg["content"]:
-                    ptype = part.get("type", "text")
-                    if ptype == "text":
-                        parts.append({"type": "text", "text": part["text"]})
-                    elif ptype == "image_url" and self._is_multimodal:
-                        from localm.inference.media import decode_image_url
-                        img = decode_image_url(part["image_url"]["url"])
-                        images.append(img)
-                        parts.append({"type": "image"})
-                    elif ptype == "input_audio" and self._is_multimodal:
-                        from localm.inference.media import decode_audio
-                        audio, sr = decode_audio(
-                            part["input_audio"]["data"],
-                            part["input_audio"].get("format", "wav"),
-                        )
-                        audios.append((audio, sr))
-                        parts.append({"type": "audio"})
-                    # else: drop unsupported media on text-only models
-                template_messages.append({"role": msg["role"], "content": parts})
-            else:
-                template_messages.append(msg)
-
-        # --- Tokenize / process ---
-        if self._processor and (images or audios):
-            # Full multimodal path
-            text = self._processor.apply_chat_template(
-                template_messages, tokenize=False, add_generation_prompt=True
-            )
-            # add_special_tokens=False: the template already emitted the model's
-            # BOS, so re-tokenizing with the default would prepend a SECOND one
-            # (see the text-path note below). Standard processors forward this to
-            # their tokenizer.
-            process_kwargs = {"text": text, "return_tensors": "pt",
-                              "add_special_tokens": False}
-            if images:
-                process_kwargs["images"] = images
-            if audios:
-                process_kwargs["audios"] = audios
-            inputs = self._processor(**process_kwargs).to(model.device)
-        else:
-            # Text-only path (even if processor exists, no media was provided)
-            text = tokenizer.apply_chat_template(
-                template_messages, tokenize=False, add_generation_prompt=True
-            )
-            # add_special_tokens=False: the chat template already emits the
-            # model's BOS (Gemma <bos>, Llama-3 <|begin_of_text|>, Mistral <s>),
-            # so re-tokenizing with the tokenizer default would prepend a SECOND
-            # BOS and degrade coherence. This matches what apply_chat_template(
-            # tokenize=True) does internally; templates that emit no BOS
-            # (ChatML/Qwen) are for models that take no standalone BOS, so
-            # suppressing it here is correct for them too.
-            inputs = tokenizer(
-                text, return_tensors="pt", add_special_tokens=False
-            ).to(model.device)
-
-        # --- Streaming generation ---
-        streamer = TextIteratorStreamer(
-            tokenizer, skip_special_tokens=True, skip_prompt=True
+        # Checked BEFORE the loaded-state gate below, and before ever touching
+        # self._runner - mirrors GgufBackend.chat_stream's identical ordering
+        # exactly (gguf.py:586). This is the backend-level "source of truth"
+        # guarantee the image-rejection regression test suite documents:
+        # ANY caller gets a clean UnsupportedInputError for an image against
+        # a text-only model, even one that never bothered to load it first,
+        # not just "model not loaded". supports_images is False whenever
+        # not self.loaded, so this fires correctly pre-load too.
+        if messages_contain_image(messages) and not self.supports_images:
+            raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+        if self._runner is None or not self.loaded:
+            raise RuntimeError("Model not loaded - call load() first")
+        # last_finish_reason is deliberately NOT set anywhere on this class -
+        # preserving the EXACT pre-existing gap this replaces (the in-process
+        # HFBackend never set it either, so Engine.last_finish_reason's
+        # getattr(..., "stop") fallback always fired). See _hf_runner.py's
+        # module docstring and the tracked follow-up task; do not "fix" this
+        # here without reading both first.
+        yield from self._runner.chat_stream(
+            first_chunk_timeout=self._first_token_timeout_seconds(),
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repeat_penalty,
+            grammar=grammar,
+            grammar_lazy=grammar_lazy,
+            grammar_triggers=grammar_triggers,
+            seed=seed,
         )
-
-        if seed is not None:
-            import torch as _torch
-            _torch.manual_seed(seed)
-
-        gen_kwargs: dict = {
-            **inputs,
-            "streamer": streamer,
-            "max_new_tokens": max_tokens,
-            "repetition_penalty": repeat_penalty,
-        }
-        if temperature > 0:
-            gen_kwargs.update(
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-            )
-        else:
-            gen_kwargs["do_sample"] = False
-
-        # Grammar-constrained decoding (optional [grammar] extra). When a grammar
-        # is supplied, xgrammar masks tokens that would break it; sampling/greedy
-        # then picks only from the still-legal tokens. Soft-degrades to
-        # unconstrained generation if xgrammar is absent or the grammar is bad.
-        lp = _grammar_processor(grammar, tokenizer, model)
-        if lp is not None:
-            gen_kwargs["logits_processor"] = lp
-
-        thread = threading.Thread(
-            target=model.generate, kwargs=gen_kwargs, daemon=True
-        )
-        thread.start()
-
-        for token_text in streamer:
-            yield token_text
-
-        thread.join()

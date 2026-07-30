@@ -226,6 +226,28 @@ DEFAULT_CONFIG: dict = {
     # legitimately take minutes. Raise this only if a genuinely slow box needs
     # longer than the generous default.
     "gguf_first_token_timeout_s": 900.0,
+    # Ceiling (seconds) for an HF (HuggingFace-transformers) model load in its
+    # isolated worker process (see backends/_hf_runner.py) before it is
+    # treated as hung and killed. Same rationale as gguf_load_timeout_s: a
+    # stalled load has no safe "unmeasurable" fallback. HF loads read
+    # full-precision safetensors from disk (no quantized mmap fast path), so
+    # this can legitimately need longer than a GGUF load of similar size.
+    "hf_load_timeout_s": 900.0,
+    # How long an HF reply may take to produce its first token before the
+    # worker is treated as hung. Same rationale as gguf_first_token_timeout_s
+    # (covers prompt prefill, not one token's decode). HF's CPU path is
+    # always dense full-precision (never quantized the way GGUF's ggml
+    # kernels are), so this is unvalidated for very slow CPU-only HF
+    # inference - raise it if a genuinely slow box needs longer.
+    "hf_first_token_timeout_s": 900.0,
+    # Bounded wait for one HF embed() RPC. Separate from and more generous
+    # than the dedicated GGUF-based embedder's own timeout: HFBackend.embed()
+    # loops over texts one at a time with no batching, /v1/embeddings passes
+    # its input through with no size cap, and an HF load never quantizes -
+    # so a large batch against a full-precision CPU-fallback model can
+    # plausibly run far longer than the dedicated small-model embedder ever
+    # needs to.
+    "hf_embed_timeout_s": 600.0,
     # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
     # explicit selection (device 0). A stale index falls back to device 0 with
     # a logged warning, not a wrong/out-of-range GPU (see

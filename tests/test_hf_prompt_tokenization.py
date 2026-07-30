@@ -7,6 +7,12 @@ string with the tokenizer default (``add_special_tokens=True``) prepends a SECON
 BOS for the instruct families this backend runs, which degrades coherence. The
 chat path must re-tokenize with ``add_special_tokens=False`` (matching what
 ``apply_chat_template(tokenize=True)`` does internally and the count_tokens path).
+
+Tests HFWorker (``_hf_worker.py``), not the HFBackend proxy (``hf.py``):
+tokenization/chat-template logic runs only in the isolated child process now
+(see the thread-pool-exhaustion fix), so this in-process, no-subprocess unit
+test targets the class that actually owns that logic - HFWorker's chat_stream
+body is unchanged from what HFBackend's used to be, just moved.
 """
 
 from unittest.mock import MagicMock
@@ -24,9 +30,9 @@ def test_chat_tokenization_suppresses_double_bos(monkeypatch):
     pytest.importorskip("transformers", exc_type=ImportError)
     import transformers
 
-    from localm.inference.backends import hf as hfmod
+    from localm.inference.backends import _hf_worker as hfmod
 
-    be = hfmod.HFBackend.__new__(hfmod.HFBackend)
+    be = hfmod.HFWorker.__new__(hfmod.HFWorker)
     be._processor = None
     be._is_multimodal = False
     be._model = MagicMock()

@@ -10,7 +10,6 @@ from fastapi import Request
 
 from localm.inference.backends.base import BaseBackend
 from localm.inference.backends.gguf import GgufBackend
-from localm.inference.backends.hf import HFBackend
 from localm.plugins.builtin.memory.plug import (
     _recent_sessions_text, _memory_inlet, memory_get, memory_put
 )
@@ -68,20 +67,31 @@ def test_gguf_backend_count_messages_tokens_with_llm():
 
 
 def test_hf_backend_count_messages_tokens_with_tokenizer():
-    backend = HFBackend(model_path="dummy")
-    # Mock self._tokenizer
+    # Tests HFWorker (_hf_worker.py), not the HFBackend proxy (hf.py): the
+    # chat-template + tokenizer logic runs only in the isolated child process
+    # now (see the thread-pool-exhaustion fix) - HFBackend.count_messages_tokens
+    # is an RPC to that process. The ORIGINAL version of this test patched
+    # HFBackend.count_messages_tokens itself with a mock and asserted the mock's
+    # own return value, which is method-under-test-agnostic and would have
+    # passed unchanged with the method's real body deleted entirely - fixed to
+    # exercise the real logic through a mocked tokenizer (mocking the external
+    # boundary, not the code being tested).
+    from localm.inference.backends._hf_worker import HFWorker
+
+    backend = HFWorker.__new__(HFWorker)
     mock_tokenizer = MagicMock()
+    mock_tokenizer.apply_chat_template.return_value = "hello world"
     mock_tokenizer.encode.return_value = [1, 2, 3]
     backend._tokenizer = mock_tokenizer
+    backend._processor = None
     backend._is_multimodal = False
-    
+
     messages = [
         {"role": "user", "content": "hello world"}
     ]
-    
-    with patch("localm.inference.backends.hf.HFBackend.count_messages_tokens") as mock_count:
-        mock_count.return_value = 3
-        assert backend.count_messages_tokens(messages) == 3
+
+    assert backend.count_messages_tokens(messages) == 3
+    mock_tokenizer.apply_chat_template.assert_called_once()
 
 
 def test_recent_sessions_text_chronological_truncation(tmp_path):
