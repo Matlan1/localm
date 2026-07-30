@@ -125,7 +125,7 @@
 // offload (AGENTS.md rule 5 - a silent CPU fallback must not read as success).
 // A stale-cached client would keep toasting an unqualified "switched" even
 // when the server told it the load degraded to slow CPU layers.
-const CACHE = "localm-shell-v85";
+const CACHE = "localm-shell-v86";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
