@@ -237,6 +237,7 @@ MAX_TRIGGER_PATTERN_BYTES = 4096
 
 _TRIGGER_PROBE_PROC = None
 _TRIGGER_PROBE_LOCK = _threading.Lock()
+_PREWARM_THREAD = None
 
 # validate_trigger_patterns's per-process cache - see that function's
 # docstring for why this is an efficiency measure, not the safety mechanism.
@@ -328,28 +329,16 @@ def _kill_and_clear_trigger_probe() -> None:
     not the fast steady-state one. N distinct attack requests were measured
     compounding at close to the spawn cost EACH as a direct result.
 
-    HONEST LIMIT, measured, not assumed: this closes the gap for KNOWN
-    attack shapes entirely (_static_shape_rejection rejects those before
-    ever reaching this code) and measurably reduces it for UNKNOWN shapes
-    that reach the probe, but does NOT close it completely under a tight,
-    back-to-back adversarial loop with no delay between requests. The
-    background spawn here needs _TRIGGER_PROBE_LOCK to install its result,
-    and a MAIN thread immediately looping into its next request can win
-    the race to re-acquire that lock before the OS/GIL scheduler gives the
-    background thread its turn - MEASURED: roughly half of 8 back-to-back
-    unknown-shape attacks still paid the slow spawn path even with this
-    fix in place. A proactively-maintained spare daemon (filled ahead of
-    time, not only reactively after a kill) was attempted and measured to
-    NOT reliably improve on this - under the same tight loop, the spare's
-    own fill thread lost the identical scheduling race, some runs doing
-    WORSE (extra thread contention with no compensating benefit). A
-    genuinely robust fix needs a maintenance mechanism decoupled from
-    request-triggered spawning entirely (e.g. a periodic timer thread,
-    independent of the request path) - judged out of scope to build and
-    verify properly in this pass; recorded here rather than shipped
-    half-verified. See issues/issues.txt, NEW-GH928-GRAMMAR-TRIGGER-REDOS,
-    for the residual gap and this reasoning."""
-    global _TRIGGER_PROBE_PROC
+    ASYMMETRY AND FIX: Previously, the background pre-warm thread spawned
+    outside _TRIGGER_PROBE_LOCK and acquired the lock only to install its
+    finished result, while the main thread's synchronous daemon spawn ran
+    INSIDE _TRIGGER_PROBE_LOCK, holding it for the full multi-second spawn.
+    This caused the pre-warm thread to block behind the main thread's spawn,
+    rendering pre-warming ineffective under back-to-back requests. The main
+    thread now spawns outside the lock as well and joins an in-flight
+    pre-warm thread rather than starting a duplicate spawn, removing lock
+    contention during process creation."""
+    global _TRIGGER_PROBE_PROC, _PREWARM_THREAD
     if _TRIGGER_PROBE_PROC is not None:
         try:
             _TRIGGER_PROBE_PROC.kill()
@@ -364,7 +353,7 @@ def _kill_and_clear_trigger_probe() -> None:
         except Exception:
             return   # best-effort: the next caller's own synchronous spawn is the fallback
         with _TRIGGER_PROBE_LOCK:
-            if _TRIGGER_PROBE_PROC is None:
+            if _TRIGGER_PROBE_PROC is None or _TRIGGER_PROBE_PROC.poll() is not None:
                 _TRIGGER_PROBE_PROC = replacement
             else:
                 # Someone else already spawned one while we were working -
@@ -374,8 +363,10 @@ def _kill_and_clear_trigger_probe() -> None:
                 except Exception:
                     pass
 
-    _threading.Thread(target=_prewarm_replacement, daemon=True,
-                      name="localm-trigger-probe-prewarm").start()
+    t = _threading.Thread(target=_prewarm_replacement, daemon=True,
+                          name="localm-trigger-probe-prewarm")
+    _PREWARM_THREAD = t
+    t.start()
 
 
 def _static_shape_rejection(pattern: str) -> "str | None":
@@ -495,21 +486,55 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[bool, str]":
     could not be reached at all (spawn failure), or - the case this whole
     mechanism exists for - the daemon hung trying to check the pattern and
     never replied within the timeout. Never raises."""
-    global _TRIGGER_PROBE_PROC
+    global _TRIGGER_PROBE_PROC, _PREWARM_THREAD
+    first_spawn = False
+
     with _TRIGGER_PROBE_LOCK:
-        first_spawn = False
-        if _TRIGGER_PROBE_PROC is None or _TRIGGER_PROBE_PROC.poll() is not None:
-            try:
-                if _TRIGGER_PROBE_PROC is not None:
+        if _TRIGGER_PROBE_PROC is not None and _TRIGGER_PROBE_PROC.poll() is None:
+            proc = _TRIGGER_PROBE_PROC
+        else:
+            if _TRIGGER_PROBE_PROC is not None:
+                try:
                     _TRIGGER_PROBE_PROC.kill()
-            except Exception:
-                pass
-            try:
-                _TRIGGER_PROBE_PROC = _spawn_trigger_probe_daemon()
+                except Exception:
+                    pass
+                _TRIGGER_PROBE_PROC = None
+            proc = None
+
+    if proc is None:
+        # Read _PREWARM_THREAD outside _TRIGGER_PROBE_LOCK: safe because
+        # thread references in Python are atomic object assignments, and
+        # joining an already-finished thread is a harmless no-op.
+        prewarm = _PREWARM_THREAD
+        if prewarm is not None and prewarm.is_alive():
+            prewarm.join(timeout=_TRIGGER_PROBE_SPAWN_TIMEOUT)
+
+        with _TRIGGER_PROBE_LOCK:
+            if _TRIGGER_PROBE_PROC is not None and _TRIGGER_PROBE_PROC.poll() is None:
+                proc = _TRIGGER_PROBE_PROC
                 first_spawn = True
+
+        if proc is None:
+            try:
+                new_proc = _spawn_trigger_probe_daemon()
             except Exception as e:
                 return False, f"trigger-pattern probe could not be started ({e})"
-        proc = _TRIGGER_PROBE_PROC
+
+            with _TRIGGER_PROBE_LOCK:
+                if _TRIGGER_PROBE_PROC is None or _TRIGGER_PROBE_PROC.poll() is not None:
+                    _TRIGGER_PROBE_PROC = new_proc
+                    proc = new_proc
+                    first_spawn = True
+                else:
+                    try:
+                        new_proc.kill()
+                    except Exception:
+                        pass
+                    proc = _TRIGGER_PROBE_PROC
+
+    with _TRIGGER_PROBE_LOCK:
+        if proc is not _TRIGGER_PROBE_PROC or proc.poll() is not None:
+            return False, "trigger-pattern probe process is no longer valid"
         try:
             import json
             proc.stdin.write(json.dumps({"pattern": pattern}) + "\n")
