@@ -14,6 +14,37 @@ side). This file is also the first DIRECT coverage of the hider itself - the
 existing <tool_call> marker path had no dedicated test before this; the
 canonical-XML cases below are a regression baseline for it, not just for the
 new fence handling.
+
+A second design pass, same day: name-gated fences were originally decided by
+BUFFERING THE WHOLE BODY to the fence close, then running the real parse. A
+legitimate large ```json example (the model showing what a call looks like,
+or just unrelated JSON data) paid for that buffering even though it was
+never going to be hidden - streaming would visibly "freeze then burst" for
+anything JSON-shaped. _NameKeyGate (context.py) now decides INCREMENTALLY,
+scanning the object's top-level keys as they arrive (correctly skipping
+non-"name" keys of any JSON type - string, number, bool, null, nested
+object/array - so "name" is found wherever it appears, not only as the
+first key) and releasing the moment the answer is knowable: as soon as a
+"name" value's accumulated prefix can no longer match any registered tool,
+or once the object closes having found no "name" key at all. TestReleaseLatency
+below is the class that turns "streams normally" into a checkable number
+per the reasoning in coder-display-vs-execution-two-detectors (project
+memory) - see that file for why a huge object with NO "name" key at all is
+inherently NOT fast (you cannot know a key is absent without scanning past
+every key that IS present), only the common "name present, wrong value" and
+"name absent from an otherwise short object" shapes are.
+
+TestChunkBoundarySweep exists because the FIRST version of the incremental
+design shipped a real bug caught only by sweeping many chunk sizes: a
+4-step sequence (skip whitespace, expect ':', skip whitespace, look at the
+value) was one state that assumed all 4 steps completed before ever
+returning "need more data". A call that paused right after consuming the
+colon resumed by re-checking "is the next character a colon" against a
+character that came AFTER the colon already consumed - invisible at
+whole-string or 1-char-at-a-time delivery, real at other chunk sizes. Each
+of those 4 steps is its own persistent state now (see _advance_name_key_gate's
+docstring). The general lesson stands: sweep chunk sizes when testing
+anything that decides incrementally, never trust one lucky delivery pattern.
 """
 
 import time
@@ -32,6 +63,26 @@ def _hide(pieces, tool_names=None):
             iter(pieces), tool_names=tool_names):
         (hidden if is_hidden else shown).append(text)
     return "".join(shown), "".join(hidden)
+
+
+def _release_latency(text, tool_names=None):
+    """Feed `text` one character at a time; return how many characters had
+    been PULLED FROM THE PIECE ITERATOR by the moment the first non-hidden
+    output is yielded (None if the whole text stays hidden - e.g. a real
+    call with no surrounding narration). This is the number the PR body's
+    latency claims are measured with, not a guess."""
+    consumed = [0]
+
+    def counting_pieces():
+        for c in text:
+            consumed[0] += 1
+            yield c
+
+    for chunk, hidden in _ContextMixin._stream_hiding_tool_calls(
+            counting_pieces(), tool_names=tool_names):
+        if not hidden:
+            return consumed[0]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +236,69 @@ class TestFenceHiding:
         assert '"name": "run_tests"' in hidden
 
 
+class TestKeyOrderIndependence:
+    """_NameKeyGate finds "name" wherever it appears among an object's
+    top-level keys, not only as the first one - the general case a purely
+    "check the first key" design would get wrong. Each of these correctly
+    SKIPS a non-"name" key's value (string/number/bool/null/nested
+    object/array) to keep looking, exactly matching _try_parse_body's own
+    order-independent `"name" in obj` check."""
+
+    def test_name_is_the_last_key(self):
+        shown, hidden = _hide(
+            ['x ```json\n{"args": {"a": 1}, "name": "run_tests"}\n``` y'],
+            tool_names={"run_tests"})
+        assert shown == "x  y"
+        assert '"name": "run_tests"' in hidden
+
+    def test_name_is_in_the_middle(self):
+        shown, hidden = _hide(
+            ['x ```json\n{"id": 5, "name": "write_file", "args": {}}\n``` y'],
+            tool_names={"write_file"})
+        assert shown == "x  y"
+        assert '"name": "write_file"' in hidden
+
+    def test_nested_name_key_does_not_misfire(self):
+        """A "name" key INSIDE a nested object (not top-level) must not be
+        mistaken for the call's own name - _try_parse_body would not find it
+        either (json.loads gives a top-level dict; "name" in obj checks only
+        that dict's own keys)."""
+        shown, hidden = _hide(
+            ['x ```json\n{"args": {"name": "nested"}, "id": 1}\n``` y'],
+            tool_names={"run_tests"})
+        assert shown == 'x ```json\n{"args": {"name": "nested"}, "id": 1}\n``` y'
+        assert hidden == ""
+
+    def test_nested_array_and_object_before_name(self):
+        shown, hidden = _hide([
+            'x ```json\n{"items": [1, [2, 3], {"a": 1}], '
+            '"name": "run_tests", "args": {}}\n``` y'
+        ], tool_names={"run_tests"})
+        assert shown == "x  y"
+        assert '"name": "run_tests"' in hidden
+
+    def test_bool_null_number_keys_before_name(self):
+        shown, hidden = _hide([
+            'x ```json\n{"a": true, "b": null, "c": -3.5, '
+            '"name": "read_file", "args": {}}\n``` y'
+        ], tool_names={"read_file"})
+        assert shown == "x  y"
+        assert '"name": "read_file"' in hidden
+
+    def test_empty_object_releases(self):
+        shown, hidden = _hide(['x ```json\n{}\n``` y'], tool_names={"run_tests"})
+        assert shown == 'x ```json\n{}\n``` y'
+        assert hidden == ""
+
+    def test_name_value_is_not_a_string(self):
+        """"name" present but its value is a nested object, not a string -
+        _try_parse_body's isinstance(name, str) check would reject this too."""
+        shown, hidden = _hide(['x ```json\n{"name": {"x": 1}}\n``` y'],
+                              tool_names={"run_tests"})
+        assert shown == 'x ```json\n{"name": {"x": 1}}\n``` y'
+        assert hidden == ""
+
+
 class TestChunkBoundarySweep:
     """Every case below is fed through EVERY chunk size in the sweep, not just
     one - a single fixed split point is exactly how the real bug here shipped
@@ -291,6 +405,100 @@ class TestFenceBodyCapGivesUp:
         elapsed = time.monotonic() - t0
         assert elapsed < 2.0, f"took {elapsed:.3f}s - too slow"
         assert shown.startswith("```aaa")
+
+    def test_cap_fires_mid_stream_against_a_genuinely_infinite_generator(self):
+        """The earlier adversarial tests all feed a FINITE (if huge) piece
+        list, so a cap that never actually fires and instead relies on "the
+        generator eventually runs out" would still pass them - the trailing
+        "if buf: yield ..." at end-of-stream would release it anyway. Feed a
+        generator that NEVER terminates and pull only ONE value from the
+        gate's output: if the cap works, that first value arrives quickly
+        and is bounded in size; if it does not, this hangs forever (proving
+        the difference the other tests could not)."""
+        def infinite_filler():
+            yield "```json\n{"
+            while True:
+                yield '"a": 1,'
+
+        gen = _ContextMixin._stream_hiding_tool_calls(
+            infinite_filler(), tool_names={"run_tests"})
+        t0 = time.monotonic()
+        chunk, hidden = next(gen)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 3.0, f"took {elapsed:.3f}s - too slow"
+        assert not hidden
+        assert len(chunk) < _ContextMixin._MAX_PENDING_FENCE_BODY + 100, (
+            f"released chunk is {len(chunk)} chars - cap did not bound it")
+
+
+class TestReleaseLatency:
+    """Turns "streams normally" into a checkable number, per the box
+    coordinator's instruction: "the number, in the PR body, is the claim -
+    checkable; 'streaming is unaffected' is not." Each assertion is a real
+    upper bound measured against the actual code, not a description.
+
+    A real tool call's narration IS eventually hidden entirely (no separate
+    "release" ever happens for the call span itself - _release_latency
+    returns None for a body with nothing else around it), so these all use
+    a body that is NOT a call, where "release" is exactly the interesting
+    event.
+    """
+
+    TOOLS = {"run_tests", "read_file", "write_file"}
+
+    def test_name_first_wrong_value_releases_within_the_name(self):
+        """The common "JSON example that happens to have a name field"
+        shape (a person/product/file description) - releases as soon as
+        the value diverges from every registered tool's prefix, typically
+        well under the length of the object itself."""
+        text = '```json\n{"name": "John Smith", "age": 30}\n```'
+        lat = _release_latency(text, tool_names=self.TOOLS)
+        assert lat is not None
+        assert lat <= 25, f"released after {lat} of {len(text)} chars - too slow"
+
+    def test_no_name_key_in_a_short_object_releases_at_its_close(self):
+        """No "name" key anywhere: cannot be known until the object itself
+        closes (a fundamental limit - you cannot know a key is absent
+        without scanning past every key that IS present) - but that is
+        still well BEFORE the fence's own closing backticks, and nowhere
+        near buffering the whole fence as the old design did."""
+        obj = '{"users": [1, 2, 3], "count": 3}'
+        text = "```json\n" + obj + "\n```"
+        lat = _release_latency(text, tool_names=self.TOOLS)
+        assert lat is not None
+        assert lat <= len(obj) + 10, f"released after {lat}, object is {len(obj)} chars"
+        assert lat < len(text), "must release before the fence's own close, not just at it"
+
+    def test_large_json_with_no_name_key_is_bounded_by_the_object_not_the_whole_response(self):
+        """The honest, measured version of "a 400-line JSON example streams
+        normally": for an object with NO "name" key, release happens once
+        that object closes - proportional to the OBJECT's size, not to
+        however much unrelated text follows it in the same response."""
+        big_obj = '{"items": ' + str(list(range(2000))) + "}"
+        text = "```json\n" + big_obj + "\n```" + ("\nmore narration after. " * 50)
+        lat = _release_latency(text, tool_names=self.TOOLS)
+        assert lat is not None
+        assert lat <= len(big_obj) + 20, (
+            f"released after {lat}, object alone is {len(big_obj)} chars")
+        assert lat < len(big_obj) + 20 < len(text), (
+            "must not have waited for the trailing narration too")
+
+    def test_unregistered_tool_name_releases_fast_even_with_a_perfect_shape(self):
+        """A body shaped EXACTLY like a real call, differing only in the
+        name - still releases fast, proving the gate checks the value
+        against the registry rather than just "looks call-shaped"."""
+        text = '```json\n{"name": "delete_everything", "args": {}}\n```'
+        lat = _release_latency(text, tool_names=self.TOOLS)
+        assert lat is not None
+        assert lat <= 25, f"released after {lat} of {len(text)} chars - too slow"
+
+    def test_a_real_call_is_never_released_early(self):
+        """Control: the positive case must NOT show this fast-release
+        behaviour - a genuine call stays fully hidden (no separate visible
+        chunk at all), same as before this whole design pass."""
+        text = '```json\n{"name": "run_tests", "args": {}}\n```'
+        lat = _release_latency(text, tool_names=self.TOOLS)
+        assert lat is None, f"a real call must never release early, got {lat}"
 
 
 # ---------------------------------------------------------------------------

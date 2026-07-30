@@ -552,12 +552,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   narrow shape - a call written with no wrapper at all, just a bare `{...}`
   object, the least common way a model writes one - can still flash briefly
   in the CLI terminal, which has no way to un-print text it already showed;
-  the GUI corrects even that case. One consequence worth knowing: a genuine
-  ```` ```json ```` code block the model shows you as an EXAMPLE (not a call)
-  now appears all at once when it closes rather than streaming line by line,
-  because there is no way to tell the two apart before the block is
-  complete. Ordinary code fences in other languages are unaffected and still
-  stream normally.
+  the GUI corrects even that case. Deciding is incremental, not a wait for
+  the whole block: a genuine ```` ```json ```` example the model shows you
+  (not a call) is recognized as not-a-call within about the first twenty
+  characters in the common case and streams normally from there. The one
+  remaining exception is a JSON example with no `"name"` field anywhere in
+  it at all - that still appears all at once once the block closes, rather
+  than line by line, because nothing can rule it out until every field has
+  been seen. Ordinary code fences in other languages are unaffected and
+  always stream normally.
 
 ## [0.1.3] - 2026-07-23
 
