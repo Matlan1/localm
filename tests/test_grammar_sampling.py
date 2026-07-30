@@ -412,20 +412,28 @@ def test_n_distinct_known_shape_attacks_never_reach_the_probe():
     catastrophic patterns (same historical shape, different literals so
     none share a cache entry) must reject in a time that could ONLY be
     explained by the static filter - the production probe timeout alone
-    (seconds each) would make N of them take N times that."""
+    (seconds each) would make N of them take N times that.
+
+    CPU time (time.process_time()), not wall-clock: an upper-bound elapsed
+    assertion on a shared box is exactly the flake shape this repo already
+    hit and fixed the same night in test_redos_bounds.py's Unit A tests
+    (dev-notes/FIX-LOOP-2026-07-29.md) - contention inflates wall-clock
+    without inflating the actual (tiny, pure-Python) CPU work this loop
+    does, so a wall-clock upper bound can fail under load for reasons that
+    have nothing to do with the property under test."""
     import time
 
     from localm.inference.backends.base import InvalidGrammarError
     from localm.inference.gbnf import validate_trigger_patterns
 
     patterns = [r"[\s\S]*?(<attack_marker_%d>[\s\S]*)" % i for i in range(20)]
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     for p in patterns:
         with pytest.raises(InvalidGrammarError):
             validate_trigger_patterns([p])
-    elapsed = time.perf_counter() - t0
+    elapsed = time.process_time() - t0
     assert elapsed < 0.5, (
-        f"20 distinct known-shape attack patterns took {elapsed:.2f}s total - "
+        f"20 distinct known-shape attack patterns took {elapsed:.2f}s CPU time - "
         "the static filter is not actually preventing the probe/lock DoS")
 
 
