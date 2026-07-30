@@ -132,6 +132,44 @@ def test_abandoning_the_generator_does_not_leak_the_reader(tmp_path, threaded):
     assert leaked == [], f"reader thread leaked: {leaked}"
 
 
+def test_a_reader_that_dies_silently_raises_instead_of_hanging(tmp_path, threaded,
+                                                               monkeypatch):
+    """If the reader exits without posting eof or an exception, the consumer
+    must FAIL, not block forever.
+
+    This test exists because the failure was observed, not imagined: while
+    fires-controlling `_iter_file_blocks`, replacing the reader's handler with
+    `except BaseException: pass` made a test run hang until it was killed at two
+    minutes, printing nothing. A silent forever-hang inside the function that
+    verifies a downloaded model is strictly worse than a loud error.
+
+    Note the assertion names the EXACT exception type. `pytest.raises(Exception)`
+    would pass on a `queue.Empty` leaking out, or on almost any regression here,
+    and this test is specifically about which failure occurs."""
+    p = _write(tmp_path, "m.gguf", b"v" * 4096)
+
+    class _NeverRuns:
+        """A thread that reports itself dead and never runs its target."""
+        def __init__(self, *a, **kw):
+            self.name = kw.get("name")
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(mm.gguf.threading, "Thread", _NeverRuns)
+
+    with pytest.raises(RuntimeError) as ei:
+        mm._sha256_file(p)
+    assert "without delivering data or an error" in str(ei.value)
+    assert "m.gguf" in str(ei.value)
+
+
 def test_progress_is_monotonic_and_ends_at_total(tmp_path, threaded):
     data = b"q" * 4096
     p = _write(tmp_path, "m.gguf", data)

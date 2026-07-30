@@ -163,7 +163,25 @@ def _iter_file_blocks(path: Path):
     t.start()
     try:
         while True:
-            item = q.get()
+            try:
+                item = q.get(timeout=0.5)
+            except queue.Empty:
+                if not t.is_alive():
+                    # The reader exited without posting eof OR an exception.
+                    # Unreachable while _reader's try/except/else stands, since
+                    # every exit path posts one of the two - but a plain
+                    # `q.get()` here turns any future edit that breaks that
+                    # invariant into a SILENT FOREVER HANG on a multi-GB verify,
+                    # with no output to diagnose it from. Measured while
+                    # fires-controlling this function: swapping the reader's
+                    # handler for `except BaseException: pass` hung a test run
+                    # until it was killed at 2 minutes, printing nothing.
+                    # Failing loudly is the whole difference.
+                    raise RuntimeError(
+                        f"the reader thread for '{path.name}' exited without "
+                        "delivering data or an error; the digest would be "
+                        "incomplete, so it is not returned")
+                continue
             if item is eof:
                 return
             if isinstance(item, BaseException):
