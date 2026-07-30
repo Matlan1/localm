@@ -166,6 +166,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **The coder's codebase map no longer goes stale after a shell command.** Files
+  a shell command created, edited, or deleted (applying a patch, running a
+  formatter, generated code) never updated the compact codebase summary
+  injected into the model's context - only files the model wrote or edited
+  directly did. The map now reconciles itself against the filesystem (a
+  lightweight size/timestamp check, not re-reading every file) before the
+  model's next turn, so it reflects what a shell command actually did.
 - **The coder no longer skips a valid tool call that follows a malformed one.**
   When a reply contained a botched tool call before a good one, the scanner's
   recovery could step past the valid call so it never ran - the model believed it
