@@ -121,6 +121,56 @@ def _simulate_fault(mode: str) -> None:
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
 
+def _runner_entry(req_q, resp_q, ctrl_q) -> None:
+    """Process target (replaces a bare ``_runner_main`` reference so every
+    exit path is covered - see below). Wraps the whole worker body so ANY
+    exception escaping it - a bug anywhere in ``_runner_main``'s own dispatch
+    code, or the DELIBERATE let-a-native-fault-kill-the-process design in the
+    "chat_stream" branch (see ``GgufWorker.chat_stream``'s docstring) - is
+    logged via the ``logging`` module before the process dies, not left to
+    ``multiprocessing.process.BaseProcess._bootstrap``'s own
+    ``traceback.print_exc()`` alone.
+
+    WHY this is needed even though native stderr is already redirected into
+    the debug log during model load and generation (``_quiet_stderr`` /
+    ``_capture_stderr`` / ``dedup_native_stderr`` in ``llama.py``): those are
+    ``@contextlib.contextmanager`` fd-2 redirects, and their ``__exit__``
+    (restoring fd 2) runs as an escaping exception unwinds THROUGH them - i.e.
+    BEFORE it ever reaches ``_bootstrap``. So by the time multiprocessing
+    prints its own traceback, fd 2 has already been restored to whatever this
+    process inherited from its parent (closed or NUL for a GUI-launched,
+    console-less server) - the one traceback that would actually explain the
+    crash is written nowhere. Confirmed against issue #928's own "worker exit
+    1": that is multiprocessing's own signature for exactly this case (an
+    uncaught PYTHON exception), not a genuine native abort, which would exit
+    with a different, OS-specific status. See
+    dev-notes/worker-stderr-lifetime-gap.md for the full investigation.
+
+    Logging here is fd-2-independent (a ``logging.FileHandler`` writes
+    through its own Python-level stream, never through fd 2), so it captures
+    the exception regardless of what fd 2 currently points to. Deliberately
+    RE-RAISES: this only ADDS a capture, it must never change whether or how
+    the process exits - every existing crash-containment test in
+    tests/test_gguf_runner_isolation.py depends on the parent's
+    ``is_alive()``/``exitcode``-based detection staying exactly as it is.
+
+    Does NOT help a genuine native crash with no Python exception at all
+    (SIGSEGV, a raw abort with nothing printed first) - Python never regains
+    control there, so no ``except`` clause, including this one, can run. That
+    residual gap is exactly why the whole model lifecycle runs in this
+    isolated process to begin with (see the module docstring); the parent's
+    crash detection is what covers it, unchanged by this function."""
+    try:
+        _runner_main(req_q, resp_q, ctrl_q)
+    except BaseException:
+        from localm.debuglog import attach_child_logging, logger
+        attach_child_logging()   # idempotent - guarantees a handler exists
+                                  # even if _runner_main died before its own
+                                  # (identical) call to this ever ran
+        logger.critical("gguf worker process crashed", exc_info=True)
+        raise
+
+
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
     """Long-lived child: owns one GgufWorker (one loaded model) for its whole
     process lifetime, dispatching one request at a time."""
@@ -179,8 +229,16 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             return
 
         if name == "load":
-            worker = GgufWorker(cancel_event=load_cancel_event, **payload)
+            # The constructor is INSIDE this try (not just worker.load()): a
+            # malformed payload (a parent/child protocol bug) raising here is a
+            # clean, catchable Python failure, not a native fault - it deserves
+            # the same "error" envelope a load() failure gets, not an uncaught
+            # crash. Safe unconditionally: spawn_and_load() always calls
+            # self._spawn() immediately before sending "load", so `worker` is
+            # always still None here - there is no in-place "reload" whose
+            # state this could disturb.
             try:
+                worker = GgufWorker(cancel_event=load_cancel_event, **payload)
                 meta = worker.load()
                 resp_q.put(("ok", meta))
             except ModelLoadCancelled as e:
@@ -336,7 +394,7 @@ class ModelRunner:
         self._resp_q = ctx.Queue()
         self._ctrl_q = ctx.Queue()
         self._proc = ctx.Process(
-            target=_runner_main, args=(self._req_q, self._resp_q, self._ctrl_q),
+            target=_runner_entry, args=(self._req_q, self._resp_q, self._ctrl_q),
             name="localm-gguf-worker", daemon=True)
         self._proc.start()
 

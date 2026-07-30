@@ -111,6 +111,25 @@ class TestLoadCrashContainment:
         finally:
             r.shutdown(grace=0)
 
+    def test_bad_load_payload_is_a_clean_error_not_a_crash(self):
+        """The GgufWorker(**payload) constructor call now sits INSIDE the
+        "load" branch's try/except (previously only worker.load() was
+        guarded - see _runner.py), so a malformed payload - a parent/child
+        protocol bug, not a native fault - is a normal, clean error, not an
+        uncaught crash that kills the process for no native reason at all."""
+        r = ModelRunner()
+        bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.spawn_and_load(bad_params, timeout=30.0)
+            assert "unexpected keyword argument" in str(ei.value).lower()
+            assert r.is_alive(), (
+                "a bad payload is a protocol error, not a native fault - the "
+                "worker process itself must not have been killed by it"
+            )
+        finally:
+            r.shutdown(grace=0)
+
 
 class TestRunnerLifecycle:
     def test_is_alive_false_before_spawn_and_after_shutdown(self):
@@ -170,3 +189,62 @@ class TestSimpleRequestCrashContainment:
             assert "crashed" in str(ei.value).lower()
         finally:
             r.shutdown(grace=0)
+
+
+class TestCrashDiagnosticsReachDebugLog:
+    """The parent's crash message always says "see the debug log for the
+    native stack trace" (e.g. ModelRunner.chat_stream's "Native inference
+    fault" RuntimeError above) - but the worker only redirected native stderr
+    into that log during the narrow model-load and generation windows
+    (_quiet_stderr / _capture_stderr / dedup_native_stderr in llama.py), not
+    for its whole life. Worse: even a fault that happens INSIDE the
+    generation window is not enough, because dedup_native_stderr's fd-2
+    restore (its context manager __exit__) runs as the exception unwinds
+    THROUGH it - before the exception ever reaches multiprocessing's own
+    traceback.print_exc() in BaseProcess._bootstrap - so the one traceback
+    that would actually explain the crash was written to an already-restored
+    fd 2 (closed/NUL for a GUI-launched, console-less process). See
+    dev-notes/worker-stderr-lifetime-gap.md for the full investigation
+    (a follow-up to #932 / issue #928).
+
+    Reuses test_dispatch_crash_during_chat_stream_is_contained's exact fault
+    (chat_stream sent before any load -> worker is None -> AttributeError
+    escapes _runner_main uncaught) rather than inventing a new one: it is
+    already proven to reproduce "an exception _runner_main deliberately lets
+    escape", needs no real model/GPU, and is unaffected by the separate fix
+    to the "load" branch's constructor call (see TestLoadCrashContainment)."""
+
+    def test_uncaught_dispatch_crash_is_logged_to_the_debug_log(
+            self, monkeypatch, tmp_path):
+        log_path = tmp_path / "worker_crash.log"
+        # A real path (not "1"/"true") so log_file_path() resolves it exactly
+        # like a child that inherited an already-open debug log from its
+        # parent server process - see debuglog.log_file_path().
+        monkeypatch.setenv("LOCALM_DEBUG", str(log_path))
+
+        r = ModelRunner()
+        r._spawn()
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+            assert "native inference fault" in str(ei.value).lower()
+            # is_alive() only ever reports False once the OS has reported the
+            # process fully exited - so any write the child's Python code did
+            # before dying (including this fix's logger.critical call) is
+            # already flushed and visible to this read; no wait/retry needed.
+            assert not r.is_alive()
+        finally:
+            r.shutdown(grace=0)
+
+        assert log_path.is_file(), (
+            "the crashed worker never even attached the shared debug log"
+        )
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        assert "AttributeError" in text and "NoneType" in text, (
+            "the worker crashed with no envelope (by design - see "
+            "GgufWorker.chat_stream's docstring), but its actual exception "
+            "detail never reached the debug log - the parent's own "
+            "'see the debug log for the native stack trace' message is a "
+            "lie if there is nothing in that log to see\n--- log content ---\n"
+            + text
+        )
