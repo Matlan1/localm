@@ -704,3 +704,41 @@ def test_route_accepts_safe_grammar_trigger_and_reaches_generation():
     })
     assert r.status_code == 200, (r.status_code, r.text)
     engine.chat_stream.assert_called_once()
+
+
+def test_probe_pattern_is_safe_joins_inflight_prewarm_without_duplicate_spawn():
+    """Verify that _probe_pattern_is_safe joins an in-flight pre-warm thread
+    outside _TRIGGER_PROBE_LOCK rather than spawning a duplicate daemon."""
+    import time
+    import localm.inference.gbnf as gbnf
+
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdin = MagicMock()
+
+    spawn_called = False
+
+    def mock_spawn():
+        nonlocal spawn_called
+        spawn_called = True
+        return fake_proc
+
+    with patch.object(gbnf, "_TRIGGER_PROBE_PROC", None), \
+         patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=mock_spawn), \
+         patch.object(gbnf, "_readline_with_timeout", return_value="OK"):
+
+        def fake_prewarm():
+            time.sleep(0.05)
+            with gbnf._TRIGGER_PROBE_LOCK:
+                gbnf._TRIGGER_PROBE_PROC = fake_proc
+
+        prewarm_thread = threading.Thread(target=fake_prewarm)
+        gbnf._PREWARM_THREAD = prewarm_thread
+        prewarm_thread.start()
+
+        is_safe, reason = gbnf._probe_pattern_is_safe(r"^<tool_call>")
+
+        assert is_safe is True
+        assert spawn_called is False, "should have joined in-flight prewarm instead of spawning duplicate"
+
