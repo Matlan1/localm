@@ -1,51 +1,31 @@
 name: CI
 
 on:
-  # THIS WORKFLOW RUNS ONLY WHEN A HUMAN ASKS FOR IT. No push trigger, no
-  # pull_request trigger. Maintainer's directive, 2026-07-29, stated as: no
-  # 7-minute runs on PRs, and that means no runs on merge either.
+  # CI RUNS ON PULL REQUESTS. Maintainer's directive, 2026-07-30, stated as:
+  # re-enable CI runs on PR, for the release PR also. This SUPERSEDES the
+  # 2026-07-29 decision that removed the trigger.
   #
-  # READ THE DIRECTIVE AS BEING ABOUT COST, NOT ABOUT WHICH TRIGGER. That
-  # distinction is the whole reason this comment exists. When the pull_request
-  # trigger was removed, the push trigger was treated as the approved substitute
-  # and workflow_dispatch as "free because it costs the dev box nothing" - which
-  # accounted for the wrong resource and preserved the exact spend the removal
-  # was meant to eliminate. Measured on the day this was written: 51 push runs
-  # plus 9 dispatches in a single session, two platforms each, roughly 7 minutes
-  # a side. Adding any automatic trigger back, or routinely dispatching in place
-  # of one, re-creates that and is the same mistake wearing a different name.
+  # DO NOT REMOVE THIS AGAIN WITHOUT ASKING HIM. That instruction is the whole
+  # reason this comment is still long: the trigger has now been removed (#839),
+  # restored (#860), removed again, and restored again here. Every flip cost a
+  # round of confusion about what actually gates a merge, and each time the
+  # removal was re-derived from first principles by someone reading only the
+  # cost argument below. The cost argument is real AND it has been outweighed,
+  # deliberately, by the person who pays it. Read the history before acting on
+  # the economics.
   #
-  # SO: do not add `push:` or `pull_request:` back without asking him. Do not
-  # dispatch this as a routine pre-merge or post-merge gate. A dispatch is for
-  # when someone decides a specific change needs the two-platform matrix and
-  # accepts the cost, not for every unit.
+  # NO `push:` TRIGGER, and that is deliberate rather than an oversight. The
+  # 2026-07-29 removal was about COST, NOT about which trigger, and that
+  # distinction is what got lost last time: when `pull_request` was dropped,
+  # `push` was treated as the approved substitute and workflow_dispatch as "free
+  # because it costs the dev box nothing", which accounted for the wrong resource
+  # and preserved the exact spend the removal was meant to eliminate. Measured
+  # then: 51 push runs plus 9 dispatches in ONE session, two platforms each, about
+  # 7 minutes a side. A PR trigger runs once per PR; a push trigger runs once per
+  # commit, and that difference is the entire point.
   #
-  # WHAT GATES A PR NOW: code scanning only, per-PR, via codeql.yml (about a
-  # minute per language). Everything else is the local targeted run.
-  #
-  # WHAT THAT COSTS, stated so it is not rediscovered as a surprise: a local run
-  # diverges from this job along three axes, none visible from the local run -
-  # PLATFORM (this matrix runs Linux too; a Linux-only regression reached master
-  # that way in #845), DEPENDENCY SET (`.[dev,rag]` has no numpy; a dev venv
-  # usually does), and DEPENDENCY VERSION (CI resolves the newest allowed dev
-  # tool; ruff 0.16 reddened master while local venvs on 0.15 were green). WSL
-  # (Ubuntu, python 3.12) reproduces the first two at no cost to anyone.
-  #
-  # NO `pull_request` TRIGGER. This is the maintainer's standing decision, made
-  # twice (#839, and again here after #860 restored it): a two-OS pytest matrix
-  # costing ~7 minutes per side does not belong in front of every PR. Do not add
-  # it back without asking him - it has now been removed, re-added, and removed
-  # again, and each flip cost a round of confusion about what actually gates a
-  # merge.
-  #
-  # WHAT STILL GATES A PR: code scanning, per-PR, via .github/workflows/
-  # codeql.yml. About a minute per language, and its whole value is catching a
-  # newly introduced alert BEFORE it lands.
-  #
-  # WHAT THIS COSTS, stated plainly rather than left to be rediscovered - #860
-  # restored the trigger for these reasons and they did not stop being true, they
-  # were outweighed. A local suite diverges from this job along three axes, none
-  # of them visible from the local run:
+  # WHAT THIS BUYS, and it is why the trigger is back: a local run diverges from
+  # this job along three axes, none of them visible from the local run.
   #   PLATFORM       contributors run Windows; this matrix runs Windows AND Linux.
   #                  A Linux-only regression reached master exactly this way
   #                  (#845), and took four sessions to diagnose.
@@ -54,11 +34,14 @@ on:
   #                  appear locally at all.
   #   DEPENDENCY VER CI resolves the newest allowed dev tool; a venv lags. ruff
   #                  0.16 reddened master while every local venv on 0.15 was green.
-  # So the pre-merge signal is again whatever the contributor runs locally, plus
-  # master's post-merge run, which arrives AFTER the merge. Use workflow_dispatch
-  # against a branch when a change is one the three axes above could bite - a
-  # platform-specific path, anything touching dependency resolution - and WSL
-  # (Ubuntu, python 3.12) reproduces two of the three for free.
+  # WSL (Ubuntu, python 3.12) reproduces the first two at no cost to anyone, and
+  # is still the cheapest way to check a Linux hunch mid-work.
+  #
+  # CODE SCANNING IS STILL SEPARATE. codeql.yml runs per-PR on its own (about a
+  # minute per language) and catches a newly introduced alert before it lands.
+  # This workflow does not replace it; the two answer different questions.
+  pull_request:
+    branches: [master]
   workflow_dispatch:
     inputs:
       run_abi:
