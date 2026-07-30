@@ -87,7 +87,26 @@ def _run_check_capturing_output(monkeypatch, torch_mod, transformers_mod):
 def test_reports_ok_for_the_real_installed_combo(monkeypatch):
     """Against whatever torch/transformers is genuinely installed in THIS venv,
     the check must actually resolve AutoTokenizer/AutoProcessor/
-    AutoModelForCausalLM and report OK - not just that they import."""
+    AutoModelForCausalLM and report OK - not just that they import.
+
+    Skips rather than crashes when llama.cpp's native runtime is already
+    loaded in this process (test_doctor_gpu_verdict.py's own real
+    compute-device probe does this in-process when run earlier in the same
+    pytest worker): a FRESH `import torch` here is the documented
+    known-doomed DLL-identity conflict
+    (VramSizingMixin._free_total_vram_bytes's docstring), which
+    `pytest.importorskip` cannot turn into a skip - it only catches
+    ImportError, and this raises OSError: [WinError 127] instead, failing the
+    test outright rather than an environmental skip. Genuinely reproducing
+    this test's own subject (the REAL installed combo) is not possible under
+    this precondition; a targeted single-file run is unaffected."""
+    from localm.inference.backends.llamacpp import _loader
+    if _loader.native_lib_loaded():
+        pytest.skip("llama.cpp's native runtime is already loaded in this "
+                     "process (a real compute-device probe ran earlier in "
+                     "this same pytest worker) - a fresh torch import here "
+                     "is the known-doomed DLL-identity conflict, not this "
+                     "test's own subject")
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
 

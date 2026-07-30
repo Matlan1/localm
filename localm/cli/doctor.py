@@ -250,8 +250,41 @@ def _check_vram_torch() -> bool:
     tools can be absent while torch still sees a usable GPU (common on ROCm
     installs without rocm-smi on PATH). Printing both "CPU mode only" and a torch
     GPU/VRAM line in the same run contradicts itself, so let torch's view veto the
-    CPU-only warning."""
+    CPU-only warning.
+
+    Skips the torch attempt entirely once ``_loader.native_lib_loaded()`` is
+    True - the SAME precondition and SAME blanket guard
+    ``VramSizingMixin._vram_levels`` / ``_free_total_vram_bytes``
+    (llamacpp/_sizing.py) use for the identical DLL-identity conflict (see
+    their docstrings for the root cause): once llama.cpp's own native runtime
+    is loaded in this process, a later ``import torch`` on this project's
+    Windows + AMD ROCm build reliably hits STATUS_ENTRYPOINT_NOT_FOUND. This is
+    doctor's fourth call site for the same conflict (discover._list_gpus_probe,
+    gpu_usage.raw_reading_is_process_scoped and _sizing.py's VramSizingMixin
+    are the other three, already guarded). Costs nothing to skip here:
+    _check_gpu_verdict's real verdict comes from a direct backend probe, this
+    torch reading is only ever OR'd in as a last-resort hedge. Not reachable in
+    a real standalone `localm doctor` run (the earlier native-code checks in
+    doctor() load in a separate subprocess, never in-process here) - only a
+    mixed pytest run that loads the native lib in-process before this call
+    reaches it.
+
+    The ``except Exception`` below (beyond the plain ``ImportError`` for
+    "torch not installed") is deliberate: ``doctor()`` calls this with no
+    try/except of its own, so any OTHER torch import failure - such as the
+    doomed-combination conflict above reached some other way - must not
+    escape and silently truncate every later doctor check."""
     torch_gpu_found = False
+    from localm.inference.backends.llamacpp import _loader
+    if _loader.native_lib_loaded():
+        from localm.debuglog import logger as _dbg
+        _dbg.debug(
+            "doctor: skipping the torch VRAM probe - llama.cpp's native "
+            "runtime is already loaded in this process, so `import torch` "
+            "here is the known-doomed DLL-identity conflict (see "
+            "VramSizingMixin._free_total_vram_bytes's docstring); "
+            "torch_gpu_found stays False for this supplementary line")
+        return torch_gpu_found
     try:
         import torch
         if torch.cuda.is_available():
@@ -315,6 +348,14 @@ def _check_vram_torch() -> bool:
             console.print(f"  {_WARN_SYM}  torch available but torch.cuda.is_available() = False")
     except ImportError:
         console.print(f"  {_WARN_SYM}  torch not installed - GPU VRAM check skipped")
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("doctor: torch GPU/VRAM probe failed with %s (not a plain "
+                   "ImportError, possibly the DLL-identity conflict above "
+                   "reached some other way); GPU VRAM check skipped for this "
+                   "supplementary line - see _check_gpu_verdict for the real "
+                   "verdict", type(e).__name__)
+        console.print(f"  {_WARN_SYM}  torch GPU/VRAM probe failed ({type(e).__name__}) - skipped")
     return torch_gpu_found
 
 
@@ -472,6 +513,39 @@ def _check_packages() -> dict:
     _dist_names = {"huggingface_hub": "huggingface-hub"}
     modules: dict = {}
     for mod, label in packages + optional_pkgs:
+        # torch's own fifth call site for the DLL-identity conflict documented
+        # at _check_vram_torch (llama.cpp's native runtime already loaded in
+        # this process makes a later `import torch` doomed on this project's
+        # Windows + AMD ROCm build): proactively skip it here too, before it
+        # can even be attempted - found live via this exact
+        # importlib.import_module("torch") raising OSError: [WinError 127]
+        # when test_doctor_gpu_verdict.py's real compute-device probe loaded
+        # the native runtime earlier in the same pytest worker. No other
+        # package here shares this specific risk.
+        #
+        # Narrower than _vram_levels's blanket native_lib_loaded() skip (the
+        # same trade-off discover._torch_gpu_probe_known_doomed weighs against
+        # _sizing's blanket one): a torch ALREADY resident in sys.modules -
+        # imported for real earlier in this same process, or a test double -
+        # makes `import torch` here a plain cache hit, never a fresh preload,
+        # so the conflict cannot occur and the working module must be kept.
+        # Skipping unconditionally would cost real behavior here (unlike
+        # _vram_levels's display-only reading): _check_hf_backend_usable below
+        # depends on getting the real module handle back.
+        if mod == "torch" and "torch" not in sys.modules:
+            from localm.inference.backends.llamacpp import _loader
+            if _loader.native_lib_loaded():
+                from localm.debuglog import logger as _dbg
+                _dbg.debug(
+                    "doctor: skipping the torch package import - llama.cpp's "
+                    "native runtime is already loaded in this process, so "
+                    "`import torch` here is the known-doomed DLL-identity "
+                    "conflict (see VramSizingMixin._free_total_vram_bytes's "
+                    "docstring)")
+                modules[mod] = None
+                console.print(f"  {_WARN_SYM}  {label} - skipped (native GPU "
+                              "runtime already loaded in this process)")
+                continue
         try:
             m = importlib.import_module(mod)
             modules[mod] = m
@@ -503,6 +577,20 @@ def _check_packages() -> dict:
             modules[mod] = None
             sym     = _WARN_SYM if (mod, label) in optional_pkgs else _FAIL_SYM
             ver_str = " - not installed"
+        except Exception as e:
+            # ONLY torch has the DLL-identity conflict above; any other package
+            # raising something other than ImportError is a genuinely new,
+            # un-root-caused failure mode that doctor() must not silently mask.
+            if mod != "torch":
+                raise
+            modules[mod] = None
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("doctor: torch import failed with %s (not a plain "
+                       "ImportError, possibly the DLL-identity conflict "
+                       "reached some other way); reported as unavailable for "
+                       "this run", type(e).__name__)
+            sym = _WARN_SYM
+            ver_str = f" - import failed ({type(e).__name__})"
         console.print(f"  {sym}  {label}{ver_str}")
     return modules
 
