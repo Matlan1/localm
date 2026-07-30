@@ -306,11 +306,20 @@ def test_tokenizers_not_installed_defers_to_the_transformers_error(monkeypatch, 
 # ---------------------------------------------------------------------------
 
 def test_hfbackend_load_refuses_dangerous_tokenizer_before_require_torch(tmp_path):
-    """The real integration point. Must fail via THIS gate - proven by the
-    console never reaching the "loading processor" line _require_torch's
-    caller prints - not merely fail somewhere inside load() for some other
-    reason (a torch/weights error would look like success for this test's
-    purposes otherwise)."""
+    """The real integration point. Must fail via THIS gate - proven by no
+    isolated worker process ever having been spawned - not merely fail
+    somewhere inside load() for some other reason (a torch/weights error
+    would look like success for this test's purposes otherwise).
+
+    Updated for HFBackend's subprocess isolation (thread-pool-exhaustion
+    fix, 2026-07-30): the class is now a thin parent-side proxy - the real
+    tokenizer/model objects this test used to inspect directly
+    (backend._tokenizer / backend._model) live inside an isolated child
+    process now, not on this object at all. backend._runner is None is the
+    direct analog: it is only ever set (to a real HFRunner, which spawns
+    the child) AFTER both pre-flight gates - _check_custom_code_allowed and
+    this one - pass. See backends/hf.py's load() and backends/_hf_worker.py
+    for the isolation this test now has to account for."""
     pytest.importorskip("transformers", exc_type=ImportError)
     from localm.inference.backends.hf import HFBackend
 
@@ -318,5 +327,4 @@ def test_hfbackend_load_refuses_dangerous_tokenizer_before_require_torch(tmp_pat
     backend = HFBackend(str(d))
     with pytest.raises(RuntimeError, match="Oniguruma safety probe"):
         backend.load()
-    assert backend._tokenizer is None, "tokenizer must never have been set"
-    assert backend._model is None, "model load must never have been attempted"
+    assert backend._runner is None, "no worker process must ever have been spawned"
