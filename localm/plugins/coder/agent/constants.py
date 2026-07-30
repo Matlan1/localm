@@ -17,15 +17,16 @@ from __future__ import annotations
 # come from ToolResult.changes (post-call, its own dry_run-driven sweep), not
 # from this set membership alone - see _refresh_map_for_tool's *result* param.
 #
-# run_shell is a KNOWN NO-OP here, kept rather than removed so the gap stays
-# visible instead of looking merely forgotten: it has no `path`-shaped arg at
-# all (a `command` string only), so _call_target_paths() always returns []
-# for it and the refresh never fires. A shell command can write anything, so
-# fixing this needs the SAME git-diff-based detection already gated off the
-# live path elsewhere (persistence._detect_shell_changes, wired only to
-# episodic close-time reflection - see dev-notes/coder-changed-files-
-# tracking-gaps-2026-07-29.md item 2, deliberately deferred there: the same
-# blocking-subprocess-on-the-event-loop risk applies here, not a quick fix).
+# run_shell has no `path`-shaped arg at all (a `command` string only), so
+# _call_target_paths() always returns [] for it - a per-file refresh_file()
+# call ahead of time is not possible, unlike every other tool in this set.
+# _refresh_map_for_tool special-cases it instead: mark the whole map dirty
+# (ProjectMap.mark_dirty) and let the next read reconcile it against the
+# filesystem with a bounded stat-diff (ProjectMap._rescan_if_dirty, triggered
+# from context._build_messages once per turn). No git and no subprocess, so
+# the blocking-subprocess-on-the-event-loop risk that deferred the OTHER
+# git-diff-based detection elsewhere (persistence._detect_shell_changes,
+# wired only to episodic close-time reflection) does not apply to this path.
 _MUTATING_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "run_shell",
     "patch_file", "edit_notebook_cell", "search_replace",
