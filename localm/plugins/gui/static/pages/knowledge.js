@@ -33,7 +33,7 @@ export async function refreshKnowledgePage() {
   refreshKbSelect();   // keep the chat drawer selector in sync
   // The embedding status is also what a row needs to tell "never embedded"
   // apart from "embedding is ready now but THIS collection predates it / went
-  // stale" - only the latter is actionable via reindex, so fetch it once here
+  // stale" - only the latter is actionable via re-embed, so fetch it once here
   // and pass it into each row instead of re-deriving it from DOM text.
   const embedStatus = await refreshEmbeddingPanel();
   const embedReady = !!(embedStatus && embedStatus.status === "ready");
@@ -66,13 +66,13 @@ export async function refreshKnowledgePage() {
     const tr = el("tr");
     // The embedding model being ready is a GLOBAL fact; a collection only picks
     // it up when (re)indexed. BM25-while-ready means this specific collection
-    // predates the model (or its vector index went stale) and reindexing would
+    // predates the model (or its vector index went stale) and re-embedding would
     // fix it - worth flagging inline, not just in the info-modal warning.
     // Gated on n_chunks > 0: an EMPTY collection also reports has_vectors=false
     // (there is nothing to have vectors for), which is not the same situation as
     // "was indexed without embeddings" - a freshly created, never-indexed
-    // collection has nothing to reindex and must not show the badge.
-    const needsReindex = c.n_chunks > 0 && !c.has_vectors && embedReady;
+    // collection has nothing to re-embed and must not show the badge.
+    const needsReembed = c.n_chunks > 0 && !c.has_vectors && embedReady;
 
     // Drag-and-drop upload directly onto the collection row
     tr.addEventListener("dragover", (e) => {
@@ -98,11 +98,11 @@ export async function refreshKnowledgePage() {
     tr.appendChild(el("td", "mono", String(c.n_docs)));
     tr.appendChild(el("td", "mono", String(c.n_chunks)));
     const retrievalTd = el("td", "mono", c.has_vectors ? "hybrid" : "BM25");
-    if (needsReindex) {
-      const badge = el("span", "retrieval-badge", "reindex needed");
+    if (needsReembed) {
+      const badge = el("span", "retrieval-badge", "re-embed needed");
       badge.title = "The embedding model is ready, but this collection was "
         + "indexed before that (or its vector index went stale), so it is "
-        + "BM25/lexical-only until you click 'reindex'."
+        + "BM25/lexical-only until you click 're-embed'."
         + (c.vector_degrade_reason ? " (" + c.vector_degrade_reason + ")" : "");
       retrievalTd.appendChild(badge);
     }
@@ -114,15 +114,16 @@ export async function refreshKnowledgePage() {
     add.onclick = () => kbAddDocs(c.name);
     actions.appendChild(add);
 
-    const reindex = el("button", needsReindex ? "warn" : "",
-      needsReindex ? "reindex needed" : "reindex");
-    reindex.title = "Re-embed every document already in this collection - use "
-      + "this after switching the embedding model in Settings, or any time "
-      + "this shows BM25 for a collection you expected to be hybrid. Just "
-      + "clicking 'add docs' again does NOT do this: unchanged files are "
-      + "skipped, not re-embedded.";
-    reindex.onclick = () => kbReindexCollection(c.name);
-    actions.appendChild(reindex);
+    const reembed = el("button", needsReembed ? "warn" : "",
+      needsReembed ? "re-embed needed" : "re-embed");
+    reembed.title = "Recompute this collection's vectors with the embedding "
+      + "model currently set in Settings, from the text already stored here - "
+      + "no original files needed, uploads included, nothing deleted. Use this "
+      + "after switching the embedding model, or any time this shows BM25 for a "
+      + "collection you expected to be hybrid. Clicking 'add docs' again does "
+      + "NOT do this: unchanged files are skipped, not re-embedded.";
+    reembed.onclick = () => kbReembedCollection(c.name);
+    actions.appendChild(reembed);
 
     const search = el("button", "", "search");
     search.onclick = () => kbSearchModal(c.name);
@@ -184,13 +185,13 @@ export async function refreshEmbeddingPanel() {
   if (st.status === "ready") {
     // "Ready" only covers indexing FROM NOW ON: it says nothing about a
     // collection indexed before this model was set up, or one whose vector
-    // index went stale - those stay BM25 until reindexed (flagged per-row
+    // index went stale - those stay BM25 until re-embedded (flagged per-row
     // below), so this must not read as a blanket "you're all set".
     statusEl.textContent = st.dim
       ? `Ready: ${st.model} (${st.dim}-dim) - semantic search is on for new `
-        + `indexing. Existing collections may need "reindex" below.`
+        + `indexing. Existing collections may need "re-embed" below.`
       : `Ready: ${st.model} is installed - semantic search is on for new `
-        + `indexing. Existing collections may need "reindex" below.`;
+        + `indexing. Existing collections may need "re-embed" below.`;
     statusEl.style.color = "var(--green)";
   } else if (st.status === "unknown") {
     // The owner pointed embedding_model at a filesystem path. That path (and
@@ -398,75 +399,76 @@ export async function kbRunAdd(name, paths, embed, log, retried = false, reindex
   }
 }
 
-/** Re-embed every document already indexed in *name*, e.g. after switching
- *  or first setting up the embedding model. Unlike kbAddDocs (which needs the
- *  user to browse to the folder again, and then skips unchanged files),
- *  this reuses the collection's own known document list and forces the
- *  server to reindex regardless of whether the files look unchanged - the
- *  documents() list (not upload: entries) is exactly what "add its docs
- *  again" should have meant. */
-export async function kbReindexCollection(name) {
-  let data;
-  try {
-    const r = await fetch("/api/rag/collections/" + encodeURIComponent(name),
-                          { headers: authHeaders() });
-    data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
-  } catch (e) {
-    toast("Could not load collection: " + e.message, true);
-    return;
-  }
-  const docs = data.docs || [];
-  const paths = docs.filter((d) => !d.uploaded).map((d) => d.path);
-  const uploadedCount = docs.length - paths.length;
-  if (!paths.length) {
-    toast(uploadedCount
-      ? "Nothing to reindex - every document here was uploaded from a "
-        + "device and can't be re-read from the server disk. Re-upload "
-        + "them to refresh their embeddings."
-      : "This collection has no documents yet.", true);
-    return;
-  }
-  const embed = $("kb-embed") ? $("kb-embed").checked : true;
-  if (!(await kbConfirmReindex(name, paths.length, uploadedCount, embed))) return;
+/** Recompute this collection's vectors with the CURRENT embedding model, from
+ *  the chunk text already stored in the collection.
+ *
+ *  This calls POST /api/rag/collections/<name>/reembed, and it MUST. The
+ *  obvious-looking alternative - re-adding the collection's own documents with
+ *  force - is what this used to do, and it cannot work for the case the button
+ *  exists for. Re-adding re-reads the ORIGINAL FILES, which means:
+ *
+ *    - it trips the very dimension guard the user is trying to get past (the
+ *      server's own reembed docstring says so explicitly);
+ *    - it silently EXCLUDED every uploaded document (`!d.uploaded`), because
+ *      those have no path on the server disk - so a collection built by
+ *      uploading re-embedded nothing at all, and a mixed one was left with
+ *      some vectors at the old dimension and some at the new;
+ *    - it needed the source folder to still exist and still hold those files.
+ *
+ *  The endpoint has none of those constraints: it works from chunks.jsonl, so
+ *  no source file has to exist, uploads are included like anything else, and
+ *  an interrupted run leaves the previous index intact. The error the user gets
+ *  on a dimension mismatch names this button BY NAME ("or use 'Re-embed' on the
+ *  Knowledge page"), so it has to be the thing that actually recovers them.
+ *
+ *  There is no `embed` toggle here on purpose: re-embedding without computing
+ *  embeddings is not an operation. */
+export async function kbReembedCollection(name) {
+  if (!(await kbConfirmReembed(name))) return;
   const log = $("kb-log");
   log.style.display = "block";
-  log.textContent = `Re-indexing ${paths.length} document(s) in '${name}'`
-    + (embed ? "" : " (BM25 only)") + "…\n";
-  if (uploadedCount) {
-    log.textContent += `Skipping ${uploadedCount} uploaded document(s) - `
-      + `re-upload them if you need to refresh those too.\n`;
-  }
-  const BATCH = 50;
-  const batches = [];
-  for (let i = 0; i < paths.length; i += BATCH) batches.push(paths.slice(i, i + BATCH));
-  for (let b = 0; b < batches.length; b++) {
-    if (batches.length > 1)
-      log.textContent += `Batch ${b + 1} / ${batches.length} (${batches[b].length} docs)…\n`;
-    await kbRunAdd(name, batches[b], embed, log, false, /* reindex */ true);
+  log.textContent = `Re-embedding '${name}' with the current embedding model…\n`;
+  try {
+    const r = await fetch(
+      `/api/rag/collections/${encodeURIComponent(name)}/reembed`,
+      { method: "POST", headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    toast(end.status === "done" ? "Re-embedding finished"
+                                : "Re-embedding " + end.status,
+          end.status !== "done");
+    refreshKnowledgePage();
+  } catch (e) {
+    log.textContent += "failed: " + e.message + "\n";
+    toast("Re-embedding failed: " + e.message, true);
   }
 }
 
-/** In-page confirm before a full reindex (which re-embeds every document and
- *  may take a while on a large collection). */
-export function kbConfirmReindex(name, count, uploadedCount, embed) {
+/** In-page confirm before a full re-embed (minutes of model work on a large
+ *  collection). No document count and no uploaded-document caveat: the server
+ *  works from stored chunk text, so every document is covered including
+ *  uploads, and nothing is skipped. */
+export function kbConfirmReembed(name) {
   return new Promise((resolve) => {
-    openModal(`Re-index '${name}'?`, (body) => {
+    openModal(`Re-embed '${name}'?`, (body) => {
       body.appendChild(el("p", "",
-        `This re-embeds all ${count} document(s) currently indexed in `
-        + `'${name}'` + (embed ? "" : " (lexical/BM25 only - check "
-        + "'Compute embeddings' above first if you want semantic search)")
-        + `. Use this after switching the embedding model in Settings, or `
-        + `any time this collection shows BM25 when you expected hybrid.`));
-      if (uploadedCount) {
-        body.appendChild(el("p", "sub",
-          `${uploadedCount} uploaded document(s) can't be re-read from the `
-          + `server disk and will be skipped.`));
-      }
+        `This recomputes every vector in '${name}' with the embedding model `
+        + `currently set in Settings, using the text already stored in the `
+        + `collection. Nothing is deleted, no original files are needed, and `
+        + `uploaded documents are included.`));
+      body.appendChild(el("p", "sub",
+        `Use this after switching the embedding model, or any time this `
+        + `collection shows BM25 when you expected hybrid. On a large `
+        + `collection it can take several minutes; the previous index stays `
+        + `in place until the new one is complete.`));
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
-      const ok = el("button", "btn-secondary btn-primary", "Re-index");
+      const ok = el("button", "btn-secondary btn-primary", "Re-embed");
       ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
       row.append(cancel, ok);
       body.appendChild(row);
