@@ -626,3 +626,45 @@ def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
     if pos < len(text):
         parts.append(text[pos:])
     return parts
+
+
+def strip_tool_calls(text: str, tool_names: Optional[set] = None) -> tuple[list[ToolCall], str, int]:
+    """Split *text* into every tool call parse_tool_calls recognises (all 5
+    shapes) and the prose around them, plus a count of malformed leftovers.
+
+    Returns ``(calls, clean_text, malformed_count)``. ``calls`` is exactly what
+    :func:`parse_tool_calls` returns, so passing *tool_names* opts into the same
+    name-gated fenced/bare-JSON forms it does; ``clean_text`` is *text* with every
+    one of those spans removed via :func:`split_response`, the same two-value shape
+    :func:`strip_xml_tool_calls` has always returned for the XML-only case, so both
+    existing call sites (the session transcript and the resume recap) only needed a
+    name to change, not their control flow.
+
+    ``malformed_count`` exists because parse_tool_calls only returns a call when the
+    body actually parsed as JSON. A response that hits the tool-call repair path in
+    agent/loop.py's ``_handle_no_tool_calls`` (a ``<tool_call>`` wrapper whose JSON
+    body is malformed, a real and not rare local-model failure mode) is persisted to
+    history via ``self._add_assistant(response)`` before the repair succeeds, so
+    persisted history can legitimately contain a tagged block that never parses.
+    Dropping that block silently would trade the raw-text leak this function exists
+    to fix for a different one, so after every parseable call is removed, a second
+    pass with strip_xml_tool_calls (a pure delimiter match, no JSON validation)
+    clears out whatever ``<tool_call>...</tool_call>`` blocks are still in the
+    remainder and reports how many there were, so a caller can render a generic
+    placeholder instead of raw tag soup - the same thing the session transcript
+    already did for this case before this function existed.
+
+    That second pass only ever understood the XML wrapper, same as
+    strip_xml_tool_calls always has: a malformed marker-variant (``<|tool_call>...``)
+    or a malformed explicit fence that reaches history through the same repair-path
+    gap is NOT cleaned up here and still surfaces raw, exactly as it does today. That
+    is a pre-existing gap in strip_xml_tool_calls, not a new one this function opens;
+    closing it for every shape is separate work from what this function targets (the
+    ```json fence and the bare top-level JSON object - the two forms that used to
+    leak raw and unsummarised even though the agent's own live loop already
+    understood and executed them).
+    """
+    calls = parse_tool_calls(text, tool_names=tool_names)
+    clean = "".join(s for s in split_response(text, calls) if isinstance(s, str))
+    leftover, clean = strip_xml_tool_calls(clean)
+    return calls, clean, len(leftover)

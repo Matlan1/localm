@@ -182,6 +182,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   not read.** If one call in a reply parsed and another did not, the broken one
   was dropped in silence: it never ran, the model was never told, and nothing
   recorded it. It is reported back now, so the model can send it again.
+- **A coder session's saved transcript or resume view no longer shows a tool call
+  as raw JSON.** When a reply wrote its tool call as a fenced ```` ```json ````
+  block or a bare JSON object instead of the usual wrapped form, the full-mode
+  `.localcoder/sessions` transcript and the GUI's "resumed your last session"
+  recap did not recognise it, so the raw JSON (fence markers and all) showed up
+  verbatim instead of being summarised or cleanly removed, even though the call
+  itself ran normally. Both places now recognise every form the coder itself
+  understands.
 - **Resuming a coder session no longer loses track of what it already changed.**
   After a server restart or a GUI reconnect, the list of files changed so far in
   that session came back empty, so both undo and the changed-files view were

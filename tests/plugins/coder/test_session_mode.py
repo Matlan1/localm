@@ -273,6 +273,83 @@ class TestAgentClose:
         assert "write_file" in content
         assert "out.py" in content
 
+    def test_full_markdown_summarises_a_fenced_json_tool_call(self, tmp_path):
+        """```json fences are one of the 5 shapes parse_tool_calls recognises
+        (name-gated); before this fix the raw fence markers and JSON leaked
+        verbatim into the transcript instead of being summarised."""
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "assistant", "content": (
+                'Reading it now.\n'
+                '```json\n{"name": "read_file", "args": {"path": "a.py"}}\n```'
+            )},
+        ]
+        agent._turns = 1
+
+        result = agent.close()
+        content = result.read_text()
+        assert "Reading it now." in content
+        assert "read_file" in content
+        assert "a.py" in content
+        assert "```" not in content
+        assert '"name"' not in content
+
+    def test_full_markdown_summarises_a_bare_json_tool_call(self, tmp_path):
+        """A bare top-level {"name":...,"args":...} object with no wrapper at
+        all is the other shape that used to leak raw JSON into the transcript."""
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "assistant", "content": (
+                '{"name": "write_file", "args": {"path": "out.py", "content": "x"}}'
+            )},
+        ]
+        agent._turns = 1
+
+        result = agent.close()
+        content = result.read_text()
+        assert "write_file" in content
+        assert "out.py" in content
+        assert '"name"' not in content
+        assert '"args"' not in content
+
+    def test_full_markdown_shows_placeholder_for_a_malformed_tool_call(self, tmp_path):
+        """A <tool_call> block whose JSON body never parsed (loop.py's repair
+        path persists the raw attempt to history before the repair succeeds)
+        must still render the same generic placeholder it always has, not
+        leak raw XML."""
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "assistant", "content": (
+                'Let me check.\n<tool_call>\n'
+                '{"name": "read_file", "args": {"path": "a.py"'
+                '\n</tool_call>'
+            )},
+        ]
+        agent._turns = 1
+
+        result = agent.close()
+        content = result.read_text()
+        assert "Let me check." in content
+        assert "(tool call)" in content
+        assert "<tool_call>" not in content
+
+    def test_full_markdown_header_renders_for_a_purely_malformed_tool_call(self, tmp_path):
+        """No prose survives at all, only the malformed block - the header
+        line must still appear (via `calls or malformed`), matching what the
+        old strip_xml_tool_calls-only code path did for the same shape."""
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "assistant", "content": (
+                '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"\n</tool_call>'
+            )},
+        ]
+        agent._turns = 1
+
+        result = agent.close()
+        content = result.read_text()
+        assert f"**{agent.name}**:" in content
+        assert "(tool call)" in content
+
     def test_privacy_no_files_created(self, tmp_path):
         agent = _make_agent(tmp_path, SessionMode.PRIVACY)
         agent._messages = [{"role": "user", "content": "secret message"}]

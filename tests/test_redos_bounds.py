@@ -45,7 +45,7 @@ from localm.plugins.coder.parser import (
     _iter_marker_variant_calls,
     _iter_fenced_blocks, _iter_xml_tool_calls, _pair_delimited, _parse_gemma_args,
     _try_parse_body,
-    parse_tool_calls, strip_xml_tool_calls)
+    parse_tool_calls, strip_tool_calls, strip_xml_tool_calls)
 from localm.textguard import _FRAME_RE, neutralise
 
 # Generous on purpose: see the module docstring. The smallest pre-fix baseline
@@ -500,7 +500,11 @@ def test_multiple_fenced_blocks_are_all_found():
 def test_session_transcript_uses_the_parser_splitter():
     """session.py must not carry its own copy of the tool_call regex - that
     duplicate was the reason a poisoned response re-hung the transcript export
-    forever after, and two copies drift."""
+    forever after, and two copies drift. The primary splitter moved from
+    strip_xml_tool_calls to strip_tool_calls (the superset that also
+    recognises the fenced and bare-JSON call shapes), so the identity check
+    below moved with it; the structural guards against a private regex are
+    unchanged."""
     import pathlib
 
     from localm.plugins.coder import parser as parser_mod
@@ -510,7 +514,52 @@ def test_session_transcript_uses_the_parser_splitter():
     assert "_TC_RE" not in src, "session.py still defines a private tool_call regex"
     assert "re.compile" not in src and "_re.compile" not in src, \
         "session.py compiled a regex again"
-    assert session_mod.strip_xml_tool_calls is parser_mod.strip_xml_tool_calls
+    assert session_mod.strip_tool_calls is parser_mod.strip_tool_calls
+
+
+def test_strip_tool_calls_recognises_a_fenced_json_call_with_tool_names():
+    """The shape strip_xml_tool_calls never understood: a ```json fence
+    naming a real tool. Name-gated, like parse_tool_calls itself - absent
+    tool_names it must NOT be treated as a call."""
+    text = 'Reading it now.\n```json\n{"name": "read_file", "args": {"path": "a.py"}}\n```'
+    calls, clean, malformed = strip_tool_calls(text, tool_names={"read_file"})
+    assert len(calls) == 1
+    assert calls[0].name == "read_file"
+    assert clean.strip() == "Reading it now."
+    assert malformed == 0
+
+    calls2, clean2, malformed2 = strip_tool_calls(text)
+    assert calls2 == []
+    assert malformed2 == 0
+    assert "```json" in clean2
+
+
+def test_strip_tool_calls_recognises_a_bare_json_call_with_tool_names():
+    text = '{"name": "write_file", "args": {"path": "out.py", "content": "x"}}'
+    calls, clean, malformed = strip_tool_calls(text, tool_names={"write_file"})
+    assert len(calls) == 1
+    assert calls[0].name == "write_file"
+    assert clean == ""
+    assert malformed == 0
+
+
+def test_strip_tool_calls_counts_a_malformed_xml_block_and_still_cleans_it():
+    text = 'Let me check.\n<tool_call>\n{"name": "read_file", "args": {"path": "a.py"\n</tool_call>'
+    calls, clean, malformed = strip_tool_calls(text, tool_names={"read_file"})
+    assert calls == []
+    assert malformed == 1
+    assert clean.strip() == "Let me check."
+    assert "<tool_call>" not in clean
+
+
+def test_strip_tool_calls_matches_strip_xml_tool_calls_on_xml_only_text():
+    """Parity check for the case both functions have always handled."""
+    text = '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>'
+    xml_calls, xml_clean = strip_xml_tool_calls(text)
+    calls, clean, malformed = strip_tool_calls(text)
+    assert len(calls) == 1 and calls[0].name == "read_file"
+    assert clean == xml_clean
+    assert malformed == 0
 
 
 @pytest.mark.parametrize("content, calls, clean", [
