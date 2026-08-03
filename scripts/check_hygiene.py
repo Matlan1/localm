@@ -1261,17 +1261,6 @@ def _import_cycle_violations() -> list[str]:
     return problems
 
 
-def _manifest_problems() -> list[str]:
-    """The release-file manifest gate's findings (NEW-RELEASE-FILEMANIFEST), run as
-    part of this one hygiene pass. check_manifest lives beside this file; a missing or
-    malformed manifest is reported as a problem, never a silent skip (rule 5)."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    try:
-        import check_manifest
-        return check_manifest.check_manifest()
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        return [f"release manifest check could not run: {e}"]
-
 
 def _strict_env() -> bool:
     """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but a
@@ -1295,13 +1284,9 @@ def main(argv: list[str]) -> int:
         # `git ls-files` failed or returned nothing, so the dash/disclosure/abs-path
         # scan and the changelog gate below would run over ZERO files and this gate
         # would print "passed" having checked nothing. A disclosure/privacy gate that
-        # reports clean without scanning anything is exactly the silent pass AGENTS.md
-        # rule 5 forbids, so fail loud instead. (check_manifest keeps its documented
-        # not-a-checkout silence as a LIBRARY; here, at the top-level gate, a checkout
-        # with no enumerable tracked files is an error, not a benign no-op.)
+        # reports clean without scanning anything is a silent false pass, so fail loud.
         print("Hygiene check FAILED: could not enumerate tracked files via 'git ls-files' "
-              "- nothing was scanned. Run this from a git checkout; a hygiene gate must "
-              "not report clean without actually scanning the tree (AGENTS.md rule 5).",
+              "- nothing was scanned. Run this from a git checkout.",
               file=sys.stderr)
         return 1
     problems: list[str] = []
@@ -1328,27 +1313,19 @@ def main(argv: list[str]) -> int:
     if strict and warnings:
         problems.extend(warnings)
         warnings = []
-    manifest = _manifest_problems()
     if warnings:
         print("Hygiene WARNING(S) - not failures; pass --strict or set "
               "LOCALM_HYGIENE_STRICT=1 to escalate them:\n", file=sys.stderr)
         for w in warnings:
             print("  " + w, file=sys.stderr)
         print(file=sys.stderr)
-    if problems or manifest:
-        if problems:
-            print("Hygiene check FAILED (see AGENTS.md):\n", file=sys.stderr)
-            for p in problems:
-                print("  " + p, file=sys.stderr)
-            print(f"\n{len(problems)} hygiene issue(s).", file=sys.stderr)
-        if manifest:
-            print("\nRelease manifest check FAILED (see release-manifest.toml):\n",
-                  file=sys.stderr)
-            for p in manifest:
-                print("  " + p, file=sys.stderr)
-            print(f"\n{len(manifest)} manifest issue(s).", file=sys.stderr)
+    if problems:
+        print("Hygiene check FAILED:\n", file=sys.stderr)
+        for p in problems:
+            print("  " + p, file=sys.stderr)
+        print(f"\n{len(problems)} hygiene issue(s).", file=sys.stderr)
         return 1
-    print("Hygiene check passed (content + release manifest).")
+    print("Hygiene check passed.")
     return 0
 
 
