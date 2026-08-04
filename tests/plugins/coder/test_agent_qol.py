@@ -500,3 +500,53 @@ class TestPatchModeGuard:
         result = agent._execute_tool(call, interactive=False)
         assert not result.ok and "[patch-mode]" in result.output
         assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
+# ---------------------------------------------------------------------------
+#  Tool-result duration (#962)
+# ---------------------------------------------------------------------------
+
+class TestToolResultDuration:
+    """The GUI used to guess a tool's execution time client-side, between two
+    render events (coder.js buildToolCard's card.dataset.t0) - it read ~0.0s
+    whenever both arrived in the same tick, which was most of the time. The
+    fix times the real invocation server-side and puts it on the emitted
+    "tool_result" event. A test asserting only "the field exists" would pass
+    on a hardcoded 0.0 just as easily as on a real measurement, so this pins
+    the number against a tool that deliberately takes a known amount of time."""
+
+    def test_duration_reflects_real_tool_time(self, tmp_path):
+        def slow(cwd, **kw):
+            time.sleep(0.3)
+            return ToolResult.success("done")
+
+        fake = {"slow_probe": ToolDef("slow_probe", slow, "slow", {},
+                                       destructive=False)}
+        events = []
+        agent = _make_agent(tmp_path, on_event=events.append)
+        call = _make_call("slow_probe")
+        with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", fake):
+            result = agent._execute_tool(call, interactive=False)
+        assert result.ok
+
+        tool_results = [e for e in events if e.get("type") == "tool_result"]
+        assert len(tool_results) == 1
+        duration_s = tool_results[0]["duration_s"]
+        # Not the hang-test's full second - just enough above the client-side
+        # false floor (two same-tick renders read as ~0.0s) to prove this is a
+        # real measurement of the 0.3s sleep, not a stub value.
+        assert duration_s >= 0.25
+
+    def test_duration_is_zero_when_denied_before_execution(self, tmp_path):
+        """A tool blocked by network policy never reaches tool_def.fn - it
+        should report 0.0s, not omit the field (an absent field and a real
+        instant tool would be indistinguishable to the GUI otherwise)."""
+        events = []
+        agent = _make_agent(tmp_path, on_event=events.append)
+        call = _make_call("fetch_url", url="http://example.invalid/x")
+        with patch("localm.netpolicy.network_mode", return_value="off"):
+            result = agent._execute_tool(call, interactive=False)
+        assert not result.ok
+        tool_results = [e for e in events if e.get("type") == "tool_result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["duration_s"] == 0.0
