@@ -145,6 +145,99 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Cold start: _hb_monotonic is None until the heartbeat task's own first tick
+# (deliberately NOT seeded at module-import time). A request answered before
+# that first tick used to report loop_lag as elapsed-since-import - a number
+# that GROWS WITH WALL-CLOCK TIME regardless of what the loop is doing,
+# surviving in the one window the #955/#950 fix below never exercised (a
+# fresh, never-yet-ticked heartbeat). Measured live during a real model load:
+# a /health check read loop_lag=13.50s, and a later request in that same
+# still-cold-started run read 71.11s - see dev-notes/restart-loop-lag-
+# investigation-2026-08-04.md for the full trace.
+# --------------------------------------------------------------------------- #
+
+def test_loop_lag_seconds_is_zero_before_the_first_heartbeat_tick(monkeypatch):
+    from localm.inference import http_server as hs
+
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    # Even with a lot of wall-clock time notionally "elapsed" (no seed to
+    # measure against), the cold-start reading must stay 0.0 - never a
+    # number that grows just because time.monotonic() advances.
+    for now in (0.0, 1_000_000.0, 1_000_071.11):
+        monkeypatch.setattr(hs.time, "monotonic", lambda now=now: now)
+        assert hs._loop_lag_seconds() == 0.0
+
+
+def test_watchdog_skips_the_check_before_the_first_heartbeat_tick(tmp_path, monkeypatch):
+    """The watchdog thread must not crash (TypeError subtracting None) or
+    fabricate a stall dump against a baseline that was never real."""
+    from localm.inference import http_server as hs
+    trace = tmp_path / "hang.log"
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    stop, thread = hs._start_hang_watchdog(
+        threshold=0.05, trace_path=trace, poll=0.05)
+    try:
+        time.sleep(0.3)   # several polls' worth, all with _hb_monotonic still None
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive(), "watchdog thread died instead of skipping cleanly"
+    assert not trace.exists(), "must not dump against a fabricated cold-start baseline"
+
+
+def test_watchdog_resumes_normal_checking_once_ticked_after_a_cold_start(tmp_path, monkeypatch):
+    """Once _hb_monotonic transitions from None to a real value (the
+    heartbeat's first tick), the watchdog must go back to detecting a
+    genuine stall normally - the cold-start skip must not become permanent."""
+    from localm.inference import http_server as hs
+    trace = tmp_path / "hang.log"
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    stop, thread = hs._start_hang_watchdog(
+        threshold=0.1, trace_path=trace, poll=0.05)
+    try:
+        time.sleep(0.2)   # cold, skipped
+        # The heartbeat's first tick lands, then immediately goes stale -
+        # the exact shape of a real stall right after startup.
+        monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic() - 1.0)
+        time.sleep(0.3)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+    text = trace.read_text(encoding="utf-8", errors="replace")
+    assert "LOCALM HANG WATCHDOG" in text, text
+
+
+@pytest.mark.anyio
+async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monkeypatch):
+    """End-to-end with the REAL heartbeat coroutine (not a manually-set
+    value): force a genuinely cold _hb_monotonic (simulating a fresh module
+    import, since the module-level global otherwise persists real values
+    across earlier tests in this same process), confirm loop_lag reads 0.0
+    while cold, then confirm it goes back to reporting real scheduling delay
+    once the coroutine's first tick lands - the cold-start handling must not
+    leak into or replace the steady-state behavior #955/#950 already fixed."""
+    from localm.inference import http_server as hs
+
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    assert hs._loop_lag_seconds() == 0.0, "must read 0.0 while genuinely cold"
+
+    hb = asyncio.create_task(hs._hang_heartbeat_loop())
+    try:
+        deadline = time.monotonic() + 3.0
+        while hs._hb_monotonic is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert hs._hb_monotonic is not None, "heartbeat task never ticked"
+        # Now a real reading, same as the steady-state tests below.
+        assert hs._loop_lag_seconds() == pytest.approx(0.0, abs=0.5)
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except asyncio.CancelledError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # GitHub #955/#950: loop_lag telemetry was not lag - it was time-since-last-
 # heartbeat-tick, which saws 0..1s on a perfectly healthy loop for no reason
 # other than where "now" falls in the heartbeat's own cycle. _loop_lag_seconds()
