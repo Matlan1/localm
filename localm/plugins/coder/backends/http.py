@@ -26,6 +26,24 @@ _RETRY_STATUSES = {429, 500, 502, 503, 529}
 _MAX_RETRIES = 4
 _BACKOFF_BASE_S = 2.0
 
+# 503 gets its OWN, much smaller retry budget than the rest of
+# _RETRY_STATUSES (#964). Unlike 429/500/502/529 (cloud rate-limit/overload
+# signals genuinely worth a real exponential backoff), a local ``localm
+# serve``'s 503 has several distinct causes with very different retry value:
+# some are fast-resolving and worth a retry ("Model load was superseded by a
+# newer request" - http_server.py, or "No engine initialised" during
+# startup), while others are a DETERMINISTIC isolated-worker fault (a
+# grammar-check or embedding-worker crash/timeout, inference/routes/chat.py)
+# that will almost certainly recur on retry - the status code alone cannot
+# tell these apart. Before this, EVERY 503 got the full 4-retry/~30s budget,
+# so the deterministic case cost the user up to 30s of blind waiting before
+# an already-informative error message (see CoderServerError/_raise_for_
+# status above) ever reached them. One short, fixed-delay retry gives the
+# genuinely transient causes a real chance to resolve while keeping the
+# deterministic case's cost small and bounded.
+_MAX_RETRIES_503 = 1
+_RETRY_DELAY_503_S = 3.0
+
 
 class CoderAuthError(RuntimeError):
     """The inference server rejected the request for auth reasons (401/403).
@@ -35,9 +53,45 @@ class CoderAuthError(RuntimeError):
     """
 
 
+class CoderServerError(RuntimeError):
+    """A non-2xx response the server explained (a FastAPI ``{"detail": "..."}``
+    body, or plain text), folded into the message - unlike
+    ``resp.raise_for_status()``, which only ever reports the status line
+    ("503 Server Error: Service Unavailable for url: ...") and never reads the
+    body, so a server-side diagnostic (e.g. "the model worker faulted (...)")
+    never reached the user (#964)."""
+
+
+def _response_detail(resp) -> str:
+    """Best-effort server-provided detail text from *resp*, or "" if none is
+    extractable. Tries the FastAPI error shape (``{"detail": "..."}``) first,
+    then falls back to the raw body text. Never raises: this runs on an
+    already-failing response, and a parsing hiccup here must not replace a
+    real error with a confusing one. Bounded to 500 chars so a large or
+    unexpected body cannot dominate the raised message."""
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        detail = data.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()[:500]
+    try:
+        text = resp.text
+    except Exception:
+        return ""
+    if isinstance(text, str) and text.strip():
+        return text.strip()[:500]
+    return ""
+
+
 def _raise_for_status(resp) -> None:
     """Turn a 401/403 into a CoderAuthError whose message tells the user how to
-    supply an API key; otherwise behave like resp.raise_for_status()."""
+    supply an API key. Any other non-2xx response with server-provided detail
+    (see _response_detail) raises CoderServerError with that detail folded in;
+    otherwise falls back to plain resp.raise_for_status() (no detail was
+    extractable, e.g. a non-JSON, non-text response)."""
     if resp.status_code in (401, 403):
         raise CoderAuthError(
             f"Authentication failed (HTTP {resp.status_code}) for {resp.url}. "
@@ -46,26 +100,41 @@ def _raise_for_status(resp) -> None:
             "pass it with `--api-key <key>` or set the LOCALM_API_KEY environment "
             "variable."
         )
+    if resp.status_code < 400:
+        return
+    detail = _response_detail(resp)
+    if detail:
+        raise CoderServerError(
+            f"HTTP {resp.status_code} error from {resp.url}: {detail}")
     resp.raise_for_status()
 
 
 def _retry_delay(response, attempt: int) -> float:
-    """Honour Retry-After when present, else exponential backoff."""
+    """Honour Retry-After when present, else exponential backoff - except a
+    503, which always gets the short fixed delay (see _RETRY_DELAY_503_S):
+    it only ever retries once (_MAX_RETRIES_503), so there is no backoff
+    curve to compute and a fixed short wait is simplest."""
     retry_after = response.headers.get("Retry-After", "")
     if retry_after.isdigit():
         return min(float(retry_after), 120.0)
+    if response.status_code == 503:
+        return _RETRY_DELAY_503_S
     return min(_BACKOFF_BASE_S * (2 ** attempt), 60.0)
 
 
 def _post_with_retry(url: str, *, headers: dict, json_body: dict,
                      timeout: int, stream: bool = False,
                      verify=True) -> requests.Response:
-    """POST with retry on 429/5xx. Returns the first non-retryable response."""
+    """POST with retry on 429/5xx. Returns the first non-retryable response.
+
+    503 uses its own smaller budget (_MAX_RETRIES_503) than the rest of
+    _RETRY_STATUSES - see that constant's comment for why."""
     last = None
     for attempt in range(_MAX_RETRIES + 1):
         resp = requests.post(url, headers=headers, json=json_body,
                              timeout=timeout, stream=stream, verify=verify)
-        if resp.status_code not in _RETRY_STATUSES or attempt == _MAX_RETRIES:
+        max_retries = _MAX_RETRIES_503 if resp.status_code == 503 else _MAX_RETRIES
+        if resp.status_code not in _RETRY_STATUSES or attempt >= max_retries:
             return resp
         delay = _retry_delay(resp, attempt)
         resp.close()
