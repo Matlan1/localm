@@ -553,7 +553,13 @@ async def memory_consolidate(request: Request = None):
             return strip_think("".join(eng.chat_stream(
                 [{"role": "user", "content": prompt}]))).strip()
 
-        return synthesize_memory(complete, principal=principal)
+        # driving_engine pins the engine busy and touches its activity clock for
+        # the WHOLE synthesis pass, not per-completion: synthesize_memory can call
+        # complete() several times (one per candidate), and a gap between calls is
+        # exactly the window idle-unload could otherwise evict this model in.
+        from localm.inference.http_server import driving_engine
+        with driving_engine(eng):
+            return synthesize_memory(complete, principal=principal)
 
     return await _off_loop(_do_consolidate)
 
@@ -1001,7 +1007,11 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
             return strip_think("".join(
                 eng.chat_stream([{"role": "user", "content": prompt}]))).strip()
 
-        res = synthesize_memory(complete, principal=principal)
+        # See memory_consolidate's matching comment: pin for the whole pass, not
+        # per-completion, so a gap between candidates cannot be evicted into.
+        from localm.inference.http_server import driving_engine
+        with driving_engine(eng):
+            res = synthesize_memory(complete, principal=principal)
         added = res.get("added", 0)
         if added:
             logger.info("memory auto-consolidate: added %d fact(s)", added)

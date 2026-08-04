@@ -190,7 +190,12 @@ def _run_chat(job: Job, *, engine=None) -> str:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
     from localm.plugins.builtin.jobs import webtool
-    return webtool.run_chat_with_web(eng, job.prompt)
+    # Pin for the WHOLE tool-calling loop (run_chat_with_web can drive several
+    # rounds), not per-round - see _run_memory's matching comment for why a
+    # timestamp alone is not enough and the pin must span the entire task.
+    from localm.inference.http_server import driving_engine
+    with driving_engine(eng):
+        return webtool.run_chat_with_web(eng, job.prompt)
 
 
 def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
@@ -323,7 +328,14 @@ def _run_memory(job: Job, *, engine=None) -> str:
             state["empty_replies"] += 1
         return text
 
-    result = synthesize_memory(complete)
+    # Pin the engine busy and touch its activity clock for the WHOLE synthesis
+    # pass (synthesize_memory can call complete() several times), not just the
+    # instant it was resolved above - otherwise a quiet server running only this
+    # scheduled job has nothing marking the model as in-use, and idle-unload can
+    # unload it mid-run (see dev-notes/idle-unload-plugin-activity-gap-2026-08-04.md).
+    from localm.inference.http_server import driving_engine
+    with driving_engine(eng):
+        result = synthesize_memory(complete)
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
     # A contradiction to a saved (user-typed) fact is surfaced, never silently

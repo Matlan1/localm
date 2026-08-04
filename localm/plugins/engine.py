@@ -569,6 +569,20 @@ class PluginHost:
     def engine(self) -> Any:
         return self._manager.inference_engine
 
+    def driving_engine(self, engine: Any = None):
+        """Context manager: pin *engine* (or engine(), if not passed) as busy and
+        reset its idle-unload clock for the DURATION of a real generation call.
+
+        Wrap this around the actual chat_stream/complete call - never around a
+        bare engine()/inference_engine access used only to check .loaded or read
+        a name. idle-unload cannot otherwise tell a plugin genuinely driving the
+        model apart from one that merely looked at it, and a model can be
+        unloaded mid-task on a quiet server (no concurrent HTTP request) as a
+        result. See localm.inference.http_server.driving_engine for the full
+        mechanism (why active_requests, not just a timestamp, is required)."""
+        from localm.inference.http_server import driving_engine as _driving_engine
+        return _driving_engine(engine if engine is not None else self.engine())
+
     def audit(self, event: str, data: dict) -> None:
         try:
             from localm.debuglog import logger as _dbg
