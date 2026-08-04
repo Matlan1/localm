@@ -144,7 +144,12 @@
 // v92: ADR-0004 Unit B - a "Warm up now" action next to Settings' embedding_model
 // field (settings.js) plus its CSS (style.css). A stale-cached client would keep
 // serving the old settings page with no button at all.
-const CACHE = "localm-shell-v92";
+// v93: app/settings-perf.js changed - a failed chat send now parses the JSON
+// error body instead of slicing the raw text, so the user sees the server's
+// actual reason (and, for a VRAM-overflow 503, its full "Options:" list)
+// instead of truncated raw JSON markup. A stale-cached client would keep
+// showing the old sliced-and-mangled error.
+const CACHE = "localm-shell-v93";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
