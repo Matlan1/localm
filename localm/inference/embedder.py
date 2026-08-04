@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from localm import pathscrub
-from localm.debuglog import logger
+from localm.debuglog import dedup_native_stderr, logger
 from localm.inference.backends.llamacpp._sizing import VramSizingMixin
 
 # Known small embedding models, keyed by a friendly name -> (hf_repo, filename).
@@ -424,36 +424,68 @@ class GGUFEmbedder:
         # must not probe for them itself (discover.resolve_auto_split_ratios).
         _tensor_split_keepalive = apply_gpu_split(
             mp, ratios_override=gpu_split_ratios)
-        self._model = api.llama_load_model_from_file(model_path, mp)
-        if not self._model:
-            raise RuntimeError(f"failed to load embedding model: {model_path}")
-        self._vocab = api.llama_model_get_vocab(self._model)
-        self.dim = int(api.llama_model_n_embd(self._model))
-        # Read what the model declares BEFORE creating the context (a metadata
-        # read needs no context), so "auto" can honour it and so a mis-pool is
-        # reportable either way.
-        self.declared_pooling = declared_pooling_type(self._model, api)
-        self.pooling_type = _effective_pooling(pooling_type, self.declared_pooling)
-        logger.debug("embedder %s: declared pooling %s, using %s",
-                     Path(model_path).name, pooling_name(self.declared_pooling),
-                     pooling_name(self.pooling_type))
-        if self.n_ctx is None:
-            native_ctx = int(api.llama_model_n_ctx_train(self._model))
-            self.n_ctx = _resolve_embed_ctx(native_ctx)
-            logger.debug(
-                "embedder %s: native training window %d token(s), using %d",
-                Path(model_path).name, native_ctx, self.n_ctx)
-        cp = api.llama_context_default_params()
-        cp.n_ctx = self.n_ctx
-        cp.n_batch = self.n_ctx
-        cp.n_ubatch = self.n_ctx      # non-causal encode needs ubatch >= seq len
-        cp.embeddings = True
-        cp.pooling_type = self.pooling_type
-        self._ctx = api.llama_init_from_model(self._model, cp)
-        if not self._ctx:
-            api.llama_free_model(self._model)
-            self._model = None
-            raise RuntimeError("failed to create embedding context")
+        # This isolated child (see the class docstring) never suppressed or
+        # grouped its native stderr at all - unlike every load path in
+        # llamacpp/llama.py, which wraps its own equivalent calls in
+        # _quiet_stderr/dedup_native_stderr. llama_load_model_from_file's
+        # per-tensor "create_tensor"/"load_tensors" lines and
+        # llama_init_from_model's "sched_reserve"/"graph_reserve" lines went
+        # straight to whatever this child's inherited fd 2 pointed at - raw,
+        # ungrouped, and (via multiprocessing 'spawn' fd inheritance) landing
+        # directly in the shared debug log file with no timestamp/level
+        # prefix, exactly like the file always gets for the chat backend too
+        # (see debuglog.py's dedup_native_stderr docstring: the raw record is
+        # never grouped) - but with no LIVE view at all, unlike the chat
+        # backend, and no repeat-count collapsing of a chatty line (#951).
+        # One contiguous scope covers both native calls below (never
+        # re-entered per call - a model load is one-shot, not a per-token
+        # loop, so dedup_native_stderr's background-thread cost is paid once).
+        #
+        # Does NOT violate "an isolated child must never console.print" (see
+        # HFWorker's UnicodeEncodeError incident): that invariant is about
+        # rich.Console().print() specifically - a child's stdout does not
+        # inherit the parent's console encoding, and rich's default crashed on
+        # a literal unicode glyph. dedup_native_stderr never touches rich; its
+        # console stream is a plain file object opened by _stable_console_stream()
+        # with encoding="utf-8", errors="backslashreplace" (debuglog.py) -
+        # built specifically so an unencodable byte degrades to an escaped
+        # sequence instead of raising. It also does not use stdout/stdin, so it
+        # cannot corrupt this child's IPC (multiprocessing Queues, never stdio -
+        # see _embedder_runner.py's protocol docstring). This exact mechanism
+        # already runs inside GgufWorker's own isolated child today (llama.py's
+        # _generate(), PR #443) - reusing it here follows established
+        # precedent rather than introducing a new console-writing path.
+        with dedup_native_stderr():
+            self._model = api.llama_load_model_from_file(model_path, mp)
+            if not self._model:
+                raise RuntimeError(f"failed to load embedding model: {model_path}")
+            self._vocab = api.llama_model_get_vocab(self._model)
+            self.dim = int(api.llama_model_n_embd(self._model))
+            # Read what the model declares BEFORE creating the context (a metadata
+            # read needs no context), so "auto" can honour it and so a mis-pool is
+            # reportable either way.
+            self.declared_pooling = declared_pooling_type(self._model, api)
+            self.pooling_type = _effective_pooling(pooling_type, self.declared_pooling)
+            logger.debug("embedder %s: declared pooling %s, using %s",
+                         Path(model_path).name, pooling_name(self.declared_pooling),
+                         pooling_name(self.pooling_type))
+            if self.n_ctx is None:
+                native_ctx = int(api.llama_model_n_ctx_train(self._model))
+                self.n_ctx = _resolve_embed_ctx(native_ctx)
+                logger.debug(
+                    "embedder %s: native training window %d token(s), using %d",
+                    Path(model_path).name, native_ctx, self.n_ctx)
+            cp = api.llama_context_default_params()
+            cp.n_ctx = self.n_ctx
+            cp.n_batch = self.n_ctx
+            cp.n_ubatch = self.n_ctx      # non-causal encode needs ubatch >= seq len
+            cp.embeddings = True
+            cp.pooling_type = self.pooling_type
+            self._ctx = api.llama_init_from_model(self._model, cp)
+            if not self._ctx:
+                api.llama_free_model(self._model)
+                self._model = None
+                raise RuntimeError("failed to create embedding context")
         self._mem = api.llama_get_memory(self._ctx) if api.has_memory_api() else None
 
     def _embed_one(self, text: str) -> List[float]:
