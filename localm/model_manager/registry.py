@@ -415,8 +415,11 @@ def find_sibling_mmproj(model_path) -> Optional[Path]:
     p = Path(model_path)
     if p.suffix.lower() != ".gguf" or not p.parent.is_dir():
         return None
-    by_name = {f.name: f for f in p.parent.glob("*.gguf")
-               if f.name != p.name and "mmproj" in f.name.lower()}
+    cands = [f for f in p.parent.glob("*.gguf")
+             if f.name != p.name and "mmproj" in f.name.lower()]
+    if not cands:
+        return None
+    by_name = {f.name: f for f in cands}
     picked = _pick_mmproj_candidate(p.stem, list(by_name.keys()))
     return by_name[picked] if picked else None
 
