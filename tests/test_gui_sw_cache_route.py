@@ -45,6 +45,17 @@ class TestDeterminism:
         r2 = web._sw_js_response()
         assert r1.body == r2.body
 
+    def test_etag_is_identical_across_repeated_requests(self, fake_static):
+        """The ETag is what actually gates the 304 in TestConditionalGet - a body
+        that is byte-identical across requests proves nothing about caching
+        efficiency on its own if the ETag it is hashed into varied per request
+        (e.g. from something non-deterministic sneaking into the digest). Asserted
+        explicitly and separately from body-identity so a regression here cannot
+        hide behind that other, weaker assertion."""
+        etags = {web._sw_js_response().headers.get("etag") for _ in range(3)}
+        assert len(etags) == 1
+        assert next(iter(etags))
+
 
 class TestChangeDetection:
     def test_editing_a_cacheable_file_changes_the_value(self, fake_static):
