@@ -141,7 +141,10 @@
 // into what-I-did / what-I-expected / what-happened fields (#958) - a
 // stale-cached client would keep the old single-textarea form and the new
 // fields would never reach the server.
-const CACHE = "localm-shell-v91";
+// v92: ADR-0004 Unit B - a "Warm up now" action next to Settings' embedding_model
+// field (settings.js) plus its CSS (style.css). A stale-cached client would keep
+// serving the old settings page with no button at all.
+const CACHE = "localm-shell-v92";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

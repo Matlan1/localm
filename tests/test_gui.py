@@ -447,6 +447,88 @@ def test_set_model_type_endpoint(gui_app, monkeypatch):
                            json={"model": "m1", "model_type": "bogus"}).status_code == 400
 
 
+class TestEmbeddingWarmupRoute:
+    """ADR-0004 Unit B: POST /api/embedding/warmup triggers get_embedder() from an
+    explicit user action (instead of the first real request paying the cost
+    silently), streaming coarse stage text through the same job/SSE mechanism
+    model pull already uses. Drives the REAL JobManager (attach_gui wires a real
+    one, not a mock) and the REAL SSE route end to end."""
+
+    @staticmethod
+    def _events(client, job_id):
+        r = client.get(f"/api/jobs/{job_id}/events")
+        assert r.status_code == 200, r.text
+        return [json.loads(ln[6:]) for ln in r.text.splitlines()
+               if ln.startswith("data: ")]
+
+    def test_warmup_streams_stages_and_reports_ready(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        from localm.inference import embedder as emb
+        monkeypatch.setattr(emb, "loaded_dim", lambda: None)
+
+        def _fake_get_embedder(*, on_progress=None):
+            for msg in ("Resolving the embedding model...",
+                       "Loading into memory (this can take up to a minute)...",
+                       "Ready (5-dim)."):
+                if on_progress:
+                    on_progress(msg)
+            return object()
+
+        monkeypatch.setattr(emb, "get_embedder", _fake_get_embedder)
+        with TestClient(app) as client:
+            r = client.post("/api/embedding/warmup")
+            assert r.status_code == 200, r.text
+            events = self._events(client, r.json()["job_id"])
+
+        texts = [e["text"] for e in events if e.get("type") == "line"]
+        assert texts == ["Resolving the embedding model...",
+                         "Loading into memory (this can take up to a minute)...",
+                         "Ready (5-dim)."]
+        assert events[-1] == {"type": "end", "status": "done",
+                              "returncode": None, "result": None}
+
+    def test_warmup_already_loaded_reports_instantly_without_reloading(
+            self, gui_app, monkeypatch):
+        """An already-warm embedder must not be dropped and reloaded just because
+        the user clicked the button again - that would be wasteful and could
+        stall a concurrent chat/RAG call that is using it right now."""
+        app, _ = gui_app
+        from localm.inference import embedder as emb
+        monkeypatch.setattr(emb, "loaded_dim", lambda: 5)
+        calls = {"n": 0}
+
+        def _must_not_be_called(*, on_progress=None):
+            calls["n"] += 1
+            return object()
+
+        monkeypatch.setattr(emb, "get_embedder", _must_not_be_called)
+        with TestClient(app) as client:
+            r = client.post("/api/embedding/warmup")
+            events = self._events(client, r.json()["job_id"])
+
+        texts = [e["text"] for e in events if e.get("type") == "line"]
+        assert texts == ["Already warm (5-dim)."]
+        assert events[-1]["status"] == "done"
+        assert calls["n"] == 0, "warmup reloaded an already-loaded embedder"
+
+    def test_warmup_failure_surfaces_the_reason_and_fails_the_job(
+            self, gui_app, monkeypatch):
+        app, _ = gui_app
+        from localm.inference import embedder as emb
+        monkeypatch.setattr(emb, "loaded_dim", lambda: None)
+        monkeypatch.setattr(emb, "get_embedder", lambda *, on_progress=None: None)
+        monkeypatch.setattr(emb, "last_error",
+                            lambda: "not an embedding model (no pooling head)")
+
+        with TestClient(app) as client:
+            r = client.post("/api/embedding/warmup")
+            events = self._events(client, r.json()["job_id"])
+
+        texts = [e["text"] for e in events if e.get("type") == "line"]
+        assert any("not an embedding model" in t for t in texts), texts
+        assert events[-1]["status"] == "failed"
+
+
 class TestLogExportEndpoint:
     """R30: copy every instance log into a user-chosen folder."""
 

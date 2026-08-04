@@ -62,7 +62,7 @@ import math
 import re
 import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from localm import pathscrub
 from localm.debuglog import dedup_native_stderr, logger
@@ -1128,13 +1128,33 @@ def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
     evict_chat_for_embedder()
 
 
-def get_embedder() -> Optional[IsolatedEmbedder]:
+def _emit_stage(on_progress: Optional[Callable[[str], None]], msg: str) -> None:
+    """Best-effort coarse stage announcement for get_embedder()'s caller (ADR-0004
+    Unit B: the "warm up the embedder" job). Mirrors managed_comfy_provision._emit
+    - a raising sink must never abort a load. Parent-side only: this never touches
+    the isolated embedder child's own load/embed IPC protocol."""
+    if on_progress is None:
+        return
+    try:
+        on_progress(msg)
+    except Exception:
+        logger.debug("embedder progress sink raised (ignored)", exc_info=True)
+
+
+def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
+                  ) -> Optional[IsolatedEmbedder]:
     """The shared embedder, loading the configured model on first use. Returns None
     when no embedding model can be resolved - callers then fall back to lexical
     retrieval. A missing model is re-checked on every call (so a mid-session
     ``localm setup-embeddings`` is picked up without a restart); only a genuine
     load FAILURE is cached. Loading holds the engine's process-global load lock so
     it cannot race a chat-model load onto the GPU.
+
+    *on_progress*, if given, receives coarse human-readable stage announcements
+    (resolving/downloading/evicting/loading/ready) - purely additive, every
+    existing caller is unaffected. Added for the explicit "warm up the embedder"
+    job (ADR-0004 Unit B) so a cold server's first load - up to two 300s timeout
+    windows (VRAM eviction wait + child spawn/native-load) - is not silent.
 
     The pre-load swap check (``_maybe_swap_for_embedder``) deliberately runs
     OUTSIDE ``_LOCK`` (double-checked locking below), not inside a single held
@@ -1155,6 +1175,7 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
             return _EMBEDDER
         if _LOAD_FAILED:
             return None
+        _emit_stage(on_progress, "Resolving the embedding model...")
         # Cheap filesystem-only re-check every call (NO download): finds a model a
         # user just installed into this running server.
         path = resolve_embedding_model_path(allow_download=False)
@@ -1163,8 +1184,10 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
             # (only actually fetches under net_mode=allow). Latched so a batch of
             # embed calls does not re-attempt the download on every chunk.
             _TRIED_DOWNLOAD = True
+            _emit_stage(on_progress, "Not found locally - attempting a download...")
             path = resolve_embedding_model_path()
         if not path:
+            _emit_stage(on_progress, "No embedding model is configured or available.")
             return None
         from localm.config import load_config
         _cfg = load_config()
@@ -1184,6 +1207,7 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
     # evict_chat_for_embedder()/decide_embedder_swap() are idempotent (a
     # second call simply finds nothing left to evict, or enough VRAM already
     # free) and the actual load below re-checks the singleton state.
+    _emit_stage(on_progress, "Checking VRAM (may evict a resident chat model)...")
     _maybe_swap_for_embedder(path, intent_ngl)
     ngl, placement_reason = _choose_embedder_gpu_layers(path, _cfg)
     if placement_reason is not None:
@@ -1197,6 +1221,8 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
         if _LOAD_FAILED:
             return None
         try:
+            _emit_stage(on_progress,
+                       "Loading into memory (this can take up to a minute)...")
             from localm.inference.engine import _LOAD_LOCK
             with _LOAD_LOCK:
                 _EMBEDDER = IsolatedEmbedder(
@@ -1211,12 +1237,14 @@ def get_embedder() -> Optional[IsolatedEmbedder]:
                         _EMBEDDER.dim,
                         pooling_name(getattr(_EMBEDDER, "effective_pooling", None)))
             _LAST_ERROR = None
+            _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
             return _EMBEDDER
         except Exception as e:
             _LOAD_FAILED = True
             _LAST_ERROR = str(e)
             logger.warning("could not load embedding model %s (%s); lexical-only",
                            path, e)
+            _emit_stage(on_progress, f"Load failed: {e}")
             return None
 
 
