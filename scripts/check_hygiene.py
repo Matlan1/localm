@@ -1137,6 +1137,29 @@ def _install_hook() -> int:
 # fire on dozens of documented design choices and need exactly the allowlist this
 # check exists to avoid. Only eager, module-level edges count.
 #
+# "MODULE-LEVEL" MEANS "RUNS DURING IMPORT", NOT "UNINDENTED". A ``def``/``async
+# def``/``class`` body is genuinely deferred (never touched until called or
+# instantiated), but a module-level ``try:``/``if:`` body is NOT deferred - it
+# executes unconditionally-during-import (``try``) or whenever its guard is true
+# (``if``), same as a bare top-level statement, just indented. The common
+# "optional dependency" (``try: import X except ImportError: X = None``) and
+# "platform fallback" (``if sys.platform == ...``) idioms are exactly this shape,
+# so excluding them left real eager coupling invisible to the graph. Both branches
+# of an ``if``/``try`` are walked (either can execute depending on the runtime
+# condition/exception, and either can be the one that creates a real edge), while
+# ``def``/``class`` bodies nested inside a ``try``/``if`` still are not - the
+# import inside THEM stays deferred regardless of what encloses them. The one
+# carve-out is ``if TYPE_CHECKING:``: that guard is False at runtime by
+# definition (True only for a static type checker), so an import inside it never
+# actually executes - it is the standard way to add a type-only import without
+# creating a REAL cycle, and counting it would flag that idiom as if it did.
+#
+# RELATIVE IMPORTS (``from . import x``, ``from ..config import y``, ...) are
+# resolved to their absolute ``localm.x.y`` target the same way Python itself
+# does at runtime (anchored on the importing module's ``__package__``), not
+# skipped. A relative import is exactly as eager and exactly as capable of
+# closing a cycle as an absolute one; the only difference is spelling.
+#
 # Granularity is the top-level unit under localm/ (the package name, or the module
 # name for a top-level .py), because that is the level a layering claim is made at.
 # Intra-package cycles are a separate, much noisier question and are not in scope.
@@ -1155,6 +1178,72 @@ def _module_name(path: Path, pkg_root: Path) -> str:
     return "localm" + ("." + rel.replace("/", ".") if rel else "")
 
 
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """True for ``if TYPE_CHECKING:`` or ``if typing.TYPE_CHECKING:`` - the
+    conventional name either way, never True at runtime, so the body never
+    actually executes (see the check-7 block comment above)."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
+def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Statements in *body* that run EAGERLY at module-import time: direct
+    statements plus, recursively, anything inside a module-level ``try``/
+    ``except``/``else``/``finally`` or ``if``/``elif``/``else`` block. Both
+    branches of an ``if``/``try`` are included - either can run depending on
+    the runtime condition or exception, and either can be the one that creates
+    a real edge. ``def``/``async def``/``class`` bodies are never recursed
+    into (deferred / separately-scoped, regardless of what encloses them), and
+    neither is an ``if TYPE_CHECKING:`` body (never True at runtime). See the
+    check-7 block comment above for why."""
+    out: list[ast.stmt] = []
+    for stmt in body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            out.append(stmt)
+        elif isinstance(stmt, ast.If):
+            if _is_type_checking_guard(stmt.test):
+                continue
+            out.extend(_eager_module_statements(stmt.body))
+            out.extend(_eager_module_statements(stmt.orelse))
+        elif isinstance(stmt, (ast.Try, ast.TryStar)):
+            out.extend(_eager_module_statements(stmt.body))
+            for handler in stmt.handlers:
+                out.extend(_eager_module_statements(handler.body))
+            out.extend(_eager_module_statements(stmt.orelse))
+            out.extend(_eager_module_statements(stmt.finalbody))
+        # def/async def/class: deferred or separately-scoped; do not recurse.
+    return out
+
+
+def _resolve_relative_import(node: ast.ImportFrom, own_module: str,
+                              is_package: bool) -> "str | None":
+    """The absolute ``localm...`` module a relative ``ImportFrom`` resolves to,
+    mirroring ``importlib._bootstrap._resolve_name``: a level-N import is
+    anchored at the importing module's ``__package__``, then walked up (N-1)
+    more components. ``__package__`` for a package's ``__init__.py`` IS the
+    package's own name; for a plain module it is the module's PARENT - one
+    relative level shallower inside an ``__init__.py`` than in a sibling
+    module of that same package, which is real Python import semantics, not
+    an approximation.
+
+    None when the level walks past *own_module*'s own components (an invalid
+    relative import that would fail at runtime with "attempted relative
+    import beyond top-level package") - there is nothing to resolve, and this
+    never silently mis-resolves to the wrong package instead of reporting
+    that."""
+    package = own_module if is_package else own_module.rsplit(".", 1)[0]
+    parts = package.split(".")
+    if node.level > len(parts):
+        return None
+    base = ".".join(parts[: len(parts) - node.level + 1])
+    if not base:
+        return None
+    return f"{base}.{node.module}" if node.module else base
+
+
 def _module_level_import_edges(pkg_root: Path) -> dict[str, dict[str, str]]:
     """unit -> {imported unit: "file:line of one eager import that creates it"}.
 
@@ -1163,21 +1252,24 @@ def _module_level_import_edges(pkg_root: Path) -> dict[str, dict[str, str]]:
     edge-free would let a cycle hide behind a syntax error (rule 5)."""
     edges: dict[str, dict[str, str]] = {}
     for path in sorted(pkg_root.rglob("*.py")):
-        unit = _import_unit(_module_name(path, pkg_root))
+        own_module = _module_name(path, pkg_root)
+        unit = _import_unit(own_module)
+        is_package = path.name == "__init__.py"
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError as e:
             edges.setdefault(unit, {})["<unparseable>"] = f"{path}: {e}"
             continue
-        for node in ast.walk(tree):
-            # col_offset 0 == module level. Anything indented is inside a function,
-            # class body or conditional and is not an eager dependency.
-            if getattr(node, "col_offset", 1) != 0:
-                continue
+        for node in _eager_module_statements(tree.body):
             targets: list[str] = []
-            if (isinstance(node, ast.ImportFrom) and node.level == 0
-                    and node.module and node.module.startswith("localm")):
-                targets = [node.module]
+            if isinstance(node, ast.ImportFrom):
+                if node.level == 0:
+                    if node.module and node.module.startswith("localm"):
+                        targets = [node.module]
+                else:
+                    resolved = _resolve_relative_import(node, own_module, is_package)
+                    if resolved is not None and resolved.startswith("localm"):
+                        targets = [resolved]
             elif isinstance(node, ast.Import):
                 targets = [a.name for a in node.names if a.name.startswith("localm")]
             for target in targets:
