@@ -1448,17 +1448,35 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
     import faulthandler
     import json
     import os
+
+    from localm.debuglog import logger
     try:
         d = _crash_dir(home)
         _crash_trace_fh = open(_crash_trace_path(d, instance_id), "w", encoding="utf-8")
         try:
             faulthandler.enable(file=_crash_trace_fh, all_threads=True)
-        except Exception:
-            # Best-effort: if faulthandler cannot attach (e.g. the fd is not a
-            # real file on some platforms) we still arm the crash marker below, so
-            # a hard death is still reported next start - just without the native
-            # traceback. Arming must not fail over this.
-            pass
+            if not faulthandler.is_enabled():
+                # enable() can return without raising yet still not actually be
+                # armed on some platforms/file-object shapes - is_enabled() is
+                # the one call that tells the truth, not "no exception was
+                # raised". Surfacing this (rule 5) is the whole point of
+                # NEW-CRASH-NOTICE-USELESS's (A): every native-trace file on the
+                # maintainer's box was 0 bytes across 4 instances, and this was
+                # previously silent either way.
+                logger.warning(
+                    "bugreport: faulthandler.enable() returned without raising "
+                    "but is_enabled() is False - a native crash will produce no "
+                    "trace this run")
+        except Exception as e:
+            # Arming must not fail over this: we still write the crash marker
+            # below, so a hard death is still reported next start - just
+            # without the native traceback. But a silent `except: pass` here
+            # is exactly why every trace file on record is 0 bytes with no clue
+            # why - log it so a future empty trace is diagnosable instead of a
+            # repeat mystery.
+            logger.warning(
+                "bugreport: faulthandler could not attach (%s: %s) - a native "
+                "crash this run will produce no trace", type(e).__name__, e)
         _crash_marker_path(d, instance_id).write_text(
             json.dumps({"pid": os.getpid(), "context": context or {}}),
             encoding="utf-8")

@@ -5,6 +5,7 @@ next start via a crash marker)."""
 
 import asyncio
 import json
+import logging
 
 from localm import bugreport, instances
 
@@ -44,6 +45,65 @@ def test_crash_marker_arm_check_disarm(tmp_path, monkeypatch):
     assert not marker.exists()
     assert bugreport.check_and_report_prior_crash(home=home) is None
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+#  NEW-CRASH-NOTICE-USELESS (A, part 1): a faulthandler attach failure must   #
+#  never be a silent `except Exception: pass` - every native-trace file on    #
+#  the maintainer's box was 0 bytes across 4 crashes with no clue why, and    #
+#  the old code could not have told the difference between "no fault           #
+#  occurred" and "faulthandler never attached in the first place" (rule 5).   #
+# --------------------------------------------------------------------------- #
+
+def test_faulthandler_enable_exception_is_logged_not_silent(tmp_path, monkeypatch, caplog):
+    import faulthandler
+
+    def _boom(*a, **k):
+        raise OSError("fd is not a real file on this platform")
+
+    monkeypatch.setattr(faulthandler, "enable", _boom)
+    home = str(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        # Arming must still succeed (the marker is what matters for crash
+        # detection) even though the trace mechanism itself failed to attach.
+        assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
+
+    assert (tmp_path / "run" / "server-crash.marker").exists()
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("faulthandler" in r.getMessage() for r in warnings), (
+        "a faulthandler.enable() failure must be logged, not swallowed silently")
+
+
+def test_faulthandler_silently_not_enabled_is_also_logged(tmp_path, monkeypatch, caplog):
+    """enable() can return WITHOUT raising and still not actually be armed on
+    some platforms/file shapes - "no exception" is not proof of success.
+    is_enabled() is the one call that tells the truth."""
+    import faulthandler
+
+    monkeypatch.setattr(faulthandler, "enable", lambda *a, **k: None)
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    home = str(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("faulthandler" in r.getMessage() for r in warnings)
+
+
+def test_faulthandler_successful_attach_logs_no_warning(tmp_path, caplog):
+    """The negative case: a genuinely successful attach on this real box (no
+    mocking of faulthandler itself) must NOT spam a warning - only a real
+    attach failure should."""
+    home = str(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
+    bugreport.disarm_crash_guard(home=home)   # tidy up: detach + close the fh
+
+    warnings = [r for r in caplog.records
+               if r.levelno >= logging.WARNING and "faulthandler" in r.getMessage()]
+    assert warnings == []
 
 
 # --------------------------------------------------------------------------- #
