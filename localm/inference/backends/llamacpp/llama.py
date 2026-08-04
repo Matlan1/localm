@@ -71,6 +71,36 @@ def _quiet_stderr():
             os.close(saved_fd)
 
 
+def _stderr_ctx_for_generate(verbose: bool):
+    """Which stderr-handling context manager _generate() wraps its (single,
+    contiguous) prefill + decode-loop scope in. Pulled out as a pure function,
+    isolated from grammar/grammar_lazy entirely now, so the decision is
+    directly unit-testable without constructing a real LlamaCpp/native model.
+
+    verbose already lets native output straight through unfiltered, so there
+    is nothing here to suppress or group - nullcontext. Otherwise this is
+    always ``dedup_native_stderr`` (debuglog.py), for grammar-constrained
+    requests exactly the same as plain ones.
+
+    Grammar used to get its own full-suppression path (_quiet_stderr) here,
+    because the lazy grammar sampler logs "Grammar still awaiting trigger
+    after token N" for every token until the trigger fires - hundreds of
+    identical lines per response with the pre-#952/#963 grouper, which only
+    collapsed a line repeated immediately after itself. That volume concern
+    is now exactly what _LineGrouper's repeat-count collapsing handles (it
+    also now tolerates a repeating multi-line CYCLE, not just one line), so
+    there is no remaining reason to hide this path's native output entirely -
+    doing so also hid real grammar diagnostics (AGENTS.md rule 5). Sharing
+    dedup_native_stderr is safe here specifically because BOTH of
+    _generate()'s call sites for this context manager already wrap one whole
+    prefill/decode-loop scope, never re-entered per token - the one
+    requirement dedup_native_stderr's own docstring imposes."""
+    if verbose:
+        return contextlib.nullcontext
+    from localm.debuglog import dedup_native_stderr
+    return dedup_native_stderr
+
+
 class _CapturedStderr:
     """Holder yielded by _capture_stderr; .tail() reads the captured native text."""
 
@@ -939,13 +969,10 @@ class LlamaCpp:
             # minimal reply cannot fit any more.
             max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
-            if self._verbose:
-                _ctx = contextlib.nullcontext
-            elif grammar or grammar_lazy:
-                _ctx = _quiet_stderr
-            else:
-                from localm.debuglog import dedup_native_stderr
-                _ctx = dedup_native_stderr
+            # grammar/grammar_lazy no longer pick a different stderr context here -
+            # see _stderr_ctx_for_generate's docstring for why the grammar path
+            # was folded into the same one as plain generation.
+            _ctx = _stderr_ctx_for_generate(self._verbose)
 
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
@@ -1133,6 +1160,18 @@ class LlamaCpp:
             bos_markers = ("<bos>", "<s>", "﻿")
             add_special = not any(prompt.startswith(m) for m in bos_markers)
 
+            # Stays on _quiet_stderr rather than _generate()'s dedup_native_stderr
+            # (see the why-comment there): below, _ctx() is entered once for the
+            # mtmd prefill AND AGAIN INSIDE THE PER-TOKEN LOOP (the llama_decode
+            # call further down), never hoisted to one contiguous scope the way
+            # _generate() was restructured to do. dedup_native_stderr spins up a
+            # background reader thread per entry - re-entering it per token would
+            # both reset its dedup grouping on every token (defeating it) and pay
+            # real thread-creation cost per token, exactly the anti-pattern
+            # dedup_native_stderr's own docstring warns against. Widening this
+            # path needs the same per-call-not-per-token restructuring _generate()
+            # got in #443 first; doing it as a side effect here risks regressing
+            # a working vision-generation path for a log-formatting fix.
             _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
             self.last_finish_reason = "stop"
             with self._gen_lock:

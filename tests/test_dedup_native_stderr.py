@@ -80,6 +80,56 @@ def test_single_line_is_not_suffixed():
     assert not any("only once(" in line for line in tail)
 
 
+def test_two_line_cycle_is_grouped_with_count():
+    """The real native pattern this class exists for (#952/#963): two DISTINCT
+    lines alternating, never repeating immediately after themselves, so the
+    original single-line lookback never collapsed either one."""
+    before = len(debuglog.recent_activity())
+    with debuglog.dedup_native_stderr():
+        for _ in range(20):
+            os.write(2, b"ggml_backend_cuda_graph_compute: CUDA graph warmup complete\n")
+            os.write(2, b"ggml_backend_cuda_graph_compute: CUDA graph warmup reset\n")
+    joined = "\n".join(debuglog.recent_activity()[before:])
+    assert "ggml_backend_cuda_graph_compute: CUDA graph warmup complete(20)" in joined
+    assert "ggml_backend_cuda_graph_compute: CUDA graph warmup reset(20)" in joined
+
+
+def test_cycle_survives_an_interleaved_changing_line():
+    """The exact production shape: a 2-line repeating cycle with a THIRD line
+    that changes every occurrence (mirrors "CUDA Graph id N reused", N
+    varies) interleaved between repeats. The changing line can never collapse
+    itself (it never matches a prior line), but it must not evict/reset the
+    two lines that ARE genuinely repeating - that was the actual bug: a
+    small pure lookback (or a naive fixed-order FIFO ring) gets displaced by
+    every one-off arrival before the repeating pair can accumulate a count."""
+    before = len(debuglog.recent_activity())
+    with debuglog.dedup_native_stderr():
+        for i in range(12):
+            os.write(2, f"CUDA Graph id {i} reused\n".encode())
+            os.write(2, b"ggml_backend_cuda_graph_compute: CUDA graph warmup complete\n")
+            os.write(2, b"ggml_backend_cuda_graph_compute: CUDA graph warmup reset\n")
+    joined = "\n".join(debuglog.recent_activity()[before:])
+    assert "ggml_backend_cuda_graph_compute: CUDA graph warmup complete(12)" in joined
+    assert "ggml_backend_cuda_graph_compute: CUDA graph warmup reset(12)" in joined
+    # each changing line is distinct, so it is emitted bare, never dropped
+    for i in range(12):
+        assert f"CUDA Graph id {i} reused" in joined
+
+
+def test_more_distinct_lines_than_capacity_still_emits_everything():
+    """Bounded memory: pushing well past _MAX_PENDING distinct lines must
+    still emit every one of them (via LRU eviction), never silently drop a
+    line just because the pending set filled up."""
+    before = len(debuglog.recent_activity())
+    n = debuglog._LineGrouper._MAX_PENDING * 4
+    with debuglog.dedup_native_stderr():
+        for i in range(n):
+            os.write(2, f"distinct line {i}\n".encode())
+    joined = "\n".join(debuglog.recent_activity()[before:])
+    for i in range(n):
+        assert f"distinct line {i}" in joined
+
+
 def test_fd_2_is_restored_after_exit(capfd):
     """After the context exits, writes to fd 2 must reach the real stream
     again (not still be swallowed by the torn-down pipe)."""

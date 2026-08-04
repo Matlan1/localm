@@ -491,32 +491,66 @@ def record_native_line(text: str) -> None:
 
 
 class _LineGrouper:
-    """Collapses a stream of consecutive IDENTICAL lines into "line(N)".
+    """Collapses a stream of lines into repeat-count groups, tolerating a small
+    REPEATING SET of up to _MAX_PENDING distinct lines - not just a line
+    repeated immediately after itself.
 
-    A different line flushes whatever was pending first. Nothing is dropped -
-    every distinct line is eventually emitted exactly once, either bare (a
-    run of 1) or with its repeat count."""
+    Native ggml/llama.cpp stderr often alternates between a handful of
+    DISTINCT lines rather than repeating one line twice in a row (e.g.
+    ggml-cuda's "CUDA graph warmup complete" / "...warmup reset", toggled
+    every call): a lookback of exactly 1 (the original design) never
+    re-matches either line, so nothing ever collapses and a long generation
+    floods the live console/ring-buffer views with the full pair forever.
+    The same stream also carries a line that changes every occurrence
+    ("CUDA Graph id N reused", N varies) - that one can never be grouped by
+    exact match, which is fine and expected; the point is that it must not
+    defeat grouping of the two lines that DO repeat verbatim around it.
+
+    Up to _MAX_PENDING distinct lines are held open at once as an LRU set,
+    each with its own running count: a line that matches one already pending
+    increments it in place and marks it most-recently-used; a genuinely new
+    distinct line, once the set is full, evicts and emits the LEAST-recently-
+    used slot to make room. LRU (not first-seen order) matters here because a
+    one-off line that never repeats (the "id N" line above) must cycle
+    straight through the set without evicting a slot that IS actively
+    repeating - otherwise every unrelated one-off line between repeats would
+    reset the count on the very thing this class exists to collapse.
+    _MAX_PENDING=1 reduces to the original single-line-lookback behaviour
+    exactly. Nothing is dropped: every distinct line is eventually emitted
+    exactly once, either bare (a run of 1) or with its repeat count.
+
+    Deliberately generic - no CUDA-specific string ever appears in this
+    class - so the next backend's own repeating cycle collapses too."""
+
+    # Small and bounded on purpose: enough to hold a short repeating cycle
+    # (the observed case is 2 lines) open across one-off lines interleaved
+    # with it, while keeping a genuinely non-repeating stream's reordering
+    # latency (at most _MAX_PENDING lines, versus 1 before this class
+    # existed) small enough not to meaningfully change the live view's
+    # responsiveness.
+    _MAX_PENDING = 8
 
     def __init__(self, emit) -> None:
         self._emit = emit
-        self._pending: Optional[str] = None
-        self._count = 0
+        self._pending: "collections.OrderedDict[str, int]" = collections.OrderedDict()
 
     def feed(self, line: str) -> None:
-        if line == self._pending:
-            self._count += 1
+        if line in self._pending:
+            self._pending.move_to_end(line)
+            self._pending[line] += 1
             return
-        self.flush()
-        self._pending = line
-        self._count = 1
+        if len(self._pending) >= self._MAX_PENDING:
+            oldest_line, oldest_count = self._pending.popitem(last=False)
+            self._emit_one(oldest_line, oldest_count)
+        self._pending[line] = 1
+
+    def _emit_one(self, line: str, count: int) -> None:
+        self._emit(line if count <= 1 else f"{line}({count})")
 
     def flush(self) -> None:
-        if self._pending is None:
-            return
-        text = self._pending if self._count <= 1 else f"{self._pending}({self._count})"
-        self._pending = None
-        self._count = 0
-        self._emit(text)
+        for line, count in self._pending.items():
+            self._emit_one(line, count)
+        self._pending.clear()
 
 
 @contextlib.contextmanager
