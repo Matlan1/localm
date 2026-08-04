@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 from localm.inference import http_server as hs
 from localm.inference.backends.base import ModelLoadCancelled
@@ -178,3 +179,64 @@ def test_single_switch_loads_normally():
     assert res["status"] == "loaded"
     assert log == ["solo"]
     assert hs._engine.display_name == "solo"
+
+
+# ---------------------------------------------------------------------------
+#  Idle-unload activity seeding on registration
+# ---------------------------------------------------------------------------
+
+def test_switch_engine_seeds_per_model_activity_immediately():
+    """A freshly loaded engine must get its OWN activity timestamp the instant
+    it registers into _engines - not fall through, later, to whatever the
+    GLOBAL _last_activity was left at by a PREVIOUS model."""
+
+    async def scenario():
+        _reset_switch_state()
+        hs._last_activity_per_model.clear()
+        # The state a real idle previous model leaves behind: the global timer
+        # is old, and nothing has touched it since.
+        hs._last_activity = time.monotonic() - 1000
+        ready = threading.Event(); ready.set()
+        engine = FakeEngine("fresh", load_gate=ready)
+        before = time.monotonic()
+        res = await hs.switch_engine("fresh", lambda n: engine)
+        return res, before
+
+    res, before = asyncio.run(scenario())
+    assert res["status"] == "loaded"
+    assert "fresh" in hs._last_activity_per_model
+    assert hs._last_activity_per_model["fresh"] >= before
+
+
+def test_switching_models_does_not_evict_the_new_one_via_the_old_ones_staleness():
+    """Regression: model A goes idle past the TTL, then the user switches to
+    model B. Before the fix, B inherited A's stale GLOBAL _last_activity the
+    instant it registered (nothing seeded a per-model entry for B), so the very
+    next idle sweep could evict B before it ever served a single request - the
+    user switches model, waits through the load, and finds it gone."""
+
+    async def scenario():
+        _reset_switch_state()
+        hs._last_activity_per_model.clear()
+        ready = threading.Event(); ready.set()
+
+        engine_a = FakeEngine("A", load_gate=ready)
+        await hs.switch_engine("A", lambda n: engine_a)
+
+        # Age A - and the global timer along with it, mirroring a real idle
+        # stretch where nothing touched anything for a while - well past any
+        # TTL the test below will use.
+        stale = time.monotonic() - 1000
+        hs._last_activity_per_model["A"] = stale
+        hs._last_activity = stale
+
+        engine_b = FakeEngine("B", load_gate=ready)
+        res = await hs.switch_engine("B", lambda n: engine_b)
+        assert res["status"] == "loaded"
+
+        hs._inference_sem = asyncio.Semaphore(1)
+        await hs._idle_unload_once(60)   # A's own staleness may evict A - fine
+        return engine_b.loaded
+
+    b_loaded = asyncio.run(scenario())
+    assert b_loaded is True, "freshly switched-to model B must not be evicted"
