@@ -17,15 +17,18 @@ routes so it doesn't shadow them.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
+from localm.debuglog import logger
 from localm.plugins.coder.sessions import SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -77,6 +80,126 @@ def _index_html_with_shell_token(token: str) -> str:
         cut = i + len("<head>")
         return html[:cut] + snippet + html[cut:]
     return snippet + html
+
+
+# sw.js's own fetch() handler regex (self.addEventListener("fetch", ...)) for
+# API-shaped paths that are NEVER cache-first. Nothing under STATIC_DIR is
+# actually named this today (these are server routes, not static files), so
+# this exclusion is future-proofing, not dead weight - kept in sync BY HAND
+# with the identical pattern inside sw.js itself, since a service worker
+# cannot import a shared module.
+_SW_UNCACHED_RE = re.compile(r"^(api|v1|plugins|localm-ca\.crt)(/|$)")
+
+# sw.js's own CACHE-constant line, e.g. `const CACHE = "localm-shell-dev";` -
+# matches regardless of the literal placeholder text so the source can say
+# anything descriptive; the ROUTE substitutes group(1)'s content on every
+# request. check_hygiene.py's placeholder-intact check uses the same pattern.
+SW_CACHE_LINE_RE = re.compile(r'(const CACHE = ")[^"]+(";)')
+
+
+def _sw_cacheable_files() -> list[Path]:
+    """Every FILE under STATIC_DIR the service worker's fetch handler can cache
+    first, sorted for deterministic hashing. Deliberately NOT limited to sw.js's
+    own SHELL precache list: the fetch handler runtime-caches ANY same-origin,
+    non-API GET into the same versioned cache (see sw.js's fetch listener), so a
+    non-SHELL asset (a KaTeX font, /vendor/jsQR.min.js, ...) goes stale exactly
+    as hard as a SHELL one and must invalidate the version the same way."""
+    out = []
+    for p in STATIC_DIR.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(STATIC_DIR).as_posix()
+        if rel == "sw.js" or _SW_UNCACHED_RE.match(rel):
+            continue
+        out.append(p)
+    return sorted(out, key=lambda p: p.relative_to(STATIC_DIR).as_posix())
+
+
+def _compute_sw_cache_value() -> str:
+    """A short content digest over every file the service worker can cache-first
+    (see ``_sw_cacheable_files``), used as sw.js's served CACHE version.
+
+    Computed FRESH on every request from whatever is currently on disk - never
+    hand-typed, never committed to git. This is what makes it immune to the
+    incident this replaces: a hand-maintained ``localm-shell-vNN`` line shipped
+    stale THREE times (undetected by review) because bumping it depended on a
+    human remembering, and even after a hygiene gate was added to catch a
+    missed bump, the shared counter line still produced a real merge conflict
+    between any two GUI PRs landing close together. A value derived fresh from
+    the files being served has nothing checked into git to forget OR to
+    conflict over - two branches touching different assets each simply serve a
+    correct value; once merged, the tree naturally reflects both changes.
+
+    A file that cannot be read (missing, permission error) feeds a distinct
+    ``MISSING:<path>: <error>`` marker into the digest instead of crashing this
+    route - a broken asset still forces a cache-bust rather than either a 500
+    or, worse, silently serving a digest that looks unchanged. The read failure
+    is ALSO logged loudly (AGENTS.md rule 5): a client seeing stale assets
+    because of a broken install should be discoverable in the debug log, not
+    only inferable from cache behaviour."""
+    h = hashlib.sha256()
+    for p in _sw_cacheable_files():
+        rel = p.relative_to(STATIC_DIR).as_posix()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            h.update(p.read_bytes())
+        except OSError as e:
+            logger.warning(
+                "sw.js cache digest: could not read %s (%s) - forcing a "
+                "cache-bust rather than silently serving a stale digest",
+                rel, e)
+            h.update(f"MISSING:{rel}: {e}".encode("utf-8"))
+        h.update(b"\0")
+    return f"localm-shell-{h.hexdigest()[:16]}"
+
+
+def _sw_js_response(if_none_match: "str | None" = None) -> Response:
+    """sw.js's own bytes with the CACHE constant substituted for a fresh content
+    digest (see ``_compute_sw_cache_value``). An unparseable source (the
+    placeholder line was edited into some other shape) is a real problem - fail
+    LOUD with a clear 500 rather than silently serving the placeholder text as
+    a literal cache name that could collide across unrelated deploys.
+
+    Honors a conditional GET (``If-None-Match``) with a real 304 the same way
+    ``_RevalidatingStatic`` already does for every other static asset - its own
+    docstring's contract is "no-cache does NOT disable caching: the browser
+    still caches and revalidates with the ETag, so an unchanged file is a
+    cheap 304". Routing this ONE path around that mount must not silently
+    drop that contract for it. The ETag is over the FINAL substituted body,
+    not just the computed cache value: an edit to sw.js's own logic (with no
+    watched asset changing) still changes what gets served and must not
+    collide with a stale ETag from before the edit.
+
+    ``read_text`` applies universal-newline translation, so a CRLF-checked-out
+    source (this repo's default on Windows) is served with LF line endings -
+    harmless (JS does not care) and, since it happens the same way on every
+    request, does not affect determinism; noted so a future reader diffing the
+    served bytes against the git-tracked file does not mistake the line-ending
+    difference for a real bug."""
+    text = (STATIC_DIR / "sw.js").read_text(encoding="utf-8")
+    value = _compute_sw_cache_value()
+    # Count matches BEFORE substituting, not via subn's own return count: subn(...,
+    # count=1) reports n=1 whether the pattern matched once or several times (it
+    # caps how many it REPLACES, not how many it FOUND), so `if n != 1` can never
+    # detect a second match - it would silently substitute the FIRST occurrence
+    # (e.g. an illustrative example string added to a future comment) and leave
+    # the REAL const CACHE line holding the literal placeholder text, reporting
+    # success while quietly defeating the whole mechanism. Exactly one match is
+    # required; zero or two-or-more both fail loud.
+    n_matches = len(SW_CACHE_LINE_RE.findall(text))
+    if n_matches != 1:
+        raise HTTPException(
+            500, f"sw.js's CACHE constant line matched {n_matches} times "
+            '(expected exactly one `const CACHE = "...";`) - cannot safely '
+            "substitute the computed cache version. This is a build defect, "
+            "not a client error.")
+    new_text = SW_CACHE_LINE_RE.sub(rf"\g<1>{value}\g<2>", text, count=1)
+    etag = f'"{hashlib.sha256(new_text.encode("utf-8")).hexdigest()[:32]}"'
+    headers = {"Cache-Control": "no-cache", "ETag": etag}
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=new_text, media_type="text/javascript", headers=headers)
 
 
 def mint_launch_grant(app, ttl: float = 300.0) -> str:
@@ -595,6 +718,17 @@ def attach_gui(
             token = getattr(request.app.state, "shell_token", "") or ""
             return HTMLResponse(_index_html_with_shell_token(token), headers=headers)
         return HTMLResponse(_index_html_with_shell_token(""), headers=headers)
+
+    @app.get("/sw.js", include_in_schema=False)
+    async def _service_worker(request: Request):
+        # Registered before the "/" static mount so it wins for this ONE path;
+        # every other static asset still goes straight to the mount below.
+        # Reads + hashes the whole static tree, so it is offloaded to a worker
+        # thread rather than run inline on the event loop (mirrors how other
+        # per-request filesystem work in this server is handled).
+        from starlette.concurrency import run_in_threadpool
+        return await run_in_threadpool(
+            _sw_js_response, request.headers.get("if-none-match"))
 
     app.mount("/", _RevalidatingStatic(directory=str(STATIC_DIR), html=True), name="gui")
 
