@@ -261,8 +261,25 @@ export function fmtCount(n) {
   return String(n);
 }
 
+// Parameter COUNT (e.g. gguf.total / safetensors.total from discover.py), not a
+// byte size - fmtSize is for bytes. A separate formatter so the two are never
+// mixed up at a call site.
+export function fmtParamCount(n) {
+  if (!n) return "";
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B params";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M params";
+  return String(n) + " params";
+}
+
 export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
                    "too-big": "needs partial CPU offload" };
+
+// moe: "confirmed" (the model's own architecture header says MoE - reliable)
+// or "likely" (a name-pattern guess only, e.g. "8x7B"/"A3B" in the repo id -
+// see discover.py's _moe_signal). The label and tooltip make that distinction
+// visible; never presented as equally certain.
+const MOE_LABEL = { confirmed: "MoE", likely: "MoE?" };
+const MOE_TITLE = { likely: "Inferred from the repo name - not confirmed by the model's own header" };
 
 export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
 
@@ -421,6 +438,22 @@ function discRepoRow(m, gpus) {
   // is shown (HF has no reliable type signal for standalone vae/text-encoder).
   if (m.detected_type) {
     head.appendChild(el("span", "type-badge type-" + m.detected_type, m.detected_type));
+  }
+  // What the model actually IS (D2): architecture family, MoE-ness, param
+  // count - all DISPLAY ONLY, from discover.py's classified-row fields, never
+  // gating which results show. Not colored into the type-badge palette (all 7
+  // --cat-* hues are already spoken for by MODEL_TYPES) - a shared hue here
+  // would misread as "this is the model's type".
+  if (m.architecture) {
+    head.appendChild(el("span", "arch-badge", m.architecture));
+  }
+  if (m.moe) {
+    const moeBadge = el("span", "moe-badge moe-" + m.moe, MOE_LABEL[m.moe] || "MoE");
+    if (MOE_TITLE[m.moe]) moeBadge.title = MOE_TITLE[m.moe];
+    head.appendChild(moeBadge);
+  }
+  if (m.param_count) {
+    head.appendChild(el("span", "param-count", fmtParamCount(m.param_count)));
   }
   const fmts = Array.isArray(m.formats) ? m.formats : ["gguf"];
   for (const f of fmts) head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] || f));

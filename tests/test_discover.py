@@ -27,7 +27,7 @@ from localm.discover import (
     GPU_PROBE_TIMEOUT,
     _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
     _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
-    _native_backend_has_vulkan,
+    _moe_signal, _native_backend_has_vulkan,
     _quant_of, applied_split_device_count, apply_gpu_split, apply_main_gpu,
     classify_hf_metadata, fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
@@ -415,6 +415,101 @@ class TestGgufClassifyExpand:
         by_id = {r["id"]: r for r in results}
         assert by_id["org/malformed-gguf"]["detected_type"] == "unknown"
         assert by_id["org/fine-gguf"]["detected_type"] == "llm"
+
+
+class TestArchitectureMoeParamCount:
+    """architecture/moe/param_count: the display-only fields a classified search
+    result carries about WHAT the model is (D2, layered on D1/#990's
+    classify_hf_metadata). Real repo shapes, verified live against the HF API
+    while designing this (see dev-notes/ADR-0004): gguf.total tracks the
+    model's total parameter count (stable across quants of the same repo, not
+    a byte size), and architecture-contains-"moe" is reliable but NOT
+    exhaustive - TheBloke/Mixtral-8x7B-v0.1-GGUF (real MoE) reports
+    architecture=="llama"."""
+
+    def test_confirmed_moe_from_architecture_string(self, monkeypatch):
+        _mock_fetch(monkeypatch, [{
+            "id": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "downloads": 1,
+            "tags": ["gguf", "conversational"],
+            "gguf": {"architecture": "qwen3moe", "total": 30532122624},
+        }])
+        r = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])[0]
+        assert r["architecture"] == "qwen3moe"
+        assert r["moe"] == "confirmed"
+        assert r["param_count"] == 30532122624
+
+    def test_likely_moe_from_repo_name_when_architecture_does_not_say_so(self, monkeypatch):
+        """Live-verified counter-example (ADR-0004): this real Mixtral repo's
+        architecture reports 'llama', not 'mixtral'/anything containing 'moe' -
+        an older conversion predating the dedicated arch tag. The name-pattern
+        fallback must catch it, and must NOT claim it as confirmed."""
+        _mock_fetch(monkeypatch, [{
+            "id": "TheBloke/Mixtral-8x7B-v0.1-GGUF", "downloads": 1,
+            "tags": ["gguf"],
+            "gguf": {"architecture": "llama", "total": 46702792704},
+        }])
+        r = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])[0]
+        assert r["architecture"] == "llama"
+        assert r["moe"] == "likely"
+
+    def test_no_moe_evidence_is_none_not_a_false_dense_claim(self, monkeypatch):
+        """Absence of both signals must abstain (None), never assert the model
+        is dense - same discipline classify_hf_metadata already applies to type."""
+        _mock_fetch(monkeypatch, [{
+            "id": "meta-llama/Llama-3.1-8B-Instruct-GGUF", "downloads": 1,
+            "tags": ["gguf", "conversational"],
+            "gguf": {"architecture": "llama", "total": 8030261248},
+        }])
+        r = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])[0]
+        assert r["moe"] is None
+
+    def test_moe_name_patterns_match_case_insensitively(self):
+        assert _moe_signal(None, "org/Some-MoE-Model") == "likely"
+        assert _moe_signal(None, "org/Mixtral-8X7B-Instruct") == "likely"
+        assert _moe_signal(None, "org/Qwen3-30B-A3B") == "likely"
+        assert _moe_signal(None, "org/Llama-3.2-1B-Instruct") is None
+
+    def test_param_count_from_hf_format_safetensors_total(self, monkeypatch):
+        _mock_fetch(monkeypatch, [{
+            "id": "org/hf-repo", "downloads": 1,
+            "pipeline_tag": "text-generation", "library_name": "transformers",
+            "tags": ["transformers", "text-generation"],
+            "safetensors": {"total": 8_000_000_000},
+        }])
+        r = hf_search("x", limit=5, formats=["hf"], model_types=["llm"])[0]
+        assert r["param_count"] == 8_000_000_000
+
+    def test_malformed_gguf_total_degrades_to_none_not_crash(self, monkeypatch):
+        """Same isinstance/positive guard as hf_param_bytes: a malformed or
+        adversarial 'total' (string, negative, bool) must degrade this row's
+        param_count to None, never raise or misreport a bool as a count."""
+        _mock_fetch(monkeypatch, [
+            {"id": "org/string-total", "downloads": 1, "tags": ["gguf"],
+             "gguf": {"architecture": "llama", "total": "not-a-number"}},
+            {"id": "org/negative-total", "downloads": 1, "tags": ["gguf"],
+             "gguf": {"architecture": "llama", "total": -5}},
+            {"id": "org/bool-total", "downloads": 1, "tags": ["gguf"],
+             "gguf": {"architecture": "llama", "total": True}},
+            {"id": "org/fine-total", "downloads": 2, "tags": ["gguf"],
+             "gguf": {"architecture": "llama", "total": 7_000_000_000}},
+        ])
+        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])
+        by_id = {r["id"]: r for r in results}
+        assert by_id["org/string-total"]["param_count"] is None
+        assert by_id["org/negative-total"]["param_count"] is None
+        assert by_id["org/bool-total"]["param_count"] is None
+        assert by_id["org/fine-total"]["param_count"] == 7_000_000_000
+
+    def test_untyped_legacy_search_carries_none_of_the_new_fields(self, monkeypatch):
+        """model_types=None (the CLI `localm search` / MCP path) never requests
+        the gguf/config expand fields, so the new fields must be entirely
+        absent - byte-for-byte the pre-existing response shape, same contract
+        detected_type already holds."""
+        _mock_fetch(monkeypatch, [{"id": "org/repo", "downloads": 1, "tags": ["gguf"]}])
+        r = hf_search("x", limit=5, formats=["gguf"])[0]
+        assert "architecture" not in r
+        assert "moe" not in r
+        assert "param_count" not in r
 
 
 # ------------------------------------------------------------------ #

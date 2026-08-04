@@ -130,7 +130,7 @@
 // stream cannot hide, e.g. a ```json fence, does not linger as raw JSON in
 // the chat bubble once it has actually been executed). A stale-cached client
 // would silently drop this event and keep showing the leaked JSON forever.
-const CACHE = "localm-shell-v88";
+const CACHE = "localm-shell-v89";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
