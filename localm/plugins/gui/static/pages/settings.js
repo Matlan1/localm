@@ -147,6 +147,18 @@ window.saveActiveSettingsSection = saveActiveSettingsSection;
 export function buildSettingControl(field) {
   if (field.widget === "hidden") return null;
   const value = field.default;     // current value (omitted for secrets)
+  // True when the current value is STILL the factory default (never saved, or
+  // saved back to exactly what it already was) - see settings_schema.py's
+  // schema_json() for why this needs its OWN field instead of comparing
+  // `value` to some remembered constant: `default` is the CURRENT value, which
+  // after a save IS the user's override, so only a separately-sourced
+  // `shipped_default` (always DEFAULT_CONFIG) can tell the two apart
+  // (NEW-DEFAULT-VALUE-PLACEHOLDER). Media per-plugin fields never set
+  // shipped_default (renderMediaSubsection builds a plain object literal
+  // without it), so this is always false for them - their own
+  // `.media-inherited` mechanism is untouched by this.
+  const isShippedDefault = field.shipped_default !== undefined
+    && value === field.shipped_default;
 
   const wrap = el("div");
   wrap.dataset.fieldKey = field.key;   // so cross-field wiring can find a control
@@ -166,7 +178,29 @@ export function buildSettingControl(field) {
         input.appendChild(o);
       }
       input.value = value == null ? "" : String(value);
-      read = () => (input.value === "" ? null : input.value);
+      // A dropdown always shows SOME selected option - there is no blank state
+      // to hide the default behind the way a number/text box has - so the
+      // GREY CUE is visual-only (reusing/extending .auto-detected, see
+      // style.css). The SAVE PAYLOAD still needs the same omit-when-unchanged
+      // contract NUMBER/TEXT get, though, or the grey styling would be lying:
+      // without this, selecting nothing and merely saving some OTHER field in
+      // the same section would silently pin this untouched default as an
+      // explicit override (still displayed grey, but no longer actually
+      // inheriting - a future DEFAULT_CONFIG change would then leave this
+      // install stuck on the old value while its own UI keeps claiming
+      // "default"). Compare against the option shown at RENDER time, not a
+      // live "still equals shipped_default" check - correct either way here
+      // since isShippedDefault was already true, but this is the same shape
+      // as the number/text branches: a value genuinely unchanged from what
+      // was shown is a no-op, independent of whether the user's mouse ever
+      // touched the control.
+      if (isShippedDefault) input.classList.add("auto-detected");
+      const shownAsDefault = isShippedDefault ? input.value : null;
+      read = () => {
+        const v = input.value;
+        if (shownAsDefault !== null && v === shownAsDefault) return undefined;
+        return v === "" ? null : v;
+      };
       break;
     }
     case "toggle": {
@@ -185,7 +219,13 @@ export function buildSettingControl(field) {
       input.step = field.step != null
         ? field.step
         : (Number.isInteger(value) ? "1" : "0.05");
-      if (value != null) input.value = value;
+      // Still the factory default: leave the box BLANK with the value shown as
+      // a native placeholder (exactly the chat-drawer / image-gen pattern),
+      // rather than a solid value indistinguishable from something the user
+      // typed. read() below already omits a blank box from the save payload -
+      // that contract predates this fix and is unchanged.
+      if (value != null && isShippedDefault) input.placeholder = "default (" + value + ")";
+      else if (value != null) input.value = value;
       read = () => (input.value.trim() === "" ? undefined : Number(input.value));
       break;
     }
@@ -299,6 +339,23 @@ export function buildSettingControl(field) {
           // Unchanged auto (or cleared back to blank) -> omit from the PATCH, so
           // the field stays dynamic (auto-detect) instead of being pinned.
           if (v === auto || v === "") return undefined;
+          return v;
+        };
+      } else if (isShippedDefault && stored) {
+        // Still the shipped default (e.g. mdns_name="localm",
+        // embedding_model="bge-small-en-v1.5") - same treatment as the
+        // auto-detect branch above: show it as a placeholder, not a solid
+        // value, and treat "still blank or still exactly the default text" as
+        // no change. Safe by construction: this branch only runs when the
+        // CURRENT value already equals the shipped default, so there is
+        // nothing customized to lose - a genuinely customized value (the
+        // common "clear it back to empty" case) always takes the plain `else`
+        // branch below instead, whose null-on-blank explicit-clear semantics
+        // are completely untouched by this branch's existence.
+        input.placeholder = "default (" + stored + ")";
+        read = () => {
+          const v = input.value.trim();
+          if (v === "" || v === stored) return undefined;
           return v;
         };
       } else {
