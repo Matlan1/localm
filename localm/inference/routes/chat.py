@@ -24,7 +24,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
-from localm.inference.backends.base import InvalidGrammarError, messages_contain_image
+from localm.inference.backends.base import (
+    EmbedBatchTooLargeError, InvalidGrammarError, messages_contain_image,
+)
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.protocol import (
@@ -315,6 +317,8 @@ def register(app: FastAPI, ctx) -> None:
                 vecs = await loop.run_in_executor(None, lambda: engine.embed(texts))
         except NotImplementedError as e:
             raise HTTPException(422, str(e))
+        except EmbedBatchTooLargeError as e:
+            raise HTTPException(413, str(e))
         finally:
             if isinstance(getattr(engine, "active_requests", None), int):
                 engine.active_requests = max(0, engine.active_requests - 1)

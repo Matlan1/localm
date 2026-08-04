@@ -23,6 +23,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   so instead of silently doing nothing.
 
 ### Security
+- **An oversized batch sent to a HuggingFace-backed embedding model could run
+  for a very long time instead of failing fast.** `/v1/embeddings` passed its
+  input straight through with no limit on how many texts, or how much text,
+  one request could contain, and a HuggingFace embed runs one text at a time
+  against a full-precision model with no batching of its own - so a large
+  enough batch could plausibly run for however long the request's timeout
+  allowed. A request against a HuggingFace-format model that exceeds a
+  configurable text-count or character-count cap is now rejected immediately
+  with a clear error instead. Not applicable to GGUF models (which cannot
+  embed at all) or the dedicated on-device embedder (a separate, already
+  small, purpose-built path).
 - **Starting the coder in your home folder no longer puts your account name into
   its prompt.** The coder shows its working directory as `~/.` when that folder
   IS your home directory, specifically so the prompt never carries your OS user

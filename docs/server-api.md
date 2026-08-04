@@ -97,7 +97,9 @@ Scope: any valid key (no specific scope required once auth is enabled).
 ```
 
 Returns OpenAI-format embedding vectors. 422 when the loaded model cannot
-embed.
+embed. Against a HuggingFace-format model, 413 when the request exceeds the
+configured text-count or character-count cap (`hf_embed_max_texts`,
+`hf_embed_max_chars`).
 
 ### `GET /v1/models`
 

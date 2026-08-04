@@ -314,13 +314,28 @@ _SIMPLE_CMD_TIMEOUT = 30.0
 # Bounded wait for one embed() RPC. Deliberately NOT the same bound as the
 # simple-command timeout above, and NOT reused unmodified from the dedicated
 # GGUF-based embedder's own 300s: HFWorker.embed() loops over texts one at a
-# time with no batching, /v1/embeddings passes its input through with no
-# size cap, and HFWorker.load() never sets any quantization config - every
-# HF load is full bf16/fp32, unlike the embedder's small-purpose-built-model
-# assumption. A large unchunked batch against a full-precision CPU-fallback
-# model can plausibly run longer than the dedicated embedder ever needs to.
+# time with no batching, and HFWorker.load() never sets any quantization
+# config - every HF load is full bf16/fp32, unlike the embedder's
+# small-purpose-built-model assumption. A large unchunked batch against a
+# full-precision CPU-fallback model can plausibly run longer than the
+# dedicated embedder ever needs to - HFBackend.embed() rejects an oversized
+# one outright (see EMBED_MAX_TEXTS_DEFAULT/EMBED_MAX_CHARS_DEFAULT below),
+# but this timeout still bounds whatever is allowed through.
 # Overridable via ``hf_embed_timeout_s``.
 EMBED_TIMEOUT_DEFAULT = 600.0
+
+# Per-request caps enforced by HFBackend.embed() before a batch is ever
+# handed to this module's IPC (i.e. before it crosses the process boundary
+# into the isolated worker) - see that method for the enforcement and
+# hf.py's _embed_max_texts()/_embed_max_chars() for the config-read pattern.
+# Two independent axes because either alone is a distinct hang vector: many
+# texts means many one-at-a-time forward passes (the AutoModel path, see
+# HFWorker.embed), while a huge individual or aggregate text can be slow to
+# even tokenize, and the sentence-transformer `.encode()` path applies no
+# truncation at all. Overridable via ``hf_embed_max_texts`` /
+# ``hf_embed_max_chars``.
+EMBED_MAX_TEXTS_DEFAULT = 256
+EMBED_MAX_CHARS_DEFAULT = 200_000
 
 
 class HFRunner:

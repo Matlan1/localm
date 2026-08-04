@@ -266,6 +266,20 @@ CORE_FIELDS: list = [
                  "hung. Raise this if you regularly embed large batches of "
                  "text against a HuggingFace embedding model.",
                  group="Engine", min=10, step=60),
+    SettingField("hf_embed_max_texts", Widget.NUMBER,
+                 "HuggingFace embed batch cap (texts)",
+                 "Maximum number of texts accepted in one /v1/embeddings "
+                 "request against a HuggingFace-format model. A HuggingFace "
+                 "embed runs one text at a time with no batching, so a very "
+                 "large request can take a long time; raise this only if "
+                 "you understand that cost.",
+                 group="Engine", min=1, step=1),
+    SettingField("hf_embed_max_chars", Widget.NUMBER,
+                 "HuggingFace embed batch cap (characters)",
+                 "Maximum total characters, summed across every text, "
+                 "accepted in one /v1/embeddings request against a "
+                 "HuggingFace-format model.",
+                 group="Engine", min=1, step=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),

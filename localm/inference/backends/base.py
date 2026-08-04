@@ -33,6 +33,21 @@ class InvalidGrammarError(ValueError):
     """
 
 
+class EmbedBatchTooLargeError(ValueError):
+    """Raised when an ``/v1/embeddings`` request against an HF-backed model
+    exceeds the configured per-request text-count or character-count cap
+    (see ``HFBackend.embed``, ``hf_embed_max_texts``, ``hf_embed_max_chars``),
+    so the request can be rejected with a clean, fast 413 up front.
+
+    Why this exists: ``HFBackend.embed()`` loops over texts one at a time
+    with no batching (or, for a sentence-transformer model, batches with no
+    truncation at all), against a model that is always loaded full
+    bf16/fp32. An oversized batch has no native bound of its own - only the
+    generous ``hf_embed_timeout_s`` - so without this check it would run for
+    however long that allows instead of failing fast.
+    """
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was deliberately aborted
     because a newer model selection superseded it (preemptive model switching).
