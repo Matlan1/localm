@@ -1748,6 +1748,16 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
                     # skip rather than dump against a fabricated baseline -
                     # the same "no reading yet, never a fake one" choice
                     # _loop_lag_seconds() makes.
+                    #
+                    # NOT COSMETIC: proven by reverting this guard and running
+                    # this loop against a real cold start. Without it, `lag =
+                    # time.monotonic() - _hb_monotonic` raises an uncaught
+                    # TypeError (subtracting from None) on the very first
+                    # poll, which crashes this daemon thread outright - a dead
+                    # thread looks identical to a healthy quiet one from the
+                    # outside, so hang detection would be silently disabled
+                    # for the rest of the process with no signal to anyone.
+                    # Do not remove this check as redundant.
                     continue
                 lag = time.monotonic() - _hb_monotonic
                 if lag < threshold:
