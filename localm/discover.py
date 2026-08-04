@@ -177,7 +177,28 @@ def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str
       allowlist membership test, so an architecture string that fails to match
       (a different naming convention, e.g. a non-GGUF config.model_type) just
       falls through to the pipeline_tag/tagset checks below rather than
-      misclassifying anything.
+      misclassifying anything. Deliberately POSITIVE-EMBEDDING ONLY - there is
+      no matching "these architectures mean llm" list, because that allowlist
+      would be unbounded and unverifiable (every causal-decoder architecture
+      nobody thought to add yet), where a confidently wrong guess is worse
+      than abstaining and falling through to the tag layer.
+
+    KNOWN FAILURE MODE of the architecture check: ``_GGUF_EMBEDDING_ARCHITECTURES``
+    was built (and is verified) against llama.cpp's OWN ``LLM_ARCH_NAMES`` strings,
+    read by this codebase's local post-download header parse. At search time,
+    ``architecture`` instead comes from HF's SERVER-SIDE parse of the same GGUF
+    header (the ``gguf.architecture`` expand field) - a different parser reading
+    the same bytes. If HF ever normalizes that string differently from
+    llama.cpp's own naming (case, punctuation, a renamed architecture), the exact
+    match below fails SILENTLY: no exception, no wrong classification - just an
+    abstain that falls through to the pipeline_tag/tagset checks, so a real
+    embedding model would classify by tag alone instead of by its header
+    architecture. No test goes red for this, because abstaining is an
+    intentionally legal outcome; "why did this classify by tag instead of
+    architecture" is the only symptom to chase. Verified live for the 8 real
+    repos this parameter was added for (see the tests below), not proven in
+    general - HF's parser and llama.cpp's naming could drift apart independently
+    at any time.
 
     Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
     resolves, so an ambiguous result is never guessed into the wrong bucket."""
@@ -287,11 +308,16 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
             # gguf.architecture (gguf-format results) wins when present - the
             # model's own header; config.model_type (hf-format results, when
             # HF has a config.json) is the fallback so both format branches
-            # get an architecture-based classification attempt.
+            # get an architecture-based classification attempt. isinstance-
+            # guarded like hf_param_bytes' safetensors check above: a
+            # malformed/adversarial API response returning a truthy non-dict
+            # for either expand field must degrade this ONE row's signal to
+            # None, not crash the whole hf_search() call for every row.
             gguf_meta = item.get("gguf")
             config_meta = item.get("config")
-            architecture = ((gguf_meta or {}).get("architecture")
-                             or (config_meta or {}).get("model_type"))
+            architecture = (
+                (gguf_meta.get("architecture") if isinstance(gguf_meta, dict) else None)
+                or (config_meta.get("model_type") if isinstance(config_meta, dict) else None))
             row["detected_type"] = classify_hf_metadata(
                 item.get("pipeline_tag"), item.get("library_name"), raw_tags,
                 architecture)

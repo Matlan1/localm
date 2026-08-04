@@ -347,19 +347,6 @@ class TestGgufClassifyExpand:
         assert results[0]["likes"] == 20
         assert results[0]["updated"] == "2026-05-21T21:35:06.000Z"
 
-    def test_classified_gguf_row_carries_stats_not_defaults(self, monkeypatch):
-        """Positive control for the collateral bug: before the expand fix, this
-        row's downloads/likes/updated would have defaulted to 0/0/"" because the
-        gguf-classify branch requested none of those fields."""
-        _mock_fetch(monkeypatch, [{
-            "id": "org/repo", "downloads": 42, "likes": 7,
-            "lastModified": "2026-01-01T00:00:00.000Z", "tags": ["gguf"],
-        }])
-        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])
-        assert results[0]["downloads"] == 42
-        assert results[0]["likes"] == 7
-        assert results[0]["updated"] == "2026-01-01T00:00:00.000Z"
-
     def test_hf_format_classify_does_not_request_gguf_expand(self, monkeypatch):
         """The gguf expand field is meaningless for an hf/safetensors result (it
         has no GGUF header) - only requested on the gguf format branch."""
@@ -411,6 +398,23 @@ class TestGgufClassifyExpand:
         }])
         results = hf_search("x", limit=5, formats=["gguf"], model_types=["embedding"])
         assert results[0]["detected_type"] == "embedding"
+
+    def test_malformed_gguf_and_config_expand_fields_degrade_not_crash(self, monkeypatch):
+        """A non-dict truthy value for the gguf/config expand field (a malformed
+        or adversarial API response - HF's documented shape is always an object
+        or absent) must degrade this row's architecture signal to None, matching
+        hf_param_bytes' isinstance guard on safetensors a few lines above - not
+        raise and take down every OTHER row in the same query with it."""
+        _mock_fetch(monkeypatch, [
+            {"id": "org/malformed-gguf", "downloads": 1, "tags": ["gguf"],
+             "gguf": "not-a-dict", "config": ["also", "not", "a", "dict"]},
+            {"id": "org/fine-gguf", "downloads": 2,
+             "tags": ["gguf", "conversational"]},
+        ])
+        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])
+        by_id = {r["id"]: r for r in results}
+        assert by_id["org/malformed-gguf"]["detected_type"] == "unknown"
+        assert by_id["org/fine-gguf"]["detected_type"] == "llm"
 
 
 # ------------------------------------------------------------------ #
