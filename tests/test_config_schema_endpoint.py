@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for GET /v1/config/schema (F2 / FAC-12).
+"""Tests for GET /v1/config/schema.
 
 The schema-driven settings page fetches this endpoint to learn each field's
 widget/options/min/max/help plus its CURRENT value (injected as `default`), so

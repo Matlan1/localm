@@ -346,8 +346,8 @@ def test_end_to_end_memory_inlet_via_real_pipeline(tmp_path, monkeypatch):
     mgr.install("memory")
     mgr.enable("memory")
     # Open-mode management routes (POST /api/memory/*) require the per-process shell
-    # token as a bearer (the H5 gate); the GUI shell injects it. Present it here so
-    # this exercises the real gate too.
+    # token as a bearer; the GUI shell injects it. Present it here so this exercises
+    # the real gate too.
     shell = getattr(app.state, "shell_token", None)
     hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
     with TestClient(app) as c:
