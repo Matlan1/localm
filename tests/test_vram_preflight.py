@@ -372,6 +372,29 @@ class TestVramReport:
         assert "0.14 GB" not in out
         assert "not trusted" in out
 
+    def test_load_skips_vram_probe_entirely_for_cpu_only_load(self, tmp_path):
+        """A CPU-only load (n_gpu_layers=0, mirroring _check_vram's own
+        "CPU-only run, VRAM is irrelevant" early-return a few lines up the
+        call chain) must never touch discover.list_gpus at all - not just
+        skip printing the result.
+
+        Measured live: when torch is not yet resident in this process (which
+        a CPU-only load never makes it, since _check_vram's own VRAM check is
+        ALSO skipped for gpu_layers==0), list_gpus(return_status=True,
+        wait_for_inflight=True) costs ~2.5-3.4s PER CALL via an isolated
+        subprocess probe that is not cached across calls (a successful
+        isolated probe never imports torch into THIS process, so the next
+        call pays the same cost again). Calling it twice (before/after) for a
+        console line with nothing to report - a CPU-only load places nothing
+        on the GPU - would add 5-7s of pure overhead to every such load."""
+        b = _backend(tmp_path, size_bytes=1_000_000, n_gpu_layers=0)
+        with patch("localm.discover.list_gpus") as fake_list_gpus, \
+             patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
+                   return_value={"n_layers": None, "kv_bytes_per_token": 0,
+                                 "supports_images": False}):
+            b._load_native()
+        fake_list_gpus.assert_not_called()
+
 
 class TestFreeVramBytesDeviceSelection:
     """_free_vram_bytes() must read the CONFIGURED main GPU device, not always
