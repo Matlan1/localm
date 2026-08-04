@@ -110,8 +110,20 @@ def _stderr_ctx_for_generate(verbose: bool):
 # and none exists to bind), it is a printf inside llama.cpp's own model-loading
 # code. Format confirmed against a real load's captured native stderr on this
 # platform's ROCm build (see dev-notes/moe-placement-report.md).
+#
+# The backend-name group is deliberately [A-Za-z0-9_]+, not \S+: this text comes
+# from captured native stderr, which a hostile GGUF could in principle influence
+# (an embedded string surfacing near a "load_tensors:" line), so CodeQL correctly
+# flagged \S+ as polynomial-time on adversarial input - a string with many
+# "load_tensors:" restart points each failing to complete lets \S+ backtrack
+# across the whole remaining text at every one, O(n^2) total. Every real backend
+# name (ROCm0, ROCm_Host, CUDA0, CUDA_Host, Vulkan0, Metal, CPU, CPU_Mapped, ...)
+# is plain alphanumeric/underscore, which shares no characters with "load_tensors:"
+# (the colon) or the literal " model buffer size" (the leading space) that
+# follows - so the class has a clean, unambiguous boundary and a failed attempt
+# terminates immediately with no backtracking, restoring linear-time scanning.
 _MODEL_BUFFER_RE = re.compile(
-    r"load_tensors:\s*(\S+) model buffer size\s*=\s*([\d.]+)\s*MiB")
+    r"load_tensors:\s*([A-Za-z0-9_]+) model buffer size\s*=\s*([\d.]+)\s*MiB")
 
 
 class _CapturedStderr:

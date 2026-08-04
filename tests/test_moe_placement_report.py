@@ -94,6 +94,35 @@ class TestModelBufferParsing:
         missing = tmp_path / "does-not-exist.log"
         assert llama_mod._CapturedStderr(str(missing)).model_buffers() == []
 
+    def test_adversarial_input_stays_linear_time(self, tmp_path):
+        """CodeQL (py/polynomial-redos, PR #1007) correctly flagged an earlier
+        version of _MODEL_BUFFER_RE that used \\S+ for the backend-name group:
+        captured native stderr is technically uncontrolled data, and a string
+        with many "load_tensors:" restart points that never complete the rest
+        of the pattern let \\S+ backtrack across the whole remaining text at
+        EVERY restart point - O(n^2) total. Measured live before the fix:
+        0.019s/0.081s/0.330s/1.140s for n=500/1000/2000/4000 repetitions (a
+        clean quadratic curve, up to 1853x slower than the fixed version at
+        n=4000). [A-Za-z0-9_]+ has no character overlap with "load_tensors:"'s
+        colon or the following literal's leading space, so a failed attempt
+        terminates immediately with no backtracking - this test proves that
+        property directly (wall-clock IS the security property here, not a
+        proxy for one) rather than merely asserting the regex text changed."""
+        import time
+        p = tmp_path / "adversarial.log"
+        # 20_000 repetitions, no valid completion anywhere - extrapolating the
+        # measured quadratic curve above, the pre-fix \S+ pattern would take
+        # roughly 25-30s here; the fixed pattern finishes in well under 0.1s.
+        p.write_text("load_tensors:" * 20_000 + "!", encoding="utf-8")
+        start = time.perf_counter()
+        result = llama_mod._CapturedStderr(str(p)).model_buffers()
+        elapsed = time.perf_counter() - start
+        assert result == []
+        assert elapsed < 2.0, (
+            f"model_buffers() took {elapsed:.2f}s on adversarial input - "
+            "this is the exact shape of the py/polynomial-redos regression "
+            "CodeQL flagged on the earlier \\S+ version of _MODEL_BUFFER_RE")
+
 
 # --------------------------------------------------------------------------- #
 #  _capture_stderr temp-file lifetime (the bug found while building this)      #
