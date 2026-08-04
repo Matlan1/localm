@@ -30,11 +30,13 @@ Scans tracked files and fails on:
      dev-notes/gpu-split-capacity-fix/ for the incident this check was written
      for - vram_info() was single-GPU-only and 8 call sites read it as if it
      were the aggregate ceiling before discover.vram_capacity() existed).
-  6. A PWA-precached GUI static file (listed in sw.js's SHELL array) changed
-     without sw.js's own CACHE version constant also being bumped - an already-
-     installed PWA would keep serving the stale cached file forever, since a
-     service worker only re-checks its precached files when its own bytes
-     change. Shipped twice undetected by a human before this check existed.
+  6. sw.js's SHELL precache array names a file that doesn't exist, or misses an
+     app/*.js or pages/*.js module it promises to precache; or sw.js's CACHE
+     constant line is no longer in the shape localm/plugins/gui/web.py's GET
+     /sw.js route expects to substitute a computed value into on every request
+     (that route is what actually keeps an installed PWA from serving stale
+     assets now - see check_hygiene's own "check 6" block comment for why a
+     hand-bumped version string was retired in favor of it).
   7. A module-level import CYCLE between top-level units under localm/ (e.g.
      inference <-> plugins). Acyclicity is checked instead of a hand-written tier
      map because a map is a maintained artifact encoding opinions - two readers
@@ -853,40 +855,41 @@ def _raw_accessor_violations(files: list[Path]) -> list[str]:
     return problems
 
 
-# ---- check 6: PWA service-worker cache-version bump gate -------------------
+# ---- check 6: PWA service-worker cache derivation --------------------------
 # The GUI's service worker (sw.js) serves static assets CACHE-FIRST, and a browser
 # only re-runs a service worker's install (which re-fetches the assets) when sw.js's
-# OWN bytes change - its CACHE version constant is what we bump to force that. So a
-# cached asset that changes without a matching CACHE bump is invisible to anyone who
-# already has the PWA installed: they keep the old copy forever.
+# OWN bytes change. sw.js's CACHE constant used to be a hand-typed version string
+# bumped whenever a cached asset changed - a value whose only requirement was "differ
+# from last time", carrying no meaning of its own.
 #
-# This has shipped THREE times undetected by human review (v49 for #621's settings.js
-# fix; again for the managed_comfy_enabled checkbox removal; and PR #640's models.js +
-# knowledge.js, which was a live field bug only by luck - a later unrelated PR bumped
-# the cache). Hence a gate, not a fourth "please remember" note.
+# That shipped stale THREE times undetected by human review before a bump gate was
+# added here (v49 for #621's settings.js fix; again for the managed_comfy_enabled
+# checkbox removal; PR #640's models.js + knowledge.js, saved only by luck when a
+# later unrelated PR happened to bump it). The gate then caught real misses for a
+# while - but a hand-maintained "must differ" line is ALSO a guaranteed merge
+# conflict between any two concurrent GUI PRs: it went v88 -> v89 -> v90 -> v91 in
+# one afternoon across three unrelated PRs, and a fourth session spent two rebase
+# rounds on that single line - during which its PR ran with NO CI at all, because a
+# conflicted PR gets no checks computed against it. One contested line silently cost
+# a session its entire verification signal.
 #
-# SCOPE - why this watches EVERY static asset and not just sw.js's SHELL list:
-# SHELL is only the PRE-cache (what install() fetches up front). sw.js's fetch handler
-# ALSO runtime-caches every same-origin, non-API, non-navigate GET into the SAME
-# versioned cache (`caches.open(CACHE).then((c) => c.put(req, copy))`) and serves it
-# cache-first forever after, with no revalidation and no expiry - the only eviction is
-# activate() dropping caches whose name != CACHE, i.e. a bump. So a NON-SHELL asset
-# goes stale exactly as hard as a SHELL one. Watching SHELL alone left 22 shipped files
-# permanently unwatched, including /vendor/jsQR.min.js (lazily loaded by the QR pairing
-# scanner) and all 20 KaTeX fonts. The honest watch set is "everything the worker can
-# cache", so this over-approximates to all tracked assets under the static root and
-# subtracts only what sw.js's fetch handler provably never caches (_SW_UNCACHED). An
-# over-approximation errs toward the gate firing, which is the right direction here:
-# the cost of a spurious fire is one cheap CACHE bump, the cost of a miss is a fix no
-# installed client ever receives.
+# The fix is to stop hand-maintaining the value at all: localm/plugins/gui/web.py's
+# GET /sw.js route now computes CACHE fresh on every request, from a content digest
+# of the actual static assets being served (see web.py's _compute_sw_cache_value).
+# It changes exactly when a cacheable asset's bytes change, for every asset the
+# service worker's fetch handler can runtime-cache - not just the SHELL precache
+# list, which alone left 22 shipped files (including all 20 KaTeX fonts and
+# /vendor/jsQR.min.js) permanently unwatched. Nothing about that value is checked
+# into git, so two branches touching different assets can never conflict over it.
+#
+# What THIS check still enforces, now that "was CACHE bumped" is no longer a
+# meaningful question: SHELL precache coverage (every listed entry names a real
+# file, every app/*.js and pages/*.js module is listed - unrelated to staleness,
+# still a real drift risk on its own) and that the CACHE placeholder line web.py's
+# route substitutes into is still in the expected shape, so an edit to sw.js cannot
+# silently break that substitution without this check catching it.
 _SW_STATIC = "localm/plugins/gui/static"
 _SW_JS = f"{_SW_STATIC}/sw.js"
-
-# Paths (relative to the static root) that sw.js's fetch handler returns early on, so
-# they are never cache-first and a bump cannot matter for them. Kept in sync with the
-# regex in sw.js's fetch listener by hand; nothing under static/ matches today, so this
-# is future-proofing, not dead weight.
-_SW_UNCACHED = re.compile(r"^(api|v1|plugins|localm-ca\.crt)(/|$)")
 
 # sw.js's SHELL comment promises to precache "every app/* and pages/* module (the
 # import graph)". Globs, NOT a copied file list: duplicating SHELL here would be the
@@ -901,7 +904,7 @@ def _sw_shell_files(sw_js_text: str) -> set[str]:
 
     An EMPTY result means the array could not be parsed - the real SHELL is never
     empty - so callers must treat empty as a failure, never as "nothing is
-    precached" (rule 5). See _sw_cache_bump_violations."""
+    precached" (rule 5). See _sw_cache_derivation_violations."""
     m = re.search(r"const SHELL = \[(.*?)\];", sw_js_text, re.S)
     if not m:
         return set()
@@ -909,50 +912,24 @@ def _sw_shell_files(sw_js_text: str) -> set[str]:
 
 
 def _sw_cache_version(sw_js_text: str) -> str | None:
-    """sw.js's CACHE constant. None => unparseable; callers must fail loud, not skip."""
+    """sw.js's CACHE constant (a placeholder that web.py's route substitutes at
+    request time - see check 6's block comment). None => unparseable; callers
+    must fail loud, not skip."""
     m = re.search(r'const CACHE = "([^"]+)"', sw_js_text)
     return m.group(1) if m else None
 
 
-def _sw_is_cacheable(rel: str) -> bool:
-    """Can the service worker cache this repo-relative path? A pure predicate, so it
-    applies to a DIFFED path as well as a tracked one. Applying it directly is what
-    makes deletions work: a staged `git rm` leaves the path in the diff but NOT in the
-    index, so intersecting the diff with `git ls-files` silently dropped every staged or
-    committed deletion - i.e. every deletion a pre-commit hook or CI would ever see (the
-    only case that survived was an unstaged unlink, which no real invocation produces)."""
-    if not rel.startswith(_SW_STATIC + "/"):
-        return False
-    if rel == _SW_JS:
-        return False                     # sw.js gates the others; it cannot gate itself
-    return not _SW_UNCACHED.match(rel[len(_SW_STATIC) + 1:])
+def _sw_cache_derivation_violations() -> list[str]:
+    """SHELL precache coverage, plus a sanity check that sw.js's CACHE placeholder
+    line is still in the shape localm/plugins/gui/web.py's GET /sw.js route expects
+    to substitute into (see check 6's block comment for what this replaced and why).
 
-
-def _sw_cacheable_assets() -> list[str] | None:
-    """Repo-relative paths of every tracked static asset the service worker can cache.
-    None => git could not enumerate them; callers must fail loud, not read it as "no
-    assets" (rule 5).
-
-    Deliberately re-enumerates via git instead of reusing main()'s _tracked_files():
-    that list drops _BINARY_EXTS (.woff2, .png) and skips the whole vendor/ directory,
-    which is correct for the text-scanning checks but would blind THIS check to exactly
-    the assets it most needs to watch (the KaTeX fonts and jsQR both live there)."""
-    out = _git("ls-files", "-z", "--", _SW_STATIC)
-    if out is None or out.returncode != 0:
-        return None
-    return [rel for rel in out.stdout.split("\0") if rel and _sw_is_cacheable(rel)]
-
-
-def _sw_cache_bump_violations() -> list[str]:
-    """A cacheable static asset must never change without sw.js's CACHE constant
-    changing in the same diff (see the block comment above for the incident record).
-
-    Every failure path here is LOUD. A silent `return []` when this check cannot do its
-    job is how it would rot into decoration: the regexes below match one exact
+    Every failure path here is LOUD. A silent `return []` when this check cannot do
+    its job is how it would rot into decoration: the regexes below match one exact
     hand-maintained format, so a benign reformat of sw.js would otherwise disable the
-    gate permanently and invisibly. That is the same standard main() already applies to
-    _tracked_files() - a gate that reports clean without actually checking anything is
-    the silent pass AGENTS.md rule 5 forbids."""
+    gate permanently and invisibly. That is the same standard main() already applies
+    to _tracked_files() - a gate that reports clean without actually checking
+    anything is the silent pass AGENTS.md rule 5 forbids."""
     sw_path = REPO / _SW_JS
     try:
         working_sw = sw_path.read_text(encoding="utf-8")
@@ -961,70 +938,38 @@ def _sw_cache_bump_violations() -> list[str]:
         # worker at all has genuinely nothing to gate, but one where the rest of the
         # static tree is present means sw.js MOVED and the gate is now pointed at
         # nothing - which must not pass silently.
-        if _sw_cacheable_assets():
+        still_ships = _git("ls-files", "-z", "--", _SW_STATIC)
+        if still_ships is not None and still_ships.returncode == 0 and still_ships.stdout:
             return [f"{_SW_JS}: missing, but {_SW_STATIC}/ still ships assets - the PWA "
-                    "cache-bump gate is pointed at a file that no longer exists and just "
-                    "checked NOTHING. Update _SW_JS in this script to the new path."]
-        # Falls through on [] (a checkout with no GUI) and on None (git could not
-        # enumerate, e.g. REPO is not a git tree). Neither is hidden: a tree git cannot
-        # enumerate ALREADY fails loud in main(), which refuses to report clean without
-        # scanning anything, so duplicating that alarm here would only fire on non-git
-        # callers that have nothing to gate in the first place.
+                    "cache-derivation gate is pointed at a file that no longer exists "
+                    "and just checked NOTHING. Update _SW_JS in this script to the new "
+                    "path (and web.py's route, which reads the same file)."]
+        # Falls through on no output (a checkout with no GUI) and on a failed git call
+        # (REPO is not a git tree). Neither is hidden: a tree git cannot enumerate
+        # ALREADY fails loud in main(), which refuses to report clean without scanning
+        # anything, so duplicating that alarm here would only fire on non-git callers
+        # that have nothing to gate in the first place.
         return []
     except OSError as e:
-        return [f"{_SW_JS}: exists but could not be read ({e}) - the PWA cache-bump gate "
-                "could not run."]
+        return [f"{_SW_JS}: exists but could not be read ({e}) - the PWA "
+                "cache-derivation gate could not run."]
 
     shell = _sw_shell_files(working_sw)
     working_cache = _sw_cache_version(working_sw)
     if not shell:
         return [f"{_SW_JS}: could not parse the SHELL precache array (expected "
-                '`const SHELL = [ "/asset", ... ];`). The PWA cache-bump gate reads it '
-                "to check precache coverage, so it just checked NOTHING. Restore that "
-                "format or update _sw_shell_files in this script."]
+                '`const SHELL = [ "/asset", ... ];`). The PWA cache-derivation gate '
+                "reads it to check precache coverage, so it just checked NOTHING. "
+                "Restore that format or update _sw_shell_files in this script."]
     if working_cache is None:
         return [f"{_SW_JS}: could not parse the CACHE constant (expected "
-                '`const CACHE = "localm-shell-vN";`). The PWA cache-bump gate compares '
-                "it against the baseline, so it just checked NOTHING. Restore that "
-                "format or update _sw_cache_version in this script."]
+                '`const CACHE = "...";`). localm/plugins/gui/web.py\'s GET /sw.js '
+                "route substitutes this line's value on every request - if it cannot "
+                "find it either, every client gets a 500 instead of the service "
+                "worker. Restore that format or update _sw_cache_version in this "
+                "script AND SW_CACHE_LINE_RE in web.py together."]
 
-    problems = _sw_shell_coverage_problems(shell, sw_path.parent)
-
-    ref = _changelog_baseline_ref()
-    if ref is None:
-        return problems                  # no git at all: the diff below cannot run
-    base_result = _git("show", f"{ref}:{_SW_JS}")
-    if base_result is None or base_result.returncode != 0:
-        return problems                  # sw.js not in the baseline yet: nothing to diff
-    base_cache = _sw_cache_version(base_result.stdout)
-    if base_cache is None:
-        problems.append(
-            f"{_SW_JS}: could not parse the CACHE constant from the baseline ({ref[:8]}), "
-            "so the PWA cache-bump gate could not tell whether it was bumped.")
-        return problems
-    if working_cache != base_cache:
-        return problems                  # bumped: exactly what this gate asks for
-
-    # One diff over the whole static tree, so an asset that was DELETED or ADDED counts
-    # too - a per-file is_file() walk silently skipped deletions. Filter with the
-    # predicate rather than against `git ls-files`: the index does not hold a staged
-    # deletion, so intersecting with it dropped exactly the deletions this must catch.
-    # -z keeps non-ASCII paths raw (core.quotepath would otherwise mangle them).
-    changed = _git("diff", "--name-only", "-z", ref, "--", _SW_STATIC)
-    if changed is None or changed.returncode != 0:
-        problems.append(
-            f"{_SW_STATIC}: `git diff` against the baseline ({ref[:8]}) failed, so the "
-            "PWA cache-bump gate could not tell which assets changed. It checked NOTHING.")
-        return problems
-    stale = sorted(p for p in changed.stdout.split("\0") if p and _sw_is_cacheable(p))
-    for rel in stale:
-        problems.append(
-            f"{rel}: changed since {ref[:8]} but {_SW_JS}'s CACHE version was not bumped "
-            f"(still {working_cache!r}) - an already-installed PWA will keep serving the "
-            "OLD cached copy forever, since the browser only re-installs a service worker "
-            "when ITS OWN bytes change. Bump CACHE in sw.js and say why in the comment "
-            "above it.")
-    return problems
+    return _sw_shell_coverage_problems(shell, sw_path.parent)
 
 
 def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]:
@@ -1439,7 +1384,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_changelog_append_only())
     problems.extend(_raw_accessor_violations(tracked))
     problems.extend(_big_test_write_violations(tracked))
-    problems.extend(_sw_cache_bump_violations())
+    problems.extend(_sw_cache_derivation_violations())
     problems.extend(_import_cycle_violations())
     # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
     # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
