@@ -14,7 +14,7 @@ import pytest
 
 from localm import settings_schema as ss
 from localm.config import DEFAULT_CONFIG
-from localm.discover import GPU_PROBE_OK
+from localm.discover import FREE_SCOPE_DEVICE, FREE_SCOPE_PROCESS, GPU_PROBE_OK
 
 
 # --------------------------------------------------------------------------- #
@@ -430,6 +430,63 @@ class TestGpusCli:
             "a timed-out GPU probe was misreported as 'no torch' (rule 5)")
         assert ("timed out" in out or "timeout" in out)
         assert ("again" in out or "retry" in out)
+
+    @staticmethod
+    def _flat(output):
+        # Rich's console wraps long lines to the render width, which can split
+        # "free counts only this process" across a line break in captured
+        # output; collapsing all whitespace makes the substring check robust
+        # to wherever that wrap lands.
+        return " ".join(output.split())
+
+    # Same "free counts only this process" caveat as cli/doctor.py's torch VRAM
+    # check; these cover cli/models.py's `gpus` command, which previously
+    # printed `free` with no free_scope check at all.
+    def test_process_scoped_free_gets_caveat(self, cli_runner):
+        from localm.cli import main
+        gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_PROCESS}]
+        with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "free counts only this process" in self._flat(r.output)
+
+    def test_device_scoped_free_has_no_caveat(self, cli_runner):
+        from localm.cli import main
+        gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_DEVICE}]
+        with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "free counts only this process" not in self._flat(r.output)
+
+    def test_untagged_free_scope_defers_to_raw_reading_check(self, cli_runner):
+        """No free_scope key at all (never happens from the real discover.list_gpus,
+        which always tags it, but is what a raw/legacy entry would look like) must
+        fall back to gpu_usage.raw_reading_is_process_scoped() exactly like
+        doctor.py's torch VRAM check does, not silently assume either scope."""
+        from localm.cli import main
+        gpus = [dict(self._GPUS[0])]   # no "free_scope" key
+        with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)), \
+             patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=True):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "free counts only this process" in self._flat(r.output)
+
+        with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)), \
+             patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=False):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "free counts only this process" not in self._flat(r.output)
+
+    def test_no_free_reading_has_no_caveat(self, cli_runner):
+        """free itself is None (no reading at all) - nothing to caveat, even when
+        free_scope claims PROCESS scope, since no free figure is ever printed."""
+        from localm.cli import main
+        gpus = [{**self._GPUS[0], "free": None, "free_scope": FREE_SCOPE_PROCESS}]
+        with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "GB free" not in r.output
+        assert "free counts only this process" not in self._flat(r.output)
 
 
 # --------------------------------------------------------------------------- #
