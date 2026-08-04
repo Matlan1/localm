@@ -221,12 +221,36 @@ def set_mode(home: Path, instance_id: str, mode: str) -> bool:
         return False
 
 
+def _describe_unreadable(path) -> str:
+    """Best-effort (size, mtime) of *path* for the read_entry warning below -
+    never raises (this runs inside the except branch of an already-failed
+    read, so it must not itself fail), and "stat also failed" is a real,
+    reportable outcome rather than an exception escaping the log call."""
+    try:
+        st = Path(path).stat()
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        return f"size={st.st_size} mtime={mtime}"
+    except OSError as e:
+        return f"stat also failed: {e}"
+
+
 def read_entry(path) -> Optional[dict]:
     """Read one registry entry, or None. A MISSING file (FileNotFoundError) is
     normal and returns None silently; a CORRUPT or unreadable file
     (JSONDecodeError/OSError) ALSO collapses to None but is logged first, so a
     reap that deletes a live-but-unreadable entry is at least discoverable under
-    --debug instead of looking identical to "no such file"."""
+    --debug instead of looking identical to "no such file".
+
+    The size/mtime in that log line are diagnostic instrumentation, not
+    incidental: a live "Expecting value: line 1 column 1 (char 0)" (json
+    failing on an EMPTY string) has been observed with the writer's own
+    temp-file + os.replace pattern present in every commit that has ever
+    written this file - so the exact mechanism that produced a 0-byte entry
+    is still unknown. size=0 confirms "genuinely empty" (as observed);
+    size>0 here would instead mean a TRUNCATED write, a materially different
+    cause the read alone cannot distinguish. Do not remove this once the next
+    occurrence is explained - it costs nothing on the (normal) missing-file
+    path, which returns before ever reaching it."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
@@ -235,7 +259,8 @@ def read_entry(path) -> Optional[dict]:
     except (json.JSONDecodeError, OSError) as e:
         # Surface (not silence) a corrupt/permission-denied entry before it gets
         # treated as missing and potentially reaped while the process is live.
-        logger.warning("registry entry %s unreadable: %s", path, e)
+        logger.warning("registry entry %s unreadable: %s (%s)",
+                       path, e, _describe_unreadable(path))
         return None
 
 

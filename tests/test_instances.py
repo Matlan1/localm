@@ -9,6 +9,7 @@ leak), and the advertise() context manager lifecycle.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -127,6 +128,58 @@ def test_list_entries_skips_corrupt(tmp_path):
     instances.run_dir(tmp_path).mkdir(parents=True)
     (instances.run_dir(tmp_path) / "bad.json").write_text("{not json", encoding="utf-8")
     assert instances.list_entries(tmp_path) == []
+
+
+# ------------------------------------------------------------------ #
+#  read_entry diagnostics: size/mtime on an unreadable entry          #
+#  (NEW-GPU-REGISTRY-ZERO-BYTE-ENTRY instrumentation - a live 0-byte  #
+#  registry entry was observed with no known code path that could    #
+#  produce one; this lets the NEXT occurrence distinguish "genuinely  #
+#  empty" from "truncated mid-write" from the log alone.)             #
+# ------------------------------------------------------------------ #
+
+def test_read_entry_empty_file_is_rejected_and_reports_size_zero(tmp_path, caplog):
+    instances.run_dir(tmp_path).mkdir(parents=True)
+    p = instances.run_dir(tmp_path) / "empty.json"
+    p.write_bytes(b"")
+    with caplog.at_level("WARNING"):
+        assert instances.read_entry(p) is None
+    assert "size=0" in caplog.text
+    assert "char 0" in caplog.text   # json's own message for an empty string
+
+
+def test_read_entry_truncated_file_reports_nonzero_size(tmp_path, caplog):
+    """A file with SOME content that is still invalid JSON - the shape a
+    mid-write truncation would leave - must report a NONZERO size, the exact
+    signal that distinguishes it from the empty-file case above."""
+    instances.run_dir(tmp_path).mkdir(parents=True)
+    p = instances.run_dir(tmp_path) / "truncated.json"
+    p.write_text('{"instance_id": "abc", "pid":', encoding="utf-8")   # cut off
+    with caplog.at_level("WARNING"):
+        assert instances.read_entry(p) is None
+    assert "size=0" not in caplog.text
+    m = re.search(r"size=(\d+)", caplog.text)
+    assert m and int(m.group(1)) > 0, caplog.text
+
+
+def test_read_entry_missing_file_does_not_log(tmp_path, caplog):
+    """The normal, expected case (no entry yet, or already reaped) must stay
+    silent - only a genuinely unreadable EXISTING file is diagnostic-worthy."""
+    p = instances.run_dir(tmp_path) / "does-not-exist.json"
+    with caplog.at_level("WARNING"):
+        assert instances.read_entry(p) is None
+    assert caplog.text == ""
+
+
+def test_reap_removes_the_empty_entry_read_entry_flags(tmp_path):
+    """The existing reap behaviour (already covered by test_reap_removes_corrupt
+    for a non-empty corrupt file) must hold for the empty-file case too - the
+    instrumentation is diagnostic-only and must not change what gets cleaned up."""
+    instances.run_dir(tmp_path).mkdir(parents=True)
+    bad = instances.run_dir(tmp_path) / "empty.json"
+    bad.write_bytes(b"")
+    instances.reap_stale(tmp_path, is_alive=lambda e: True)
+    assert not bad.exists()
 
 
 @pytest.mark.skipif(__import__("sys").platform == "win32", reason="POSIX modes only")
