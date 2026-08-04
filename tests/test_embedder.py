@@ -190,6 +190,52 @@ def test_download_gated_by_net_policy_records_last_error(monkeypatch):
     assert "bge-small-en-v1.5" in err and "not auto-downloading" in err
 
 
+def test_policy_declined_download_does_not_clobber_a_real_load_failure(monkeypatch):
+    """Regression (found live via tests/test_disclosure.py's own scrub test,
+    which poisons _LAST_ERROR + _LOAD_FAILED directly to simulate a genuine
+    load failure): the SAME latched-_LOAD_FAILED protection given to
+    _record_resolve_success() must also cover _download_known's two
+    policy-decline branches. A "not auto-downloading" verdict fires only when
+    the known-key file is ALSO absent from disk - a state that cannot
+    coexist with a REAL load failure for the SAME spec (loading requires the
+    file to have been found first) - so while _LOAD_FAILED is latched, a
+    policy decline is not new evidence and must leave last_error() alone,
+    exactly like a bare resolve success already does."""
+    _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="ask")
+    monkeypatch.setattr(emb, "_LOAD_FAILED", True)
+    monkeypatch.setattr(
+        emb, "_LAST_ERROR",
+        "failed to load embedding model: /some/path.gguf: not an embedding model")
+
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "not an embedding model" in err
+    assert "not auto-downloading" not in err
+
+
+def test_resolve_failure_also_does_not_clobber_a_real_load_failure(monkeypatch):
+    """The unified choke point (_set_resolve_outcome) means the SAME guard now
+    covers _record_resolve_failure too, not just _record_resolve_success and
+    _download_known's policy branches - added after the coordinator's review
+    named this as the third, still-unguarded write site sharing the identical
+    "same reason, sibling path, guard not carried across" shape. A resolve
+    FAILURE for a name that matches nothing at all, while _LOAD_FAILED is
+    latched, must leave the more specific load-failure reason in place - it
+    can only be racing a stale flag from an abandoned spec (reaching a real
+    load attempt requires the CURRENT spec to have resolved first), so the
+    latched fact wins."""
+    _cfg(monkeypatch, embedding_model="totally-unrelated-typo-xyz")
+    monkeypatch.setattr(emb, "_LOAD_FAILED", True)
+    monkeypatch.setattr(
+        emb, "_LAST_ERROR",
+        "failed to load embedding model: /some/path.gguf: not an embedding model")
+
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "not an embedding model" in err
+    assert "totally-unrelated-typo-xyz" not in err
+
+
 def test_resolve_failure_warns_once_then_quiets(monkeypatch, caplog):
     """resolve_embedding_model_path re-runs on every embed_texts() call while no
     embedder is loaded (get_embedder never caches a missing-model result). An
