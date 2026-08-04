@@ -78,7 +78,7 @@ def register(app: FastAPI, ctx) -> None:
                 warns = []
             if warns:
                 created = {**created, "warnings": warns}
-        # Lockout guard (S3): in open mode the loopback GUI is trusted via the
+        # Lockout guard: in open mode the loopback GUI is trusted via the
         # per-process shell token, which the server STOPS honouring the instant auth
         # turns on (a key now exists). Without this, minting your first key from the
         # local GUI would orphan the browser session and lock the owner out. So on the

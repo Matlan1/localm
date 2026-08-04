@@ -1987,8 +1987,7 @@ def _principal_from_token(token, source):
             # owning key against the live keystore every request, so revoking or
             # expiring it cuts the session off (parity with the bearer path's
             # per-request verify()). An owner/ADMIN session is exempt - decoupled
-            # from the key VALUE so an owner-key ROLL does not log the owner out
-            # (the S1 fix).
+            # from the key VALUE so an owner-key ROLL does not log the owner out.
             from localm.auth import key_hash_live
             if not key_hash_live(rec.get("key_hash")):
                 return None
@@ -3191,13 +3190,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                              "(only same-origin requests or a configured "
                              "'cors_origins' may use this endpoint)."},
                 )
-            # H5: open-mode management gate. With no key configured, management
+            # Open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
             # loopback GUI shell), so a no-Origin local client (curl, a script)
             # can no longer mint a key, flip config, install a plugin, load a
             # model, or browse the filesystem unauthenticated. Protected mode (a
             # key exists) is bearer-auth'd on the route. The token is required even
-            # for an allowlisted CORS origin (F2): an Origin header is forgeable, so
+            # for an allowlisted CORS origin: an Origin header is forgeable, so
             # it is not a management credential - a configured external origin must
             # use an API key for state changes.
         is_unsafe = request.method in _UNSAFE_METHODS

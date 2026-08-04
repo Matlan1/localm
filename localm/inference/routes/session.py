@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Session auth routes (S2): HttpOnly cookie + CSRF for the browser GUI.
+"""Session auth routes: HttpOnly cookie + CSRF for the browser GUI.
 
 Extracted verbatim from create_app(); behavior unchanged. The session cookie
 names, max age, and the token/CSRF helpers live on the http_server module and are

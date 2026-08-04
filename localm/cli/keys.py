@@ -119,9 +119,10 @@ def key_clear(yes):
         return
     auth.clear_api_key()
     # A browser owner session carries its own ADMIN scope snapshot and survives a
-    # key roll (S1), so a leftover owner cookie would keep full access after the
-    # key is gone - defeating the clear (dangerous when require_auth is on). Sign
-    # every browser session out here, mirroring /api/auth/key/clear. Device bearer
+    # key roll (sessions are decoupled from the key value by design), so a
+    # leftover owner cookie would keep full access after the key is gone -
+    # defeating the clear (dangerous when require_auth is on). Sign every
+    # browser session out here, mirroring /api/auth/key/clear. Device bearer
     # KEYS live in the keystore and are untouched.
     revoked = sessions.revoke_all()
     console.print("[green]✓[/green] API key cleared - open mode.")
@@ -141,17 +142,18 @@ def key_recover():
     untouched, so devices keep working; only the owner credential is rotated. Live
     browser (cookie) sessions are signed out too, so a captured owner cookie cannot
     outlive the recovery. The local CLI is the trusted recovery path, so this does
-    not require the old key (SEC-3). To instead drop all auth and return to open
+    not require the old key. To instead drop all auth and return to open
     mode, use 'key clear'."""
     from localm import auth, sessions
     had = auth.get_api_key() is not None
     key = auth.regenerate_key()
-    # regenerate_key deliberately leaves browser sessions alone (S1: a GUI key roll
-    # must not log the browser out), but recovery is the compromise path. An owner
-    # cookie carries its own ADMIN snapshot and is exempt from the keystore recheck,
-    # so it would survive the rotation unless dropped here. Revoke every session
-    # (NOT inside regenerate_key, to keep the GUI's survive-a-roll behavior intact),
-    # mirroring /api/auth/key/clear. Device bearer KEYS in the keystore are untouched.
+    # regenerate_key deliberately leaves browser sessions alone (by design: a GUI
+    # key roll must not log the browser out), but recovery is the compromise path.
+    # An owner cookie carries its own ADMIN snapshot and is exempt from the
+    # keystore recheck, so it would survive the rotation unless dropped here.
+    # Revoke every session (NOT inside regenerate_key, to keep the GUI's
+    # survive-a-roll behavior intact), mirroring /api/auth/key/clear. Device
+    # bearer KEYS in the keystore are untouched.
     revoked = sessions.revoke_all()
     console.print("[green]Owner access recovered. New owner key (shown once - "
                   "copy it now):[/green]")

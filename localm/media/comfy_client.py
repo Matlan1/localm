@@ -996,7 +996,7 @@ def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-#  S5 BUG-REOFFER: the __func__ regression re-offers managed ComfyUI ONCE
+#  Managed-ComfyUI re-offer: the __func__ regression re-offers managed ComfyUI ONCE
 # ---------------------------------------------------------------------------
 #
 #  The T1 shim (above) fixes THIS run in memory. As a durable answer, decision 1
