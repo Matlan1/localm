@@ -888,6 +888,71 @@ class TestVramEstimate:
         assert data["kv_cache"] == 4096 * 16_000    # size-class floor for a tiny file
         assert data["kv_cache"] > 0
 
+    def test_estimate_discounts_pinned_moe_experts_from_the_configured_n_cpu_moe(
+            self, gui_app, tmp_path):
+        """AUDIT-KV-SYSSTATS, the sequel: the same GUI estimate this class's
+        KV-shape tests already fixed once was ALSO blind to n_cpu_moe -
+        _sizing.py's VramSizingMixin._effective_model_bytes_for_vram gained
+        this exact discount for the load-time preflight, but the route had no
+        n_cpu_moe query param and estimate_vram had no parameter for it, so
+        the live readout still showed the whole file as VRAM-needed even
+        after a load with experts pinned would succeed. n_cpu_moe has no GUI
+        slider (unlike n_ctx/n_gpu_layers), so the route reads it from the
+        SAVED config, not a query param."""
+        from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
+        from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
+        from localm.config import load_config as real_load_config
+        app, _ = gui_app
+        tensors = [
+            ("blk.0.attn_q.weight", [4], 0, 2_000),
+            ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
+        ]
+        kv = [("general.architecture", _T_STRING, "testmoe")]
+        model_file = _gguf_with_tensors(tmp_path / "moe.gguf", kv, tensors)
+        pinned = gguf_moe_pinned_expert_bytes(model_file, 1)
+        assert pinned == 900_000   # precondition: the fixture matches the pinning pattern
+
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        base_cfg = real_load_config()
+
+        def _get(n_cpu_moe):
+            with patch("localm.config.load_registry", return_value=reg), \
+                 patch("localm.config.load_config",
+                       return_value={**base_cfg, "n_cpu_moe": n_cpu_moe}), \
+                 patch("localm.discover.list_gpus",
+                       side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+                with TestClient(app) as client:
+                    return client.get("/api/vram-estimate",
+                                      params={"model": "m", "n_ctx": 0}).json()
+
+        without = _get(0)
+        with_moe = _get(1)
+        assert with_moe["weights"] == without["weights"] - pinned
+        assert with_moe["weights"] < without["weights"]
+
+    def test_estimate_n_cpu_moe_zero_is_a_no_op(self, gui_app, tmp_path):
+        """The default (n_cpu_moe=0, no setting configured) must be BYTE
+        IDENTICAL to a caller that never knew this parameter existed - the
+        discount is opt-in via config, never applied speculatively."""
+        import os
+        from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
+        app, _ = gui_app
+        tensors = [("blk.0.ffn_gate_exps.weight", [4], 0, 900_000)]
+        kv = [("general.architecture", _T_STRING, "testmoe")]
+        model_file = _gguf_with_tensors(tmp_path / "moe.gguf", kv, tensors)
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 0}).json()
+        # The whole file, unchanged - compared against the file's own real
+        # on-disk size rather than a hand-derived magic number, since the
+        # exact byte count includes GGUF header/KV/tensor-info/alignment
+        # overhead this test has no reason to reproduce by hand.
+        assert data["weights"] == os.path.getsize(model_file)
+
 
 class TestStatsVramTrust:
     """The status-bar VRAM figure (/api/stats -> sysstats._vram) shows used/percent

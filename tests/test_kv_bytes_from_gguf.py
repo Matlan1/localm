@@ -316,3 +316,33 @@ class TestEstimateVramUsesTheRealShape:
         est = estimate_vram(model_bytes, n_ctx=4096, kv_bytes_per_token=0)
         assert est["kv_cache"] == 4096 * GgufBackend._bytes_per_token(model_bytes)
         assert est["kv_cache"] > 0
+
+    def test_moe_pinned_bytes_reduces_the_weights_estimate(self, tmp_path):
+        """AUDIT-KV-SYSSTATS, the sequel: _sizing.py's VramSizingMixin.
+        _effective_model_bytes_for_vram discounts a Mixture-of-Experts load's
+        weight footprint by whatever n_cpu_moe pins to system RAM - this GUI
+        estimate must apply the SAME discount, or the live readout keeps
+        showing the whole file as VRAM-needed even after the load itself
+        would succeed. moe_pinned_bytes=0 (the default) must be a no-op -
+        every existing caller/test that never passes it keeps today's
+        answer."""
+        from localm.sysstats import estimate_vram
+        model_bytes = 800 * 1024 * 1024   # 800 MB file, matches the real MoE test scale
+        pinned = 700 * 1024 * 1024        # 700 MB of it pinned to system RAM
+
+        without = estimate_vram(model_bytes, n_ctx=0, n_gpu_layers=99)
+        with_moe = estimate_vram(model_bytes, n_ctx=0, n_gpu_layers=99,
+                                 moe_pinned_bytes=pinned)
+        assert with_moe["weights"] == model_bytes - pinned
+        assert with_moe["weights"] < without["weights"]
+        assert with_moe["needed"] < without["needed"]
+
+    def test_moe_pinned_bytes_never_goes_negative(self, tmp_path):
+        # A pinned count larger than the file itself (a parsing quirk, or a
+        # stale n_cpu_moe against a since-replaced smaller file) must clamp
+        # to zero, never underflow into a negative "weights" the UI would
+        # render as nonsense.
+        from localm.sysstats import estimate_vram
+        est = estimate_vram(100, n_ctx=0, n_gpu_layers=99, moe_pinned_bytes=999)
+        assert est["weights"] == 0
+        assert est["needed"] >= 0
