@@ -24,7 +24,7 @@ import secrets
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncIterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -3481,6 +3481,38 @@ def _unpin(engine) -> None:
     """Release the request pin taken by _pin. Balanced exactly once per request."""
     if isinstance(getattr(engine, "active_requests", None), int):
         engine.active_requests = max(0, engine.active_requests - 1)
+
+
+@contextmanager
+def driving_engine(engine):
+    """Pin *engine* busy and touch its activity clock for the DURATION of a
+    plugin-driven generation call (memory auto-consolidate, a scheduled job, ...).
+
+    Wrap this around the ACTUAL chat_stream/complete call, never around merely
+    resolving or inspecting the engine (checking .loaded, reading a name) - a
+    bare property read must not count as activity, or a model nobody is really
+    using again stays pinned resident forever. Plugins reach the live engine via
+    PluginManager.inference_engine, which is now resolved fresh at every use site
+    across several plugins (#959), so inspection-only reads are common; only the
+    call that actually drives the model should register as "in use".
+
+    active_requests is NOT optional here even though a timestamp is also touched:
+    _idle_unload_once checks the per-model timestamp FIRST and only consults
+    active_requests if that already looks stale, so active_requests>0 is what
+    actually prevents eviction mid-task across a multi-round loop where
+    individual rounds may pause for a while - a timestamp alone cannot, since
+    nothing re-touches it between rounds unless every round does so itself.
+    Touching the clock again on exit resets the idle countdown to "now" the
+    moment the task genuinely finishes, so the model is not instantly eligible
+    for eviction the second a long task ends."""
+    name = getattr(engine, "display_name", None)
+    _touch_activity(name)
+    _pin(engine)
+    try:
+        yield engine
+    finally:
+        _unpin(engine)
+        _touch_activity(name)
 
 
 async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[str]:

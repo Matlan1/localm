@@ -58,14 +58,18 @@ def home(tmp_path, monkeypatch):
 class _StubEngine:
     loaded = True
 
-    def __init__(self, reply):
+    def __init__(self, reply, display_name="stub-model"):
         self._reply = reply
         self.calls = 0
         self.caller_thread = None
+        self.display_name = display_name
+        self.active_requests = 0
+        self.active_requests_during_call = None
 
     def chat_stream(self, messages, **kw):
         self.calls += 1
         self.caller_thread = threading.get_ident()
+        self.active_requests_during_call = self.active_requests
         yield self._reply
 
 
@@ -107,6 +111,33 @@ def test_consolidate_calls_the_model_off_the_event_loop_thread(home, monkeypatch
         "memory_consolidate called the model's chat_stream() ON the event-loop "
         "thread - a blocking generation there starves /api/stats and every other "
         "request for the whole run (#953)")
+
+
+def test_consolidate_pins_the_engine_busy_for_the_whole_call(home, monkeypatch):
+    """F9: memory_consolidate's synthesize_memory call must be wrapped in
+    driving_engine, or idle-unload cannot tell this route apart from a bare
+    engine() access and can unload the model mid-consolidation on a quiet
+    server. Checked from OUTSIDE, at the actual chat_stream() call, so a
+    forgotten/misplaced wrap fails this test regardless of implementation
+    detail."""
+    from localm.inference import http_server as hs
+    eng = _StubEngine(_facts_reply())
+    monkeypatch.setattr(plug, "_live_engine", lambda: eng)
+    hs._last_activity_per_model.pop(eng.display_name, None)
+
+    async def _drive():
+        return await plug.memory_consolidate(request=None)
+
+    asyncio.run(_drive())
+
+    assert eng.calls > 0, "consolidation never called the model - broken test setup"
+    assert eng.active_requests_during_call == 1, (
+        "the model was not pinned busy (active_requests) during its own "
+        "chat_stream call - a quiet server running only this route has "
+        "nothing marking the model as in-use for idle-unload")
+    assert eng.active_requests == 0, "the pin must be released once the call returns"
+    assert eng.display_name in hs._last_activity_per_model, (
+        "the per-model activity clock was never touched")
 
 
 def test_event_loop_stays_responsive_while_consolidate_is_in_flight(home, monkeypatch):
