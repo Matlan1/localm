@@ -225,7 +225,7 @@ class TestAnthropicBackend:
 
         captured = {}
 
-        def fake_post(url, *, headers, json_body, timeout, stream=False, verify=True):
+        def fake_post(url, *, headers, json_body, timeout, stream=False, verify=True, retry_503=True):
             captured["url"] = url
             captured["headers"] = headers
             captured["json_body"] = json_body
@@ -264,7 +264,7 @@ class TestAnthropicBackend:
 
         captured = {}
 
-        def fake_post(url, *, headers, json_body, timeout, stream=False, verify=True):
+        def fake_post(url, *, headers, json_body, timeout, stream=False, verify=True, retry_503=True):
             captured["json_body"] = json_body
             resp = MagicMock()
             resp.status_code = 200

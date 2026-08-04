@@ -26,23 +26,36 @@ _RETRY_STATUSES = {429, 500, 502, 503, 529}
 _MAX_RETRIES = 4
 _BACKOFF_BASE_S = 2.0
 
-# 503 gets its OWN, much smaller retry budget than the rest of
-# _RETRY_STATUSES (#964). Unlike 429/500/502/529 (cloud rate-limit/overload
-# signals genuinely worth a real exponential backoff), a local ``localm
-# serve``'s 503 has several distinct causes with very different retry value:
-# some are fast-resolving and worth a retry ("Model load was superseded by a
-# newer request" - http_server.py, or "No engine initialised" during
-# startup), while others are a DETERMINISTIC isolated-worker fault (a
-# grammar-check or embedding-worker crash/timeout, inference/routes/chat.py)
-# that will almost certainly recur on retry - the status code alone cannot
-# tell these apart. Before this, EVERY 503 got the full 4-retry/~30s budget,
-# so the deterministic case cost the user up to 30s of blind waiting before
-# an already-informative error message (see CoderServerError/_raise_for_
-# status above) ever reached them. One short, fixed-delay retry gives the
-# genuinely transient causes a real chance to resolve while keeping the
-# deterministic case's cost small and bounded.
-_MAX_RETRIES_503 = 1
-_RETRY_DELAY_503_S = 3.0
+# 503 from OUR OWN local server is never retried at all (#964) - unlike
+# 429/500/502/529, which keep the full budget above unchanged (a cloud
+# provider's genuine rate-limit/overload signal). This is not "we cannot
+# tell 503 apart from a real error", it is TRACED: every 503 reachable from
+# this backend's own call path (/v1/chat/completions, /v1/completions, both
+# resolve their engine via inference/http_server.py's get_engine(), which
+# always calls switch_engine(..., preempt=False)) is either deterministic or
+# has already exhausted its own resolution window server-side before the
+# response ever reaches this client:
+#   - "Model load was superseded by a newer request" (http_server.py) is
+#     UNREACHABLE here: superseding only cancels a preempt=True load (an
+#     explicit GUI/CLI model switch), and switch_engine's own comment says so
+#     plainly - "API-routed loads (preempt=False) run to completion, never
+#     cancelled by a concurrent different-model load". A preempt=False
+#     load's cancel token is created but never wired to the global one that
+#     .set() actually triggers, so ModelLoadCancelled cannot fire for it.
+#   - A VRAM-refusal 503 already waited on wait_for_vram_release() (vram.py,
+#     5s default) SERVER-SIDE before refusing - a client retry on top adds
+#     latency without improving the odds, since the server already tried.
+#   - "No model loaded"/"No engine initialised" need an explicit user action
+#     (load a model), not a passing few seconds.
+#   - The grammar-check/embedding worker-fault 503 (inference/routes/chat.py,
+#     #991) is a deterministic isolated-worker crash that will almost
+#     certainly recur on the identical retried request.
+# Before this, EVERY local 503 got the full 4-retry/~30s budget, so the
+# deterministic case cost the user up to 30s of blind waiting before an
+# already-informative error message (see CoderServerError/_raise_for_status
+# above) ever reached them, for zero real chance of success. A NON-local
+# OpenAI-compatible endpoint (cloud or otherwise) is unaffected - its 503
+# causes were never traced here and keep the existing behaviour.
 
 
 class CoderAuthError(RuntimeError):
@@ -110,31 +123,29 @@ def _raise_for_status(resp) -> None:
 
 
 def _retry_delay(response, attempt: int) -> float:
-    """Honour Retry-After when present, else exponential backoff - except a
-    503, which always gets the short fixed delay (see _RETRY_DELAY_503_S):
-    it only ever retries once (_MAX_RETRIES_503), so there is no backoff
-    curve to compute and a fixed short wait is simplest."""
+    """Honour Retry-After when present, else exponential backoff."""
     retry_after = response.headers.get("Retry-After", "")
     if retry_after.isdigit():
         return min(float(retry_after), 120.0)
-    if response.status_code == 503:
-        return _RETRY_DELAY_503_S
     return min(_BACKOFF_BASE_S * (2 ** attempt), 60.0)
 
 
 def _post_with_retry(url: str, *, headers: dict, json_body: dict,
                      timeout: int, stream: bool = False,
-                     verify=True) -> requests.Response:
+                     verify=True, retry_503: bool = True) -> requests.Response:
     """POST with retry on 429/5xx. Returns the first non-retryable response.
 
-    503 uses its own smaller budget (_MAX_RETRIES_503) than the rest of
-    _RETRY_STATUSES - see that constant's comment for why."""
+    retry_503=False (passed by HTTPBackend for its own local server - see the
+    comment above _RETRY_STATUSES for why) makes a 503 immediately
+    non-retryable, same as any status outside _RETRY_STATUSES; every other
+    retryable status keeps the full _MAX_RETRIES budget unchanged."""
     last = None
     for attempt in range(_MAX_RETRIES + 1):
         resp = requests.post(url, headers=headers, json=json_body,
                              timeout=timeout, stream=stream, verify=verify)
-        max_retries = _MAX_RETRIES_503 if resp.status_code == 503 else _MAX_RETRIES
-        if resp.status_code not in _RETRY_STATUSES or attempt >= max_retries:
+        if resp.status_code not in _RETRY_STATUSES or attempt == _MAX_RETRIES:
+            return resp
+        if resp.status_code == 503 and not retry_503:
             return resp
         delay = _retry_delay(resp, attempt)
         resp.close()
@@ -182,6 +193,14 @@ class HTTPBackend(BaseLLMBackend):
         self._api_key      = api_key
         self._timeout      = timeout
         self._extra        = extra_params
+        # This backend's OWN local server, as opposed to a cloud/remote
+        # OpenAI-compatible endpoint - gates the 503 retry carve-out (see the
+        # comment above _RETRY_STATUSES). Stored directly rather than reusing
+        # supports_grammar below: that flag is ALSO False whenever anthropic
+        # is set, which would wrongly re-enable full 503 retries for the
+        # (never actually constructed) localm_server=True, anthropic=True
+        # combination.
+        self._is_local_server = bool(localm_server)
         # TLS verification for the POST. A localm network bind serves HTTPS via
         # its own local CA, so a loopback self-call must trust that CA; external
         # HTTPS (OpenAI/Anthropic) keeps normal public verification. verify=None
@@ -439,6 +458,7 @@ class HTTPBackend(BaseLLMBackend):
             json_body=self._body(messages, stream=False, **kwargs),
             timeout=self._timeout,
             verify=self._verify,
+            retry_503=not self._is_local_server,
         )
         _raise_for_status(resp)
         data = resp.json()
@@ -484,6 +504,7 @@ class HTTPBackend(BaseLLMBackend):
             timeout=self._timeout,
             stream=True,
             verify=self._verify,
+            retry_503=not self._is_local_server,
         ) as resp:
             _raise_for_status(resp)
             for line in resp.iter_lines():
@@ -557,6 +578,7 @@ class HTTPBackend(BaseLLMBackend):
             timeout=self._timeout,
             stream=True,
             verify=self._verify,
+            retry_503=not self._is_local_server,
         ) as resp:
             _raise_for_status(resp)
             for line in resp.iter_lines():

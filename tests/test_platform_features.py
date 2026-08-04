@@ -3,6 +3,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from localm.plugins.coder.tools import tool_read_env
 
 
@@ -120,56 +122,53 @@ class TestRetryOn429:
 
 
 class TestRetryOn503:
-    """503 gets its own smaller budget than 429/500/502/529 (#964): a local
-    server's 503 can be a deterministic isolated-worker fault (grammar-check
-    or embedding crash) that will almost certainly recur on retry, unlike
-    429/500/502/529's cloud rate-limit/overload signals. The status code
-    alone cannot tell a deterministic fault apart from a genuinely transient
-    one (a model load superseded by a newer request, or the engine still
-    initialising) - so this gives every 503 exactly ONE short retry rather
-    than 429's full 4-retry/~30s budget, bounding the worst case while still
-    giving the transient causes a real chance to recover."""
+    """A LOCAL server's 503 is never retried at all (#964) - traced, not
+    guessed: every 503 reachable from this backend's own call path
+    (/v1/chat/completions, /v1/completions - both resolve their engine via
+    switch_engine(..., preempt=False)) is either a deterministic fault
+    (grammar-check/embedding worker crash) or has already exhausted its own
+    resolution window server-side (wait_for_vram_release's 5s wait) before
+    the response ever reaches this client - see the comment above
+    _RETRY_STATUSES in http.py for the full trace, including why "Model load
+    was superseded" specifically cannot happen on this preempt=False path.
+    A non-local (cloud/other OpenAI-compatible) endpoint is unaffected and
+    keeps the full budget, since its 503 causes were never traced here."""
 
-    def test_503_retries_once_then_gives_up(self):
-        from localm.plugins.coder.backends.http import (
-            _MAX_RETRIES_503, _post_with_retry)
+    def test_local_503_is_never_retried(self):
+        from localm.plugins.coder.backends.http import _post_with_retry
 
-        assert _MAX_RETRIES_503 == 1, (
-            "this test's call-count assertion below is written against "
-            "exactly 1 - update both together if the budget ever changes")
         faulted = MagicMock(status_code=503, headers={})
         with patch("localm.plugins.coder.backends.http.requests.post",
                    return_value=faulted) as post, \
              patch("localm.plugins.coder.backends.http.time.sleep") as sleep:
+            resp = _post_with_retry("http://x", headers={}, json_body={},
+                                    timeout=5, retry_503=False)
+        assert resp.status_code == 503
+        # Exactly ONE request, zero retries - not 429's _MAX_RETRIES + 1 = 5.
+        # The exact regression #964 traced to: a deterministic worker-fault
+        # 503 was retried like a transient cloud rate limit, costing ~30s
+        # before an already-informative message ever reached the user, for
+        # zero real chance of success (every reachable cause is either
+        # deterministic or already server-side-exhausted - see the class
+        # docstring).
+        assert post.call_count == 1
+        sleep.assert_not_called()
+
+    def test_non_local_503_keeps_the_full_retry_budget(self):
+        """retry_503 defaults to True (unset) - a cloud/other OpenAI-
+        compatible endpoint's 503 is untouched by this carve-out."""
+        from localm.plugins.coder.backends.http import (
+            _MAX_RETRIES, _post_with_retry)
+
+        errored = MagicMock(status_code=503, headers={})
+        with patch("localm.plugins.coder.backends.http.requests.post",
+                   return_value=errored) as post, \
+             patch("localm.plugins.coder.backends.http.time.sleep"):
             resp = _post_with_retry("http://x", headers={}, json_body={}, timeout=5)
         assert resp.status_code == 503
-        # ONE retry (2 total requests), not 429's _MAX_RETRIES + 1 = 5 - the
-        # exact regression #964 traced to: a deterministic worker-fault 503
-        # was retried like a transient cloud rate limit, costing ~30s before
-        # an already-informative message ever reached the user.
-        assert post.call_count == 2
-        sleep.assert_called_once()
+        assert post.call_count == _MAX_RETRIES + 1
 
-    def test_503_retry_uses_the_short_fixed_delay_not_exponential_backoff(self):
-        from localm.plugins.coder.backends.http import (
-            _RETRY_DELAY_503_S, _retry_delay)
-        resp = MagicMock(status_code=503, headers={})
-        # Same fixed delay regardless of attempt number - 503 never gets a
-        # backoff CURVE (it only ever retries once).
-        assert _retry_delay(resp, 0) == _RETRY_DELAY_503_S
-        assert _retry_delay(resp, 3) == _RETRY_DELAY_503_S
-
-    def test_503_still_honours_an_explicit_retry_after_header(self):
-        """The server's own explicit hint outranks the fixed 503 delay -
-        unchanged priority order from the pre-existing Retry-After handling."""
-        from localm.plugins.coder.backends.http import _retry_delay
-        resp = MagicMock(status_code=503, headers={"Retry-After": "12"})
-        assert _retry_delay(resp, 0) == 12.0
-
-    def test_503_succeeding_on_the_one_retry_is_unaffected(self):
-        """The genuinely-transient case (e.g. http_server.py's "Model load
-        was superseded by a newer request") still gets its one real chance
-        to recover and succeeds normally."""
+    def test_non_local_503_succeeding_on_retry_is_unaffected(self):
         from localm.plugins.coder.backends.http import _post_with_retry
 
         faulted = MagicMock(status_code=503, headers={"Retry-After": "0"})
@@ -181,9 +180,9 @@ class TestRetryOn503:
         assert resp is ok
         assert post.call_count == 2
 
-    def test_other_5xx_statuses_keep_the_full_retry_budget(self):
-        """429/500/502/529 are unaffected by the 503-specific carve-out -
-        still the full _MAX_RETRIES budget, unchanged from before."""
+    def test_other_5xx_statuses_keep_the_full_retry_budget_even_with_retry_503_false(self):
+        """retry_503=False gates 503 specifically - 429/500/502/529 are
+        completely unaffected, even on a localm_server=True backend."""
         from localm.plugins.coder.backends.http import (
             _MAX_RETRIES, _post_with_retry)
 
@@ -192,6 +191,44 @@ class TestRetryOn503:
             with patch("localm.plugins.coder.backends.http.requests.post",
                        return_value=errored) as post, \
                  patch("localm.plugins.coder.backends.http.time.sleep"):
-                resp = _post_with_retry("http://x", headers={}, json_body={}, timeout=5)
+                resp = _post_with_retry("http://x", headers={}, json_body={},
+                                        timeout=5, retry_503=False)
             assert resp.status_code == status
             assert post.call_count == _MAX_RETRIES + 1, status
+
+
+class TestHTTPBackendLocalServer503Wiring:
+    """HTTPBackend itself must actually PASS retry_503 through, keyed on
+    localm_server - a unit test on _post_with_retry alone cannot prove the
+    real caller wires it correctly."""
+
+    def test_localm_server_backend_fails_fast_on_persistent_503(self):
+        from localm.plugins.coder.backends.http import (
+            CoderServerError, HTTPBackend)
+
+        faulted = MagicMock(status_code=503, headers={},
+                            json=MagicMock(return_value={"detail": "worker faulted"}))
+        backend = HTTPBackend("http://127.0.0.1:8642/v1", "test-model",
+                              localm_server=True, verify=False)
+        with patch("localm.plugins.coder.backends.http.requests.post",
+                   return_value=faulted) as post, \
+             patch("localm.plugins.coder.backends.http.time.sleep") as sleep:
+            with pytest.raises(CoderServerError):
+                backend.chat([{"role": "user", "content": "hi"}])
+        assert post.call_count == 1
+        sleep.assert_not_called()
+
+    def test_non_localm_backend_retries_persistent_503(self):
+        from localm.plugins.coder.backends.http import (
+            _MAX_RETRIES, CoderServerError, HTTPBackend)
+
+        faulted = MagicMock(status_code=503, headers={},
+                            json=MagicMock(return_value={"detail": "overloaded"}))
+        backend = HTTPBackend("https://api.example.com/v1", "test-model",
+                              verify=False)   # localm_server defaults False
+        with patch("localm.plugins.coder.backends.http.requests.post",
+                   return_value=faulted) as post, \
+             patch("localm.plugins.coder.backends.http.time.sleep"):
+            with pytest.raises(CoderServerError):
+                backend.chat([{"role": "user", "content": "hi"}])
+        assert post.call_count == _MAX_RETRIES + 1
