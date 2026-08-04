@@ -53,7 +53,12 @@ It also runs the release-file manifest gate (scripts/check_manifest.py,
 NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
 or release-exclude, nothing local-only may be committed, and no manifest pattern
 may go stale. Folding it in here means the ONE CI "Hygiene gate" step and the
---install-hook pre-commit hook cover both without a separate step to remember.
+--install-hook pre-commit hook cover both without a separate step to remember -
+WHEN scripts/check_manifest.py is present. That file is itself gitignored
+(AGENTS.md rule 6), so it is absent from a fresh CI checkout and from most
+external contributors' clones by design; when it cannot be imported this reports
+a WARNING (escalated to a failure only under --strict / LOCALM_HYGIENE_STRICT=1),
+never a silent pass - see _release_manifest_gate().
 
 Run before committing:   python scripts/check_hygiene.py
 Install as a git hook:    python scripts/check_hygiene.py --install-hook
@@ -1363,6 +1368,45 @@ def _never_tracked_violations() -> list[str]:
     return out
 
 
+def _release_manifest_gate() -> tuple[list[str], list[str]]:
+    """Run the full release-manifest gate (check_manifest.check_manifest()) and
+    return (failures, warnings).
+
+    scripts/check_manifest.py is itself gitignored (AGENTS.md rule 6 - it is
+    release-tooling metadata, not part of the public product, same as
+    release-manifest.toml), so it is ABSENT from a fresh CI checkout and from most
+    external contributors' clones BY DESIGN - that is expected, not a bug. When it
+    cannot be imported this returns a WARNING (escalated to a failure only under
+    --strict/LOCALM_HYGIENE_STRICT=1), never a silent skip: the module docstring
+    above used to claim this gate was unconditionally "folded in" here when in fact
+    nothing ever called it - release-manifest.toml drifted 13 entries stale on
+    master with this reporting a clean pass throughout (see
+    dev-notes/release-manifest-gate-wiring.md for the incident). Reporting nothing
+    when the check cannot run would be that exact failure shape again, just
+    relocated."""
+    try:
+        # Deliberately Path(__file__).parent, NOT the module-level REPO global:
+        # check_manifest.py always lives next to THIS file on disk regardless of
+        # what tree is under test, whereas REPO is legitimately monkeypatched to a
+        # scratch tmp_path by tests exercising the file-scanning checks in
+        # isolation. Keying this lookup off REPO would make it silently look for
+        # check_manifest.py inside that scratch tree instead of next to the real
+        # script, breaking the gate under every such test.
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import check_manifest as cm
+    except ImportError:
+        return [], [
+            "release-manifest gate SKIPPED: scripts/check_manifest.py is not present "
+            "in this checkout. Expected on CI and most external clones - it is "
+            "intentionally gitignored (AGENTS.md rule 6). This checkout's hygiene "
+            "pass does NOT mean the release-manifest classification is clean; run "
+            "'python scripts/check_manifest.py' by hand on a checkout that has it "
+            "(e.g. the maintainer's own) before cutting a release."]
+    return list(cm.check_manifest()), []
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
@@ -1386,19 +1430,29 @@ def main(argv: list[str]) -> int:
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_derivation_violations())
     problems.extend(_import_cycle_violations())
+    manifest_failures, manifest_warnings = _release_manifest_gate()
+    problems.extend(manifest_failures)
     # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
     # legitimate); --strict / LOCALM_HYGIENE_STRICT=1 folds the warnings into the
     # failures for CI-style use.
-    warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
-    if warnings:
-        # Report-only context, FOLDED INTO the last warning rather than appended as
-        # its own entry. Appending it made --strict print the note inside the FAILED
-        # list and count it as a hygiene issue ("2 issue(s)" for one real warning),
-        # which is exactly what this note must never be: it is context, and a branch
-        # adding changelog bullets is the point of the file.
+    changelog_warnings = _changelog_unreleased_drops() + _changelog_unreleased_duplicates()
+    if changelog_warnings:
+        # Report-only context, FOLDED INTO the last CHANGELOG warning rather than
+        # appended as its own entry. Appending it made --strict print the note inside
+        # the FAILED list and count it as a hygiene issue ("2 issue(s)" for one real
+        # warning), which is exactly what this note must never be: it is context, and
+        # a branch adding changelog bullets is the point of the file. Gated on
+        # changelog_warnings specifically (not the combined warnings list below) so
+        # it is never misattached to an unrelated warning, e.g. manifest_warnings,
+        # when a changelog warning did not actually fire.
         note = _changelog_unreleased_added_note()
         if note:
-            warnings[-1] = warnings[-1] + "\n" + "\n".join(note)
+            changelog_warnings[-1] = changelog_warnings[-1] + "\n" + "\n".join(note)
+    # manifest_warnings joins the same escalation path: on the one machine that
+    # actually has check_manifest.py (the maintainer's), a --strict run (as used
+    # before cutting a release) should fail loud rather than silently accept a
+    # checkout that is somehow missing it.
+    warnings = changelog_warnings + manifest_warnings
     if strict and warnings:
         problems.extend(warnings)
         warnings = []
