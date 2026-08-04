@@ -314,8 +314,63 @@ class TestContentNeverLeaks:
         assert "there was an error in your code" not in digest
         # The genuine, unrelated error survives.
         assert "RuntimeError: Native llama runtime failed to load" in digest
-        # The redaction is disclosed, not silent (AGENTS.md rule 5).
-        assert "1 debug record(s) withheld" in digest
+        # The redaction is disclosed, not silent (AGENTS.md rule 5). 2, not
+        # 1: the lone "request served" line right after the content marker is
+        # ALSO withheld, because _drop_content_records cannot yet trust it is
+        # not itself still part of the content write (see its own docstring) -
+        # a single trailing record is never enough evidence to resynchronize.
+        assert "2 debug record(s) withheld" in digest
+
+    def test_embedded_header_lookalike_line_inside_the_reply_does_not_escape(self):
+        # Adversarial-review finding: parse_records has no way to know a
+        # multi-line content write's true extent (debuglog.py's writer adds
+        # no boundary marker). If the model's OWN reply text contains a line
+        # shaped like localm's own log header - entirely plausible from a
+        # coding assistant quoting/discussing a real log line, or from
+        # untrusted web content a job tool fetched - parse_records used to
+        # split the content write into two records right there, and the
+        # SECOND fragment's header (attacker/model-controlled text) matched
+        # none of the markers, escaping _drop_content_records entirely.
+        text = (
+            "2026-07-13 15:24:51,000 DEBUG   localm: raw model output:\n"
+            "Sure, here is an example log line:\n"
+            "2026-07-13 15:24:52,000 INFO    localm: my real secret content is "
+            "CreditCard=4111111111111111 and password=hunter2\n"
+            "that was the example\n"
+        )
+        digest = ld.build_digest(text)
+        assert "hunter2" not in digest
+        assert "CreditCard=4111111111111111" not in digest
+        assert "debug record(s) withheld" in digest
+
+    def test_embedded_header_lookalike_survives_only_after_genuine_resync(self):
+        # The flip side of the fix above: operational usefulness must
+        # recover once genuine traffic (3+ mutually near-duplicate records,
+        # the same signal collapse_records already trusts) resumes after a
+        # content write, even though the immediate next line(s) are withheld.
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
+            "{'query': 'my private medical condition'}\n"
+            + "\n".join(_polling_line(f"2026-07-13 15:24:{51+i:02d}", 7, 0.2)
+                        for i in range(4))
+        )
+        digest = ld.build_digest(text)
+        assert "my private medical condition" not in digest
+        assert "GET /api/stats" in digest
+        assert "debug record(s) withheld" in digest
+
+    def test_truncated_tail_starting_mid_content_is_withheld_via_start_tainted(self):
+        # Adversarial-review finding: bugreport.py's _recent_log_tail
+        # truncates a huge log file to its last N bytes before ever calling
+        # build_digest, so the surviving text can start mid-way through a
+        # content write with NO header at all (parse_records gives it
+        # level=="" - the "file starts mid-record" branch). Without
+        # start_tainted, that severed fragment is trusted immediately.
+        text = ("my actual secret chat reply continues here with password=hunter2\n"
+               "2026-07-13 15:24:53,000 INFO    localm: request served\n")
+        assert "hunter2" in ld.build_digest(text)                       # untruncated: trusted
+        assert "hunter2" not in ld.build_digest(text, start_tainted=True)  # truncated: withheld
+        assert "debug record(s) withheld" in ld.build_digest(text, start_tainted=True)
 
     def test_memory_embed_content_snippet_is_withheld(self):
         text = (
@@ -338,7 +393,13 @@ class TestContentNeverLeaks:
         assert "content withheld: privacy mode" in digest
         assert "debug record(s) withheld" not in digest
 
-    def test_web_tool_args_withheld_but_bare_tool_name_kept(self):
+    def test_web_tool_args_withheld_and_bare_tool_name_alone_is_also_withheld(self):
+        # A SINGLE trailing bare-tool-name record right after the marker is
+        # NOT enough evidence to resynchronize (see
+        # test_embedded_header_lookalike_survives_only_after_genuine_resync
+        # for the case where enough genuine traffic DOES follow) - it is
+        # exactly as forgeable as the marker line itself, so it is withheld
+        # too rather than naively trusted.
         text = (
             "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
             "{'query': 'my private medical condition'}\n"
@@ -346,8 +407,20 @@ class TestContentNeverLeaks:
         )
         digest = ld.build_digest(text)
         assert "my private medical condition" not in digest
-        assert "jobs web tool: fetch_url" in digest   # name-only line is operational, kept
-        assert "1 debug record(s) withheld" in digest
+        assert "jobs web tool: fetch_url" not in digest
+        assert "2 debug record(s) withheld" in digest
+
+    def test_web_tool_args_marker_distinguishes_content_from_name_only_directly(self):
+        # is_content_record itself (independent of the tainted-resync
+        # integration behavior above) must still tell the two message shapes
+        # apart - the structural "{" after the tool name is the signal.
+        assert ld.is_content_record(
+            {"level": "DEBUG", "logger": "localm", "lines": [
+                "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
+                "{'query': 'x'}"]})
+        assert not ld.is_content_record(
+            {"level": "DEBUG", "logger": "localm", "lines": [
+                "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: fetch_url"]})
 
     def test_content_record_dropped_before_it_could_survive_as_a_collapse_survivor(self):
         lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2) for i in range(5)]
@@ -402,19 +475,53 @@ class TestNativeLineRunCollapsesWithinOneRecord:
     exactly this reason."""
 
     def test_giant_run_of_near_duplicate_native_lines_collapses_within_one_record(self):
+        # HUNDREDS of consecutive unleveled lines, not the favourable
+        # interleaving in TestNativeCrashContinuationSurvives (one native line
+        # PER SEPARATE leveled record, which already collapses via the
+        # existing RECORD-level mechanism and could never reproduce this bug).
+        # Here there is exactly ONE leveled header, so parse_records glues
+        # every one of these 300 lines onto that SAME record as its
+        # continuation lines - the giant-single-record shape #952 actually hit.
         header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
-        spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(70)]
+        spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(300)]
         text = "\n".join([header] + spam)
         digest = ld.build_digest(text)
         assert digest.count("ggml_cuda: buffer pool alloc") == 1
-        assert "repeated 70x" in digest
-        assert len(digest) < len(text) / 5
+        assert "repeated 300x" in digest
+        assert len(digest) < len(text) / 10
 
     def test_native_run_with_no_leading_leveled_header_still_collapses(self):
-        spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(50)]
+        # The realistic shape of a REAL captured log's tail once trimmed to
+        # the failure region: no leveled record at all, just hundreds of raw
+        # native lines in a row (parse_records' "file starts mid-record"
+        # branch glues them all into ONE level=="" record).
+        spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(250)]
         digest = ld.build_digest("\n".join(spam))
         assert digest.count("ggml_cuda: buffer pool alloc") == 1
-        assert "repeated 50x" in digest
+        assert "repeated 250x" in digest
+
+    def test_realistic_captured_log_shape_hundreds_of_mixed_native_lines(self):
+        # Mirrors an actual captured log's tail (per #952's own report and
+        # this module's own dedup_native_stderr commentary): a handful of
+        # genuine leveled records, then HUNDREDS of consecutive raw native
+        # lines alternating between two real ggml/CUDA message shapes with no
+        # timestamp of their own - not a synthetic one-line-per-record
+        # fixture. Both native message shapes must still be found (the
+        # survivor keeps its own real content) and the digest must shrink by
+        # an order of magnitude, exactly the property #952 needed and the
+        # favourable-interleaving fixture could never exercise.
+        lines = [
+            "2026-07-13 15:24:10,000 INFO    localm: model load: gemma-3 on vulkan",
+            "2026-07-13 15:24:11,000 DEBUG   localm: GET /api/stats -> 200 (7 ms, loop_lag=0.20s)",
+        ]
+        for i in range(400):
+            lines.append(f"CUDA Graph id {5 + i % 2} reused")
+        text = "\n".join(lines)
+        digest = ld.build_digest(text)
+        assert "model load: gemma-3 on vulkan" in digest
+        assert "CUDA Graph id" in digest
+        assert "repeated" in digest
+        assert len(digest) < len(text) / 20
 
     def test_short_native_run_within_a_record_stays_expanded(self):
         header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"

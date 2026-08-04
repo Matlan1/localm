@@ -319,14 +319,77 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
     return out
 
 
-def _drop_content_records(records: List[LogRecord]) -> "tuple[List[LogRecord], int]":
-    """Remove every content record (is_content_record) BEFORE anything else
-    touches *records* - collapsing and is_error_record's own signal scan must
-    never see one, so a content record can neither survive as a collapsed
-    run's "survivor" line nor get promoted to ERROR (and so kept verbatim) by
-    words in its own content. Returns (kept, count_dropped)."""
-    kept = [r for r in records if not is_content_record(r)]
-    return kept, len(records) - len(kept)
+def _drop_content_records(
+        records: List[LogRecord], *, start_tainted: bool = False
+) -> "tuple[List[LogRecord], int]":
+    """Remove every content record (is_content_record) AND everything that
+    follows one until we are confident we have resynchronized to genuine
+    operational logging - BEFORE anything else touches *records*.
+
+    A content-marker match on a record's OWN header is not sufficient by
+    itself. debuglog.py's writer is a stock logging.FileHandler with no
+    boundary marker between records, so parse_records has no way to know a
+    multi-line debug_content_enabled() write's true extent. If the model's
+    OWN reply text contains a line shaped like localm's own log header
+    ("TIMESTAMP LEVEL name: message" - trivially produced by a coding
+    assistant quoting or discussing a real log line, or by adversarial text
+    injected through an untrusted web page a job tool fetched, LM-DA-014),
+    parse_records incorrectly starts a NEW record right there. That
+    fragment's own header is then attacker/model-controlled text matching
+    none of _CONTENT_MARKER_RES, so checking only each record's own header
+    lets it straight through - reproduced live: a "raw model output:" record
+    whose reply quotes one realistic-looking log line lets everything after
+    that quoted line survive untouched, chat content included.
+
+    So once a content marker fires, every record after it is ALSO dropped -
+    regardless of its own claimed level, since a level marker in that window
+    is exactly as forgeable as any other line - until a run of
+    _MIN_RUN_TO_COLLAPSE (3) CONSECUTIVE, mutually near-duplicate (matching
+    record_template()) records appears. Real operational traffic (routine
+    polling) reliably produces such a run within moments of resuming, so the
+    digest stays useful past the immediate vicinity of a content write;
+    free-form content producing 3 back-to-back near-duplicates immediately
+    after the marker, with nothing else in between, is the residual, accepted
+    risk (same shape as the 137-vs-139 masking trade-off documented in
+    record_template - the fix for a narrower window is widening
+    _CONTENT_MARKER_RES or the resync run length, not weakening this).
+
+    *start_tainted* applies the SAME distrust to the very first record:
+    bugreport.py's _recent_log_tail truncates a huge log file to its last
+    _LOG_TAIL_READ_BYTES, so the truncated text can start mid-way through a
+    content write with no header at all (parse_records' "starts mid-record"
+    branch gives it level==""). Without this, that severed fragment would be
+    trusted immediately, the same gap via a different door.
+
+    Returns (kept, count_dropped)."""
+    kept: List[LogRecord] = []
+    dropped = 0
+    tainted = start_tainted
+    i, n = 0, len(records)
+    while i < n:
+        rec = records[i]
+        if is_content_record(rec):
+            tainted = True
+            dropped += 1
+            i += 1
+            continue
+        if tainted:
+            tmpl = record_template(rec)
+            j = i + 1
+            while (j < n and not is_content_record(records[j])
+                   and record_template(records[j]) == tmpl):
+                j += 1
+            run_len = j - i
+            if run_len >= _MIN_RUN_TO_COLLAPSE:
+                tainted = False
+                kept.extend(records[i:j])
+            else:
+                dropped += run_len
+            i = j
+            continue
+        kept.append(rec)
+        i += 1
+    return kept, dropped
 
 
 def _content_withheld_notice(n: int) -> str:
@@ -337,17 +400,19 @@ def _content_withheld_notice(n: int) -> str:
             "included in a bug report) ...")
 
 
-def build_digest(text: str, *, max_chars: int = 6000) -> str:
-    """The full pipeline: parse -> drop chat-content records -> collapse
-    near-duplicate benign runs -> keep every error in full -> fit *max_chars*,
-    trimming benign content first and never silently dropping an error. Never
-    raises (returns "" on any unexpected failure, matching the caller's
-    existing best-effort contract)."""
+def build_digest(text: str, *, max_chars: int = 6000, start_tainted: bool = False) -> str:
+    """The full pipeline: parse -> drop chat-content records (and everything
+    until resync, see _drop_content_records) -> collapse near-duplicate
+    benign runs -> keep every error in full -> fit *max_chars*, trimming
+    benign content first and never silently dropping an error. Never raises
+    (returns "" on any unexpected failure, matching the caller's existing
+    best-effort contract). *start_tainted*: see _drop_content_records - pass
+    True when *text* may itself start mid-record (a truncated tail)."""
     try:
         records = parse_records(text)
         if not records:
             return ""
-        records, withheld = _drop_content_records(records)
+        records, withheld = _drop_content_records(records, start_tainted=start_tainted)
         notice = _content_withheld_notice(withheld) if withheld else ""
         if not records:
             return notice

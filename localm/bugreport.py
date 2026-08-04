@@ -457,10 +457,15 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
         if chosen is None:
             return ""
         raw = chosen.read_text(encoding="utf-8", errors="replace")
-        if len(raw) > _LOG_TAIL_READ_BYTES:
+        truncated = len(raw) > _LOG_TAIL_READ_BYTES
+        if truncated:
             raw = raw[-_LOG_TAIL_READ_BYTES:]
         from localm._log_digest import build_digest
-        return _scrub_secrets(build_digest(raw, max_chars=max_chars))
+        # start_tainted=truncated: a truncated tail can start mid-way through
+        # a debug_content_enabled() write with no header of its own (#961
+        # follow-up) - build_digest must not trust whatever it finds first.
+        return _scrub_secrets(
+            build_digest(raw, max_chars=max_chars, start_tainted=truncated))
     except Exception:
         return ""
 
