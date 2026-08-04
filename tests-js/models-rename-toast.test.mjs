@@ -55,6 +55,40 @@ test("models-rename: the toast names the SANITIZED name the server stored", asyn
     "the toast must NOT claim the raw name, which is not a registry key");
 });
 
+test("models-rename: server migration notes (e.g. the unreachable .localcoder case) reach the toast", async () => {
+  // CONTROL review: the notes rename_model_with_notes reports must not be
+  // dropped between the server response and the user - a bare "Renamed"
+  // toast with no mention of what could not be migrated silently hides a
+  // real gap (AGENTS.md rule 5).
+  const toasts = [];
+  const NOTE = "A per-project .localcoder/config.toml 'model' setting (if any) "
+    + "lives outside <data dir> and was NOT updated - fix it by hand in any "
+    + "project that pinned this model.";
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch(MODELS, [],
+      { status: "renamed", model: "gemma3-12b", new_name: "daily-driver", notes: [NOTE] }),
+  });
+  window.toast = (msg) => toasts.push(String(msg));
+
+  await clickRename(window, "daily-driver");
+
+  assert.ok(toasts.some((t) => t.includes(".localcoder") && t.includes("daily-driver")),
+    `expected the toast to include both the new name and the migration note, got: ${JSON.stringify(toasts)}`);
+});
+
+test("models-rename: a response with no notes (or an older server) toasts cleanly, no 'undefined'", async () => {
+  const toasts = [];
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch(MODELS, [],
+      { status: "renamed", model: "gemma3-12b", new_name: "daily-driver" }),   // no notes key
+  });
+  window.toast = (msg) => toasts.push(String(msg));
+
+  await clickRename(window, "daily-driver");
+
+  assert.deepEqual(toasts, ["Renamed to 'daily-driver'"]);
+});
+
 test("models-rename: a failed rename surfaces the server's error, not a silent no-op", async () => {
   const toasts = [];
   const { window } = loadAppWithPages({

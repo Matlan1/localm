@@ -870,6 +870,19 @@ def alias_model(existing: str, new_name: str) -> bool:
 
 def rename_model(old_name: str, new_name: str) -> bool:
     """
+    Rename a registered model from *old_name* to *new_name*. Thin bool-only
+    wrapper over :func:`rename_model_with_notes`, for CLI simplicity and
+    backward compatibility (a caller that also needs the migration notes -
+    e.g. the GUI route, which must show them to the user rather than let
+    them sit in the server log - should call that instead). See its
+    docstring for the full behavior.
+    """
+    renamed, _notes = rename_model_with_notes(old_name, new_name)
+    return renamed
+
+
+def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[str]]":
+    """
     Rename a registered model from *old_name* to *new_name*: MOVES the
     registry entry to a new key (unlike alias_model, which copies - *old_name*
     stops working here), and best-effort migrates every OTHER place inside
@@ -878,28 +891,32 @@ def rename_model(old_name: str, new_name: str) -> bool:
     RAG collection metadata). A per-project ``.localcoder/config.toml``
     ``model`` setting lives OUTSIDE <data dir> (in the user's own project
     repo, discoverable only relative to a `cwd` a coder session supplies) and
-    cannot be enumerated or migrated from here.
+    cannot be enumerated or migrated from here - always reported in the
+    returned notes, never silently dropped (AGENTS.md rule 5).
 
     Sibling aliases - other registry entries whose file happens to be the same
     one *old_name* pointed at - are left untouched: they are independent
     names for that file, exactly like any alias `localm alias` creates, and
     renaming one name must not delete or repoint the others.
 
-    Returns False when *old_name* is not registered, or *new_name* (after the
-    same sanitizing alias_model applies) is already taken by a DIFFERENT
-    entry. Renaming a name to itself (post-sanitize) is a no-op success.
+    Returns ``(False, [])`` when *old_name* is not registered, or *new_name*
+    (after the same sanitizing alias_model applies) is already taken by a
+    DIFFERENT entry. Renaming a name to itself (post-sanitize) is a no-op
+    success with no notes (nothing needed migrating). On a genuine rename,
+    returns ``(True, notes)`` where *notes* is what
+    :func:`_migrate_model_references` reports.
     """
     reg = _mm.load_registry()
     if old_name not in reg:
         console.print(f"[red]Not found:[/red] {old_name}")
-        return False
+        return False, []
     safe_name = _sanitize_name(new_name)
     if safe_name == old_name:
         console.print(f"[dim]'{old_name}' is already named '{safe_name}'[/dim]")
-        return True
+        return True, []
     if safe_name in reg:
         console.print(f"[red]Name already in use:[/red] {safe_name}")
-        return False
+        return False, []
 
     # Atomic RMW (re-read inside the lock), and - unlike alias_model above -
     # actually notice whether the move happened: a concurrent writer could
@@ -921,14 +938,15 @@ def rename_model(old_name: str, new_name: str) -> bool:
             console.print(f"[red]Not found:[/red] {old_name}")
         else:
             console.print(f"[red]Name already in use:[/red] {safe_name}")
-        return False
+        return False, []
 
     console.print(
         f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> [bold]{safe_name}[/bold]"
     )
-    for note in _migrate_model_references(old_name, safe_name):
+    notes = _migrate_model_references(old_name, safe_name)
+    for note in notes:
         console.print(f"[dim]{note}[/dim]")
-    return True
+    return True, notes
 
 
 def _migrate_model_references(old_name: str, new_name: str) -> List[str]:

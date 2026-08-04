@@ -274,7 +274,8 @@ export async function refreshModelsPage() {
       };
       actions.appendChild(aliasBtn);
       const renameBtn = el("button", "", "rename");
-      renameBtn.title = "Rename this model (unlike alias, the old name stops working)";
+      renameBtn.title = "Rename this model (unlike alias, the old name stops working; "
+        + "any OTHER name already pointing at the same file is unaffected)";
       renameBtn.onclick = async () => {
         const name = prompt(`Rename '${m.name}' to:`, m.name);
         if (!name || name.trim() === m.name) return;
@@ -285,8 +286,19 @@ export async function refreshModelsPage() {
         const data = await r.json().catch(() => ({}));
         // Same discipline as alias above: the server sanitizes the name, so
         // report what it actually stored, not the raw text typed in.
-        if (r.ok) { toast(`Renamed to '${data.new_name || name.trim()}'`); refreshModelsPage(); }
-        else toast(data.detail || "Rename failed", true);
+        if (r.ok) {
+          let msg = `Renamed to '${data.new_name || name.trim()}'`;
+          // The server's migration notes - what it updated, and what it could
+          // NOT reach (e.g. a per-project .localcoder/config.toml) - must
+          // reach the user here, not sit only in the server log (AGENTS.md
+          // rule 5: a partial outcome reported and then discarded is the same
+          // as hiding it).
+          if (Array.isArray(data.notes) && data.notes.length) {
+            msg += ". " + data.notes.join(" ");
+          }
+          toast(msg);
+          refreshModelsPage();
+        } else toast(data.detail || "Rename failed", true);
       };
       actions.appendChild(renameBtn);
       if (m.loaded) {

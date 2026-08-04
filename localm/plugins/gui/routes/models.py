@@ -774,20 +774,21 @@ def register(app: FastAPI, ctx) -> None:
         # (REG-562): sanitizing happens server-side, so the collision check and
         # the eventual response must both speak the sanitized name, not the raw
         # text the caller sent.
-        from localm.model_manager import _sanitize_name, rename_model
+        from localm.model_manager import _sanitize_name, rename_model_with_notes
         new_name = _sanitize_name(req.new_name)
         if new_name != req.model and new_name in registry:
             raise HTTPException(409, f"Name already taken: {new_name}")
         loop = asyncio.get_running_loop()
         try:
-            renamed = await loop.run_in_executor(
-                get_plugin_executor(), rename_model, req.model, req.new_name)
+            renamed, notes = await loop.run_in_executor(
+                get_plugin_executor(), rename_model_with_notes, req.model, req.new_name)
         except Exception as e:
             raise HTTPException(400, f"Rename failed: {e}")
         if not renamed:
-            # rename_model itself distinguishes "vanished" from "name taken" via
-            # its own console output, but only a bool crosses the executor
-            # boundary - re-derive which race it lost the same way alias does.
+            # rename_model_with_notes itself distinguishes "vanished" from "name
+            # taken" via its own console output, but only the return value
+            # crosses the executor boundary - re-derive which race it lost the
+            # same way alias does.
             from localm.config import load_registry
             if req.model not in load_registry():
                 raise HTTPException(404, f"Model not registered: {req.model}")
@@ -795,7 +796,12 @@ def register(app: FastAPI, ctx) -> None:
         # Synchronous, in-memory only (no await) - safe to call directly on the
         # event loop right after the executor call above returns.
         _hs.rekey_loaded_model(req.model, new_name)
-        return {"status": "renamed", "model": req.model, "new_name": new_name}
+        # `notes` includes what could be migrated AND what could not (e.g. a
+        # per-project .localcoder/config.toml, unreachable from here) - it must
+        # reach the caller, not just the server log, or a user has no way to
+        # learn their coder config may still name the old model.
+        return {"status": "renamed", "model": req.model, "new_name": new_name,
+                "notes": notes}
 
     @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_set_type(req: SetTypeRequest):

@@ -131,6 +131,46 @@ class TestRenameModel:
         assert store["renamed"]["path"] == str(f)
 
 
+class TestRenameModelWithNotes:
+    """rename_model() is a thin bool-only wrapper over this; a caller that
+    needs to SHOW the migration notes to a user (the GUI route) must call
+    this instead, or the honest "here is what could not be migrated" report
+    never leaves the server log (AGENTS.md rule 5)."""
+
+    def test_successful_rename_always_reports_the_unreachable_localcoder_note(
+            self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        store["orig"] = {"path": str(f), "source": "local"}
+        ok, notes = mm.rename_model_with_notes("orig", "renamed")
+        assert ok is True
+        assert any(".localcoder" in n for n in notes), (
+            "the caller-facing notes must always carry this caveat, not just "
+            "the server console rename_model_with_notes also prints to")
+
+    def test_failure_returns_no_notes(self, fake_registry):
+        store, _ = fake_registry
+        store["a"] = {"path": "p", "source": "local"}
+        store["b"] = {"path": "q", "source": "local"}
+        ok, notes = mm.rename_model_with_notes("a", "b")
+        assert ok is False
+        assert notes == []
+
+    def test_self_rename_noop_returns_no_notes(self, fake_registry):
+        store, _ = fake_registry
+        store["a"] = {"path": "p", "source": "local"}
+        ok, notes = mm.rename_model_with_notes("a", "a")
+        assert ok is True
+        assert notes == []
+
+    def test_rename_model_bool_wrapper_matches_the_notes_version(self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        store["orig"] = {"path": str(f), "source": "local"}
+        assert mm.rename_model("orig", "renamed") is True
+        assert "renamed" in store
+
+
 class TestRenameModelRace:
     """Same atomic-RMW discipline as TestRegistryRmwAtomicity in
     test_model_dedup.py: a concurrent writer landing between the precheck
