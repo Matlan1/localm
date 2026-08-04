@@ -425,6 +425,29 @@ def alias(existing, new_name):
         sys.exit(1)
 
 
+@main.command()
+@click.argument("old_name", shell_complete=_complete_model_name)
+@click.argument("new_name")
+def rename(old_name, new_name):
+    """Rename a registered model from OLD_NAME to NEW_NAME.
+
+    Unlike 'localm alias', OLD_NAME stops working: this MOVES the
+    registration, and best-effort updates every config/job/RAG reference
+    inside <data dir> that named OLD_NAME. A per-project
+    .localcoder/config.toml 'model' setting (if any) lives outside <data dir>
+    and is not touched - update it by hand in any project that pinned this
+    model.
+
+    \b
+    Example:
+      localm rename gemma3-12b daily-driver
+    """
+    from ..model_manager import rename_model
+
+    if not rename_model(old_name, new_name):
+        sys.exit(1)
+
+
 
 
 @main.command()

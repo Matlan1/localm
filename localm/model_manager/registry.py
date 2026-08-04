@@ -19,6 +19,7 @@ from typing import Optional
 from rich.table import Table
 from ..config import REGISTRY_FILE
 from ..config import load_config
+from ..config import update_config
 from ..debuglog import logger
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
@@ -863,6 +864,161 @@ def alias_model(existing: str, new_name: str) -> bool:
         f"[bold]{existing}[/bold]"
     )
     return True
+
+
+
+
+def rename_model(old_name: str, new_name: str) -> bool:
+    """
+    Rename a registered model from *old_name* to *new_name*. Thin bool-only
+    wrapper over :func:`rename_model_with_notes`, for CLI simplicity and
+    backward compatibility (a caller that also needs the migration notes -
+    e.g. the GUI route, which must show them to the user rather than let
+    them sit in the server log - should call that instead). See its
+    docstring for the full behavior.
+    """
+    renamed, _notes = rename_model_with_notes(old_name, new_name)
+    return renamed
+
+
+def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[str]]":
+    """
+    Rename a registered model from *old_name* to *new_name*: MOVES the
+    registry entry to a new key (unlike alias_model, which copies - *old_name*
+    stops working here), and best-effort migrates every OTHER place inside
+    <data dir> that stores the plain name string (config.json's pinned_models
+    / embedding_model / coder_reviewer_model, scheduled jobs' `model` field,
+    RAG collection metadata). A per-project ``.localcoder/config.toml``
+    ``model`` setting lives OUTSIDE <data dir> (in the user's own project
+    repo, discoverable only relative to a `cwd` a coder session supplies) and
+    cannot be enumerated or migrated from here - always reported in the
+    returned notes, never silently dropped (AGENTS.md rule 5).
+
+    Sibling aliases - other registry entries whose file happens to be the same
+    one *old_name* pointed at - are left untouched: they are independent
+    names for that file, exactly like any alias `localm alias` creates, and
+    renaming one name must not delete or repoint the others.
+
+    Returns ``(False, [])`` when *old_name* is not registered, or *new_name*
+    (after the same sanitizing alias_model applies) is already taken by a
+    DIFFERENT entry. Renaming a name to itself (post-sanitize) is a no-op
+    success with no notes (nothing needed migrating). On a genuine rename,
+    returns ``(True, notes)`` where *notes* is what
+    :func:`_migrate_model_references` reports.
+    """
+    reg = _mm.load_registry()
+    if old_name not in reg:
+        console.print(f"[red]Not found:[/red] {old_name}")
+        return False, []
+    safe_name = _sanitize_name(new_name)
+    if safe_name == old_name:
+        console.print(f"[dim]'{old_name}' is already named '{safe_name}'[/dim]")
+        return True, []
+    if safe_name in reg:
+        console.print(f"[red]Name already in use:[/red] {safe_name}")
+        return False, []
+
+    # Atomic RMW (re-read inside the lock), and - unlike alias_model above -
+    # actually notice whether the move happened: a concurrent writer could
+    # still take old_name or safe_name between the precheck and this call, and
+    # claiming success when nothing moved would violate AGENTS.md rule 5 (never
+    # report success on a step that silently did nothing).
+    moved = False
+
+    def _apply(r: dict) -> None:
+        nonlocal moved
+        if old_name in r and safe_name not in r:
+            r[safe_name] = r.pop(old_name)
+            moved = True
+
+    _mm.update_registry(_apply)
+    if not moved:
+        reg_now = _mm.load_registry()
+        if old_name not in reg_now:
+            console.print(f"[red]Not found:[/red] {old_name}")
+        else:
+            console.print(f"[red]Name already in use:[/red] {safe_name}")
+        return False, []
+
+    console.print(
+        f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> [bold]{safe_name}[/bold]"
+    )
+    notes = _migrate_model_references(old_name, safe_name)
+    for note in notes:
+        console.print(f"[dim]{note}[/dim]")
+    return True, notes
+
+
+def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
+    """Best-effort: rewrite every *old_name* reference this process can reach
+    inside <data dir>, after rename_model has already moved the registry
+    entry. Never raises - the registry rename has already succeeded and must
+    not be undone because a secondary reference could not be updated; a site
+    that fails to migrate is reported as a note (AGENTS.md rule 5: surfaced,
+    not swallowed), not a crash. Returns human-readable notes: what changed,
+    and what could not be reached at all.
+    """
+    notes: List[str] = []
+
+    try:
+        def _apply_cfg(cfg: dict) -> None:
+            pinned = cfg.get("pinned_models")
+            if isinstance(pinned, list) and old_name in pinned:
+                cfg["pinned_models"] = [new_name if n == old_name else n for n in pinned]
+            if cfg.get("embedding_model") == old_name:
+                cfg["embedding_model"] = new_name
+            if cfg.get("coder_reviewer_model") == old_name:
+                cfg["coder_reviewer_model"] = new_name
+        update_config(_apply_cfg)
+    except Exception as e:
+        logger.debug("rename_model: config migration failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not update config.json references: {e}")
+
+    try:
+        from localm.plugins.builtin.jobs.store import JobStore
+        store = JobStore()
+        migrated = 0
+        for job in store.list():
+            if job.model == old_name:
+                store.update(job.id, model=new_name)
+                migrated += 1
+        if migrated:
+            notes.append(f"Updated {migrated} scheduled job(s) to the new name")
+    except Exception as e:
+        logger.debug("rename_model: jobs migration failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not update scheduled jobs: {e}")
+
+    try:
+        from localm.rag.store import Collection, collection_names
+        migrated = 0
+        for cname in collection_names():
+            try:
+                coll = Collection(cname)
+            except Exception:
+                continue
+            # No public label-only setter exists (reembed() would trigger a
+            # full re-index just to relabel a display string), so this goes
+            # through the same private _meta + _save_meta() reembed() itself
+            # uses to persist that one field.
+            if coll._meta.get("embedding_model") == old_name:
+                coll._meta["embedding_model"] = new_name
+                coll._save_meta()
+                migrated += 1
+        if migrated:
+            notes.append(f"Updated {migrated} RAG collection metadata record(s)")
+    except Exception as e:
+        logger.debug("rename_model: RAG collection migration failed for %s -> %s: %s",
+                     old_name, new_name, e)
+        notes.append(f"Could not update RAG collection metadata: {e}")
+
+    notes.append(
+        "A per-project .localcoder/config.toml 'model' setting (if any) lives "
+        "outside <data dir> and was NOT updated - fix it by hand in any "
+        "project that pinned this model."
+    )
+    return notes
 
 
 

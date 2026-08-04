@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -27,7 +28,8 @@ from localm.executor import get_plugin_executor
 from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
                                     LoadModelRequest, MediaPreflightRequest,
                                     PullRequest, PullTokenRedeemRequest,
-                                    RemoveModelRequest, ScanRequest,
+                                    RemoveModelRequest, RenameModelRequest,
+                                    ScanRequest,
                                     SetTypeRequest, UnloadModelRequest,
                                     consume_pull_grant)
 
@@ -169,6 +171,7 @@ def register(app: FastAPI, ctx) -> None:
         # hop for the identity comparison below, for the same reason.
         def _probe_rows() -> tuple:
             sizes: dict = {}
+            mtimes: dict = {}
             resolved: dict = {}
             # The per-row resolve() has exactly ONE consumer: the embedder
             # identity comparison below. So it is skipped entirely when no
@@ -186,24 +189,34 @@ def register(app: FastAPI, ctx) -> None:
                     emb_resolved = None
             for _n, _e, _m, ep in rows:
                 p = Path(ep)
+                # ONE stat() for both size and mtime (the previous size-only form
+                # called p.is_file() - itself a stat - then p.stat() again on a
+                # hit). mtime is recorded for a directory too (an HF model dir),
+                # unlike size, which stays None for a dir - a directory's total
+                # size needs a recursive walk this probe does not do, but its own
+                # mtime is free once stat() has already been called.
                 try:
-                    sizes[ep] = p.stat().st_size if p.is_file() else None
+                    st_res = p.stat()
+                    sizes[ep] = st_res.st_size if stat.S_ISREG(st_res.st_mode) else None
+                    mtimes[ep] = st_res.st_mtime
                 except (OSError, ValueError):
                     sizes[ep] = None
+                    mtimes[ep] = None
                 if emb_resolved is None:
                     continue
                 try:
                     resolved[ep] = p.resolve()
                 except (OSError, ValueError):
                     resolved[ep] = None
-            return sizes, resolved, emb_resolved
+            return sizes, mtimes, resolved, emb_resolved
 
-        sizes, resolved_paths, emb_resolved = await loop.run_in_executor(
+        sizes, mtimes, resolved_paths, emb_resolved = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
         models = []
         for name, entry, mtype, epath in rows:
             size = sizes.get(epath)
+            mtime = mtimes.get(epath)
             engine = _hs._engines.get(name)
             loaded = engine.loaded if engine is not None else False
             # A registered model can also be the shared EMBEDDING model, loaded
@@ -219,6 +232,7 @@ def register(app: FastAPI, ctx) -> None:
                 "name": name,
                 "source": str(entry.get("source", "")),
                 "size_bytes": size,
+                "mtime": mtime,
                 "active": name == current,
                 # Independent of "active": a model can be resident in VRAM
                 # (loaded) without being the one currently serving requests -
@@ -746,6 +760,48 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(404, f"Model not registered: {req.model}")
             raise HTTPException(409, f"Name already taken: {alias}")
         return {"status": "aliased", "model": req.model, "alias": alias}
+
+    @app.post("/api/models/rename", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_rename(req: RenameModelRequest):
+        """Rename a registered model. Unlike alias, the OLD name stops
+        working - this MOVES the registration (plus best-effort migrates
+        config/jobs/RAG references that named it). Renaming the currently
+        ACTIVE (or merely loaded) model is allowed: the live engine is
+        re-keyed in place right after the registry move, so it keeps serving
+        under its new name instead of being orphaned under the old one."""
+        registry = _require_registered(req.model)
+        # Same precheck-then-report-the-sanitized-name discipline as alias
+        # (REG-562): sanitizing happens server-side, so the collision check and
+        # the eventual response must both speak the sanitized name, not the raw
+        # text the caller sent.
+        from localm.model_manager import _sanitize_name, rename_model_with_notes
+        new_name = _sanitize_name(req.new_name)
+        if new_name != req.model and new_name in registry:
+            raise HTTPException(409, f"Name already taken: {new_name}")
+        loop = asyncio.get_running_loop()
+        try:
+            renamed, notes = await loop.run_in_executor(
+                get_plugin_executor(), rename_model_with_notes, req.model, req.new_name)
+        except Exception as e:
+            raise HTTPException(400, f"Rename failed: {e}")
+        if not renamed:
+            # rename_model_with_notes itself distinguishes "vanished" from "name
+            # taken" via its own console output, but only the return value
+            # crosses the executor boundary - re-derive which race it lost the
+            # same way alias does.
+            from localm.config import load_registry
+            if req.model not in load_registry():
+                raise HTTPException(404, f"Model not registered: {req.model}")
+            raise HTTPException(409, f"Name already taken: {new_name}")
+        # Synchronous, in-memory only (no await) - safe to call directly on the
+        # event loop right after the executor call above returns.
+        _hs.rekey_loaded_model(req.model, new_name)
+        # `notes` includes what could be migrated AND what could not (e.g. a
+        # per-project .localcoder/config.toml, unreachable from here) - it must
+        # reach the caller, not just the server log, or a user has no way to
+        # learn their coder config may still name the old model.
+        return {"status": "renamed", "model": req.model, "new_name": new_name,
+                "notes": notes}
 
     @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_set_type(req: SetTypeRequest):

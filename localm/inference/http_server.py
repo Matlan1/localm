@@ -1474,6 +1474,44 @@ def _touch_activity(name: str | None = None) -> None:
         _last_activity_per_model[name] = now
 
 
+def rekey_loaded_model(old_name: str, new_name: str) -> bool:
+    """Re-key every in-memory record of a loaded model's identity after its
+    registry entry was renamed *old_name* -> *new_name*, so a still-loaded/
+    serving engine is not orphaned under its old name.
+
+    This is load-bearing, not cosmetic: ``active_model()`` reads
+    ``_engine.display_name``, and the GUI's remove-model guard is exactly
+    ``req.model == active_model()`` - without this re-key, renaming the
+    active model would leave that guard comparing the NEW registry name
+    against the engine's stale OLD display_name, so it would never match and
+    the GUI could delete the file out from under the model still serving
+    requests.
+
+    A synchronous, in-memory-only op (dict/list mutation, no I/O, no
+    ``await``), so it is safe to call directly from an async route body: on
+    a single-threaded event loop nothing else can interleave between the pop
+    and the re-insert. Returns False (no-op) when *old_name* is not
+    currently loaded - the common case, since renaming an unloaded model
+    needs no runtime bookkeeping."""
+    global _active_model_name
+    engine = _engines.pop(old_name, None)
+    if engine is None:
+        return False
+    engine.display_name = new_name
+    _engines[new_name] = engine
+    if old_name in _engines_lru:
+        _engines_lru[_engines_lru.index(old_name)] = new_name
+    if _active_model_name == old_name:
+        _active_model_name = new_name
+    sem = _inference_sems.pop(old_name, None)
+    if sem is not None:
+        _inference_sems[new_name] = sem
+    ts = _last_activity_per_model.pop(old_name, None)
+    if ts is not None:
+        _last_activity_per_model[new_name] = ts
+    return True
+
+
 def _sanitize_client_context(raw) -> dict:
     """Reduce an untrusted GUI ``client`` payload to a safe, bounded dict for a bug
     report: only known string fields (capped) plus a capped list of console-error

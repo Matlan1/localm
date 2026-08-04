@@ -154,7 +154,10 @@
 // instead of a solid value indistinguishable from something you typed;
 // setup-max-turns lost its hardcoded "40") - a stale-cached client would keep
 // every default looking already-customized.
-const CACHE = "localm-shell-v94";
+// v95: Models page column sort (models.js, style.css) and the rename control
+// (models.js) - a stale-cached client would keep the old unsortable table and
+// have no rename button.
+const CACHE = "localm-shell-v95";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
