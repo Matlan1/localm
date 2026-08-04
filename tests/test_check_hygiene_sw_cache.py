@@ -400,7 +400,7 @@ def test_gate_is_wired_into_main(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ch, "_changelog_append_only", lambda: [])
     monkeypatch.setattr(ch, "_raw_accessor_violations", lambda files: [])
     monkeypatch.setattr(ch, "_big_test_write_violations", lambda files: [])
-    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
 
     rc = ch.main([])
 

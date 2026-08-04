@@ -1275,6 +1275,57 @@ def _strict_env() -> bool:
         "", "0", "false", "no", "off")
 
 
+# Files and directories that are DELIBERATELY NOT PUBLISHED. They live on a
+# contributor's disk and are listed in .gitignore, but .gitignore only stops a
+# file being added while it is UNTRACKED - it does nothing once something is in
+# the index, and nothing at all in a worktree whose .gitignore predates the
+# entry. Both of those happened: after the internals were removed, every stale
+# worktree still had the old .gitignore, so these showed as ordinary untracked
+# files and a single `git add -A` staged all 21 of them for re-publication.
+#
+# Maintainer, 2026-08-04: "NO MORE DISCLOSING OF ANY INTERNALS ON GH THAT DO NOT
+# NEED TO BE ON THERE" and "agents and CLAUDE.md do NOT belong there".
+#
+# So this is a TRACKED-state check, not a content scan: it asks git what is in
+# the index, which is the only question that decides what reaches GitHub.
+_NEVER_TRACKED = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "RELEASE.md",
+    "release-manifest.toml",
+    "scripts/codeql/",
+    "scripts/tier2_gpu_split/",
+)
+
+
+def _never_tracked_violations() -> list[str]:
+    """Fail if anything in _NEVER_TRACKED is tracked by git.
+
+    Uses `git ls-files` directly rather than the filtered _tracked_files() list,
+    because that one drops binaries and _SKIP_DIRS - a filter that is right for a
+    content scan and wrong here, where the question is only "is it in the index".
+    """
+    r = _git("ls-files", "-z")
+    if r is None or r.returncode != 0:
+        # Distinguish "nothing tracked" (benign) from "could not ask" (not
+        # benign): a publication gate that cannot see the index must not pass.
+        return ["could not run 'git ls-files' to verify no internal file is "
+                "tracked - this gate cannot be assumed clean, so it fails"]
+    tracked = [p for p in r.stdout.split("\0") if p]
+    out = []
+    for entry in _NEVER_TRACKED:
+        if entry.endswith("/"):
+            hits = [p for p in tracked if p.startswith(entry)]
+        else:
+            hits = [p for p in tracked if p == entry]
+        for h in sorted(hits):
+            out.append(
+                f"{h}: internal file is TRACKED and would be published to "
+                f"GitHub. It is in .gitignore, but .gitignore does not untrack "
+                f"something already in the index. Run: git rm --cached '{h}'")
+    return out
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
@@ -1290,6 +1341,7 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
     problems: list[str] = []
+    problems.extend(_never_tracked_violations())
     for f in tracked:
         problems.extend(_scan(f))
     problems.extend(_changelog_append_only())
