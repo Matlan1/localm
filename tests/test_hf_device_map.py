@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from localm.inference.backends.hf import _cuda_device_map
+from localm.inference.backends._hf_worker import _cuda_device_map
 
 _HEADROOM = int(0.5e9)   # must match the headroom baked into _cuda_device_map
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -249,7 +249,7 @@ def _assert_subprocess_ok(result: "subprocess.CompletedProcess[str]") -> None:
 _CPU_OFFLOAD_CHILD_SCRIPT = """
 from unittest.mock import MagicMock
 
-from localm.inference.backends.hf import _cuda_device_map
+from localm.inference.backends._hf_worker import _cuda_device_map
 import localm.discover as discover
 from torch import nn
 from accelerate.utils import infer_auto_device_map
