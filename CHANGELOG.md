@@ -12,6 +12,48 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Models page can now sort by column and rename a model.** Table headers for
+  Name, Role, Source, Size and a new Modified column are clickable to sort
+  ascending or descending, and the choice is remembered across reloads. A rename
+  control (`localm rename OLD NEW`, matching API and button) moves a model to a
+  new name outright, unlike the existing alias which keeps the old name working
+  too - other aliases pointing at the same file are left alone. Renaming
+  best-effort updates every other place that stores the plain name (pinned
+  models, the embedding and coder-reviewer model settings, scheduled jobs, RAG
+  collection metadata) and tells you what it could and could not update; a
+  currently loaded model keeps running under its new name without a reload. One
+  thing it cannot reach: a per-project `.localcoder/config.toml` that pins this
+  model by name has to be updated by hand.
+- **Loading a Mixture-of-Experts model with "MoE expert layers on CPU" turned on
+  now tells you where the weights actually landed**, instead of leaving you to
+  take it on faith. The load prints a line like "moe placement: 200.00 MiB
+  system RAM / 800.00 MiB VRAM across 2 backend buffer(s)"; if nothing could be
+  read back it says "not reported" rather than implying zero. Ordinary loads are
+  silent as before - this only appears when the setting is actually on.
+- **A "Warm up now" button in Settings loads the embedding model on demand,**
+  with a live status line walking through resolving, downloading if needed,
+  freeing VRAM, and loading. Previously the embedder loaded silently and
+  invisibly on whatever request happened to need it first - even after running
+  `localm setup-embeddings`, which only fetches the file and never actually
+  loads it - so the first real embeddings or RAG call could stall for minutes
+  with no explanation. Already-loaded shows "Already warm" instead of reloading.
+  This is opt-in: nothing changes if you never click it.
+- **The coder can now search your indexed Knowledge collections.** Two new
+  tools, one to list what is available and one to search a named collection for
+  matching excerpts, so the coder is no longer limited to files in the project
+  directory. Search asks for confirmation by default, since collection content
+  isn't scoped to the project the way file reads are; retrieved text goes
+  through the same sanitiser used for anything else untrusted before it can
+  reach the model. A restricted (shared, non-owner) coder session cannot use
+  either tool. Search is lexical only for now, not the hybrid/embedding search
+  the Knowledge page itself can do.
+- **The Image generation page can now select a LoRA and set its strength.** A
+  dropdown lists the LoRA files installed in your ComfyUI instance, with
+  separate strength fields for the model and for CLIP (defaulting to 1.0 and 0.5
+  when left blank). The name is validated before it is ever handed to ComfyUI's
+  workflow graph, since ComfyUI resolves it against its own models folder rather
+  than a path localm controls - the same check runs whether the request comes
+  through the API or through the coder's own image-generation tool.
 - **The Models page now shows a model switch actually happening.** The "use"
   button shows "loading…" for the real duration of the switch (which can take
   tens of seconds), instead of giving no feedback beyond being disabled. The
@@ -37,6 +79,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   so instead of silently doing nothing.
 
 ### Security
+- **A bug report can no longer include your actual chat content, and asking for
+  help no longer means filing three copies of the same complaint.** Attaching a
+  debug log tail to a report could pull in a raw model reply, a snippet of your
+  own text from an embedding failure, or a web-tool query built from your
+  prompt - because those log lines looked like any other line to the report
+  builder. Worse, if that leaked text happened to contain a word like "error"
+  it was kept and prioritized ahead of the report's real errors. Report
+  generation now recognizes the exact log lines that can carry your content and
+  withholds them (with a "records withheld" note), including a check for a
+  reply that fakes a log-header line to slip past it. Separately, the "What I
+  was doing" and "What happened" fields used to be the same text twice, telling
+  the maintainer nothing about what you expected versus what went wrong - the
+  bug-report form now has three distinct fields (what you were doing, what you
+  expected, what actually happened). A long run of repeated native log lines
+  with no timestamp of its own (which could fill a whole report's character
+  budget with one line copied dozens of times) is now collapsed before the
+  budget is spent.
 - **An oversized batch sent to a HuggingFace-backed embedding model could run
   for a very long time instead of failing fast.** `/v1/embeddings` passed its
   input straight through with no limit on how many texts, or how much text,
@@ -209,6 +268,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   serving your next request immediately, instead of reloading first.
 
 ### Changed
+- **Settings now shows you which fields you've actually changed.** A field
+  still on its shipped default now renders blank with the default shown as a
+  greyed placeholder, instead of looking identical to a value you chose
+  yourself. A field you did override still renders solid, and clearing an
+  override still sends an explicit "use the default" rather than silently
+  reverting. The coder session panel's "Max turns" field gets the same
+  treatment - blank means "use the server's default," not a client guess of 40.
+- **Pulling or verifying a model file is measurably faster.** Hashing now reads
+  in 4 MB blocks instead of 64 KB, roughly doubling throughput on a local SSD
+  (233 to 479 MB/s hashing a 10 GB file in testing) with no change to the
+  digest produced. Files under 32 MB are unaffected (too small for the overhead
+  to pay off).
 - **Three model routes now require host filesystem access:** scanning for ComfyUI
   models, pulling a model by naming a path already on the server, and downloading
   a curated ComfyUI model. This affects only additional keys you minted yourself
@@ -216,6 +287,172 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **The GUI no longer needs a manual reminder to invalidate its own cache when
+  a static file changes.** Every change to the app's HTML, JS or CSS used to
+  need a hand-typed version bump so browsers would fetch the new copy; missing
+  one meant an already-open browser could keep serving a stale, possibly broken
+  page indefinitely, since a service worker only re-checks its cache when its
+  own bytes change. The cache key is now computed automatically from the actual
+  contents of every cacheable file, so it changes exactly when something
+  relevant does.
+- **Restarting or stopping localm from the tray icon (Windows) no longer
+  reports a false crash on the next startup.** The tray's Restart and Stop
+  buttons called the server's internal hooks without identifying which running
+  instance they meant, which cleared the wrong bookkeeping and left the real
+  one armed - so the next start reported a crash that never happened. They now
+  correctly identify the instance (and, for Restart, the port it was really
+  running on). Separately: when a real crash IS detected, its leftover trace
+  file is now cleaned up instead of accumulating on disk forever, a failure to
+  attach the crash detector is now logged instead of silently leaving you with
+  no report if a crash does happen, and the report's stated cause now reflects
+  the actual evidence found - a captured fault trace, a log that cuts off
+  mid-word during native model loading, or an honest "no evidence found" -
+  instead of a generic guess. This does not explain any specific past
+  unexplained crash; it only stops these particular false positives and makes
+  a real one easier to diagnose.
+- **Listing or opening a Knowledge collection can no longer freeze the whole
+  server.** Both actions used to fully re-parse a collection's stored chunks
+  and vectors just to report counts, and because localm answers requests on a
+  single thread, that parse blocked every other in-flight request for as long
+  as it took - measured at up to several seconds for a multi-thousand-chunk
+  collection. Listing and viewing a collection now read from a small cached
+  summary instead, cutting a measured 3.3 second freeze to 0.003 seconds. A
+  collection that predates this cache still falls back to the slower path the
+  first time, but that fallback no longer blocks the server outright while it
+  runs.
+- **A failed chat request in the GUI no longer shows you raw JSON.** The error
+  display used to take the server's response text and cut it off at 300
+  characters, so a VRAM-overflow error's actual list of suggestions (lower the
+  context, offload fewer layers, and so on) was silently cut away past that
+  point, and what remained showed literal `{"detail":...` markup instead of a
+  message. The full server-provided explanation is shown now, with no length
+  cap, the same way every other error in the GUI already worked.
+- **A coder session can now be repointed to a different model without losing
+  its history.** Previously a session's model was fixed at creation - switching
+  the active model elsewhere in the app could make the session's next message
+  silently reload its original model back into VRAM, evicting whatever you had
+  just switched to. A session can now be told to use a different model in
+  place; only the account that owns the shared inference engine can trigger a
+  switch that affects it for everyone, and a session currently mid-task refuses
+  the change rather than corrupting it.
+- **A scheduled job or memory auto-consolidation can no longer have its model
+  unloaded out from under it.** If idle-unload is turned on (off by default)
+  and the server was otherwise quiet, a scheduled chat/memory job or a
+  background memory-consolidation pass could get evicted mid-run, because
+  those paths called the inference engine directly instead of going through
+  the same "mark this model busy" path an ordinary chat request uses. Both now
+  pin the model for as long as they are actually using it.
+- **A vision-capable model's projector file is now fetched and wired up
+  automatically when you pull it, and every way of starting localm now
+  actually uses it.** Pulling a vision GGUF previously downloaded only the
+  language model - the separate projector file needed to see images had to be
+  found and attached by hand, with no warning that anything was missing until
+  you tried sending a picture and it silently failed. Pulling now checks the
+  source repository for a projector sibling, verifies it really is one, and
+  records it; `localm gui`, `localm serve`, and `localm run` all now pick that
+  projector up automatically instead of only two of the four places that build
+  a model doing so. An explicit `--mmproj` flag still always wins if you want
+  to override it.
+- **The coder plugin now shows you the server's actual error instead of just
+  "Service Unavailable," and no longer wastes half a minute retrying a failure
+  that was never going to succeed.** A non-auth error response from the coder's
+  HTTP backend (local or remote) used to report only the bare status line, with
+  no detail even when the server had already sent one - now the response body's
+  detail is read and shown, capped at 500 characters. Separately, a 503 from
+  localm's own local server used to be retried like any transient network
+  error, up to 5 requests over roughly 30 seconds; since every such 503 from
+  the local server has already either failed deterministically or exhausted
+  its own wait before the response reaches the client, it now fails
+  immediately on the first try instead. A remote/cloud backend's retry
+  behavior is unchanged.
+- **Setup and update output for the bundled ComfyUI installer now appears live
+  instead of going silent for minutes at a time.** The log used to buffer all
+  output from git/pip/venv steps and only show it once the whole command
+  finished - one report saw over five minutes of apparent silence with only
+  two log lines total, despite work actively happening in the background.
+  Output now streams line by line as it happens, for both a fresh install and
+  an update.
+- **Switching the active model while another model has gone idle no longer
+  risks the newly switched-to model being evicted before it ever answers a
+  request.** The idle-unload timer only started counting a model's activity
+  from its first served request, so a model that inherited the previous
+  model's already-expired idle clock the instant it was loaded could be
+  evicted by the very next idle sweep. A newly loaded or switched-to model's
+  activity clock is now seeded at load time instead.
+- **Native model-loading output (llama.cpp/ggml) from an embedding-model load
+  is now grouped and de-duplicated the same way as every other model load's
+  output**, instead of appearing as raw, unformatted spew with no timestamp and
+  no repeat-collapsing. Only visible with `--debug`/`LOCALM_DEBUG` on; the
+  persisted debug log file is unaffected either way.
+- **A coder tool call that is blocked, denied, or skipped (patch mode
+  interception, a scope restriction, a dry run) now correctly shows its result
+  in the chat instead of leaving its card stuck on "..." forever**, which also
+  desynced every tool result after it onto the wrong card for the rest of the
+  session. The reported duration for a tool that never actually ran is now
+  omitted rather than shown as a misleading "0.0s".
+- **A grammar-constrained chat request that fails because the model worker
+  itself faulted no longer tells you your grammar syntax was wrong.** It used
+  to be reported as a plain "invalid grammar" error even when the real cause
+  was an unrelated crash or timeout in the isolated worker process; it now
+  reports the worker fault for what it is.
+- **Native model-loading output that alternates between two or more distinct
+  lines (common with CUDA's own warmup chatter) is now collapsed the same way
+  a single repeating line already was.** The line-grouping logic used to only
+  compare each new line to the one immediately before it, so an alternating
+  cycle never matched and the console, GUI status window, and bug-report log
+  tail all filled with the full repeated pair for the whole generation.
+  Grammar-constrained requests also switch to this same grouped view - they
+  previously suppressed native output entirely, hiding real grammar
+  diagnostics along with the noise. Only affects the live console/GUI view;
+  the persisted debug log file still gets every raw line.
+- **`localm gpus` now tells you when its free-VRAM figure only accounts for
+  this process**, not the whole card - on some driver/platform combinations
+  (notably AMD ROCm/HIP on Windows) the number can look reassuringly high on a
+  card that other running processes have actually filled. `localm doctor`
+  already carried this caveat; `gpus` now matches it.
+- **A connection that drops out mid-relay while the server is shutting down or
+  restarting is now closed cleanly instead of abandoned**, and no longer leaves
+  "Task was destroyed but it is pending!" warnings in the log.
+- **Manually synthesizing memory ("Synthesize now") no longer fails with "load
+  a model first" right after you've switched models, and no longer freezes the
+  server for the length of the synthesis call.** The memory plugin used to
+  cache which model was active only once, at startup, so switching models
+  later left it pointing at a stale, unloaded reference - it now always
+  resolves the model that is actually active. The synthesis call itself is now
+  run off the main thread, so a 16-second synthesis no longer stalls every
+  other request for 16 seconds.
+- **Two more bugs affecting every GGUF model load are fixed.** Every templated
+  token-count request to the model worker was silently failing (a
+  bytes-versus-string mismatch) and falling back to a less accurate count that
+  skipped the chat template's own markup - this had been happening on every
+  prompt, on every load, since the isolated worker was introduced, without
+  ever surfacing above debug level; a real recurrence would now log a warning
+  instead of staying invisible. Separately, the "vram: X GB in use" line
+  printed after a model loads is no longer read from a raw, process-blind
+  measurement that could print a number far from reality (one case: "0.14 GB
+  in use" on a card that actually had 10.53 GB in use); it now uses the same
+  trusted reading the GUI's status bar relies on, and says so plainly when
+  that reading can't be trusted rather than showing a number that might be
+  wrong. For a CPU-only load, where nothing is ever placed on a GPU, this line
+  is now skipped entirely instead of printing a technically-uncorrected
+  reading (and paying the cost of checking one) for nothing to report.
+- **The coder's episode store (its cross-session "lessons learned" log) no
+  longer silently drops and then permanently deletes an episode** if its text
+  happened to contain certain rare Unicode line-separator characters - the same
+  class of bug already fixed in the coder's RAG store and in agent memory,
+  applied here to the one file that had not received it yet.
+- **The coder's reported tool execution time is now real, not a guess.** The
+  GUI used to estimate how long a tool took from the gap between two UI render
+  events, which usually landed in the same screen update and read as roughly
+  0.0 seconds regardless of the tool's actual cost. The server now measures and
+  reports the real duration; a tool that never ran (blocked, denied before
+  execution) reports exactly 0.0 rather than nothing, so the GUI can tell
+  "genuinely instant" apart from "did not run."
+- **A model that fails to load now leaves a real diagnostic message instead of
+  a blank one, for any kind of load failure** - a corrupted file, running out
+  of memory, an unsupported quantization. The native runtime's own explanation
+  was being captured to a temporary file and then deleted before the caller
+  ever read it, so this affected every failed GGUF load, not just a rare case.
 - **HuggingFace model search now recognizes MoE chat models it used to badge
   "unknown".** Type detection only read a repo's `pipeline_tag`, and a
   HF-repacked GGUF-only quantization upload commonly never sets that field -
@@ -224,6 +461,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the model's own GGUF header architecture, so a GGUF-only MoE upload with no
   `pipeline_tag` at all is correctly badged as an LLM instead of "unknown".
   Quant labels like `MXFP4_MOE`, `TQ1_0`, and `TQ2_0` are now recognized too.
+  A classified GGUF search query's stat fields (downloads, likes, last
+  modified) no longer go missing from every result row as a side effect of
+  the same request.
 - **The coder's codebase map no longer goes stale after a shell command.** Files
   a shell command created, edited, or deleted (applying a patch, running a
   formatter, generated code) never updated the compact codebase summary
