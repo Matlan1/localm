@@ -5,6 +5,7 @@ next start via a crash marker)."""
 
 import asyncio
 import json
+import logging
 
 from localm import bugreport, instances
 
@@ -44,6 +45,65 @@ def test_crash_marker_arm_check_disarm(tmp_path, monkeypatch):
     assert not marker.exists()
     assert bugreport.check_and_report_prior_crash(home=home) is None
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+#  NEW-CRASH-NOTICE-USELESS (A, part 1): a faulthandler attach failure must   #
+#  never be a silent `except Exception: pass` - every native-trace file on    #
+#  the maintainer's box was 0 bytes across 4 crashes with no clue why, and    #
+#  the old code could not have told the difference between "no fault           #
+#  occurred" and "faulthandler never attached in the first place" (rule 5).   #
+# --------------------------------------------------------------------------- #
+
+def test_faulthandler_enable_exception_is_logged_not_silent(tmp_path, monkeypatch, caplog):
+    import faulthandler
+
+    def _boom(*a, **k):
+        raise OSError("fd is not a real file on this platform")
+
+    monkeypatch.setattr(faulthandler, "enable", _boom)
+    home = str(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        # Arming must still succeed (the marker is what matters for crash
+        # detection) even though the trace mechanism itself failed to attach.
+        assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
+
+    assert (tmp_path / "run" / "server-crash.marker").exists()
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("faulthandler" in r.getMessage() for r in warnings), (
+        "a faulthandler.enable() failure must be logged, not swallowed silently")
+
+
+def test_faulthandler_silently_not_enabled_is_also_logged(tmp_path, monkeypatch, caplog):
+    """enable() can return WITHOUT raising and still not actually be armed on
+    some platforms/file shapes - "no exception" is not proof of success.
+    is_enabled() is the one call that tells the truth."""
+    import faulthandler
+
+    monkeypatch.setattr(faulthandler, "enable", lambda *a, **k: None)
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    home = str(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("faulthandler" in r.getMessage() for r in warnings)
+
+
+def test_faulthandler_successful_attach_logs_no_warning(tmp_path, caplog):
+    """The negative case: a genuinely successful attach on this real box (no
+    mocking of faulthandler itself) must NOT spam a warning - only a real
+    attach failure should."""
+    home = str(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
+    bugreport.disarm_crash_guard(home=home)   # tidy up: detach + close the fh
+
+    warnings = [r for r in caplog.records
+               if r.levelno >= logging.WARNING and "faulthandler" in r.getMessage()]
+    assert warnings == []
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +208,79 @@ def test_genuine_crash_still_detected_while_a_sibling_stays_alive(
     assert not (run / "server-crash.instance-b.marker").exists()
     # ...while instance-a (alive) is left completely alone.
     assert (run / "server-crash.instance-a.marker").exists()
+
+
+# --------------------------------------------------------------------------- #
+#  NEW-CRASH-NOTICE-USELESS (D): the trace file must not outlive its marker.  #
+#  _report_one_crash_marker used to unlink only the marker, never the         #
+#  companion server-crash-trace.<instance_id>.txt it reads - so run/          #
+#  accumulated one such file per instance that had EVER armed, forever (4     #
+#  already present on the maintainer's box, all 0 bytes).                     #
+# --------------------------------------------------------------------------- #
+
+def test_report_one_crash_marker_deletes_the_trace_file_too(tmp_path, monkeypatch):
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    home = str(tmp_path)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-x", 4242)
+    trace = run / "server-crash-trace.inst-x.txt"
+    trace.write_text("Current thread 0x1: SIGSEGV in ggml\n", encoding="utf-8")
+
+    captured = {}
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: captured.update(k) or str(tmp_path / "r.md"))
+
+    result = bugreport.check_and_report_prior_crash(home=home)
+
+    assert result is not None
+    # The trace's content reached the report before being deleted - cleanup
+    # must not cost the diagnostic value it exists to preserve.
+    assert "SIGSEGV in ggml" in captured["context"].get("native_trace", "")
+    assert not (run / "server-crash.inst-x.marker").exists()
+    assert not trace.exists(), "the trace file must be deleted with its marker"
+
+
+def test_report_one_crash_marker_survives_a_missing_trace_file(tmp_path, monkeypatch):
+    """No trace at all (window-close/OS-kill leave none) must not be treated
+    as a cleanup failure - the report still files normally."""
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    home = str(tmp_path)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-y", 5353)
+    # No trace file written at all.
+
+    calls = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+
+    result = bugreport.check_and_report_prior_crash(home=home)
+
+    assert result is not None
+    assert len(calls) == 1
+    assert not (run / "server-crash.inst-y.marker").exists()
+
+
+def test_a_live_siblings_trace_file_is_left_untouched(tmp_path, monkeypatch):
+    """A marker whose pid is genuinely still alive is skipped entirely (an
+    existing invariant) - its trace file, still in active use by that live
+    process's faulthandler, must not be touched either."""
+    home = str(tmp_path)
+    run = tmp_path / "run"
+    _write_marker(run, "inst-z", 6464)
+    trace = run / "server-crash-trace.inst-z.txt"
+    trace.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: True)
+    calls = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: calls.append(k) or str(tmp_path / "r.md"))
+
+    result = bugreport.check_and_report_prior_crash(home=home)
+
+    assert result is None
+    assert calls == []
+    assert (run / "server-crash.inst-z.marker").exists()
+    assert trace.exists(), "a live sibling's trace file must not be deleted"
 
 
 def test_asyncio_handler_reports_task_exception(monkeypatch):

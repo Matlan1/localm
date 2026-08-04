@@ -31,6 +31,43 @@ def _report_preload_failure(console, exc: Exception) -> None:
     logger.exception("background model preload failed")
 
 
+def _tray_callbacks(app, hs):
+    """Build the (on_restart, on_stop) callables for the tray control surface
+    (appface.start_app_face).
+
+    Returns LAZY closures over *app*, not functools.partial-bound values:
+    app.state.instance_id/instance_port are set by instances.advertise()
+    inside hs.run_advertised(), which is called just below this function's
+    own call site - AFTER the tray is wired, not before. A partial would
+    freeze instance_id/port at None (their state at wire time); these
+    closures read app.state at CALL time instead - by the time a user can
+    physically click Restart/Stop, run_advertised() has long since entered
+    advertise()'s context and populated both.
+
+    Bug this fixes (verified against real code, not a guess): appface
+    invokes on_restart/on_stop with NO arguments
+    (``threading.Thread(target=self.on_restart)``, appface.py), and both
+    hs._do_restart and hs._do_shutdown are keyword-only with None defaults.
+    Wiring the bare functions directly (the previous code) meant a tray
+    Restart/Stop always called disarm_crash_guard(instance_id=None), which
+    clears the LEGACY unscoped marker (bugreport.py's per-instance-scoping
+    fallback) and leaves this instance's real server-crash.<instance_id>.marker
+    still armed - so the NEXT start reports a crash that never happened. The
+    HTTP routes (routes/admin.py's restart/stop endpoints) already pass the
+    real instance_id and get this right; only the tray path was broken.
+    _do_restart losing its port the same way meant _restart_argv omitted
+    ``-p``, so a re-exec'd server could come back on a different port -
+    stranding the tray/GUI's own open window on a dead one."""
+    def on_restart():
+        hs._do_restart(instance_id=getattr(app.state, "instance_id", None),
+                       port=getattr(app.state, "instance_port", None))
+
+    def on_stop():
+        hs._do_shutdown(instance_id=getattr(app.state, "instance_id", None))
+
+    return on_restart, on_stop
+
+
 def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
@@ -732,13 +769,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Tray control surface (Windows): Open / Copy address / View logs / Restart /
     # Stop, so the running server is a real background app, not just a console.
     # Best-effort and fully guarded - it never blocks the server. Restart/Stop are
-    # wired to the server's existing hooks; "View logs" dumps the always-on activity
-    # buffer (INFO+, no chat content) to a readable file. (Linux gets a styled Tk
-    # control window next; see appface.)
+    # wired to the server's existing hooks (via _tray_callbacks - NOT the bare
+    # hs._do_restart/hs._do_shutdown; see that function's docstring for why a
+    # bare wire silently misreported every tray stop/restart as a crash);
+    # "View logs" dumps the always-on activity buffer (INFO+, no chat content)
+    # to a readable file. (Linux gets a styled Tk control window next; see
+    # appface.)
+    on_restart, on_stop = _tray_callbacks(app, hs)
     app_face = appface.start_app_face(
         name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
         get_log_lines=debuglog.recent_activity,
-        on_restart=hs._do_restart, on_stop=hs._do_shutdown)
+        on_restart=on_restart, on_stop=on_stop)
     if app_face is not None:
         # Accurate splash: flip the window from "Starting..." to "Running" (and, on
         # Windows, hide it to the tray) once the port is ACTUALLY accepting
