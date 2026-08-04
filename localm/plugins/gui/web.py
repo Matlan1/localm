@@ -179,12 +179,22 @@ def _sw_js_response(if_none_match: "str | None" = None) -> Response:
     difference for a real bug."""
     text = (STATIC_DIR / "sw.js").read_text(encoding="utf-8")
     value = _compute_sw_cache_value()
-    new_text, n = SW_CACHE_LINE_RE.subn(rf"\g<1>{value}\g<2>", text, count=1)
-    if n != 1:
+    # Count matches BEFORE substituting, not via subn's own return count: subn(...,
+    # count=1) reports n=1 whether the pattern matched once or several times (it
+    # caps how many it REPLACES, not how many it FOUND), so `if n != 1` can never
+    # detect a second match - it would silently substitute the FIRST occurrence
+    # (e.g. an illustrative example string added to a future comment) and leave
+    # the REAL const CACHE line holding the literal placeholder text, reporting
+    # success while quietly defeating the whole mechanism. Exactly one match is
+    # required; zero or two-or-more both fail loud.
+    n_matches = len(SW_CACHE_LINE_RE.findall(text))
+    if n_matches != 1:
         raise HTTPException(
-            500, "sw.js's CACHE constant line is not in the expected "
-            '`const CACHE = "...";` shape - cannot substitute the computed '
-            "cache version. This is a build defect, not a client error.")
+            500, f"sw.js's CACHE constant line matched {n_matches} times "
+            '(expected exactly one `const CACHE = "...";`) - cannot safely '
+            "substitute the computed cache version. This is a build defect, "
+            "not a client error.")
+    new_text = SW_CACHE_LINE_RE.sub(rf"\g<1>{value}\g<2>", text, count=1)
     etag = f'"{hashlib.sha256(new_text.encode("utf-8")).hexdigest()[:32]}"'
     headers = {"Cache-Control": "no-cache", "ETag": etag}
     if if_none_match and if_none_match == etag:

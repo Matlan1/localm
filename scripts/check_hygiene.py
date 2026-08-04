@@ -992,8 +992,8 @@ def _sw_shell_coverage_problems(shell: set[str], static_root: Path) -> list[str]
                 problems.append(
                     f"{_SW_STATIC}{url}: ships but is NOT listed in {_SW_JS}'s SHELL, "
                     "which promises every app/* and pages/* module - so it is never "
-                    "precached and the installed PWA cannot open it offline. Add it to "
-                    "SHELL and bump CACHE.")
+                    "precached and the installed PWA cannot open it offline. Add it "
+                    "to SHELL.")
     return problems
 
 

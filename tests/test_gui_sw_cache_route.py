@@ -165,6 +165,25 @@ class TestSubstitution:
             web._sw_js_response()
         assert ei.value.status_code == 500
 
+    def test_two_matching_lines_fails_loud_not_a_silent_wrong_substitution(
+            self, fake_static):
+        """re.subn(..., count=1) reports n=1 whether the pattern matched once or
+        several times (it caps how many it REPLACES, not how many it FOUND), so
+        checking that return count alone cannot detect a second match - it would
+        silently substitute the FIRST occurrence (e.g. an illustrative example
+        string in a future comment) and leave the REAL const CACHE line holding
+        the literal placeholder text, reporting success while quietly defeating
+        the whole mechanism. Two matches must fail loud, never resolve to one
+        of them by accident."""
+        (fake_static / "sw.js").write_text(
+            'const CACHE = "localm-shell-dev";\n'
+            '// example: const CACHE = "some-other-value";\n',
+            encoding="utf-8")
+        with pytest.raises(HTTPException) as ei:
+            web._sw_js_response()
+        assert ei.value.status_code == 500
+        assert "matched 2 times" in str(ei.value.detail)
+
 
 class TestConditionalGet:
     """_RevalidatingStatic's own contract for every other asset: no-cache does
