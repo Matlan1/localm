@@ -1473,8 +1473,19 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       signal: chat.abort.signal,
     });
     if (!r.ok) {
-      const detail = await r.text();
-      const err = new Error(`${r.status}: ${detail.slice(0, 300)}`);
+      // Same shape as every other fetch error site in the GUI (chat.js:1193,
+      // coder.js:539/644/687/847/865/905): parse the JSON body and use its
+      // .detail, falling back to r.statusText when the body is not JSON at
+      // all. The raw-text-sliced version this replaces showed the user literal
+      // JSON markup (the message began `{"detail":"...`) and cut the body at a
+      // fixed length that landed mid-word, discarding whatever the server put
+      // AFTER that point - for a VRAM-overflow 503 that is the actionable
+      // "Options:" list (lower the context, offload fewer layers, etc.), so
+      // the user saw a dead end where the server had already written the fix.
+      // No length cap, matching every sibling site above - the full detail
+      // (newlines included, for the Options list) reaches renderMarkdown.
+      const data = await r.json().catch(() => ({}));
+      const err = new Error(`${r.status}: ${data.detail || r.statusText}`);
       err.status = r.status;   // so the catch can recover an image-reject 400
       throw err;
     }

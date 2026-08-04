@@ -59,6 +59,33 @@ test("a zero-content chat failure leaves a visible error, not silently wiped", a
     "no blank assistant turn was persisted for the failed send");
 });
 
+test("a long detail is shown parsed, not raw JSON markup or truncated mid-word", async () => {
+  // #996-adjacent: settings-perf.js used to read the raw response TEXT and
+  // slice it to 300 chars, so the user saw literal `{"detail":"...` markup
+  // and lost whatever came after the cutoff - for a VRAM-overflow 503 that is
+  // exactly the server's actionable "Options:" list (lower the context,
+  // offload fewer layers, ...), discarded right when it mattered most.
+  const longDetail = "Context too large for available VRAM: this load needs " +
+    "roughly 12.3 GB but this GPU only has 8.0 GB total - freeing other VRAM " +
+    "will not help, it cannot fit regardless.\n  Options:\n    - Lower the " +
+    "context:  -c 32768  (or smaller)\n    - Offload fewer layers:  -g 24  " +
+    "(or -g 0 for CPU-only)\n    - Let localm auto-size GPU offload:  localm " +
+    "config n_gpu_layers_auto true\n    - Let localm auto-size the context:  " +
+    "localm config ctx_auto true";
+  const { window } = await setup(longDetail);
+  const conv = textConv();
+
+  await window.runCompletion(conv);
+
+  const box = window.document.getElementById("chat-messages");
+  assert.doesNotMatch(box.textContent, /\{"detail"/,
+    "the raw JSON body must never reach the user - it must be parsed and " +
+    "the detail field used, not the raw response text");
+  assert.match(box.textContent, /auto-size the context/,
+    "the actionable tail of a long message (past the old 300-char cutoff) " +
+    "must not be truncated away");
+});
+
 test("a zero-content chat failure does not touch vision-reject recovery", async () => {
   // Guard against a regression that scopes the skip too broadly: a REAL
   // vision-reject must still clear the live bubble via renderChat() (its own
