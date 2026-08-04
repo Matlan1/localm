@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **HuggingFace model search now shows what a model actually is.** Results
+  display the model's architecture family (e.g. `qwen3moe`, `mixtral`), an
+  approximate parameter count, and a Mixture-of-Experts badge when one applies.
+  The MoE badge is labelled `MoE` when the model's own header confirms it, or
+  `MoE?` with a tooltip when it is only a guess from the repo name (some real
+  MoE models, notably older Mixtral conversions, do not say so in their own
+  header) - never presented as equally certain. Display only; it never changes
+  which results a search returns.
 - **Run a Mixture-of-Experts model in a fraction of the VRAM.** A new
   "MoE expert layers on CPU" setting (`n_cpu_moe`, off by default) keeps the
   expert weights of the first N layers in system RAM while the rest of the model

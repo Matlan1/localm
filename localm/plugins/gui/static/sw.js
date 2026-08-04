@@ -133,7 +133,11 @@
 // v89: index.html gained a LoRA picker + strength controls on the Image page,
 // and pages/images.js now populates/reads them. A stale-cached client would
 // keep the old form with no way to select a LoRA at all.
-const CACHE = "localm-shell-v89";
+// v90: pages/models.js and style.css changed (HF search results now show a
+// model's architecture family, a Mixture-of-Experts badge, and an approximate
+// parameter count) - a stale-cached client would keep the old rows with none
+// of that information.
+const CACHE = "localm-shell-v90";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

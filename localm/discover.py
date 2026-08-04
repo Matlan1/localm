@@ -269,6 +269,54 @@ def hf_param_bytes(safetensors: Optional[dict]) -> Optional[int]:
     return total * 2
 
 
+# Name-based MoE fallback for when the header signal (architecture containing
+# "moe") is absent or - per the Mixtral counter-example below - the header lies
+# by omission: TheBloke/Mixtral-8x7B-v0.1-GGUF (a real MoE model, live-verified)
+# reports gguf.architecture == "llama", an older GGUF conversion predating
+# llama.cpp's dedicated mixtral arch tag. Matches the two common MoE naming
+# conventions: "8x7B"/"8x22B" style (Mixtral) and "A3B"/"A22B" active-param
+# style (Qwen3's MoE line), plus a bare "moe" token. Inherently incomplete (a
+# DeepSeek-style repo carries neither convention in its name) - that is why
+# this is only ever the FALLBACK behind the header signal, and why callers must
+# label a match from this pattern as inferred, never as confirmed.
+_MOE_NAME_RE = re.compile(r"(?i)\bmoe\b|\b\d+x\d+b\b|\ba\d+b\b")
+
+
+def _moe_signal(architecture: Optional[str], repo_id: str) -> Optional[str]:
+    """MoE-ness for a search-result row: ``"confirmed"`` (the model's own
+    ``architecture`` string says so - reliable, see the module note above),
+    ``"likely"`` (name pattern only - a guess, must be labelled as such in the
+    GUI), or ``None`` (no evidence either way). Deliberately never returns a
+    "dense" verdict - the absence of a MoE signal does not prove the model is
+    dense, the same abstain-rather-than-guess discipline classify_hf_metadata
+    already applies to model type."""
+    if architecture and "moe" in str(architecture).lower():
+        return "confirmed"
+    if _MOE_NAME_RE.search(repo_id):
+        return "likely"
+    return None
+
+
+def _param_count(row_fmt: str, gguf_meta: object, safetensors_meta: object) -> Optional[int]:
+    """Total parameter count for a classified row, or None when unavailable.
+
+    ``gguf.total`` (gguf-format rows) and ``safetensors.total`` (hf-format
+    rows, the same field hf_param_bytes() already reads) are both VERIFIED
+    live to be the model's total parameter count, not a byte size: three
+    different quantizations of the same repo report ``gguf.total`` within
+    0.002% of each other while their file sizes differ by 6x. Same
+    isinstance/positive guard as hf_param_bytes - a malformed/adversarial
+    expand field must degrade this row's count to None, not crash the rest of
+    the search."""
+    src = gguf_meta if row_fmt == "gguf" else safetensors_meta
+    if not isinstance(src, dict):
+        return None
+    total = src.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        return None
+    return total
+
+
 def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
                       classify: bool) -> list[dict]:
     """Build result rows from a raw HF /api/models list response.
@@ -281,9 +329,12 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
 
     ``classify``: attach a ``detected_type`` (localm.model_manager.registry
     MODEL_TYPES value, or "unknown") from the item's pipeline_tag/library_name/
-    tags fields for DISPLAY ONLY - never used to exclude a result. Omitted
-    entirely when False, so a non-type-scoped caller's response shape is
-    byte-for-byte what it was before type-scoped search existed."""
+    tags fields for DISPLAY ONLY - never used to exclude a result. Also attaches
+    ``architecture`` (the raw gguf.architecture/config.model_type string),
+    ``moe`` ("confirmed"/"likely"/None, see _moe_signal), and ``param_count``
+    (see _param_count) - all display-only, all omitted entirely when False, so
+    a non-type-scoped caller's response shape is byte-for-byte what it was
+    before type-scoped search existed."""
     if not isinstance(data, list):
         raise DiscoverError("Unexpected response from HuggingFace search")
     out = []
@@ -321,6 +372,12 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
             row["detected_type"] = classify_hf_metadata(
                 item.get("pipeline_tag"), item.get("library_name"), raw_tags,
                 architecture)
+            # Display-only "what is this model" fields - see _moe_signal /
+            # _param_count docstrings for the reliability contract each carries.
+            row["architecture"] = architecture or None
+            row["moe"] = _moe_signal(architecture, repo)
+            row["param_count"] = _param_count(
+                row_fmt, gguf_meta, item.get("safetensors"))
         out.append(row)
     return out
 

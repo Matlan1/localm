@@ -1959,6 +1959,27 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .disc-repo .head .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .disc-repo .head .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
 .disc-repo .head .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
+/* what the model IS: architecture family + MoE-ness + param count.
+   Deliberately monochrome/outlined, not colored into the .type-badge palette -
+   every --cat-* hue is already spoken for by MODEL_TYPES, and reusing one here
+   would misread as "this is the model's type" the moment both badges show. */
+.arch-badge {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  padding: 1px 7px; border: 1px solid var(--border); border-radius: 9px;
+  white-space: nowrap; flex: 0 0 auto;
+}
+.moe-badge {
+  font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px;
+  letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto; color: var(--text-dim);
+}
+/* confirmed: the model's own architecture header says MoE - a solid border. */
+.moe-badge.moe-confirmed { border: 1px solid var(--text-dim); }
+/* likely: a name-pattern guess only ("8x7B"/"A3B" in the repo id) - dashed
+   border + a "?" in the label + a title tooltip, so it never reads as equally
+   certain as a confirmed badge (see discover.py's _moe_signal). */
+.moe-badge.moe-likely { border: 1px dashed var(--border); }
+.param-count { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.moe-legend { margin: 2px 0 8px; }
 /* non-blocking "no HF runtime" hint under the toggles */
 .disc-hf-hint { border-left: 2px solid var(--yellow); padding-left: 8px; margin: 4px 0; color: var(--text-dim); }
 
