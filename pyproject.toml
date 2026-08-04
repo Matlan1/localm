@@ -68,7 +68,12 @@ dependencies = [
     # GUI/CLI print LAN-URL QRs. Core so phone pairing works out of the box.
     "qrcode>=8.2",
     "zeroconf>=0.150.0",
-    "mcp>=1.28.1",
+    # NOTE: the MCP Python SDK ("mcp") is deliberately NOT a dependency. localm
+    # speaks the MCP stdio transport directly - see localm/plugins/mcpserver/server.py
+    # (server side) and localm/plugins/coder/mcp.py (client side). The SDK was a
+    # dependency until #585 rewrote the server off it; the requirement outlived the
+    # import by mistake and pulled in 13 packages nothing here uses, python-multipart
+    # among them, which the GUI upload/share paths go out of their way to avoid.
 ]
 
 [project.optional-dependencies]
