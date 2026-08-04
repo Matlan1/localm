@@ -6,7 +6,7 @@ needs a real Arc box - out of scope here)."""
 
 import pytest
 
-from localm.inference.backends.hf import _auto_device
+from localm.inference.backends._hf_worker import _auto_device
 
 
 class _Avail:
