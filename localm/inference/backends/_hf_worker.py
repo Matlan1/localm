@@ -231,6 +231,64 @@ class _SafeGrammarProcessor:
             return scores
 
 
+def _eos_token_ids(model, tokenizer) -> set:
+    """The end-of-sequence token id(s) transformers' own default stopping
+    criteria would halt generation on for *model* - see ``EosTokenCriteria``
+    / ``_get_stopping_criteria`` in transformers/generation/utils.py, which
+    reads ``generation_config.eos_token_id`` (an int, a list, or unset).
+    Read the SAME source of truth rather than re-deriving it, so this can
+    never disagree with what the built-in criteria actually stopped on.
+    Falls back to the tokenizer's own ``eos_token_id`` for a checkpoint whose
+    generation_config leaves it unset."""
+    raw = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    if raw is None:
+        raw = getattr(tokenizer, "eos_token_id", None)
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {int(x) for x in raw}
+    return {int(raw)}
+
+
+class _FinishReasonObserver:
+    """Installed as one of ``model.generate()``'s ``stopping_criteria`` to
+    record WHY generation ended, without influencing the decision itself -
+    the actual stop is still made by transformers' own built-in
+    ``EosTokenCriteria``/``MaxLengthCriteria`` (``__call__`` below always
+    returns "never stop"). Mirrors the native GGUF worker's EOG-vs-budget
+    distinction (``backends/llamacpp/llama.py``'s ``_generate``: an
+    end-of-generation token always wins over the length budget - "length"
+    is reported only when the budget ran out with no EOG ever produced).
+
+    Verified against transformers 5.13.1's ``_sample`` loop
+    (generation/utils.py): a new token is appended to ``input_ids`` via
+    ``torch.cat`` BEFORE ``stopping_criteria`` is called, so ``input_ids``
+    already includes it on every call - the delta from the length seen on
+    the FIRST call is exactly the count of new tokens generated so far, for
+    both decoder-only and encoder-decoder ``input_ids`` conventions, with no
+    need to know the prompt length in advance.
+    """
+
+    def __init__(self, eos_token_ids: set) -> None:
+        self._eos_token_ids = eos_token_ids
+        self._baseline_len: Optional[int] = None
+        self.generated = 0
+        self.ended_on_eos = False
+
+    def __call__(self, input_ids, scores, **kwargs):
+        import torch
+        seq_len = input_ids.shape[-1]
+        if self._baseline_len is None:
+            self._baseline_len = seq_len - 1
+        self.generated = seq_len - self._baseline_len
+        self.ended_on_eos = int(input_ids[0, -1]) in self._eos_token_ids
+        # Never itself vote to stop - a torch.BoolTensor of shape
+        # (batch_size,), matching StoppingCriteriaList's `is_done |
+        # criteria(...)` contract (see MaxLengthCriteria/EosTokenCriteria's
+        # own return shape in transformers/generation/stopping_criteria.py).
+        return torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
+
+
 def _grammar_processor(grammar: Optional[str], tokenizer, model):
     """Build an xgrammar LogitsProcessor that masks any token which would violate
     *grammar* at the current parse position (so output is structurally valid by
@@ -315,6 +373,10 @@ class HFWorker:
         # Reported back to the parent proxy for its post-load status line
         # (the child cannot print it directly - see load()'s own note).
         self.resolved_device: Optional[str] = None
+        # Why the most recent chat_stream() call ended - "stop" (EOS) or
+        # "length" (max_tokens exhausted first). Mirrors GgufWorker's
+        # identical attribute; recomputed for real by chat_stream() below.
+        self.last_finish_reason = "stop"
 
     @property
     def supports_images(self) -> bool:
@@ -758,7 +820,7 @@ class HFWorker:
             if messages_contain_image(messages):
                 raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
 
-        from transformers import TextIteratorStreamer
+        from transformers import StoppingCriteriaList, TextIteratorStreamer
 
         tokenizer = self._tokenizer
         model = self._model
@@ -835,11 +897,15 @@ class HFWorker:
             import torch as _torch
             _torch.manual_seed(seed)
 
+        self.last_finish_reason = "stop"
+        finish_observer = _FinishReasonObserver(_eos_token_ids(model, tokenizer))
+
         gen_kwargs: dict = {
             **inputs,
             "streamer": streamer,
             "max_new_tokens": max_tokens,
             "repetition_penalty": repeat_penalty,
+            "stopping_criteria": StoppingCriteriaList([finish_observer]),
         }
         if temperature > 0:
             gen_kwargs.update(
@@ -868,3 +934,12 @@ class HFWorker:
             yield token_text
 
         thread.join()
+        # EOS wins over the length budget whenever both are true at once
+        # (mirrors llama.py's _generate - see _FinishReasonObserver above);
+        # "length" only when the budget ran out with no EOS ever produced.
+        if finish_observer.ended_on_eos:
+            self.last_finish_reason = "stop"
+        elif finish_observer.generated >= max_tokens:
+            self.last_finish_reason = "length"
+        else:
+            self.last_finish_reason = "stop"

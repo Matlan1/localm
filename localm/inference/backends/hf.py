@@ -398,12 +398,12 @@ class HFBackend(BaseBackend):
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
         if self._runner is None or not self.loaded:
             raise RuntimeError("Model not loaded - call load() first")
-        # last_finish_reason is deliberately NOT set anywhere on this class -
-        # preserving the EXACT pre-existing gap this replaces (the in-process
-        # HFBackend never set it either, so Engine.last_finish_reason's
-        # getattr(..., "stop") fallback always fired). See _hf_runner.py's
-        # module docstring and the tracked follow-up task; do not "fix" this
-        # here without reading both first.
+        # Mirrors GgufBackend.chat_stream: the isolated worker computes a
+        # real finish_reason (HFWorker.chat_stream, via _hf_worker.py's
+        # _FinishReasonObserver) and reports it in the "done" envelope,
+        # which HFRunner.chat_stream already caches as self._runner.last_done
+        # (see _hf_runner.py's module docstring for the envelope shape).
+        self.last_finish_reason = "stop"
         yield from self._runner.chat_stream(
             first_chunk_timeout=self._first_token_timeout_seconds(),
             messages=messages,
@@ -417,3 +417,5 @@ class HFBackend(BaseBackend):
             grammar_triggers=grammar_triggers,
             seed=seed,
         )
+        done = getattr(self._runner, "last_done", None) or {}
+        self.last_finish_reason = done.get("finish_reason", "stop")

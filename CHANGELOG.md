@@ -583,6 +583,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   than line by line, because nothing can rule it out until every field has
   been seen. Ordinary code fences in other languages are unaffected and
   always stream normally.
+- **A HuggingFace-format model's chat reply now correctly reports when it was
+  cut off by the length limit.** The `finish_reason` field in a chat
+  completion always said `"stop"` for this model type, even when the reply
+  was actually cut short by the max-tokens setting rather than the model
+  choosing to stop on its own - GGUF models already reported this correctly.
+  A client relying on `finish_reason` to detect a truncated reply (to retry
+  with more room, or to warn the user) could not tell the difference here.
+  It now says `"length"` when generation was cut off by the limit, and
+  `"stop"` when the model produced its own end-of-reply token.
 
 ## [0.1.3] - 2026-07-23
 

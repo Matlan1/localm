@@ -57,16 +57,15 @@ processed at a time):
                                   optional typed-exception tag (e.g.
                                   "UnsupportedInputError")
     ("chunk", text)            - one streamed token (chat_stream only)
-    ("done", {})                - end of one chat_stream. Deliberately EMPTY:
-                                  the in-process HFBackend this replaces never
-                                  set a real ``last_finish_reason`` either (no
-                                  attribute existed at all, so
-                                  ``Engine.last_finish_reason``'s
-                                  ``getattr(..., "stop")`` fallback always
-                                  fired) - this preserves that EXACT behavior
-                                  rather than silently fixing or silently
-                                  perpetuating it disguised as now-handled.
-                                  See hf.py and the tracked follow-up task.
+    ("done", {"finish_reason": "stop"|"length"}) - end of one chat_stream.
+                                  finish_reason is HFWorker.last_finish_reason,
+                                  computed for real by HFWorker.chat_stream
+                                  (see _hf_worker.py's _FinishReasonObserver) -
+                                  "stop" when the model produced its own
+                                  end-of-sequence token, "length" when the
+                                  max_tokens budget ran out first. Mirrors
+                                  GgufBackend/ModelRunner's identical "done"
+                                  envelope shape (llamacpp/_runner.py).
 
 A native abort, or any other uncaught fault in the child's dispatch loop,
 produces NO envelope - the parent detects the dead/stuck child via
@@ -223,7 +222,7 @@ def _runner_main(req_q, resp_q) -> None:
                 gen = worker.chat_stream(**payload)
                 for token in gen:
                     resp_q.put(("chunk", token))
-                resp_q.put(("done", {}))
+                resp_q.put(("done", {"finish_reason": worker.last_finish_reason}))
             except UnsupportedInputError as e:
                 # A clean, expected refusal (e.g. an image against a
                 # text-only checkpoint) - the loaded model is unharmed.
