@@ -460,9 +460,20 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     Every failure path also records into ``last_error()`` (like
     ``resolve_embedding_model_path``'s own failure branches), so GET
     /api/rag/embedding's ``error`` field explains a policy-gated or failed
-    download too. The log LEVEL for the two policy-gated branches stays INFO -
-    an unset net_mode or a deliberately offline box is an expected state, not a
-    defect worth a WARNING - only the download-failure branch (a real fault)
+    download too - EXCEPT while ``_LOAD_FAILED`` is latched, matching
+    ``_record_resolve_success()``'s own guard. A "not auto-downloading" or
+    "network is off" verdict is not new evidence about anything: it fires only
+    when the known-key file is ALSO not on disk, and that combination cannot
+    coexist with a REAL load failure for this exact spec, whose entire
+    precondition is that the file WAS found and WAS attempted. It can only
+    coexist with a stale ``_LOAD_FAILED`` left over from a DIFFERENT spec that
+    was never reset (a hand-edited config, bypassing the picker route's own
+    ``reset_embedder()``) - and a policy-declined download for the CURRENT
+    spec is strictly more useful there than a dangling reason about a spec
+    nobody has selected in a while. The log LEVEL for the two policy-gated
+    branches stays INFO regardless of whether the write is skipped - an unset
+    net_mode or a deliberately offline box is an expected state, not a defect
+    worth a WARNING - only the download-failure branch below (a real fault)
     warns, deduped the same way as ``resolve_embedding_model_path``'s own
     WARNING-worthy failures."""
     global _LAST_ERROR
@@ -475,12 +486,14 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
             f"(net_mode={network_mode()}); run 'localm setup-embeddings' or set "
             "net_mode=allow to enable semantic search (memory/RAG use lexical "
             "BM25 until then)")
-        _LAST_ERROR = reason
+        if not _LOAD_FAILED:
+            _LAST_ERROR = reason
         logger.info(reason)
         return None
     if network_mode() == "off":
         reason = f"embedding model {name!r} missing and network is off; lexical-only"
-        _LAST_ERROR = reason
+        if not _LOAD_FAILED:
+            _LAST_ERROR = reason
         logger.info(reason)
         return None
     try:
