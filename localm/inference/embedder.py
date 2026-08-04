@@ -313,12 +313,23 @@ def _record_resolve_failure(reason: str) -> None:
 
 
 def _record_resolve_success() -> None:
-    """Clear a prior resolve failure once the spec resolves - a fixed config (or
+    """Clear a prior RESOLVE failure once the spec resolves - a fixed config (or
     one that never needed fixing) must not keep reporting a stale reason via
     ``last_error()``, and a later, DIFFERENT misconfiguration must warn again
-    rather than staying silenced by a dedup entry from an unrelated failure."""
+    rather than staying silenced by a dedup entry from an unrelated failure.
+
+    Does NOT clear ``_LAST_ERROR`` while ``_LOAD_FAILED`` is latched. That flag
+    means a LOAD attempt for the currently configured spec already failed (e.g.
+    the file resolves fine but is not actually an embedding model) - a more
+    specific, still-true fact than "this call found a path". resolve_embedding_
+    model_path() re-runs on every get_embedder() call and every GET
+    /api/rag/embedding status poll while no embedder is loaded, so without this
+    guard the very NEXT status check after a load failure would silently wipe
+    the reason it exists to report - only reset_embedder() (an explicit
+    model-selection change) may clear a load failure."""
     global _LAST_ERROR, _LAST_RESOLVE_WARNED
-    _LAST_ERROR = None
+    if not _LOAD_FAILED:
+        _LAST_ERROR = None
     _LAST_RESOLVE_WARNED = None
 
 
@@ -375,7 +386,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     #    the two into the same "not found" message (as this used to) hid exactly
     #    the case in #949, where localm itself downloaded the model successfully
     #    and then denied it existed.
-    registered_not_gguf = None
+    registered_not_gguf = None   # None: no registry hit; else bool, is it a directory
     try:
         from localm.model_manager.registry import get_model_info
         info = get_model_info(spec)
@@ -386,7 +397,19 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
                 if p2.is_file():
                     _record_resolve_success()
                     return str(path)
-                registered_not_gguf = p2
+                try:
+                    registered_not_gguf = p2.is_dir()
+                except OSError:
+                    # A stat that fails differently from the is_file() above (a
+                    # permission error, a race with something deleting the path)
+                    # - still a real registry hit, just of unknown shape. Report
+                    # it generically rather than letting the exception escape:
+                    # embed_texts() has no try/except around get_embedder(), and
+                    # /v1/embeddings only catches RuntimeError, so an uncaught
+                    # OSError here would reach the caller as an opaque 500
+                    # instead of the informative 422 this function exists to
+                    # produce.
+                    registered_not_gguf = False
     except Exception:
         pass
 
@@ -395,7 +418,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     if not known:
         if registered_not_gguf is not None:
             kind = ("a directory (a HuggingFace-format model)"
-                    if registered_not_gguf.is_dir() else "not a single file")
+                    if registered_not_gguf else "not a single file")
             reason = (
                 f"embedding_model {spec!r} is registered but resolves to {kind}, "
                 "not a GGUF file. This dedicated embedder only loads a GGUF "
@@ -422,18 +445,33 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
 
 def _download_known(name: str, repo: str, filename: str, dest: Path,
                     allow_download: Optional[bool]) -> Optional[str]:
-    """Fetch a known embedding GGUF, gated by the network policy."""
+    """Fetch a known embedding GGUF, gated by the network policy.
+
+    Every failure path also records into ``last_error()`` (like
+    ``resolve_embedding_model_path``'s own failure branches), so GET
+    /api/rag/embedding's ``error`` field explains a policy-gated or failed
+    download too. The log LEVEL for the two policy-gated branches stays INFO -
+    an unset net_mode or a deliberately offline box is an expected state, not a
+    defect worth a WARNING - only the download-failure branch (a real fault)
+    warns, deduped the same way as ``resolve_embedding_model_path``'s own
+    WARNING-worthy failures."""
+    global _LAST_ERROR
     from localm.netpolicy import network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
-        logger.info(
-            "embedding model %r not present and not auto-downloading (net_mode=%s); "
-            "run 'localm setup-embeddings' or set net_mode=allow to enable semantic "
-            "search (memory/RAG use lexical BM25 until then)", name, network_mode())
+        reason = (
+            f"embedding model {name!r} not present and not auto-downloading "
+            f"(net_mode={network_mode()}); run 'localm setup-embeddings' or set "
+            "net_mode=allow to enable semantic search (memory/RAG use lexical "
+            "BM25 until then)")
+        _LAST_ERROR = reason
+        logger.info(reason)
         return None
     if network_mode() == "off":
-        logger.info("embedding model %r missing and network is off; lexical-only", name)
+        reason = f"embedding model {name!r} missing and network is off; lexical-only"
+        _LAST_ERROR = reason
+        logger.info(reason)
         return None
     try:
         from huggingface_hub import hf_hub_download
@@ -446,7 +484,7 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
             return str(got_p)
         return str(dest) if dest.is_file() else (str(got_p) if got_p.is_file() else None)
     except Exception as e:
-        logger.warning("embedding model download failed (%s); lexical-only", e)
+        _record_resolve_failure(f"embedding model {name!r} download failed ({e}); lexical-only")
         return None
 
 

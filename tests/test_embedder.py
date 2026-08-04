@@ -107,6 +107,44 @@ def test_resolve_success_clears_prior_last_error(tmp_path, monkeypatch):
     assert emb.last_error() is None
 
 
+def test_load_failure_survives_a_later_resolve_success_probe(tmp_path, monkeypatch):
+    """Regression: GET /api/rag/embedding's status handler calls
+    resolve_embedding_model_path() directly (the same call get_embedder() makes)
+    purely to compute 'installed'. A file that resolves fine at the path level
+    but is NOT actually a usable embedding model (the real #949-adjacent case:
+    wrong pooling, corrupt file, or - as here - a build that lacks the
+    embeddings API) must not have its LOAD failure explanation wiped by that
+    later resolve-only probe just because the path itself still exists. Only
+    reset_embedder() may clear a latched load failure."""
+    f = tmp_path / "not-an-embedder.gguf"
+    f.write_bytes(b"GGUF stub")
+    _cfg(monkeypatch, embedding_model=str(f))
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("this llama.dll build does not expose the embeddings API")
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Boom)
+    assert emb.get_embedder() is None
+    assert "embeddings API" in (emb.last_error() or "")
+
+    # The status-poll probe: same file, resolves fine at the path level.
+    assert emb.resolve_embedding_model_path() == str(f)
+    assert "embeddings API" in (emb.last_error() or ""), (
+        "a resolve-only probe must not erase a real load failure")
+
+
+def test_download_gated_by_net_policy_records_last_error(monkeypatch):
+    """A known key that is not yet downloaded, with auto-download blocked by
+    policy (net_mode off), still explains itself via last_error() - INFO-level
+    in the log (an expected state, not a defect: see _download_known), but not
+    silent to the GUI status endpoint that reads last_error()."""
+    _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="off")
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "bge-small-en-v1.5" in err and "not auto-downloading" in err
+
+
 def test_resolve_failure_warns_once_then_quiets(monkeypatch, caplog):
     """resolve_embedding_model_path re-runs on every embed_texts() call while no
     embedder is loaded (get_embedder never caches a missing-model result). An
