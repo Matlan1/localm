@@ -450,6 +450,7 @@ def _write_image_sidecar(
     clip_name2: Optional[str],
     start_time: float,
     comfy_console_warning: Optional[str] = None,
+    comfy_console_checked: bool = False,
 ) -> str:
     """Write the ``<output>.json`` reproducibility sidecar next to the image.
 
@@ -460,13 +461,21 @@ def _write_image_sidecar(
     ``lora_name``/``lora_strength_model``/``lora_strength_clip`` record what
     was REQUESTED, not confirmed applied - ComfyUI can silently skip a
     mismatched LoRA (or checkpoint/VAE/CLIP weights) and still report success
-    (NEW-COMFY-SILENT-PARTIAL-APPLY). ``comfy_console_warning`` is the
-    positive signal: present only when localm actually saw ComfyUI's own
-    console report such a mismatch during this generation. Its ABSENCE is
-    NOT proof nothing was skipped - localm can only read that console when it
-    launched ComfyUI itself (see comfy_console_warnings_since); for a remote
-    or already-running ComfyUI this field is always omitted regardless of
-    what actually happened, because there is no local process to check."""
+    (NEW-COMFY-SILENT-PARTIAL-APPLY). ``comfy_console_warning`` and
+    ``comfy_console_checked`` together avoid collapsing "checked, found
+    nothing" into the same silence as "could not check at all" - a reader
+    who only sees comfy_console_warning's absence has no way to tell those
+    apart, and would reasonably (and wrongly) read an unchecked generation as
+    confirmed-clean:
+      - checked=True,  warning present  -> localm SAW ComfyUI report a
+        mismatch during this generation.
+      - checked=True,  warning absent   -> localm read ComfyUI's console and
+        found no KNOWN silent-partial-apply pattern (not a guarantee nothing
+        was skipped - only that nothing in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS
+        matched).
+      - checked=False, warning absent   -> localm could not read the console
+        at all (a remote or already-running ComfyUI it did not launch
+        itself) - this says NOTHING about whether anything was skipped."""
     try:
         sidecar = {
             "prompt": prompt,
@@ -478,6 +487,7 @@ def _write_image_sidecar(
             "lora_strength_model": lora_strength_model if lora_name else None,
             "lora_strength_clip": lora_strength_clip if lora_name else None,
             "comfy_console_warning": comfy_console_warning,
+            "comfy_console_checked": comfy_console_checked,
             "input_image": str(input_image) if input_image else None,
             "denoise": (denoise if denoise is not None else 0.75)
                        if input_image else None,
@@ -828,6 +838,7 @@ def generate_image(
                 start_time=start_time,
                 comfy_console_warning=("; ".join(comfy_console_warnings)
                                        if comfy_console_warnings else None),
+                comfy_console_checked=console_tail_start is not None,
             )
 
         comfy_warning = (

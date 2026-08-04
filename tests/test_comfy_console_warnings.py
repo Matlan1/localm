@@ -197,12 +197,17 @@ class TestComfyConsoleWarningWiring:
         sidecar = json.loads((tmp_path / "art.png.json").read_text(encoding="utf-8"))
         assert "did not match the model" in sidecar["comfy_console_warning"]
         assert "(x5)" in sidecar["comfy_console_warning"]
+        assert sidecar["comfy_console_checked"] is True
         # lora_name/strengths still record what was REQUESTED, unchanged.
         assert sidecar["lora_name"] == "bad.safetensors"
 
     def test_clean_run_never_warns(self, tmp_path, monkeypatch, spawned):
         """The counterpart fires-control: a successful, compatible generation
-        must not spuriously warn or grow a sidecar field it never observed."""
+        must not spuriously warn or grow a sidecar field it never observed -
+        but MUST still record comfy_console_checked=True, distinguishing
+        "checked, found nothing" from the remote-ComfyUI "could not check"
+        case below. Collapsing those two into identical silence is exactly
+        the defect shape this project's rules call out."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art2.png"
@@ -231,12 +236,16 @@ class TestComfyConsoleWarningWiring:
         assert "ComfyUI's own console reported" not in msg
         sidecar = json.loads((tmp_path / "art2.png.json").read_text(encoding="utf-8"))
         assert "comfy_console_warning" not in sidecar
+        assert sidecar["comfy_console_checked"] is True
 
     def test_remote_comfy_never_claims_to_have_checked(self, tmp_path, monkeypatch):
         """No _remember_spawned registration at all - the 'localm did not
         launch this ComfyUI' case (already running, or remote/LAN per
-        sanitize_comfy_url). Must behave identically to the clean-run case:
-        no warning, no sidecar field - silence, not a false all-clear."""
+        sanitize_comfy_url). No warning either, same as the clean-run case -
+        but comfy_console_checked must read False here, NOT True: this run
+        never actually looked, and a reader must be able to tell the two
+        silences apart instead of reading "no warning field" as an all-clear
+        regardless of which case produced it."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art3.png"
@@ -273,3 +282,4 @@ class TestComfyConsoleWarningWiring:
         assert "ComfyUI's own console reported" not in msg
         sidecar = json.loads((tmp_path / "art3.png.json").read_text(encoding="utf-8"))
         assert "comfy_console_warning" not in sidecar
+        assert sidecar["comfy_console_checked"] is False
