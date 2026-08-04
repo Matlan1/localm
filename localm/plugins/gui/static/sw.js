@@ -157,12 +157,24 @@
 // v95: Models page column sort (models.js, style.css) and the rename control
 // (models.js) - a stale-cached client would keep the old unsortable table and
 // have no rename button.
-// v96: pages/models.js changed - the "use" button now shows its own
-// "loading…" state while a model switch is in flight, not just the sidebar
-// status line (invisible on mobile until the drawer opens) - a stale-cached
-// client would keep giving no feedback on this button during a load that can
-// take tens of seconds.
-const CACHE = "localm-shell-v96";
+//
+// v95 is the LAST hand-typed bump. This line went v88 -> v89 -> v90 -> v91 in
+// one afternoon across unrelated PRs, and a hand-maintained value that exists
+// purely to "be different from last time" is a guaranteed merge conflict
+// between any two concurrent GUI changes - one PR spent two rebase rounds on
+// this single line, and while conflicted it ran with NO CI at all (a
+// conflicted PR gets no checks). The GUI server now computes this value
+// itself on every request to /sw.js, from a content digest of the actual
+// static assets being served (see localm/plugins/gui/web.py,
+// _compute_sw_cache_value) - so it changes exactly when something that could
+// be cache-first changes, for BOTH files listed below and every other static
+// asset the fetch handler can cache, and it can never conflict across
+// branches because nothing about it is checked into git. The literal string
+// below is a placeholder only: no client ever sees it, the route always
+// substitutes the computed value before serving. DO NOT EDIT THIS LINE - it
+// is never bumped by hand and never seen by a client; check_hygiene.py only
+// verifies it stays in this parseable shape, not that it changed.
+const CACHE = "localm-shell-dev";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
