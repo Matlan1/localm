@@ -213,7 +213,6 @@ export function todoHint(items) {
 
 export function buildToolCard(ev) {
   const card = el("div", "tool-card");
-  card.dataset.t0 = String(Date.now());
   const inner = el("div", "inner");
   const head = el("div", "head");
   head.appendChild(el("span", "name", ev.tool));
@@ -378,8 +377,13 @@ export function handleCoderEvent(s, ev) {
       const card = s.pendingCards.shift();
       if (card) {
         const state = card.querySelector(".state");
-        const t0 = Number(card.dataset.t0 || 0);
-        const took = t0 ? ` · ${((Date.now() - t0) / 1000).toFixed(1)}s` : "";
+        // Real server-side timing (execution.py) around the tool invocation
+        // itself - not a client-side guess between two render events, which
+        // read ~0.0s whenever both arrived in the same tick. Absent on events
+        // replayed from a session recorded before this field existed; show
+        // nothing rather than a fabricated number.
+        const took = typeof ev.duration_s === "number"
+          ? ` · ${ev.duration_s.toFixed(1)}s` : "";
         state.textContent = (ev.summary || (ev.ok ? "ok" : "failed")) + took;
         state.className = "state " + (ev.ok ? "ok" : "fail");
         if (ev.output && !card.querySelector(".body .diff")) {

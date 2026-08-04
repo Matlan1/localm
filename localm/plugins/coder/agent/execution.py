@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -442,7 +443,8 @@ class _ExecutionMixin:
                 if interactive:
                     print_tool_error(call.name, result.output)
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="blocked by network policy (net_mode=off)")
+                           summary="blocked by network policy (net_mode=off)",
+                           duration_s=0.0)
                 return result
 
         # Confirmation for destructive tools (diff preview for write_file)
@@ -471,14 +473,15 @@ class _ExecutionMixin:
                     "non-interactive with no approval handler - denied. Run "
                     "interactively, or use the restricted coder for unattended runs.")
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="denied: confirmation required, none available")
+                           summary="denied: confirmation required, none available",
+                           duration_s=0.0)
                 return result
             if not approved:
                 result = ToolResult.error("Rejected by user.")
                 if interactive:
                     print_tool_result(call.name, result, verbose=False)
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="rejected by user")
+                           summary="rejected by user", duration_s=0.0)
                 return result
 
         # Snapshot file content before undoable writes so /undo can restore
@@ -532,12 +535,19 @@ class _ExecutionMixin:
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
 
+        # Timed around the invocation ONLY - not the bookkeeping below - so this
+        # is genuinely "how long the tool took", the number the GUI shows next
+        # to the card. Previously this duration was never sent at all: the GUI
+        # guessed it client-side from the gap between two render events, which
+        # read ~0.0s whenever both arrived in the same tick (coder.js#buildToolCard).
+        t_start = time.monotonic()
         try:
             result = tool_def.fn(self.cwd, **args)
         except TypeError as e:
             result = ToolResult.error(f"Bad arguments for {call.name}: {e}")
         except Exception as e:
             result = ToolResult.error(f"Tool error: {e}")
+        duration_s = time.monotonic() - t_start
 
         result = self._track_tool_failure(call, result)
 
@@ -545,7 +555,8 @@ class _ExecutionMixin:
         if interactive:
             print_tool_result(call.name, result, verbose=self.verbose)
         self._emit("tool_result", tool=call.name, ok=result.ok,
-                   summary=result.summary, output=result.output[:4000])
+                   summary=result.summary, output=result.output[:4000],
+                   duration_s=duration_s)
 
         # Incremental map refresh after file-mutating tools
         if result.ok and call.name in _MUTATING_TOOLS:
