@@ -137,6 +137,34 @@ def run_server(
         bugreport.disarm_crash_guard(instance_id=instance_id)
 
 
+def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
+    """Schedule *coro* as a tracked, fire-and-forget per-connection task.
+
+    ``asyncio.start_server``'s ``client_connected_cb`` gives no way to keep a
+    reference to the Task it creates when the callback returns a coroutine
+    (``asyncio.streams.StreamReaderProtocol`` just does ``loop.create_task(res)``
+    and drops it) - so a connection still blocked in ``_relay``/``_pump`` at
+    shutdown is invisible to ``Server.wait_closed()`` (which only waits for the
+    LISTENING socket to stop accepting, never for handler tasks already
+    running) and gets silently destroyed mid-flight when the event loop tears
+    down ("Task was destroyed but it is pending!", issue #963/portmux:209-212).
+    Tracking the Task ourselves lets shutdown cancel and await it instead."""
+    task = asyncio.ensure_future(coro)
+    inflight.add(task)
+    task.add_done_callback(inflight.discard)
+
+
+async def _cancel_inflight_conns(inflight: "set[asyncio.Task]") -> None:
+    """Cancel and await every still-pending task tracked via
+    :func:`_track_conn_task`, so shutdown never abandons a connection mid-relay.
+    A task that already finished on its own (the common case) is not touched."""
+    pending = [t for t in inflight if not t.done()]
+    for t in pending:
+        t.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) -> None:
     import uvicorn
 
@@ -158,8 +186,10 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     internal_port = server.servers[0].sockets[0].getsockname()[1]
     _harden_uvicorn_logging()
 
-    async def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        await _handle_conn(reader, writer, internal_port, port)
+    inflight: "set[asyncio.Task]" = set()
+
+    def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        _track_conn_task(inflight, _handle_conn(reader, writer, internal_port, port))
 
     demux = await asyncio.start_server(_on_conn, host=host, port=port)
 
@@ -177,6 +207,13 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         if wakeup_task:
             wakeup_task.cancel()
         demux.close()
+        # Cancel the in-flight connections BEFORE wait_closed(), not after: on
+        # this asyncio version Server.wait_closed() blocks until every accepted
+        # connection's protocol has detached (_active_count reaches 0), which
+        # never happens on its own for a connection parked mid-_relay/_pump -
+        # calling it first would deadlock shutdown forever on exactly the
+        # connection this function exists to clean up.
+        await _cancel_inflight_conns(inflight)
         try:
             await demux.wait_closed()
         except Exception:         # pragma: no cover
@@ -205,9 +242,11 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
     _harden_uvicorn_logging()
 
     state = {"warned": False, "count": 0}
+    inflight: "set[asyncio.Task]" = set()
 
-    async def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        await _handle_conn_plain(reader, writer, internal_port, port, state)
+    def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        _track_conn_task(
+            inflight, _handle_conn_plain(reader, writer, internal_port, port, state))
 
     demux = await asyncio.start_server(_on_conn, host=host, port=port)
 
@@ -225,6 +264,11 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         if wakeup_task:
             wakeup_task.cancel()
         demux.close()
+        # See _serve_async's matching comment: cancel in-flight connections
+        # BEFORE wait_closed(), which on this asyncio version blocks until
+        # every accepted connection has detached - never true on its own for
+        # one parked mid-_relay/_pump.
+        await _cancel_inflight_conns(inflight)
         try:
             await demux.wait_closed()
         except Exception:         # pragma: no cover
@@ -235,14 +279,16 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
 async def _handle_conn_plain(reader, writer, internal_port, public_port, state) -> None:
     """Peek the first byte: a TLS ClientHello (wrong scheme on the HTTP port) is
     closed cleanly and noted; anything else is a real HTTP connection and is
-    relayed to the internal uvicorn unchanged."""
+    relayed to the internal uvicorn unchanged.
+
+    One try/finally around the WHOLE body (not just the part after the first
+    byte) - this task can now be cancelled for real, by :func:`_cancel_inflight_conns`
+    on shutdown, and cancellation can land anywhere including inside the initial
+    ``readexactly``. A finally scoped to only the second half left that case
+    (and any other exception raised before it) with the writer never closed,
+    leaking the transport to a GC __del__ warning instead of a clean close."""
     try:
         first = await reader.readexactly(1)
-    except (asyncio.IncompleteReadError, ConnectionError, OSError):
-        _safe_close(writer)
-        return
-
-    try:
         if first[0] == _TLS_FIRST_BYTE:
             # We cannot complete a TLS handshake on a plain-HTTP port, so just
             # close: an HTTPS-First browser then falls back to http://. The cause
@@ -250,7 +296,7 @@ async def _handle_conn_plain(reader, writer, internal_port, public_port, state) 
             _note_tls_on_http(public_port, state)
         else:
             await _relay(first, reader, writer, internal_port)
-    except (ConnectionError, OSError, asyncio.IncompleteReadError):
+    except (asyncio.IncompleteReadError, ConnectionError, OSError):
         pass
     finally:
         _safe_close(writer)
@@ -291,19 +337,19 @@ def _note_tls_on_http(public_port, state) -> None:
 
 
 async def _handle_conn(reader, writer, internal_port, public_port) -> None:
-    """Peek the first byte and route: TLS -> relay to uvicorn, else -> redirect."""
+    """Peek the first byte and route: TLS -> relay to uvicorn, else -> redirect.
+
+    One try/finally around the WHOLE body - see :func:`_handle_conn_plain`'s
+    docstring for why: this task is now really cancellable on shutdown, and a
+    finally scoped to only the second half left the initial ``readexactly``
+    uncovered."""
     try:
         first = await reader.readexactly(1)
-    except (asyncio.IncompleteReadError, ConnectionError, OSError):
-        _safe_close(writer)
-        return
-
-    try:
         if first[0] == _TLS_FIRST_BYTE:
             await _relay(first, reader, writer, internal_port)
         else:
             await _redirect_to_https(first, reader, writer, public_port)
-    except (ConnectionError, OSError, asyncio.IncompleteReadError):
+    except (asyncio.IncompleteReadError, ConnectionError, OSError):
         pass
     finally:
         _safe_close(writer)
