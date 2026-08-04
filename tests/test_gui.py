@@ -3844,3 +3844,126 @@ def test_rename_route_rekeys_a_loaded_engine(gui_app, alias_env):
         hs._engines.clear()
         hs._engines_lru.clear()
         hs._active_model_name = None
+
+
+# ---------------------------------------------------------------------------
+#  POST /api/models/remove - the active-model guard only ever compared
+#  req.model against active_model(), which reads the SINGLE currently-active
+#  engine. A model can be resident in VRAM (loaded=True, per gui_models's own
+#  per-row "loaded" flag) without being the active one, so a background-loaded
+#  model could be deleted out from under a live, mmap'd Engine. Discovered
+#  while implementing PR #1017 (model rename); pre-existing gap, unrelated to
+#  that PR.
+# ---------------------------------------------------------------------------
+
+class _FakeLoadedEngine:
+    def __init__(self, loaded):
+        self.loaded = loaded
+
+
+def test_remove_route_refuses_a_background_loaded_non_active_model(gui_app, alias_env):
+    """model-b is loaded (resident in VRAM) but model-a is active - the old
+    guard only checked against active_model(), so this DELETE sailed through
+    and remove_model() would unlink the file while _hs._engines still held it
+    open. Drives the REAL _hs._engines module state, the same dict gui_models's
+    per-row "loaded" flag and the production guard both read."""
+    from localm import model_manager as mm
+    from localm.inference import http_server as hs
+
+    app, switched = gui_app
+    _seed_registry(mm, {
+        "model-a": {"path": "x/a.gguf", "source": "local"},
+        "model-b": {"path": "x/b.gguf", "source": "local"},
+    })
+    # gui_app's active_model() reads `switched` (defaults to "model-a" when
+    # empty) - independent of _hs._engines, exactly like production where
+    # active_model() and _hs._engines are two separate pieces of state.
+    assert switched == []
+
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._engines["model-b"] = _FakeLoadedEngine(loaded=True)
+    hs._engines_lru.append("model-b")
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "model-b"})
+        assert r.status_code == 409, (
+            f"a background-loaded model must be refused, not removed: {r.text}")
+        assert "loaded" in r.json()["detail"].lower()
+        # untouched: still in the registry
+        assert "model-b" in mm.load_registry()
+    finally:
+        hs._engines.clear()
+        hs._engines_lru.clear()
+
+
+def test_remove_route_still_allows_an_unloaded_non_active_model(gui_app, alias_env, monkeypatch):
+    """The widened guard must not become overbroad: a registered model that is
+    neither active nor resident in VRAM (no _hs._engines entry at all, the
+    common case) still proceeds to the removal job."""
+    from localm import model_manager as mm
+    from localm.inference import http_server as hs
+
+    app, _ = gui_app
+    _seed_registry(mm, {
+        "model-a": {"path": "x/a.gguf", "source": "local"},
+        "model-b": {"path": "x/b.gguf", "source": "local"},
+    })
+
+    captured = {}
+
+    class _FakeJob:
+        id = "job-test"
+
+    def fake_start_cli(self, kind, cli_args, **kw):
+        captured["kind"] = kind
+        captured["args"] = list(cli_args)
+        return _FakeJob()
+
+    monkeypatch.setattr(
+        "localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "model-b"})
+        assert r.status_code == 200, r.text
+        assert r.json()["job_id"] == "job-test"
+        assert captured["args"] == ["rm", "model-b", "--yes"]
+    finally:
+        hs._engines.clear()
+        hs._engines_lru.clear()
+
+
+def test_remove_route_still_allows_a_registered_but_unloaded_engine(gui_app, alias_env, monkeypatch):
+    """A model can also be PRESENT in _hs._engines with loaded=False (evicted /
+    never finished loading) - the guard must key on the loaded flag, not on
+    mere presence in the dict."""
+    from localm import model_manager as mm
+    from localm.inference import http_server as hs
+
+    app, _ = gui_app
+    _seed_registry(mm, {
+        "model-a": {"path": "x/a.gguf", "source": "local"},
+        "model-b": {"path": "x/b.gguf", "source": "local"},
+    })
+
+    class _FakeJob:
+        id = "job-test"
+
+    monkeypatch.setattr(
+        "localm.plugins.gui.jobs.JobManager.start_cli",
+        lambda self, kind, cli_args, **kw: _FakeJob())
+
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._engines["model-b"] = _FakeLoadedEngine(loaded=False)
+    hs._engines_lru.append("model-b")
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "model-b"})
+        assert r.status_code == 200, r.text
+    finally:
+        hs._engines.clear()
+        hs._engines_lru.clear()
