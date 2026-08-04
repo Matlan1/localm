@@ -32,6 +32,13 @@ from .base import BaseBackend, ModelLoadCancelled
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
+# Module-level, not per-backend-instance: a per-instance latch would reset on
+# every load(), so a genuinely permanent count_messages_tokens RPC bug would
+# re-warn on every model (re)load for the life of a long-running server. One
+# WARNING for the whole process is enough to make a stuck chars/4 fallback
+# visible - see count_messages_tokens below.
+_count_messages_tokens_rpc_warned = False
+
 
 class GgufBackend(VramSizingMixin, BaseBackend):
     """
@@ -208,7 +215,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         from localm.inference.backends.llamacpp._runner import ModelRunner
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-        vram_before = self._vram_levels()
+        # discover.list_gpus (not the raw torch _vram_levels() this line used to
+        # call), so the before/after console line gets the SAME cross-process
+        # correction and trust gate as every other VRAM display surface (see the
+        # end of this method and sysstats._vram_reading_trusted) - see #960: a
+        # raw torch read is blind to other processes on Windows + AMD ROCm/HIP,
+        # and every GGUF load runs in its OWN isolated worker process, so the
+        # raw reading could never see the very model this line is about.
+        # wait_for_inflight=True is safe here for the same reason it already is a
+        # few lines below for resolve_auto_split_ratios: this always runs off the
+        # event loop (an executor/CLI thread), never the server's single loop.
+        from localm.discover import list_gpus
+        try:
+            vram_before, vram_before_status = list_gpus(
+                return_status=True, wait_for_inflight=True)
+        except Exception:
+            vram_before, vram_before_status = [], None
 
         ctx_max = self._effective_ctx_max()
         self.effective_ctx_max = ctx_max
@@ -327,42 +349,45 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         else:
             self.gpu_layers_offloaded = None   # "everything" sentinel, true count unknown
 
-        # VRAM usage after load - device-level driver numbers.
-        #
-        # CORRECTION (this comment previously asserted the exact opposite, and that
-        # false belief is what shipped the bug): these numbers are NOT necessarily a
-        # global, cross-process view, and are NOT "measured from THIS process exactly
-        # as accurately as from the child". Measured on Windows + an AMD ROCm/HIP
-        # build, torch.cuda.mem_get_info reports total - THIS process's own
-        # allocations and is blind to every other process (0.14 GB reported while
-        # 10.53 GB was genuinely in use; a plain torch tensor in a CHILD process moved
-        # the parent's reading by exactly 0). Since _load_native() runs the model in
-        # an isolated WORKER subprocess, the model's VRAM is in another process - so
-        # on that platform the "this load" delta below reads +0.00 GB every time.
-        # That was assumed from CUDA's documented device-global semantics (which DO
-        # hold on Linux/NVIDIA) and never measured here.
-        #
-        # _vram_levels() reads torch directly and is NOT routed through
-        # discover.list_gpus()'s device-global correction, so this console line is
-        # still subject to the above. That is deliberate and safe HERE because it is
-        # a dim informational line, not a fit decision: the load DECISIONS
-        # (_free_vram_bytes -> _auto_gpu_layers / _auto_ctx_max / _check_vram) DO now
-        # apply the correction, so a blind reading can no longer drive an overcommit -
-        # only this cosmetic per-device delta stays uncorrected (correcting it would
-        # add a second per-device device-global probe for a log line no decision
-        # reads). See dev-notes/vram-cross-process-blindness.md.
+        # VRAM usage after load - device-level driver numbers, corrected for
+        # cross-process blindness via discover.list_gpus (see the top of this
+        # method for why, and #960). used/free are shown only when
+        # sysstats._vram_reading_trusted says the reading is BOTH fresh (a probe
+        # actually completed, not a served last-known-good value) and
+        # device-global (counts every process's VRAM, not just this one) - the
+        # exact gate the GUI/API status bar already uses, reused here rather
+        # than inventing a second one. An untrusted reading shows total-only:
+        # printing a used/free number we cannot stand behind is the AGENTS.md
+        # rule 5 failure #960 was filed over (0.14 GB "in use" shown next to a
+        # comment block that already knew it was wrong).
         #
         # torch's allocator counters (memory_allocated/reserved) are a different
         # thing again: they see only torch's own allocations and always read 0.00 for
         # llama.dll, which is why they are not used here.
-        for i, (free, total) in enumerate(self._vram_levels()):
-            used = (total - free) / 1024**3
-            line = (f"  vram     : {used:.2f} GB in use / "
-                    f"{total / 1024**3:.2f} GB total (device {i}")
-            if i < len(vram_before):
-                delta = (vram_before[i][0] - free) / 1024**3
-                line += f", {delta:+.2f} GB this load"
-            console.print(f"[dim]{line})[/dim]")
+        from localm.sysstats import _vram_reading_trusted
+        try:
+            vram_after, vram_after_status = list_gpus(
+                return_status=True, wait_for_inflight=True)
+        except Exception:
+            vram_after, vram_after_status = [], None
+        for i, gpu in enumerate(vram_after):
+            total = gpu.get("total")
+            if not total:
+                continue
+            if _vram_reading_trusted(gpu, vram_after_status):
+                free = gpu["free"]
+                used = (total - free) / 1024**3
+                line = (f"  vram     : {used:.2f} GB in use / "
+                        f"{total / 1024**3:.2f} GB total (device {i}")
+                before = vram_before[i] if i < len(vram_before) else None
+                if before is not None and _vram_reading_trusted(before, vram_before_status):
+                    delta = (before["free"] - free) / 1024**3
+                    line += f", {delta:+.2f} GB this load"
+                line += ")"
+            else:
+                line = (f"  vram     : {total / 1024**3:.2f} GB total (device {i}"
+                        f", used/free reading not trusted on this platform)")
+            console.print(f"[dim]{line}[/dim]")
 
         console.print("[green]✓[/green] Model loaded")
 
@@ -528,13 +553,40 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                            "stream; using the heuristic estimate")
             except Exception as e:
                 # An unexpected RPC failure (worker crash/timeout, an encode
-                # error): the super() return below is then a heuristic ESTIMATE,
-                # not an exact count, and context-budgeting downstream is
-                # trusting an approximation - so surface it under --debug rather
-                # than swallowing it silently (rule 5).
+                # error): the super() return below calls self.count_tokens(text)
+                # (BaseBackend.count_messages_tokens dispatches polymorphically
+                # onto THIS class, not BaseBackend's own count_tokens) - so the
+                # degrade is actually GgufBackend.count_tokens's own fallback
+                # chain: a real, untemplated tokenizer count when the worker can
+                # still answer plain count_tokens, or the chars/4 heuristic only
+                # if that ALSO fails. Either way it is missing the chat
+                # template's own tokens, so context-budgeting downstream is
+                # trusting an approximation. Log str(e), not just the exception
+                # TYPE - logging only type(e).__name__ is what let a permanent
+                # bytes/str bug in this exact RPC (#956) run silently on every
+                # request, forever, with nothing but the useless word
+                # "RuntimeError" in the log to go on.
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("gguf count_messages_tokens RPC failed (%s); using "
-                           "the heuristic estimate", type(e).__name__)
+                _dbg.debug("gguf count_messages_tokens RPC failed (%s: %s); "
+                           "falling back to an untemplated estimate",
+                           type(e).__name__, e)
+                global _count_messages_tokens_rpc_warned
+                if not _count_messages_tokens_rpc_warned:
+                    # A permanently failing RPC (a code bug, not a transient
+                    # worker hiccup) would otherwise degrade every prompt-token
+                    # count for the rest of the process without ever saying so
+                    # above --debug (rule 5). One WARNING per process is enough
+                    # to surface it without flooding the log on a chat
+                    # session's per-request cadence - every occurrence is still
+                    # logged at --debug above.
+                    _count_messages_tokens_rpc_warned = True
+                    _dbg.warning(
+                        "gguf count_messages_tokens RPC failed (%s: %s); token "
+                        "counts are silently falling back to an estimate that "
+                        "ignores the chat template, instead of the real "
+                        "templated count (this notice prints once per "
+                        "process; see --debug for every occurrence)",
+                        type(e).__name__, e)
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #

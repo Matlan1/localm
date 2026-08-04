@@ -308,18 +308,29 @@ class TestVramReport:
 
     def test_load_reports_usage_delta(self, tmp_path, capsys):
         """End to end through _load_native with a stubbed ModelRunner: the
-        printed line shows in-use/total and the delta this load consumed.
-        The VRAM-delta report stays parent-side (it reads driver-global
-        state, correct from either process) even though the real model load
-        now happens in an isolated worker - see llamacpp/_runner.py."""
+        printed line shows in-use/total and the delta this load consumed,
+        when discover.list_gpus reports a TRUSTED (fresh, device-global)
+        reading - #960 replaced the raw torch _vram_levels() read here with
+        discover.list_gpus() gated through sysstats._vram_reading_trusted,
+        the same trust gate the GUI/API status bar already uses."""
+        from localm.discover import FREE_SCOPE_DEVICE, GPU_PROBE_OK
         b = _backend(tmp_path, size_bytes=1_000_000)
         # 12 GiB free before the load, 4 GiB free after -> 8 GiB this load.
         # Sizes are displayed in binary units (GiB labelled "GB").
         GIB = 1024 ** 3
-        levels = iter([[(12 * GIB, 16 * GIB)],
-                       [(4 * GIB, 16 * GIB)]])
-        with patch.object(GgufBackend, "_vram_levels",
-                          side_effect=lambda: next(levels)), \
+        readings = iter([
+            [{"index": 0, "total": 16 * GIB, "free": 12 * GIB,
+              "free_scope": FREE_SCOPE_DEVICE}],
+            [{"index": 0, "total": 16 * GIB, "free": 4 * GIB,
+              "free_scope": FREE_SCOPE_DEVICE}],
+        ])
+
+        def _fake_list_gpus(*, deadline=None, return_status=False,
+                            wait_for_inflight=False):
+            gpus = next(readings)
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        with patch("localm.discover.list_gpus", side_effect=_fake_list_gpus), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
                    return_value={"n_layers": None, "kv_bytes_per_token": 0,
                                  "supports_images": False}):
@@ -328,6 +339,38 @@ class TestVramReport:
         assert "12.00 GB in use / 16.00 GB total" in out
         assert "+8.00 GB this load" in out
         assert "0.00 GB allocated" not in out      # the old, wrong line
+
+    def test_load_omits_used_free_when_reading_not_trusted(self, tmp_path, capsys):
+        """#960: a process-scoped reading (Windows + AMD ROCm/HIP torch, blind
+        to every OTHER process's VRAM - exactly the case for a GGUF load,
+        which always runs in its own isolated worker process) must NOT print
+        a used/free figure it cannot stand behind as current fact. Total-only,
+        with a stated reason, instead of repeating the bug's exact symptom:
+        the filed report showed "0.14 GB in use" on a 16 GB board that
+        genuinely had 10.53 GB in use."""
+        from localm.discover import FREE_SCOPE_PROCESS, GPU_PROBE_OK
+        b = _backend(tmp_path, size_bytes=1_000_000)
+        GIB = 1024 ** 3
+
+        def _fake_list_gpus(*, deadline=None, return_status=False,
+                            wait_for_inflight=False):
+            # Blind to the model this process's own worker just loaded -
+            # "free" reads almost the whole board free, same shape as the
+            # filed bug.
+            gpus = [{"index": 0, "total": 16 * GIB, "free": 15.86 * GIB,
+                     "free_scope": FREE_SCOPE_PROCESS}]
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        with patch("localm.discover.list_gpus", side_effect=_fake_list_gpus), \
+             patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
+                   return_value={"n_layers": None, "kv_bytes_per_token": 0,
+                                 "supports_images": False}):
+            b._load_native()
+        out = capsys.readouterr().out
+        assert "16.00 GB total" in out
+        assert "in use" not in out
+        assert "0.14 GB" not in out
+        assert "not trusted" in out
 
 
 class TestFreeVramBytesDeviceSelection:

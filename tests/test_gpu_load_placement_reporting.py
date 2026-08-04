@@ -35,7 +35,7 @@ def _load(backend, *, n_layers):
     VRAM-delta console print (no real GPU needed) and the isolated worker
     process (spawn_and_load), whose canned response reports the model's true
     layer count exactly as the real native worker would."""
-    with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
+    with patch("localm.discover.list_gpus", return_value=([], "ok")), \
          patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                "spawn_and_load",
                return_value={"n_layers": n_layers, "kv_bytes_per_token": 0,
@@ -106,7 +106,7 @@ class TestBackendRecordsGpuPlacement:
         monkeypatch.setattr(GgufBackend, "_cached_layer_count", lambda self: None)
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=True)
         b.effective_gpu_layers = 12
-        with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
+        with patch("localm.discover.list_gpus", return_value=([], "ok")), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                    "spawn_and_load",
                    return_value={"kv_bytes_per_token": 0, "supports_images": False}):
@@ -124,7 +124,7 @@ class TestBackendRecordsGpuPlacement:
         monkeypatch.setattr(GgufBackend, "_cached_layer_count", lambda self: None)
         b = _backend(tmp_path, n_gpu_layers=99, n_gpu_layers_auto=False)
         b.effective_gpu_layers = 99
-        with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
+        with patch("localm.discover.list_gpus", return_value=([], "ok")), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                    "spawn_and_load",
                    return_value={"kv_bytes_per_token": 0, "supports_images": False}):

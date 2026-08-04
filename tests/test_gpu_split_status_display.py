@@ -52,8 +52,11 @@ def _backend(tmp_path):
 
 
 def _load(backend):
-    with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
-         patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+    # discover.list_gpus is stubbed by _cfg() (always called before _load() in
+    # this file) - it now backs both resolve_gpu_split's bare-list validation
+    # call AND GgufBackend._load_native's own before/after VRAM-display reads
+    # (see gguf.py, #960), so no separate _vram_levels patch is needed here.
+    with patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                "spawn_and_load",
                return_value={"n_layers": 1, "kv_bytes_per_token": 0,
                              "supports_images": False}):
@@ -68,8 +71,16 @@ class TestBackendRecordsAppliedSplit:
             "localm.config.load_config",
             lambda: {**base, "gpu_split_indices": indices,
                      "gpu_split_ratios": ratios})
-        monkeypatch.setattr(discover, "list_gpus",
-                            lambda: [{"index": 0}, {"index": 1}])
+        # Must tolerate BOTH callers: resolve_gpu_split's own bare list_gpus()
+        # call (validating configured indices) and GgufBackend._load_native's
+        # list_gpus(return_status=True, wait_for_inflight=True) VRAM-display
+        # reads (#960) - a zero-arg-only double would TypeError on the latter.
+        # These entries carry no "total", so _load_native's print loop skips
+        # them (display content is out of scope for this file's tests).
+        monkeypatch.setattr(
+            discover, "list_gpus",
+            lambda **kw: ([{"index": 0}, {"index": 1}], "ok")
+            if kw.get("return_status") else [{"index": 0}, {"index": 1}])
         monkeypatch.setattr(discover, "_native_backend_has_vulkan",
                             lambda: False)
 
