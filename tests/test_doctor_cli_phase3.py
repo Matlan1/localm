@@ -27,6 +27,36 @@ import localm.cli as cli
 doctor_mod = importlib.import_module("localm.cli.doctor")
 
 
+@pytest.fixture(autouse=True)
+def _neutralise_native_lib_loaded():
+    """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY
+    xdist worker in which a real_gguf-gated test has RUN (conftest.py's lazy
+    resource gate - or the test itself - calls load_lib() at that test's setup,
+    and _loaded_lib is deliberately never reset). Once True, doctor.py's own
+    _check_vram_torch() skips the torch attempt ENTIRELY (see its docstring -
+    the same known-doomed DLL-identity conflict), so
+    test_doctor_no_cpu_only_warning_when_torch_sees_gpu's fake "RTX 4090" torch
+    never gets read at all - confirmed by reproduction: forcing
+    _loader._loaded_lib truthy before this test, standalone, reproduces the
+    exact "RTX 4090" missing from output failure a full-suite run hits when a
+    real_gguf-gated file (e.g. test_kv_bytes_offload.py) loads the native
+    runtime first in the same worker.
+
+    Same pattern as test_vram_preflight.py's own _neutralise_native_lib_loaded
+    (copied rather than shared via conftest.py - see that fixture's docstring
+    for why this stays an opt-in, module-scoped fixture rather than a global
+    one: tests/test_native_dll_conflict_guard.py unit-tests
+    native_lib_loaded() itself, and a global override would silently defeat
+    that test's own mock instead of guarding against the real cross-worker
+    pollution). Patches the FUNCTION, not the underlying _loaded_lib variable
+    (there is no separate cache variable here) - restored after every test."""
+    from localm.inference.backends.llamacpp import _loader
+    saved = _loader.native_lib_loaded
+    _loader.native_lib_loaded = lambda: False
+    yield
+    _loader.native_lib_loaded = saved
+
+
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                     #
 # --------------------------------------------------------------------------- #
