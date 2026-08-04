@@ -26,6 +26,37 @@ _RETRY_STATUSES = {429, 500, 502, 503, 529}
 _MAX_RETRIES = 4
 _BACKOFF_BASE_S = 2.0
 
+# 503 from OUR OWN local server is never retried at all (#964) - unlike
+# 429/500/502/529, which keep the full budget above unchanged (a cloud
+# provider's genuine rate-limit/overload signal). This is not "we cannot
+# tell 503 apart from a real error", it is TRACED: every 503 reachable from
+# this backend's own call path (/v1/chat/completions, /v1/completions, both
+# resolve their engine via inference/http_server.py's get_engine(), which
+# always calls switch_engine(..., preempt=False)) is either deterministic or
+# has already exhausted its own resolution window server-side before the
+# response ever reaches this client:
+#   - "Model load was superseded by a newer request" (http_server.py) is
+#     UNREACHABLE here: superseding only cancels a preempt=True load (an
+#     explicit GUI/CLI model switch), and switch_engine's own comment says so
+#     plainly - "API-routed loads (preempt=False) run to completion, never
+#     cancelled by a concurrent different-model load". A preempt=False
+#     load's cancel token is created but never wired to the global one that
+#     .set() actually triggers, so ModelLoadCancelled cannot fire for it.
+#   - A VRAM-refusal 503 already waited on wait_for_vram_release() (vram.py,
+#     5s default) SERVER-SIDE before refusing - a client retry on top adds
+#     latency without improving the odds, since the server already tried.
+#   - "No model loaded"/"No engine initialised" need an explicit user action
+#     (load a model), not a passing few seconds.
+#   - The grammar-check/embedding worker-fault 503 (inference/routes/chat.py,
+#     #991) is a deterministic isolated-worker crash that will almost
+#     certainly recur on the identical retried request.
+# Before this, EVERY local 503 got the full 4-retry/~30s budget, so the
+# deterministic case cost the user up to 30s of blind waiting before an
+# already-informative error message (see CoderServerError/_raise_for_status
+# above) ever reached them, for zero real chance of success. A NON-local
+# OpenAI-compatible endpoint (cloud or otherwise) is unaffected - its 503
+# causes were never traced here and keep the existing behaviour.
+
 
 class CoderAuthError(RuntimeError):
     """The inference server rejected the request for auth reasons (401/403).
@@ -35,9 +66,45 @@ class CoderAuthError(RuntimeError):
     """
 
 
+class CoderServerError(RuntimeError):
+    """A non-2xx response the server explained (a FastAPI ``{"detail": "..."}``
+    body, or plain text), folded into the message - unlike
+    ``resp.raise_for_status()``, which only ever reports the status line
+    ("503 Server Error: Service Unavailable for url: ...") and never reads the
+    body, so a server-side diagnostic (e.g. "the model worker faulted (...)")
+    never reached the user (#964)."""
+
+
+def _response_detail(resp) -> str:
+    """Best-effort server-provided detail text from *resp*, or "" if none is
+    extractable. Tries the FastAPI error shape (``{"detail": "..."}``) first,
+    then falls back to the raw body text. Never raises: this runs on an
+    already-failing response, and a parsing hiccup here must not replace a
+    real error with a confusing one. Bounded to 500 chars so a large or
+    unexpected body cannot dominate the raised message."""
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        detail = data.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()[:500]
+    try:
+        text = resp.text
+    except Exception:
+        return ""
+    if isinstance(text, str) and text.strip():
+        return text.strip()[:500]
+    return ""
+
+
 def _raise_for_status(resp) -> None:
     """Turn a 401/403 into a CoderAuthError whose message tells the user how to
-    supply an API key; otherwise behave like resp.raise_for_status()."""
+    supply an API key. Any other non-2xx response with server-provided detail
+    (see _response_detail) raises CoderServerError with that detail folded in;
+    otherwise falls back to plain resp.raise_for_status() (no detail was
+    extractable, e.g. a non-JSON, non-text response)."""
     if resp.status_code in (401, 403):
         raise CoderAuthError(
             f"Authentication failed (HTTP {resp.status_code}) for {resp.url}. "
@@ -46,6 +113,12 @@ def _raise_for_status(resp) -> None:
             "pass it with `--api-key <key>` or set the LOCALM_API_KEY environment "
             "variable."
         )
+    if resp.status_code < 400:
+        return
+    detail = _response_detail(resp)
+    if detail:
+        raise CoderServerError(
+            f"HTTP {resp.status_code} error from {resp.url}: {detail}")
     resp.raise_for_status()
 
 
@@ -59,13 +132,20 @@ def _retry_delay(response, attempt: int) -> float:
 
 def _post_with_retry(url: str, *, headers: dict, json_body: dict,
                      timeout: int, stream: bool = False,
-                     verify=True) -> requests.Response:
-    """POST with retry on 429/5xx. Returns the first non-retryable response."""
+                     verify=True, retry_503: bool = True) -> requests.Response:
+    """POST with retry on 429/5xx. Returns the first non-retryable response.
+
+    retry_503=False (passed by HTTPBackend for its own local server - see the
+    comment above _RETRY_STATUSES for why) makes a 503 immediately
+    non-retryable, same as any status outside _RETRY_STATUSES; every other
+    retryable status keeps the full _MAX_RETRIES budget unchanged."""
     last = None
     for attempt in range(_MAX_RETRIES + 1):
         resp = requests.post(url, headers=headers, json=json_body,
                              timeout=timeout, stream=stream, verify=verify)
         if resp.status_code not in _RETRY_STATUSES or attempt == _MAX_RETRIES:
+            return resp
+        if resp.status_code == 503 and not retry_503:
             return resp
         delay = _retry_delay(resp, attempt)
         resp.close()
@@ -113,6 +193,14 @@ class HTTPBackend(BaseLLMBackend):
         self._api_key      = api_key
         self._timeout      = timeout
         self._extra        = extra_params
+        # This backend's OWN local server, as opposed to a cloud/remote
+        # OpenAI-compatible endpoint - gates the 503 retry carve-out (see the
+        # comment above _RETRY_STATUSES). Stored directly rather than reusing
+        # supports_grammar below: that flag is ALSO False whenever anthropic
+        # is set, which would wrongly re-enable full 503 retries for the
+        # (never actually constructed) localm_server=True, anthropic=True
+        # combination.
+        self._is_local_server = bool(localm_server)
         # TLS verification for the POST. A localm network bind serves HTTPS via
         # its own local CA, so a loopback self-call must trust that CA; external
         # HTTPS (OpenAI/Anthropic) keeps normal public verification. verify=None
@@ -370,6 +458,7 @@ class HTTPBackend(BaseLLMBackend):
             json_body=self._body(messages, stream=False, **kwargs),
             timeout=self._timeout,
             verify=self._verify,
+            retry_503=not self._is_local_server,
         )
         _raise_for_status(resp)
         data = resp.json()
@@ -415,6 +504,7 @@ class HTTPBackend(BaseLLMBackend):
             timeout=self._timeout,
             stream=True,
             verify=self._verify,
+            retry_503=not self._is_local_server,
         ) as resp:
             _raise_for_status(resp)
             for line in resp.iter_lines():
@@ -488,6 +578,7 @@ class HTTPBackend(BaseLLMBackend):
             timeout=self._timeout,
             stream=True,
             verify=self._verify,
+            retry_503=not self._is_local_server,
         ) as resp:
             _raise_for_status(resp)
             for line in resp.iter_lines():
