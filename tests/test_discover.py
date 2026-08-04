@@ -71,9 +71,24 @@ class TestQuantParsing:
         ("model-f16.gguf", "F16"),
         ("model-BF16.gguf", "BF16"),
         ("mystery-model.gguf", ""),
+        ("qwen-agentworld-35b-a3b-mxfp4_moe.gguf", "MXFP4_MOE"),   # real filename
+        ("model-MXFP4.gguf", "MXFP4"),
+        ("model-TQ1_0.gguf", "TQ1_0"),
+        ("model-TQ2_0.gguf", "TQ2_0"),
     ])
     def test_quant_of(self, name, quant):
         assert _quant_of(name) == quant
+
+    def test_quant_of_prefers_mxfp4_over_an_earlier_base_precision_token(self):
+        """Real filename (elbelga/Huihui-Qwen3.6-35B-A3B-abliterated_MXFP4_MOE):
+        the non-expert-tensor precision is named FIRST, so plain re.search (which
+        returns the LEFTMOST match) would report 'BF16'/'F16' - the un-quantized
+        dtype of the tensors that are NOT the point - instead of the actual MoE
+        expert quantization."""
+        assert _quant_of(
+            "Huihui-Qwen3.6-35B-A3B-abliterated-bf16_MXFP4_MOE.gguf") == "MXFP4_MOE"
+        assert _quant_of(
+            "Huihui-Qwen3.6-35B-A3B-abliterated-f16_MXFP4_MOE.gguf") == "MXFP4_MOE"
 
 
 # ------------------------------------------------------------------ #
@@ -304,6 +319,104 @@ class TestHfSearchSize:
         assert both["size_bytes"] == 100        # 50 params * 2, carried from hf pass
 
 
+class TestGgufClassifyExpand:
+    """A classified (model_types-scoped) gguf-format query needs its own
+    expand[] fields: gguf.architecture for classify_hf_metadata, and - the
+    collateral bug this regression test guards - downloads/likes/lastModified,
+    which `expand` silently drops the moment ANY field is requested (measured
+    live against the real HF API: a classified gguf query that requested only
+    pipeline_tag/library_name/tags came back with downloads and likes ABSENT,
+    not merely zero - vs. present with no expand at all)."""
+
+    def test_classified_gguf_query_requests_stats_and_architecture_fields(self, monkeypatch):
+        # Capture the raw URL (not parse_qsl's `seen` dict, which collapses
+        # repeated expand[] keys to the last one) to assert every field was
+        # requested.
+        urls = _urls_capture(monkeypatch, [{
+            "id": "mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-MTP-GGUF",
+            "downloads": 9970, "likes": 20, "lastModified": "2026-05-21T21:35:06.000Z",
+            "tags": ["gguf", "conversational"],
+            "gguf": {"architecture": "qwen35moe", "total": 35505251456},
+        }])
+        results = hf_search("carnice", limit=5, formats=["gguf"], model_types=["llm"])
+        joined = urls[0]
+        for field in ("downloads", "likes", "lastModified", "gguf", "config",
+                      "pipeline_tag", "library_name", "tags"):
+            assert f"expand%5B%5D={field}" in joined, f"{field} missing from {joined}"
+        assert results[0]["downloads"] == 9970
+        assert results[0]["likes"] == 20
+        assert results[0]["updated"] == "2026-05-21T21:35:06.000Z"
+
+    def test_hf_format_classify_does_not_request_gguf_expand(self, monkeypatch):
+        """The gguf expand field is meaningless for an hf/safetensors result (it
+        has no GGUF header) - only requested on the gguf format branch."""
+        urls = _urls_capture(monkeypatch, [
+            {"id": "org/hf-repo", "downloads": 1,
+             "pipeline_tag": "text-generation", "library_name": "transformers",
+             "tags": ["transformers", "text-generation"]}])
+        hf_search("x", limit=5, formats=["hf"], model_types=["llm"])
+        assert "expand%5B%5D=gguf" not in urls[0]
+        assert "expand%5B%5D=config" in urls[0]
+
+    def test_hf_format_classify_keeps_its_own_stats_and_size_expand(self, monkeypatch):
+        """Guards the if/elif split above: fmt=='hf' must still get its own
+        safetensors+downloads+likes+lastModified expand when classify is ALSO
+        on - the new `elif classify` branch (gguf-only) must never suppress the
+        pre-existing, unrelated `if fmt == 'hf'` branch."""
+        urls = _urls_capture(monkeypatch, [
+            {"id": "org/hf-repo", "downloads": 1, "safetensors": {"total": 10},
+             "pipeline_tag": "text-generation", "library_name": "transformers",
+             "tags": ["transformers", "text-generation"]}])
+        hf_search("x", limit=5, formats=["hf"], model_types=["llm"])
+        for field in ("safetensors", "downloads", "likes", "lastModified"):
+            assert f"expand%5B%5D={field}" in urls[0], f"{field} missing from {urls[0]}"
+
+    def test_end_to_end_real_repo_shape_resolves_to_llm_via_hf_search(self, monkeypatch):
+        """Integration proof (not just the pure classify_hf_metadata unit test)
+        that the wiring from HF's raw JSON shape all the way to the row's
+        detected_type badge is correct: mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-GGUF
+        real metadata - no pipeline_tag - resolves through hf_search itself."""
+        _mock_fetch(monkeypatch, [{
+            "id": "mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-GGUF",
+            "downloads": 100, "likes": 5,
+            "tags": ["gguf", "quantized", "apex", "moe", "mixture-of-experts",
+                     "qwen3", "carnice", "agentic", "tool-calling",
+                     "license:apache-2.0", "endpoints_compatible", "region:us",
+                     "conversational"],
+            "gguf": {"architecture": "qwen35moe", "total": 34660610688},
+        }])
+        results = hf_search("carnice", limit=5, formats=["gguf"], model_types=["llm"])
+        assert results[0]["detected_type"] == "llm"
+
+    def test_end_to_end_embedding_architecture_via_hf_search(self, monkeypatch):
+        """A gguf result with a verified embedding architecture and NO other
+        classifying signal resolves to 'embedding' through the full hf_search
+        path, not just the pure function."""
+        _mock_fetch(monkeypatch, [{
+            "id": "org/bert-embed-gguf", "downloads": 3, "tags": ["gguf"],
+            "gguf": {"architecture": "nomic-bert-moe", "total": 1},
+        }])
+        results = hf_search("x", limit=5, formats=["gguf"], model_types=["embedding"])
+        assert results[0]["detected_type"] == "embedding"
+
+    def test_malformed_gguf_and_config_expand_fields_degrade_not_crash(self, monkeypatch):
+        """A non-dict truthy value for the gguf/config expand field (a malformed
+        or adversarial API response - HF's documented shape is always an object
+        or absent) must degrade this row's architecture signal to None, matching
+        hf_param_bytes' isinstance guard on safetensors a few lines above - not
+        raise and take down every OTHER row in the same query with it."""
+        _mock_fetch(monkeypatch, [
+            {"id": "org/malformed-gguf", "downloads": 1, "tags": ["gguf"],
+             "gguf": "not-a-dict", "config": ["also", "not", "a", "dict"]},
+            {"id": "org/fine-gguf", "downloads": 2,
+             "tags": ["gguf", "conversational"]},
+        ])
+        results = hf_search("x", limit=5, formats=["gguf"], model_types=["llm"])
+        by_id = {r["id"]: r for r in results}
+        assert by_id["org/malformed-gguf"]["detected_type"] == "unknown"
+        assert by_id["org/fine-gguf"]["detected_type"] == "llm"
+
+
 # ------------------------------------------------------------------ #
 #  classify_hf_metadata - pure classification, no network              #
 # ------------------------------------------------------------------ #
@@ -378,6 +491,168 @@ class TestClassifyHfMetadata:
     def test_nothing_resolves_returns_unknown_not_llm(self):
         assert classify_hf_metadata(None, None, []) == "unknown"
         assert classify_hf_metadata("image-classification", "timm", ["timm"]) == "unknown"
+
+    # -------------------------------------------------------------- #
+    # architecture param (gguf.architecture / config.model_type) and  #
+    # the tag-set LLM/embedding fallback - added to resolve 8 real    #
+    # MoE GGUF repos that showed "unknown" (no pipeline_tag at all,   #
+    # a HF-repacked-GGUF-only upload commonly omits it).              #
+    # -------------------------------------------------------------- #
+
+    def test_embedding_architecture_signal(self):
+        """A GGUF whose own header architecture is a verified embedding-only
+        llama.cpp architecture is 'embedding' even with zero other metadata -
+        the strongest signal this function has, since it comes from the
+        model's own file rather than a repo author's tags."""
+        assert classify_hf_metadata(None, None, [], "bert") == "embedding"
+        assert classify_hf_metadata(None, None, [], "nomic-bert-moe") == "embedding"
+
+    def test_architecture_signal_is_case_insensitive_and_optional(self):
+        assert classify_hf_metadata(None, None, [], "BERT") == "embedding"
+        assert classify_hf_metadata(None, None, [], None) == "unknown"
+        assert classify_hf_metadata(None, None, []) == "unknown"   # default arg
+
+    def test_architecture_unrecognised_falls_through_not_wrong_guess(self):
+        """A causal-decoder architecture (llama/qwen35moe/deepseek2/mixtral) is
+        NOT in the embedding allowlist, and classify_hf_metadata has no positive
+        LLM-by-architecture list (too broad/unverifiable to maintain) - it must
+        fall through to the pipeline_tag/tagset checks, never guess 'llm' from
+        architecture alone."""
+        assert classify_hf_metadata(None, None, [], "qwen35moe") == "unknown"
+
+    def test_lora_tag_wins_over_embedding_architecture(self):
+        """Precedence: the exact-tag checks run BEFORE the architecture check,
+        same reasoning as the diffusion-vs-lora precedence test above - a LoRA
+        adapter for an embedding base model is still a lora, not a full
+        embedding checkpoint."""
+        assert classify_hf_metadata(
+            None, "peft", ["peft", "lora"], "bert") == "lora"
+
+    def test_llm_tagset_conversational_without_pipeline_tag(self):
+        """The exact shape of a HF-repacked GGUF-only upload: pipeline_tag is
+        entirely absent (never set on the quantizer's own repo), but the base
+        model's 'conversational' tag survives onto it."""
+        assert classify_hf_metadata(
+            None, None, ["gguf", "conversational"]) == "llm"
+
+    def test_llm_tagset_text_generation_without_pipeline_tag(self):
+        assert classify_hf_metadata(
+            None, None, ["gguf", "text-generation"]) == "llm"
+
+    def test_embedding_tagset_without_pipeline_tag(self):
+        assert classify_hf_metadata(
+            None, None, ["gguf", "feature-extraction"]) == "embedding"
+
+    def test_image_text_to_text_is_llm_not_diffusion(self):
+        """A vision-language chat model (e.g. a Qwen-VL GGUF) declares this
+        pipeline_tag - it is still an LLM (a chat model with image input), never
+        routed to diffusion-unet."""
+        assert classify_hf_metadata(
+            "image-text-to-text", "transformers",
+            ["transformers", "gguf", "image-text-to-text"]) == "llm"
+
+    # Real repo metadata captured live from the HF API (2026-08-04) for the 8
+    # repos the maintainer flagged as showing "unknown" in model search - the
+    # DONE oracle for this fix. Every one has NO pipeline_tag (a HF-repacked
+    # GGUF-only upload commonly never sets it); the tag-set 'conversational'
+    # fallback and/or the gguf.architecture signal resolve all 8 to 'llm'.
+
+    def test_real_repo_mudler_carnice_apex_mtp(self):
+        # mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-MTP-GGUF
+        assert classify_hf_metadata(
+            None, None,
+            ["gguf", "quantized", "apex", "apex-mtp", "moe", "mixture-of-experts",
+             "qwen3", "qwen3.6", "speculative-decoding", "self-speculative", "mtp",
+             "base_model:samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B",
+             "base_model:quantized:samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B",
+             "license:apache-2.0", "endpoints_compatible", "region:us",
+             "conversational"],
+            "qwen35moe") == "llm"
+
+    def test_real_repo_mudler_carnice_apex(self):
+        # mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-GGUF
+        assert classify_hf_metadata(
+            None, None,
+            ["gguf", "quantized", "apex", "moe", "mixture-of-experts", "qwen3",
+             "carnice", "agentic", "tool-calling",
+             "base_model:samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B",
+             "base_model:quantized:samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B",
+             "license:apache-2.0", "endpoints_compatible", "region:us",
+             "conversational"],
+            "qwen35moe") == "llm"
+
+    def test_real_repo_thebloke_mixtral_moe_rp_story(self):
+        # TheBloke/Mixtral-8x7B-MoE-RP-Story-GGUF - library_name=transformers,
+        # gguf.architecture=llama (Mixtral is llama.cpp's llama arch family).
+        assert classify_hf_metadata(
+            None, "transformers",
+            ["transformers", "gguf", "mixtral", "not-for-all-audiences", "nsfw",
+             "base_model:Undi95/Mixtral-8x7B-MoE-RP-Story",
+             "base_model:quantized:Undi95/Mixtral-8x7B-MoE-RP-Story",
+             "license:cc-by-nc-4.0", "region:us", "conversational"],
+            "llama") == "llm"
+
+    def test_real_repo_mradermacher_carnice_i1(self):
+        # mradermacher/Carnice-Qwen3.6-MoE-35B-A3B-i1-GGUF
+        assert classify_hf_metadata(
+            None, "transformers",
+            ["transformers", "gguf", "qwen3.6", "moe", "hermes", "agentic",
+             "tool-calling", "qlora", "unsloth", "carnice", "en",
+             "dataset:bespokelabs/Bespoke-Stratos-17k",
+             "dataset:AI-MO/NuminaMath-CoT",
+             "dataset:kai-os/carnice-glm5-hermes-traces",
+             "dataset:open-thoughts/OpenThoughts-Agent-v1-SFT",
+             "base_model:samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B",
+             "base_model:quantized:samuelcardillo/Carnice-Qwen3.6-MoE-35B-A3B",
+             "license:apache-2.0", "endpoints_compatible", "region:us", "imatrix",
+             "conversational"],
+            "qwen35moe") == "llm"
+
+    def test_real_repo_mradermacher_droplychee_moe_v2(self):
+        # mradermacher/droplychee-moe-v2-i1-GGUF - gguf.architecture=deepseek2.
+        assert classify_hf_metadata(
+            None, "transformers",
+            ["transformers", "gguf", "text-generation-inference", "unsloth",
+             "glm4_moe_lite", "en", "base_model:droplychee/droplychee-moe-v2",
+             "base_model:quantized:droplychee/droplychee-moe-v2",
+             "license:apache-2.0", "endpoints_compatible", "region:us", "imatrix",
+             "conversational"],
+            "deepseek2") == "llm"
+
+    def test_real_repo_elbelga_huihui_qwen_abliterated_mxfp4(self):
+        # elbelga/Huihui-Qwen3.6-35B-A3B-abliterated_MXFP4_MOE - the ONLY one of
+        # the 8 with an explicit pipeline_tag: image-text-to-text (VLM).
+        assert classify_hf_metadata(
+            "image-text-to-text", "transformers",
+            ["transformers", "gguf", "abliterated", "uncensored",
+             "image-text-to-text",
+             "base_model:Qwen/Qwen3.6-35B-A3B",
+             "base_model:quantized:Qwen/Qwen3.6-35B-A3B", "license:apache-2.0",
+             "endpoints_compatible", "region:us", "imatrix", "conversational"],
+            "qwen35moe") == "llm"
+
+    def test_real_repo_freedomaisvr_qwen_agentworld_mxfp4_moe(self):
+        # FreedomAISVR/Qwen-AgentWorld-35B-A3B-MXFP4-MOE-GGUF
+        assert classify_hf_metadata(
+            None, None,
+            ["gguf", "qwen", "qwen3.5", "moe", "agent", "world-model",
+             "mxfp4_moe", "vision", "multimodal", "35b", "en", "multilingual",
+             "base_model:Qwen/Qwen-AgentWorld-35B-A3B",
+             "base_model:quantized:Qwen/Qwen-AgentWorld-35B-A3B",
+             "license:apache-2.0", "endpoints_compatible", "region:us",
+             "conversational"],
+            "qwen35moe") == "llm"
+
+    def test_real_repo_unsloth_cogito_v2_deepseek_moe(self):
+        # unsloth/cogito-v2-preview-deepseek-671B-MoE-GGUF
+        assert classify_hf_metadata(
+            None, "transformers",
+            ["transformers", "gguf", "unsloth",
+             "base_model:deepcogito/cogito-v2-preview-deepseek-671B-MoE",
+             "base_model:quantized:deepcogito/cogito-v2-preview-deepseek-671B-MoE",
+             "license:mit", "endpoints_compatible", "region:us", "imatrix",
+             "conversational"],
+            "deepseek2") == "llm"
 
 
 # ------------------------------------------------------------------ #

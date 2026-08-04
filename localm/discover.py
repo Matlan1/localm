@@ -77,11 +77,20 @@ _ANY_TYPE = "__any__"
 from localm.vram import VRAM_OVERHEAD_BYTES as _OVERHEAD_BYTES
 from localm.vram import VRAM_WEIGHT_FACTOR as _WEIGHT_FACTOR
 
+# Single-sourced from model_manager.gguf, the same verified llama.cpp
+# encoder/embedding architecture allowlist gguf_embedding_signal() uses on a
+# freshly-downloaded file's own header - so a search-time badge and a
+# post-download registration never disagree about the SAME architecture value.
+# No cycle: gguf.py (and the model_manager package it lives in) never imports
+# discover, only the reverse (verified live before wiring this in).
+from localm.model_manager.gguf import _GGUF_EMBEDDING_ARCHITECTURES
+
 # Quantization label inside a GGUF filename, e.g. Q4_K_M, Q8_0, IQ4_XS,
-# Q6_K, F16, BF16. Matched case-insensitively on word-ish boundaries.
+# Q6_K, F16, BF16, MXFP4_MOE, TQ1_0. Matched case-insensitively on word-ish
+# boundaries.
 _QUANT_RE = re.compile(
-    r"(?i)(?<![A-Z0-9])(IQ\d+_[A-Z0-9]+|Q\d+_K(?:_[SML])?|Q\d+_\d+"
-    r"|BF16|F16|F32|FP16|FP32)(?![A-Z0-9])")
+    r"(?i)(?<![A-Z0-9])(IQ\d+_[A-Z0-9]+|Q\d+_K(?:_[SML])?|Q\d+_\d+|TQ[12]_0"
+    r"|MXFP4(?:_MOE)?|BF16|F16|F32|FP16|FP32)(?![A-Z0-9])")
 
 # Split GGUF naming: model-00001-of-00003.gguf
 _SPLIT_RE = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$",
@@ -126,20 +135,70 @@ def _get(url: str, params: Optional[dict] = None) -> object:
         raise DiscoverError(f"HuggingFace request failed: {e}")
 
 
+# Tag-set fallback for LLM / embedding-ness, consulted alongside pipeline_tag
+# (never instead of it): a HF-repacked GGUF-only upload routinely carries no
+# pipeline_tag at all (that field belongs to the ORIGINAL checkpoint's model
+# card, which a pure-GGUF quantizer repo often never fills in) while still
+# carrying the base model's standard HF tags. Exact tokens only, same
+# substring-safety rule as the tag checks above.
+_LLM_TAGS = frozenset({"conversational", "text-generation", "text2text-generation"})
+_EMBEDDING_TAGS = frozenset({"feature-extraction", "sentence-similarity"})
+
+
 def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str],
-                          tags) -> str:
+                          tags, architecture: Optional[str] = None) -> str:
     """Classify a model_manager.registry MODEL_TYPES value from HARD HF metadata
-    (pipeline_tag, library_name, exact tag tokens) - no network, pure function.
+    (pipeline_tag, library_name, exact tag tokens, GGUF architecture) - no
+    network, pure function.
+
+    ``architecture`` is the repo's ``gguf.architecture`` (or, for a non-GGUF
+    result, ``config.model_type``) expand field - the model's OWN declared
+    architecture, read from the file/config itself rather than a repo author's
+    free-text tags. Optional and defaults to None so every existing 3-arg call
+    site (``_hf_pipeline_tag_to_type``, which does not fetch it) is unaffected.
 
     Matching is EXACT, never substring: a tag that merely CONTAINS 'vae' / 'lora' /
     'clip' (e.g. 'exploration' contains 'lora') must NOT be misclassified (MED-15).
 
-    Order matters: the exact-tag checks (vae/lora/text-encoder) run BEFORE the
-    pipeline_tag diffusion check, not after. A repo can carry a diffusion-flavored
-    pipeline_tag (inherited from its base model) AND an exact 'lora'/'vae' tag at
-    the same time - e.g. a FLUX LoRA has pipeline_tag=text-to-image (from the base
-    checkpoint) and tags including 'lora'. The tag is the more specific signal and
-    must win, or every diffusion LoRA misclassifies as a full diffusion-unet.
+    Order matters:
+
+    - The exact-tag checks (vae/lora/text-encoder) run BEFORE every other check.
+      A repo can carry a diffusion-flavored pipeline_tag (inherited from its base
+      model) AND an exact 'lora'/'vae' tag at the same time - e.g. a FLUX LoRA has
+      pipeline_tag=text-to-image (from the base checkpoint) and tags including
+      'lora'. The tag is the more specific signal and must win, or every
+      diffusion LoRA misclassifies as a full diffusion-unet.
+    - ``architecture`` is checked next, before pipeline_tag/tagset: it is read
+      straight from the model's own header, the single hardest signal this
+      function has, so it outranks a pipeline_tag or tag a repo author set (or
+      left stale/absent). Checked against the SAME verified embedding-only
+      architecture allowlist a post-download GGUF header read uses
+      (``localm.model_manager.gguf._GGUF_EMBEDDING_ARCHITECTURES``) - an exact
+      allowlist membership test, so an architecture string that fails to match
+      (a different naming convention, e.g. a non-GGUF config.model_type) just
+      falls through to the pipeline_tag/tagset checks below rather than
+      misclassifying anything. Deliberately POSITIVE-EMBEDDING ONLY - there is
+      no matching "these architectures mean llm" list, because that allowlist
+      would be unbounded and unverifiable (every causal-decoder architecture
+      nobody thought to add yet), where a confidently wrong guess is worse
+      than abstaining and falling through to the tag layer.
+
+    KNOWN FAILURE MODE of the architecture check: ``_GGUF_EMBEDDING_ARCHITECTURES``
+    was built (and is verified) against llama.cpp's OWN ``LLM_ARCH_NAMES`` strings,
+    read by this codebase's local post-download header parse. At search time,
+    ``architecture`` instead comes from HF's SERVER-SIDE parse of the same GGUF
+    header (the ``gguf.architecture`` expand field) - a different parser reading
+    the same bytes. If HF ever normalizes that string differently from
+    llama.cpp's own naming (case, punctuation, a renamed architecture), the exact
+    match below fails SILENTLY: no exception, no wrong classification - just an
+    abstain that falls through to the pipeline_tag/tagset checks, so a real
+    embedding model would classify by tag alone instead of by its header
+    architecture. No test goes red for this, because abstaining is an
+    intentionally legal outcome; "why did this classify by tag instead of
+    architecture" is the only symptom to chase. Verified live for the 8 real
+    repos this parameter was added for (see the tests below), not proven in
+    general - HF's parser and llama.cpp's naming could drift apart independently
+    at any time.
 
     Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
     resolves, so an ambiguous result is never guessed into the wrong bucket."""
@@ -148,6 +207,7 @@ def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str
     # Exact, lowercased tag tokens - a set so membership is equality, not
     # substring containment.
     tagset = {str(t).strip().lower() for t in (tags or []) if isinstance(t, str)}
+    arch = str(architecture).strip().lower() if architecture else ""
 
     if "vae" in tagset:
         return "vae"
@@ -155,13 +215,20 @@ def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str
         return "lora"
     if {"text-encoder", "clip"} & tagset:
         return "text-encoder"
+    if arch in _GGUF_EMBEDDING_ARCHITECTURES:
+        return "embedding"
     # Media / diffusion signal, checked after the exact tag tokens above (a
     # LoRA/VAE repo commonly also carries its base model's diffusion pipeline_tag).
     if tag in ("text-to-image", "image-to-image", "text-to-audio", "audio-to-audio"):
         return "diffusion-unet"
-    if tag in ("feature-extraction", "sentence-similarity"):
+    if tag in ("feature-extraction", "sentence-similarity") or tagset & _EMBEDDING_TAGS:
         return "embedding"
-    if tag in ("text-generation", "text2text-generation", "conversational"):
+    # image-text-to-text: a vision-language model is still an LLM (a chat model
+    # that additionally accepts image input), never a diffusion pipeline - HF
+    # uses this pipeline_tag for VLM chat checkpoints (e.g. a Qwen-VL GGUF).
+    if (tag in ("text-generation", "text2text-generation", "conversational",
+                "image-text-to-text")
+            or tagset & _LLM_TAGS):
         return "llm"
     return "unknown"
 
@@ -238,8 +305,22 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
             # safetensors metadata (the row then shows "size unknown").
             row["size_bytes"] = hf_param_bytes(item.get("safetensors"))
         if classify:
+            # gguf.architecture (gguf-format results) wins when present - the
+            # model's own header; config.model_type (hf-format results, when
+            # HF has a config.json) is the fallback so both format branches
+            # get an architecture-based classification attempt. isinstance-
+            # guarded like hf_param_bytes' safetensors check above: a
+            # malformed/adversarial API response returning a truthy non-dict
+            # for either expand field must degrade this ONE row's signal to
+            # None, not crash the whole hf_search() call for every row.
+            gguf_meta = item.get("gguf")
+            config_meta = item.get("config")
+            architecture = (
+                (gguf_meta.get("architecture") if isinstance(gguf_meta, dict) else None)
+                or (config_meta.get("model_type") if isinstance(config_meta, dict) else None))
             row["detected_type"] = classify_hf_metadata(
-                item.get("pipeline_tag"), item.get("library_name"), raw_tags)
+                item.get("pipeline_tag"), item.get("library_name"), raw_tags,
+                architecture)
         out.append(row)
     return out
 
@@ -286,8 +367,22 @@ def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
         # fetch). `expand` is restrictive - it drops the default stat fields - so
         # re-request downloads/likes/lastModified alongside it.
         expand += ["safetensors", "downloads", "likes", "lastModified"]
+    elif classify:
+        # gguf never requests safetensors, so without this the stats vanish
+        # too: `expand` is restrictive (drops every default field once ANY
+        # field is requested), and classify below always requests at least
+        # pipeline_tag - measured live: a classified gguf query that requested
+        # only pipeline_tag/library_name/tags silently dropped downloads AND
+        # likes from every row (both default-present with no expand at all).
+        expand += ["downloads", "likes", "lastModified"]
     if classify:
-        expand += ["pipeline_tag", "library_name", "tags"]
+        expand += ["pipeline_tag", "library_name", "tags", "config"]
+        if fmt == "gguf":
+            # The real llama.cpp architecture, read from the GGUF header
+            # itself (see classify_hf_metadata) - only meaningful for
+            # gguf-format results; an hf/safetensors repo has no gguf
+            # metadata to expand.
+            expand += ["gguf"]
     if expand:
         params["expand[]"] = expand
     data = _get(f"{HF_API}/api/models", params)
@@ -481,8 +576,20 @@ def hf_gguf_files(repo: str) -> list[dict]:
 
 
 def _quant_of(name: str) -> str:
-    m = _QUANT_RE.search(name)
-    return m.group(1).upper() if m else ""
+    """The single quant label for *name*, preferring an MXFP4/MXFP4_MOE match
+    over any earlier one in the string. A mixed-precision MoE export commonly
+    names the non-expert tensor precision FIRST (e.g.
+    '...-bf16_MXFP4_MOE.gguf'), which would otherwise win under plain
+    re.search - it returns the LEFTMOST match regardless of alternation
+    order - misreporting the actual expert quantization as a plain
+    unquantized BF16/F16 dtype."""
+    matches = _QUANT_RE.findall(name)
+    if not matches:
+        return ""
+    for m in matches:
+        if m.upper().startswith("MXFP4"):
+            return m.upper()
+    return matches[0].upper()
 
 
 # ---- GPU probe safety: a hardware probe must never block its caller -------- #

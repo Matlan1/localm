@@ -202,6 +202,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **HuggingFace model search now recognizes MoE chat models it used to badge
+  "unknown".** Type detection only read a repo's `pipeline_tag`, and a
+  HF-repacked GGUF-only quantization upload commonly never sets that field -
+  it belongs to the original checkpoint's model card, which a pure quantizer
+  repo often leaves blank. Search results now also read the repo's tags and
+  the model's own GGUF header architecture, so a GGUF-only MoE upload with no
+  `pipeline_tag` at all is correctly badged as an LLM instead of "unknown".
+  Quant labels like `MXFP4_MOE`, `TQ1_0`, and `TQ2_0` are now recognized too.
 - **The coder's codebase map no longer goes stale after a shell command.** Files
   a shell command created, edited, or deleted (applying a patch, running a
   formatter, generated code) never updated the compact codebase summary

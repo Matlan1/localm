@@ -422,6 +422,14 @@ def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
 # architectures (verified against src/llama-arch.cpp) - a GGUF whose
 # general.architecture is one of these is unambiguously an embedding/encoder
 # model, never a causal-chat LLM.
+#
+# SECOND CONSUMER: localm.discover.classify_hf_metadata also reads this set,
+# to badge a HuggingFace SEARCH result from HF's server-side gguf.architecture
+# expand field - not just this module's own post-download header parse. An
+# edit here (adding/renaming/tightening an entry) changes what the search page
+# reports as well as local detection, with no test near THIS file failing to
+# say so. See classify_hf_metadata's docstring for that comparison's own
+# failure mode (HF's parse vs. this module's parse of the same field).
 _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
     "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert",
     "jina-bert-v2", "jina-bert-v3", "eurobert", "gemma-embedding",
