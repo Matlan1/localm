@@ -421,6 +421,32 @@ def _format_error(error: Optional[BaseException]) -> str:
 _LOG_TAIL_READ_BYTES = 2_000_000
 
 
+def _find_run_log(home=None, pid=None):
+    """The Path to a run's OWN log, matched by the pid embedded in the log
+    filename (localm_<date>_<time>_<pid>.log), or None if none is found.
+    Shared by _recent_log_tail (below) and _classify_prior_death's raw-tail
+    truncation check, so the two never disagree about WHICH file a crash's
+    evidence comes from. Never raises."""
+    from pathlib import Path as _P
+    if home is None:
+        from localm.debuglog import logs_dir
+        d = logs_dir()
+    else:
+        d = _P(home) / "logs"
+    if not d.is_dir():
+        return None
+    logs = sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if pid is not None:
+        for p in logs:
+            if p.stem.endswith(f"_{pid}"):
+                return p
+    # No pid match (older marker): fall back to the most recent log that is
+    # NOT this current run's, so we do not just echo the recovering start.
+    import os as _os
+    cur = f"_{_os.getpid()}.log"
+    return next((p for p in logs if not p.name.endswith(cur)), None)
+
+
 def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
     """A digest of the crashed run's OWN log, matched by the pid embedded in the
     log filename (localm_<date>_<time>_<pid>.log): EVERY warning/error (with its
@@ -433,27 +459,7 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
     query) is dropped by build_digest before this ever sees it, whatever the
     content itself says (#961). Home paths are scrubbed. Never raises."""
     try:
-        from pathlib import Path as _P
-        if home is None:
-            from localm.debuglog import logs_dir
-            d = logs_dir()
-        else:
-            d = _P(home) / "logs"
-        if not d.is_dir():
-            return ""
-        logs = sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
-        chosen = None
-        if pid is not None:
-            for p in logs:
-                if p.stem.endswith(f"_{pid}"):
-                    chosen = p
-                    break
-        if chosen is None:
-            # No pid match (older marker): fall back to the most recent log that is
-            # NOT this current run's, so we do not just echo the recovering start.
-            import os as _os
-            cur = f"_{_os.getpid()}.log"
-            chosen = next((p for p in logs if not p.name.endswith(cur)), None)
+        chosen = _find_run_log(home, pid)
         if chosen is None:
             return ""
         raw = chosen.read_text(encoding="utf-8", errors="replace")
@@ -1512,6 +1518,94 @@ def disarm_crash_guard(home=None, instance_id: Optional[str] = None) -> None:
         pass
 
 
+# A native/ggml status line printed via raw fprintf (no "TIMESTAMP LEVEL NAME:"
+# prefix - see debuglog.py's dedup_native_stderr) - the vocabulary a hard native
+# crash mid-load/mid-generate is actually seen stopping inside, e.g. the
+# 2026-07-26 incident's log stopping dead at "llama_co" during
+# "llama_context: constructing llama_context".
+_NATIVE_OP_LINE_RE = re.compile(
+    r'^(llama_|ggml_|graph_reserve|sched_reserve|load_tensors|load_all_data|create_tensor)')
+
+# How much of the raw log tail to read for the truncation check below - small
+# on purpose, this only needs the last line, not a digest.
+_TRUNCATION_CHECK_READ_BYTES = 4000
+
+
+def _raw_tail_truncation_signal(home=None, pid=None) -> "tuple[bool, str]":
+    """(truncated, last_line): whether the crashed run's OWN raw log file (see
+    _find_run_log - the SAME file _recent_log_tail digests, read raw here
+    instead) ends WITHOUT a trailing newline, and what that final (possibly
+    mid-word) line is. A clean shutdown's last logged line is always
+    terminator-flushed with a trailing newline; a log that stops mid-line -
+    literally mid-word, e.g. "...llama_co" - is the signature of the process
+    dying between two writes, not of a clean exit. Never raises; returns
+    (False, "") on any failure or when there is nothing to check."""
+    try:
+        chosen = _find_run_log(home, pid)
+        if chosen is None:
+            return False, ""
+        with open(chosen, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _TRUNCATION_CHECK_READ_BYTES))
+            raw = fh.read().decode("utf-8", errors="replace")
+        if not raw:
+            return False, ""
+        truncated = not raw.endswith(("\n", "\r"))
+        last_line = raw.replace("\r\n", "\n").rstrip("\n").rsplit("\n", 1)[-1]
+        return truncated, last_line
+    except Exception:
+        return False, ""
+
+
+def _classify_prior_death(*, native_trace: str, hang_trace: str,
+                          raw_tail_truncated: bool,
+                          raw_tail_last_line: str) -> "tuple[str, str]":
+    """(summary, reason) for report_failure(), classified from evidence
+    actually collected - never the old blind 3-way guess when something more
+    specific is available. Pure function (no I/O) so the classification logic
+    is directly unit-testable without real marker/log/trace files.
+
+    Ordered by how direct the evidence is: a captured native trace beats an
+    inferred mid-operation cutoff beats a captured hang, and only when NONE of
+    those fired do we fall back to naming the genuine remaining ambiguity
+    (an OS kill / force-closed window legitimately leaves no trace at all -
+    NEW-CRASH-NOTICE-USELESS (A)'s own note)."""
+    if native_trace.strip():
+        first_line = next(
+            (ln.strip() for ln in native_trace.strip().splitlines() if ln.strip()), "")
+        return (
+            f"localm server crashed - native fault captured: {first_line}",
+            "a native crash was caught by the fault handler; see the captured "
+            "trace below for the exact fault and thread/frame."
+        )
+    if raw_tail_truncated and _NATIVE_OP_LINE_RE.match(raw_tail_last_line.strip()):
+        return (
+            "localm server crashed during model load/construction "
+            "(native crash suspected, no trace captured)",
+            f'the previous run\'s log stops abruptly mid-line inside '
+            f'"{raw_tail_last_line.strip()}" - no faulthandler trace was '
+            f'captured for this crash (a known open gap - see this report\'s '
+            f'"Native fault trace" section, or its absence), but a log cut off '
+            f'mid-operation during native model construction is the signature '
+            f'of a hard native crash, not a clean stop.'
+        )
+    if hang_trace.strip():
+        return (
+            "localm server appeared frozen (unresponsive) before this run ended",
+            "the always-on hang watchdog captured a stall before the process "
+            "stopped - it was most likely force-closed after becoming "
+            "unresponsive, not a native crash. See the captured stacks below."
+        )
+    return (
+        "localm server crashed (recovered on the next start)",
+        "the previous server run ended without a clean shutdown, and none of "
+        "a native trace, a mid-operation log cutoff, or a captured hang were "
+        "found in the evidence collected - most likely an OS kill or a "
+        "force-closed window (both legitimately leave no trace)."
+    )
+
+
 def _report_one_crash_marker(d, marker, home, interactive: bool):
     """Report *marker* as a crash IF its recorded pid is no longer alive, then
     clear it. Returns the report path, or None if this marker was skipped (a
@@ -1587,10 +1681,17 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
         hang = _recent_hang_traces(home, pid=info.get("pid"))
         if hang:
             ctx["hang_traces"] = hang
+        # NEW-CRASH-NOTICE-USELESS (A): classify the death from the evidence
+        # actually collected instead of a blind 3-way guess ("a native crash,
+        # an OS kill, or a force-closed window") that never said which and
+        # never named what was in flight.
+        raw_truncated, raw_last_line = _raw_tail_truncation_signal(
+            home, pid=info.get("pid"))
+        summary, reason = _classify_prior_death(
+            native_trace=trace, hang_trace=hang,
+            raw_tail_truncated=raw_truncated, raw_tail_last_line=raw_last_line)
         return report_failure(
-            summary="localm server crashed (recovered on the next start)",
-            reason=("the previous server run ended without a clean shutdown - a "
-                    "native crash, an OS kill, or a force-closed window"),
+            summary=summary, reason=reason,
             error=None, context=ctx, interactive=interactive)
     except Exception:
         return None

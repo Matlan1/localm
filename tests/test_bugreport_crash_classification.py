@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""NEW-CRASH-NOTICE-USELESS (A): the crash report must classify HOW the
+previous run died from the evidence actually collected, instead of a blind
+hardcoded 3-way guess ("a native crash, an OS kill, or a force-closed
+window") that never said which, never named the model/operation in flight,
+and never pointed at the evidence.
+
+Real-world signature this targets (the 2026-07-26 incident quoted in the
+issue): the previous run's log stopped DEAD mid-word at "llama_co" during
+"llama_context: constructing llama_context", with faulthandler having
+captured no trace. That is the signature of a hard native crash during model
+load, not an unknowable "could be anything".
+"""
+
+import json
+
+from localm import bugreport, instances
+
+
+class TestClassifyPriorDeath:
+    """Pure-function tests: no I/O, just the classification logic."""
+
+    def test_native_trace_wins_and_names_the_fault(self):
+        summary, reason = bugreport._classify_prior_death(
+            native_trace="Windows fatal exception: access violation\n\n"
+                         "Current thread 0x1 (most recent call first):\n"
+                         "  File \"llama.py\", line 942 in _generate",
+            hang_trace="",
+            raw_tail_truncated=True,
+            raw_tail_last_line="llama_co",
+        )
+        assert "native fault captured" in summary
+        assert "access violation" in summary
+        assert "captured trace below" in reason
+
+    def test_truncated_native_op_line_without_a_trace(self):
+        summary, reason = bugreport._classify_prior_death(
+            native_trace="",
+            hang_trace="",
+            raw_tail_truncated=True,
+            raw_tail_last_line="llama_context: constructing llama_context",
+        )
+        assert "model load/construction" in summary
+        assert "native crash suspected" in summary
+        assert "llama_context: constructing llama_context" in reason
+
+    def test_truncated_line_that_is_not_a_native_op_does_not_claim_a_crash(self):
+        """A truncated tail alone proves nothing - only a truncation INSIDE a
+        recognizable native-operation line is evidence of a native crash.
+        Anything else (e.g. a cut-off HTTP access log line) must fall through
+        to the honest unknown-cause message, not a false-positive claim."""
+        summary, reason = bugreport._classify_prior_death(
+            native_trace="",
+            hang_trace="",
+            raw_tail_truncated=True,
+            raw_tail_last_line="DEBUG localm: GET /api/stats -> 200 (3 m",
+        )
+        assert "native crash suspected" not in summary
+        assert "OS kill" in reason or "force-closed" in reason
+
+    def test_hang_trace_when_nothing_else_present(self):
+        summary, reason = bugreport._classify_prior_death(
+            native_trace="", hang_trace="Thread 1: <stack>\n",
+            raw_tail_truncated=False, raw_tail_last_line="",
+        )
+        assert "frozen" in summary.lower() or "unresponsive" in summary.lower()
+        assert "hang watchdog" in reason
+
+    def test_nothing_found_falls_back_to_the_honest_unknown(self):
+        summary, reason = bugreport._classify_prior_death(
+            native_trace="", hang_trace="",
+            raw_tail_truncated=False, raw_tail_last_line="",
+        )
+        assert "crashed" in summary.lower()
+        assert "OS kill" in reason and "force-closed" in reason
+
+    def test_priority_order_native_trace_beats_truncation_beats_hang(self):
+        """All three signals present at once - the most direct evidence
+        (an actual captured trace) must win, not whichever check runs last."""
+        summary, _ = bugreport._classify_prior_death(
+            native_trace="Fatal Python error: Segmentation fault\nthread info",
+            hang_trace="some hang stack",
+            raw_tail_truncated=True,
+            raw_tail_last_line="llama_context: constructing llama_context",
+        )
+        assert "native fault captured" in summary
+
+        summary2, _ = bugreport._classify_prior_death(
+            native_trace="", hang_trace="some hang stack",
+            raw_tail_truncated=True,
+            raw_tail_last_line="ggml_backend_cuda_graph_compute: warmup",
+        )
+        assert "native crash suspected" in summary2
+
+
+class TestRawTailTruncationSignal:
+    def _log(self, home, pid, body: str, *, newline_terminated: bool):
+        d = home / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"localm_2026-07-26_170900_{pid}.log"
+        text = body if newline_terminated else body.rstrip("\n")
+        p.write_bytes(text.encode("utf-8"))
+        return p
+
+    def test_no_trailing_newline_is_truncated(self, tmp_path):
+        self._log(tmp_path, 111,
+                  "llama_context: constructing llama_context\n"
+                  "llama_co", newline_terminated=False)
+        truncated, last_line = bugreport._raw_tail_truncation_signal(
+            home=tmp_path, pid=111)
+        assert truncated is True
+        assert last_line == "llama_co"
+
+    def test_trailing_newline_is_not_truncated(self, tmp_path):
+        self._log(tmp_path, 222,
+                  "DEBUG localm: clean shutdown requested\n",
+                  newline_terminated=True)
+        truncated, _ = bugreport._raw_tail_truncation_signal(home=tmp_path, pid=222)
+        assert truncated is False
+
+    def test_no_log_file_is_not_truncated(self, tmp_path):
+        truncated, last_line = bugreport._raw_tail_truncation_signal(
+            home=tmp_path, pid=999)
+        assert truncated is False
+        assert last_line == ""
+
+
+def _write_marker(run_dir, instance_id, pid):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / f"server-crash.{instance_id}.marker").write_text(
+        json.dumps({"pid": pid, "context": {}}), encoding="utf-8")
+
+
+class TestEndToEndClassificationInReport:
+    """check_and_report_prior_crash must actually USE the classification, not
+    just have it available as dead code."""
+
+    def test_mid_native_op_cutoff_reaches_the_filed_report(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        home = tmp_path
+        run = home / "run"
+        _write_marker(run, "inst-crash", 7777)
+        logs = home / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "localm_2026-07-26_170900_7777.log").write_bytes(
+            b"llama_context: constructing llama_context\nllama_co")
+
+        captured = {}
+        monkeypatch.setattr(bugreport, "report_failure",
+                            lambda **k: captured.update(k) or str(tmp_path / "r.md"))
+
+        bugreport.check_and_report_prior_crash(home=str(home))
+
+        assert "native crash suspected" in captured["summary"]
+        assert "llama_co" in captured["reason"]
+
+    def test_clean_looking_tail_with_no_evidence_stays_honest(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        home = tmp_path
+        run = home / "run"
+        _write_marker(run, "inst-clean", 8888)
+        logs = home / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "localm_2026-07-26_170900_8888.log").write_bytes(
+            b"DEBUG localm: GET /api/stats -> 200 (3 ms)\n")
+
+        captured = {}
+        monkeypatch.setattr(bugreport, "report_failure",
+                            lambda **k: captured.update(k) or str(tmp_path / "r.md"))
+
+        bugreport.check_and_report_prior_crash(home=str(home))
+
+        assert "native crash suspected" not in captured["summary"]
+        assert "OS kill" in captured["reason"]
