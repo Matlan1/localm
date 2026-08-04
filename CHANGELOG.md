@@ -189,7 +189,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model's requests, embeddings, and model loads too. HuggingFace-format
   models now run in their own isolated worker process, matching how GGUF
   models are already handled - a hang is now contained to that one request
-  and cleaned up automatically, and the rest of the server keeps working.
+  and cleaned up automatically, and the rest of the server keeps working. A
+  client that disconnects mid-generation no longer forces that model to
+  restart either: the worker now stops the generation in place and keeps
+  serving your next request immediately, instead of reloading first.
 
 ### Changed
 - **Three model routes now require host filesystem access:** scanning for ComfyUI
