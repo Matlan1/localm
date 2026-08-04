@@ -1056,3 +1056,27 @@ def final_answer(result: str) -> str:
     marker = "\n\n[session record:"
     idx = result.rfind(marker)
     return result[:idx] if idx != -1 else result
+
+
+def free_loopback_port() -> int:
+    """A loopback port nothing is listening on, right now - for tests that need
+    to prove a code path handles "unreachable" honestly, without depending on
+    a well-known port (ComfyUI's 8188, this project's own 8642, ...) happening
+    to be free on whoever's box runs the suite. A real install of any of those
+    services on the test box is common, not hypothetical (see GitHub #955-
+    class reports), and asserting behavior against "nothing is listening" must
+    not silently become an assertion about "nothing ELSE is running today".
+
+    Binds an ephemeral port and closes it immediately - never listened on, so
+    it is free again by the time this returns, but nothing answers there
+    either way. There is a theoretical reuse race (something else claims the
+    exact same port in the gap before the caller dials it), astronomically
+    unlikely in the ~16k-wide ephemeral range and the standard idiom for
+    "find a free port" across the Python ecosystem."""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from localm.plugins.coder.sessions import CoderSession, SessionManager
 from localm.plugins.gui.web import attach_gui
-from tests.conftest import final_answer as _final_answer, probe_double
+from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
 
 
 # ------------------------------------------------------------------ #
@@ -2954,10 +2954,25 @@ class TestImageComfyModelPicker:
     """/api/imagine/comfy-models + /api/imagine/comfy-launch - the Workflow
     panel's "Launch ComfyUI" button and per-slot model dropdowns."""
 
-    def test_comfy_models_reports_unreachable_honestly(self, img_app):
+    def test_comfy_models_reports_unreachable_honestly(self, img_app, tmp_path):
         """No ComfyUI is running in this test app - the route must say so
-        (rule 5: never a silently-empty picker that looks like "no slots")."""
+        (rule 5: never a silently-empty picker that looks like "no slots").
+
+        Unreachability is CONSTRUCTED, not assumed: this used to rely on
+        nothing answering the real ComfyUI default (127.0.0.1:8188), which
+        goes red on any box actually running ComfyUI there (a real, common
+        setup for this project's audience) - the test then reads as a
+        regression in whatever unrelated diff happens to be in flight.
+        free_loopback_port() gives a port nothing answers on, so this is
+        correct on a box with ComfyUI running on 8188 AND on one without."""
+        import json
+
         app, _ = img_app
+        home = tmp_path / ".localm"
+        (home / "config.json").write_text(
+            json.dumps({"comfy_api_url": f"http://127.0.0.1:{free_loopback_port()}"}),
+            encoding="utf-8")
+
         with TestClient(app) as client:
             r = client.get("/api/imagine/comfy-models")
         assert r.status_code == 200

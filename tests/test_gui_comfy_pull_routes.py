@@ -53,9 +53,17 @@ class TestPreflightRoute:
 
     def test_no_comfy_running_reports_nothing_missing(self, scoped_app):
         # Best-effort, matching preflight_models: an unreachable ComfyUI never
-        # surfaces a false "missing" list.
-        with TestClient(scoped_app) as c:
-            r = c.post("/api/media/image/preflight", json={})
+        # surfaces a false "missing" list. Mocks comfy_object_info directly
+        # (matching the sibling tests below) instead of relying on nothing
+        # answering the real ComfyUI default port - a real ComfyUI on 8188
+        # (a common setup for this project's contributors) would otherwise
+        # make this an unmocked network call whose result, and this test's
+        # outcome, this test does not control (the exact shape fixed in
+        # test_gui.py's comfy-model-picker test).
+        from localm.media import comfy_client as cc
+        with patch.object(cc, "comfy_object_info", return_value=None):
+            with TestClient(scoped_app) as c:
+                r = c.post("/api/media/image/preflight", json={})
         assert r.status_code == 200
         assert r.json() == {"missing": []}
 
