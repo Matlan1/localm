@@ -392,7 +392,17 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
         info = get_model_info(spec)
         if info:
             path = info[0] if isinstance(info, tuple) else info
-            if path:
+            # Same ordering rule as step 0's spec check: refuse a UNC/device path
+            # BEFORE any stat, never after. A registered entry's stored path is
+            # normally trustworthy (it was written by a separately-authorized
+            # `localm pull`/`add`, not derived live from this request), but this
+            # function has no way to tell "the registry" from "a hand-edited
+            # registry.json" apart, and the cost of being wrong is the same
+            # outbound SMB/NTLM auto-auth step 0 exists to prevent. Treating a
+            # UNC hit as "nothing usable here" (fall through, same as an absent
+            # entry) costs nothing: no legitimate registration produces one.
+            from localm.pathsafe import is_unc_or_device_path
+            if path and not is_unc_or_device_path(str(path)):
                 p2 = Path(path)
                 if p2.is_file():
                     _record_resolve_success()

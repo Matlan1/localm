@@ -93,6 +93,51 @@ def test_resolve_registered_directory_is_reported_as_hf_not_gguf(tmp_path, monke
     assert "not a path, a registered model, or a known key" not in err
 
 
+def test_resolve_registered_unc_path_is_never_statted(monkeypatch):
+    """A registered entry whose stored path is UNC/device-shaped (a hand-edited
+    registry, never a legitimate `localm pull`/`add`) must be refused the same
+    way step 0 refuses a UNC embedding_model spec directly - BEFORE any
+    filesystem call, never after. A real stat reaches the Windows SMB
+    redirector and can block for minutes on an unroutable host or
+    auto-authenticate against a reachable one.
+
+    Uses a side-effect counter, NOT a raise, to detect a regression: the
+    registry-lookup block this guard sits in is wrapped in a broad
+    'except Exception: pass' (to tolerate a broken registry), which would
+    silently swallow an AssertionError raised from inside is_file()/is_dir()
+    and make the test pass whether or not the guard actually fired - proven by
+    running this exact scenario against the pre-fix code before adding the
+    guard, which showed exactly that false pass. The spy never touches the
+    real filesystem/network either way, so the test cannot hang."""
+    _cfg(monkeypatch, embedding_model="sneaky-entry")
+
+    unc = r"\\attacker-host\share\fake.gguf"
+    import localm.model_manager.registry as registry
+    monkeypatch.setattr(registry, "get_model_info", lambda name, **k: (unc, None))
+
+    stat_calls = []
+
+    class _SpyPath:
+        def is_file(self):
+            stat_calls.append("is_file")
+            return False
+
+        def is_dir(self):
+            stat_calls.append("is_dir")
+            return False
+
+    real_path = emb.Path
+
+    def _spy_path(*a, **k):
+        if a and a[0] == unc:
+            return _SpyPath()
+        return real_path(*a, **k)
+
+    monkeypatch.setattr(emb, "Path", _spy_path)
+    assert emb.resolve_embedding_model_path() is None
+    assert stat_calls == [], f"a UNC-shaped registered path was statted: {stat_calls}"
+
+
 def test_resolve_success_clears_prior_last_error(tmp_path, monkeypatch):
     """A fixed (or always-fine) config must not keep reporting a stale reason
     from an earlier, unrelated failed resolve."""
