@@ -76,7 +76,13 @@ def register(app: FastAPI, ctx) -> None:
         # both work. Single canonical endpoint (the GUI router does not duplicate
         # it - that would shadow this one and drop the user's text + log flag).
         description = (body.get("description") or body.get("message") or "").strip()
-        if not description:
+        # #958: what the user expected vs what actually happened are DISTINCT,
+        # optional fields (the form's two new textareas) - not a duplicate of
+        # description. Both are optional so an old client sending only
+        # ``description`` still works exactly as before.
+        what_i_expected = (body.get("what_i_expected") or "").strip()
+        what_happened = (body.get("what_happened") or "").strip()
+        if not description and not what_happened:
             raise HTTPException(400, "Please describe the problem before sending.")
         # Optional browser context the GUI attaches (user agent, page, viewport,
         # recent JS console errors). Untrusted client input: take only known
@@ -85,7 +91,8 @@ def register(app: FastAPI, ctx) -> None:
         # never executed.
         client = _sanitize_client_context(body.get("client"))
         path = bugreport.save_user_report(
-            description, include_log=bool(body.get("include_log")), client=client)
+            description, what_i_expected=what_i_expected, what_happened=what_happened,
+            include_log=bool(body.get("include_log")), client=client)
         if path is None:
             # A failed save must not report success (we do not hide problems).
             raise HTTPException(500, "Could not save the bug report to disk.")
@@ -105,7 +112,12 @@ def register(app: FastAPI, ctx) -> None:
         # GUI can tell the user WHERE it failed and offer retry/download - the file
         # is still saved either way (we do not hide problems).
         if body.get("upload"):
-            title = (description.splitlines()[0] if description else "")[:120] \
+            # Same title-derivation preference as save_user_report itself
+            # (what happened makes a more useful issue title than what the
+            # user was doing) - kept in sync so the uploaded issue title
+            # matches the report body's own H1.
+            title_source = what_happened or description
+            title = (title_source.splitlines()[0] if title_source else "")[:120] \
                 or "user-reported issue"
             report_text = result.get("report_markdown") or path.read_text(encoding="utf-8")
             try:

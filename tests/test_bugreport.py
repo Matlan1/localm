@@ -166,6 +166,59 @@ def test_save_user_report_scrubs_home_path_in_description(tmp_path, monkeypatch)
     assert "<redacted>" in text
 
 
+# ------------------- #958: what-I-did / expected / happened --------------- #
+
+def test_save_user_report_splits_expected_and_happened_into_their_own_sections(
+        tmp_path, monkeypatch):
+    # Before this fix all three fields (title, "What I was doing", "What
+    # happened") were the SAME truncated first line - a reader could never
+    # tell what the user expected from what actually happened.
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report(
+        "I clicked the mic button to start voice input.",
+        what_i_expected="Recording should have started.",
+        what_happened="Nothing happened - no recording indicator appeared.")
+    assert path is not None and path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "## What I was doing" in text
+    assert "## What I expected" in text
+    assert "## What happened" in text
+    did_section = text.split("## What I was doing")[1].split("## What I expected")[0]
+    expected_section = text.split("## What I expected")[1].split("## What happened")[0]
+    happened_section = text.split("## What happened")[1].split("## App state")[0]
+    assert "clicked the mic button" in did_section
+    assert "Recording should have started" in expected_section
+    assert "no recording indicator" in happened_section
+    # The three sections are genuinely distinct - none is a copy of another.
+    assert "Recording should have started" not in did_section
+    assert "no recording indicator" not in expected_section
+    assert "clicked the mic button" not in happened_section
+    # The title comes from "what happened" (the more useful title), not the
+    # truncated "what I was doing" text.
+    assert text.startswith("# localm bug report: Nothing happened")
+
+
+def test_save_user_report_omits_expected_section_when_not_supplied(tmp_path, monkeypatch):
+    # Backward-compatible degraded input: a caller that supplies only
+    # description (the CLI, or an old client) gets no empty "## What I
+    # expected" section cluttering the report.
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report("just a description, nothing else")
+    text = path.read_text(encoding="utf-8")
+    assert "## What I expected" not in text
+
+
+def test_save_user_report_scrubs_what_expected_and_happened(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report(
+        "did a thing",
+        what_i_expected="it should work like Z:\\Users\\bob\\proj does",
+        what_happened="it crashed, see Z:\\Users\\bob\\crash.log")
+    text = path.read_text(encoding="utf-8")
+    assert "bob" not in text
+    assert "<redacted>" in text
+
+
 # --------------------------- the interactive offer ------------------------ #
 
 def test_report_failure_noninteractive_saves_without_prompt(tmp_path, monkeypatch, capsys):

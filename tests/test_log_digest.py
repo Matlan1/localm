@@ -290,6 +290,154 @@ class TestBudgetFitting:
         assert ld.build_digest("\x00\x01 not a log at all \xff") != None  # noqa: E711
 
 
+class TestContentNeverLeaks:
+    """#961: a bug report must never carry chat content. Before this fix, a
+    content-bearing debug record (the raw model reply, a memory-embed content
+    snippet, a web-tool query) that happened to contain a signal word
+    (error/exception/...) was PROMOTED to ERROR status by is_error_record and
+    kept verbatim - the opposite of withheld, and prioritized over genuine
+    errors when the digest is over budget. These records must be dropped
+    before that classification ever runs, regardless of their content."""
+
+    def test_raw_model_output_withheld_even_when_it_contains_error_text(self):
+        text = (
+            "2026-07-13 15:24:50,000 ERROR   localm: model load failed\n"
+            "Traceback (most recent call last):\n"
+            "RuntimeError: Native llama runtime failed to load\n"
+            "2026-07-13 15:24:51,000 DEBUG   localm: raw model output:\n"
+            "Sorry, there was an error in your code on line 12: "
+            "IndexError: list index out of range\n"
+            "2026-07-13 15:24:52,000 INFO    localm: request served\n"
+        )
+        digest = ld.build_digest(text)
+        assert "IndexError: list index out of range" not in digest
+        assert "there was an error in your code" not in digest
+        # The genuine, unrelated error survives.
+        assert "RuntimeError: Native llama runtime failed to load" in digest
+        # The redaction is disclosed, not silent (AGENTS.md rule 5).
+        assert "1 debug record(s) withheld" in digest
+
+    def test_memory_embed_content_snippet_is_withheld(self):
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: memory embed_one failed "
+            "for 'the user said their password is hunter2': ValueError: dim mismatch\n"
+        )
+        digest = ld.build_digest(text)
+        assert "hunter2" not in digest
+        assert "1 debug record(s) withheld" in digest
+
+    def test_memory_embed_privacy_mode_sibling_message_is_not_withheld(self):
+        # The privacy-mode sibling of the same log statement carries NO
+        # content (length only) - it must survive; only the content-bearing
+        # prefix is a withhold signal.
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: memory embed_one failed "
+            "(content withheld: privacy mode, 42 chars): ValueError: dim mismatch\n"
+        )
+        digest = ld.build_digest(text)
+        assert "content withheld: privacy mode" in digest
+        assert "debug record(s) withheld" not in digest
+
+    def test_web_tool_args_withheld_but_bare_tool_name_kept(self):
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: jobs web tool: web_search "
+            "{'query': 'my private medical condition'}\n"
+            "2026-07-13 15:24:51,000 DEBUG   localm: jobs web tool: fetch_url\n"
+        )
+        digest = ld.build_digest(text)
+        assert "my private medical condition" not in digest
+        assert "jobs web tool: fetch_url" in digest   # name-only line is operational, kept
+        assert "1 debug record(s) withheld" in digest
+
+    def test_content_record_dropped_before_it_could_survive_as_a_collapse_survivor(self):
+        lines = [_polling_line(f"2026-07-13 15:25:{20+i:02d}", 7, 0.2) for i in range(5)]
+        lines.append("2026-07-13 15:25:26,000 DEBUG   localm: raw model output:")
+        lines.append("secret reply text")
+        digest = ld.build_digest("\n".join(lines))
+        assert "secret reply text" not in digest
+        assert "repeated 5x" in digest
+
+    def test_is_content_record_direct(self):
+        assert ld.is_content_record(
+            {"level": "DEBUG", "logger": "localm",
+             "lines": ["2026-07-13 15:24:50,000 DEBUG   localm: raw model output:",
+                       "hi"]})
+        assert not ld.is_content_record(
+            {"level": "DEBUG", "logger": "localm",
+             "lines": ["2026-07-13 15:24:50,000 DEBUG   localm: GET /api/stats -> 200"]})
+        assert not ld.is_content_record({"level": "", "logger": "", "lines": []})
+
+    def test_content_notice_budget_is_reserved_not_squeezed_out_when_over_budget(self):
+        # diff-review-discipline: prove the ARITHMETIC, not just that the
+        # notice happens to show up. content_notice's reservation
+        # (len(notice) + 1) must compose with the pre-existing error/benign
+        # budget math in _fit_budget rather than being squeezed out by it -
+        # the notice is exactly as important to never silently drop as the
+        # "N errors omitted" notice it sits next to.
+        error_block = "2026-07-13 15:24:50,000 ERROR   localm: the actual failure\n"
+        content_block = ("2026-07-13 15:24:51,000 DEBUG   localm: raw model output:\n"
+                         "this is the secret reply\n")
+        noise = "\n".join(
+            _polling_line(f"2026-07-13 15:{30+i//60:02d}:{i%60:02d}", 7, 0.2)
+            for i in range(50)
+        )
+        max_chars = 200
+        digest = ld.build_digest(error_block + content_block + noise, max_chars=max_chars)
+        assert "the actual failure" in digest
+        assert "secret reply" not in digest
+        assert ld._content_withheld_notice(1) in digest
+        # The reservation guarantees the total never exceeds max_chars even
+        # with the notice included - it is additive with the existing
+        # per-error "leave room for the notice" (80-char) reservation, not
+        # competing with it for the same bytes.
+        assert len(digest) <= max_chars
+
+
+class TestNativeLineRunCollapsesWithinOneRecord:
+    """#958/#952: a long run of unleveled native (ggml/CUDA/HIP) stderr has no
+    "TIMESTAMP LEVEL NAME:" prefix of its own, so it always glues onto ONE
+    record as continuation lines (parse_records has no other choice) - never
+    a run of multiple RECORDS for collapse_records' record-level collapse to
+    fold. A real report's entire tail was ~70 copies of one native line for
+    exactly this reason."""
+
+    def test_giant_run_of_near_duplicate_native_lines_collapses_within_one_record(self):
+        header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
+        spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(70)]
+        text = "\n".join([header] + spam)
+        digest = ld.build_digest(text)
+        assert digest.count("ggml_cuda: buffer pool alloc") == 1
+        assert "repeated 70x" in digest
+        assert len(digest) < len(text) / 5
+
+    def test_native_run_with_no_leading_leveled_header_still_collapses(self):
+        spam = [f"ggml_cuda: buffer pool alloc {1000+i} bytes" for i in range(50)]
+        digest = ld.build_digest("\n".join(spam))
+        assert digest.count("ggml_cuda: buffer pool alloc") == 1
+        assert "repeated 50x" in digest
+
+    def test_short_native_run_within_a_record_stays_expanded(self):
+        header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
+        spam = ["ggml_cuda: buffer pool alloc 1 bytes", "ggml_cuda: buffer pool alloc 2 bytes"]
+        text = "\n".join([header] + spam)
+        digest = ld.build_digest(text)
+        assert digest.count("ggml_cuda: buffer pool alloc") == 2
+        assert "repeated" not in digest
+
+    def test_error_record_native_lines_are_never_collapsed(self):
+        # An error-classified record (the crash-signal scan promoted it) must
+        # stay verbatim, exactly like before this fix - line-level collapsing
+        # only ever applies to BENIGN records.
+        header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
+        spam = [f"CUDA error: op {i} not permitted while stream is capturing"
+                for i in range(10)]
+        text = "\n".join([header] + spam)
+        digest = ld.build_digest(text)
+        for i in range(10):
+            assert f"CUDA error: op {i} not permitted" in digest
+        assert "repeated" not in digest
+
+
 class TestFullPipelineMatchesIssue617Shape:
     def test_realistic_617_shaped_log(self):
         text = (

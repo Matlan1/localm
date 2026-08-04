@@ -42,6 +42,26 @@ class TestRecentLogTail:
         assert home_str not in tail
         assert "~" in tail or "<redacted>" in tail
 
+    def test_raw_model_output_never_reaches_the_report_even_via_the_real_file(self, tmp_path):
+        # #961, full pipeline: a real on-disk debug log (what llama.py's
+        # logger.debug("raw model output:\n%s", ...) actually writes) must
+        # never surface in the tail returned to a report, even though the
+        # reply text below contains the word "error" - which is exactly what
+        # used to promote it to ERROR status and get it kept verbatim.
+        _make_log(tmp_path, 444, (
+            "2026-07-13 15:24:50,000 ERROR   localm: model load failed\n"
+            "Traceback (most recent call last):\n"
+            "RuntimeError: Native llama runtime failed to load\n"
+            "2026-07-13 15:24:51,000 DEBUG   localm: raw model output:\n"
+            "Sorry, there was an error in your code on line 12: "
+            "IndexError: list index out of range\n"
+        ))
+        tail = br._recent_log_tail(home=tmp_path, pid=444)
+        assert "IndexError: list index out of range" not in tail
+        assert "there was an error in your code" not in tail
+        assert "RuntimeError: Native llama runtime failed to load" in tail
+        assert "debug record(s) withheld" in tail
+
 
 class TestBuildReportRendersCrashDetail:
     def test_native_trace_and_log_tail_rendered(self):
