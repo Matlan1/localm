@@ -22,6 +22,14 @@ export function fmtSize(bytes) {
   return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB (see app.js)
 }
 
+// Same shape as picker.js's local fmtDate: an ISO calendar date, compact enough
+// for a dense table cell. mtime is a null-able epoch-seconds float from /api/models.
+export function fmtModelDate(mtime) {
+  if (mtime == null) return "";
+  try { return new Date(mtime * 1000).toISOString().slice(0, 10); }
+  catch (_) { return ""; }
+}
+
 // The Registered-models table tab (All/LLMs/Embedding/...). Scopes only the
 // installed-models TABLE below - the HuggingFace SEARCH has its own explicit,
 // always-visible Type checkboxes (discTypes()), so what the search covers is
@@ -32,6 +40,62 @@ let currentTypeFilter = "all";
 // matches exactly what was prefilled, so a hand-edited spec silently falls back
 // to auto-detect (never sends a stale/wrong type hint).
 let pendingPullTypeHint = null;
+
+// Registered-models table columns: label + how to read/compare a row + whether
+// it is sortable at all (the actions column never is). "kind" picks the
+// comparator - "number" (size_bytes/mtime, both nullable: an unreadable file, a
+// UNC timeout, a missing path) vs "string" (case-insensitive). Kept as a single
+// descriptor table so the header row, the click/keydown handlers and the
+// comparator all read the same column list instead of drifting apart.
+const MODEL_COLUMNS = [
+  { key: "name", label: "Name", sortable: true, kind: "string", get: (m) => m.name || "" },
+  { key: "model_type", label: "Role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
+  { key: "source", label: "Source", sortable: true, kind: "string", get: (m) => m.source || "" },
+  { key: "size_bytes", label: "Size", sortable: true, kind: "number", get: (m) => m.size_bytes },
+  { key: "mtime", label: "Modified", sortable: true, kind: "number", get: (m) => m.mtime },
+  { key: "actions", label: "", sortable: false },
+];
+const _SORTABLE_KEYS = MODEL_COLUMNS.filter((c) => c.sortable).map((c) => c.key);
+
+// Persisted sort choice (mirrors the _bindDiscToggle read-on-init pattern this
+// file already uses for search filters). Falls back to alphabetical-by-name -
+// today's only ordering (the server's sorted(registry.items())) - whenever
+// nothing is stored yet, or a stored value no longer names a real column.
+let currentSortKey = _SORTABLE_KEYS.includes(localStorage.getItem("localm.modelsSortKey"))
+  ? localStorage.getItem("localm.modelsSortKey") : "name";
+let currentSortDir = ["asc", "desc"].includes(localStorage.getItem("localm.modelsSortDir"))
+  ? localStorage.getItem("localm.modelsSortDir") : "asc";
+
+// Compare two model rows on one column. Numbers (size_bytes, mtime) can be
+// null - an unreadable file, a UNC stat timeout, a missing path - and a null
+// ALWAYS sorts last, in both directions: coercing it to 0 would rank a broken
+// row as the smallest/oldest file rather than as genuinely unknown.
+function _compareModelRows(a, b, col, dir) {
+  const av = col.get(a);
+  const bv = col.get(b);
+  if (col.kind === "number") {
+    const aNull = av == null;
+    const bNull = bv == null;
+    if (aNull && bNull) return 0;
+    if (aNull) return 1;
+    if (bNull) return -1;
+    return dir === "asc" ? av - bv : bv - av;
+  }
+  const as = String(av).toLowerCase();
+  const bs = String(bv).toLowerCase();
+  if (as < bs) return dir === "asc" ? -1 : 1;
+  if (as > bs) return dir === "asc" ? 1 : -1;
+  return 0;
+}
+
+// Sort a copy of `models` by `sortKey`/`sortDir` ("asc"/"desc"). An unknown or
+// non-sortable sortKey returns an unsorted copy rather than throwing, so a
+// stale localStorage value degrades to "no sort" instead of breaking the page.
+export function sortModels(models, sortKey, sortDir) {
+  const col = MODEL_COLUMNS.find((c) => c.key === sortKey && c.sortable);
+  if (!col) return models.slice();
+  return models.slice().sort((a, b) => _compareModelRows(a, b, col, sortDir));
+}
 
 export async function refreshModelsPage() {
   await refreshModels();
@@ -71,10 +135,40 @@ export async function refreshModelsPage() {
     return;
   }
 
+  models = sortModels(models, currentSortKey, currentSortDir);
+
   const table = el("table", "data-table");
   const thead = el("thead");
   const hr = el("tr");
-  for (const h of ["Name", "Role", "Source", "Size", ""]) hr.appendChild(el("th", "", h));
+  for (const col of MODEL_COLUMNS) {
+    const th = el("th", "", col.label);
+    if (col.sortable) {
+      th.classList.add("sortable");
+      th.tabIndex = 0;
+      th.setAttribute("role", "columnheader");
+      const active = col.key === currentSortKey;
+      th.setAttribute("aria-sort", active ? (currentSortDir === "asc" ? "ascending" : "descending") : "none");
+      if (active) {
+        th.appendChild(el("span", "sort-arrow", currentSortDir === "asc" ? "▲" : "▼"));
+      }
+      const activate = () => {
+        if (currentSortKey === col.key) {
+          currentSortDir = currentSortDir === "asc" ? "desc" : "asc";
+        } else {
+          currentSortKey = col.key;
+          currentSortDir = "asc";
+        }
+        localStorage.setItem("localm.modelsSortKey", currentSortKey);
+        localStorage.setItem("localm.modelsSortDir", currentSortDir);
+        refreshModelsPage();
+      };
+      th.onclick = activate;
+      th.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+      };
+    }
+    hr.appendChild(th);
+  }
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
@@ -105,6 +199,7 @@ export async function refreshModelsPage() {
     
     tr.appendChild(el("td", "mono", m.source || ""));
     tr.appendChild(el("td", "mono", fmtSize(m.size_bytes)));
+    tr.appendChild(el("td", "mono", fmtModelDate(m.mtime)));
 
     const actions = el("td");
     actions.style.textAlign = "right";
