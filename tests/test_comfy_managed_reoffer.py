@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Oracle for S5 BUG-REOFFER: the __func__ regression re-offers localm's own
-managed ComfyUI ONCE (design decisions 1 + 8).
+"""Oracle for the managed-ComfyUI re-offer: the __func__ regression re-offers
+localm's own managed ComfyUI ONCE.
 
 When T1's ``__func__`` detection fires AND no managed ComfyUI is installed AND
 localm has not already made this offer, localm ALSO surfaces a one-time offer to

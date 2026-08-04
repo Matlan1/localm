@@ -664,7 +664,7 @@ def _check_plugin_deps() -> None:
 
 
 def _check_managed_comfy() -> None:
-    """Discovery hint for the opt-in localm-managed ComfyUI (design decision 8).
+    """Discovery hint for the opt-in localm-managed ComfyUI.
 
     Purely informational: it installs nothing and never changes doctor's verdict.
     When no managed instance exists, nudge the user toward `localm comfy setup`;

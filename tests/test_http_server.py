@@ -83,7 +83,7 @@ GB = 1024 ** 3
 class TestUnloadEndpoint(unittest.TestCase):
     def setUp(self):
         self.engine = _make_mock_engine(loaded=True)
-        # H5: model unload is a MODELS_WRITE management route; open mode needs the
+        # Model unload is a MODELS_WRITE management route; open mode needs the
         # loopback shell token (the GUI carries it).
         _app = create_app(self.engine)
         self.client = TestClient(
@@ -208,7 +208,7 @@ class TestUnloadEndpoint(unittest.TestCase):
 class TestLoadEndpoint(unittest.TestCase):
     def setUp(self):
         self.engine = _make_mock_engine(loaded=False)
-        # H5: model load is a MODELS_WRITE management route; open mode needs the
+        # Model load is a MODELS_WRITE management route; open mode needs the
         # loopback shell token (the GUI carries it).
         _app = create_app(self.engine)
         self.client = TestClient(

@@ -13,11 +13,11 @@ sessions rather than in a single shot:
   2. a paraphrased contradiction across two sessions does not linger as two
      unresolved, permanently-coexisting facts;
   3. the store stays BOUNDED: prune() (real code) forgets decayed synthetic
-     clutter even on a zero-fact consolidation round (F8), archives it
-     recoverably (F4), and a user-typed fact seeded alongside it survives;
-  4. recall precision (F12): an off-topic query injects nothing, an on-topic
+     clutter even on a zero-fact consolidation round, archives it
+     recoverably, and a user-typed fact seeded alongside it survives;
+  4. recall precision: an off-topic query injects nothing, an on-topic
      paraphrase recalls with the semantic signal active;
-  5. per-session episodic capture (F13): one episode per session, watermarked so
+  5. per-session episodic capture: one episode per session, watermarked so
      a re-run with no new session adds zero;
   6. no '<think' substring ever reaches the store (C1 regression guard).
 

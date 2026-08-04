@@ -189,7 +189,7 @@ class TestRequireAuthLockoutGuard:
         monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
 
     def _client(self):
-        # H5: PATCH /v1/config is a management route; in open mode it needs the
+        # PATCH /v1/config is a management route; in open mode it needs the
         # loopback shell token. Seed it by default (tests that set their own key
         # override the header and hit protected-mode bearer auth instead).
         app = create_app(_make_engine())

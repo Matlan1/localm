@@ -556,7 +556,7 @@ class TestToolResultDuration:
 
 
 # ---------------------------------------------------------------------------
-#  Every tool_call gets a matching tool_result (F5)
+#  Every tool_call gets a matching tool_result
 # ---------------------------------------------------------------------------
 
 class TestToolResultAlwaysEmitted:

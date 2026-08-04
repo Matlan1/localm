@@ -62,7 +62,7 @@ def _index_html_with_shell_token(token: str) -> str:
     shell token) as a JS global so a loopback launch can still perform management
     when no API key is configured. The protected-mode API key is NOT injected
     here - the shell route sets it as an HttpOnly cookie instead, so it never
-    reaches page JS / localStorage (S2). An empty *token* injects nothing.
+    reaches page JS / localStorage. An empty *token* injects nothing.
 
     The token is embedded only in same-origin HTML served to a trusted loopback
     client and is a short-lived per-process secret, not the durable API key."""
@@ -284,7 +284,7 @@ def consume_pull_grant(app, spec: str, token: str) -> bool:
 
 
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
-    """Establish the S2 auth cookie on *response* for a loopback owner: mint an
+    """Establish the auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
     ``localm_session`` cookie to the SESSION ID (never the key, so it never touches
     page JS and rolling the key does not invalidate it). It carries SESSION_MAX_AGE
@@ -697,7 +697,7 @@ def attach_gui(
             return resp
         if key and loopback:
             # Protected mode on loopback: establish an HttpOnly session cookie so
-            # the key never touches page JS / localStorage (S2). Only MINT a new
+            # the key never touches page JS / localStorage. Only MINT a new
             # session when the browser has no valid one, so an ordinary reload does
             # not spawn a session each time - and, crucially, a browser whose
             # session is still valid after an owner-key ROLL stays signed in (the
@@ -712,7 +712,7 @@ def attach_gui(
             return resp
         if not key and loopback:
             # Open mode on loopback: seed the per-process shell token as a JS
-            # global so the loopback SPA can still manage (H5). app.js sends it
+            # global so the loopback SPA can still manage. app.js sends it
             # as a bearer HEADER (the open-mode gate is header-based); it is
             # never persisted.
             token = getattr(request.app.state, "shell_token", "") or ""
