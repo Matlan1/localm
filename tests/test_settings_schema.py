@@ -59,6 +59,51 @@ def test_schema_json_serializable_with_defaults():
     assert by_key["mode"]["options"] == ["privacy", "log", "full"]
 
 
+class TestShippedDefaultAnnotation:
+    """NEW-DEFAULT-VALUE-PLACEHOLDER: `default` is the CURRENT value (base=
+    load_config() in the real server route), which after a save is the user's
+    own override - so the GUI needs a SEPARATE, always-factory value to tell
+    "still shipped default" apart from "user set it to this". `shipped_default`
+    is that value: always from DEFAULT_CONFIG, regardless of what `values` the
+    caller passed."""
+
+    def test_shipped_default_matches_default_config_regardless_of_override(self):
+        overridden = dict(DEFAULT_CONFIG)
+        overridden["temperature"] = 1.7   # a real user override, unlike the default 0.8
+        js = ss.schema_json(values=overridden)
+        by_key = {f["key"]: f for f in js}
+        assert by_key["temperature"]["default"] == 1.7, \
+            "default still reflects the CURRENT (overridden) value"
+        assert by_key["temperature"]["shipped_default"] == DEFAULT_CONFIG["temperature"], \
+            "shipped_default must stay the factory value even when overridden"
+        assert by_key["temperature"]["default"] != by_key["temperature"]["shipped_default"]
+
+    def test_shipped_default_equals_default_on_a_fresh_install(self):
+        js = ss.schema_json()   # values=None -> base is DEFAULT_CONFIG itself
+        for f in js:
+            if "default" in f:
+                assert f.get("shipped_default") == f["default"], (
+                    f"{f['key']}: on a fresh install default and shipped_default "
+                    f"must agree (both come from DEFAULT_CONFIG)")
+
+    def test_shipped_default_omitted_for_secret_fields(self):
+        js = ss.schema_json()
+        for f in js:
+            if f.get("secret"):
+                assert "shipped_default" not in f, \
+                    f"{f['key']}: a secret must never carry any default, shipped or not"
+
+    def test_shipped_default_present_for_every_default_bearing_field(self):
+        """Every field that gets a `default` (i.e. every non-secret field whose
+        key is in DEFAULT_CONFIG) must also get a `shipped_default` - the GUI
+        cannot grey a field it has no factory value to compare against."""
+        js = ss.schema_json()
+        for f in js:
+            if "default" in f:
+                assert "shipped_default" in f, \
+                    f"{f['key']}: has 'default' but no 'shipped_default'"
+
+
 class TestMediaPerPluginAnnotation:
     """schema_json's media_per_plugin annotation: the GUI's Media section skips
     group="Media" fields in the flat form and renders per-plugin-mapped globals

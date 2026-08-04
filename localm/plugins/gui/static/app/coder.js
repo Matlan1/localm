@@ -523,9 +523,13 @@ export async function startCoderSession(opts = {}) {
       auto_approve: $("setup-auto").checked,
       dry_run: $("setup-dry").checked,
       mode: $("setup-mode").value,
-      max_turns: Number($("setup-max-turns").value) || 40,
       resume,
     };
+    // Blank = the server's own default (sessions.py), matching temperature two
+    // lines below - a hardcoded "|| 40" here duplicated that default instead
+    // of leaving it the single source of truth (NEW-DEFAULT-VALUE-PLACEHOLDER).
+    const maxTurns = $("setup-max-turns").value.trim();
+    if (maxTurns !== "") body.max_turns = Number(maxTurns);
     const model = $("setup-model").value;
     if (model) body.model = model;
     const temp = $("setup-temperature").value.trim();

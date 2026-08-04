@@ -149,7 +149,12 @@
 // actual reason (and, for a VRAM-overflow 503, its full "Options:" list)
 // instead of truncated raw JSON markup. A stale-cached client would keep
 // showing the old sliced-and-mangled error.
-const CACHE = "localm-shell-v93";
+// v94: index.html and pages/settings.js/style.css changed (Settings fields
+// still at their shipped default now render blank+placeholder or dimmed
+// instead of a solid value indistinguishable from something you typed;
+// setup-max-turns lost its hardcoded "40") - a stale-cached client would keep
+// every default looking already-customized.
+const CACHE = "localm-shell-v94";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

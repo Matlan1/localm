@@ -1218,6 +1218,16 @@ def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list
             d["media_per_plugin"] = f.key in media_mapped
         if not f.secret and f.key in base:
             d["default"] = base[f.key]
+        # The SHIPPED default, independent of `base` above: `base` is the CURRENT
+        # value (load_config(), which after a save is the user's own override), so
+        # `default` alone cannot tell the GUI "is this still factory-fresh" from
+        # "the user set it to this exact number". Always sourced from
+        # DEFAULT_CONFIG regardless of *values*, so the GUI can grey a field that
+        # still matches what shipped rather than rendering every value - default
+        # or override alike - as solid, indistinguishable text (NEW-DEFAULT-VALUE-
+        # PLACEHOLDER).
+        if not f.secret and f.key in DEFAULT_CONFIG:
+            d["shipped_default"] = DEFAULT_CONFIG[f.key]
         if f.key == "binary_dir":
             try:
                 from localm.config import find_binary_dir

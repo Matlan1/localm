@@ -1123,9 +1123,12 @@ pre:hover .canvas-btn { opacity: 1; }
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin-top: 10px;
 }
 .settings-fields .sub { margin: 0 0 10px; font-size: 12px; }
-/* An auto-detected path shown in a blank "Blank = auto-detect" field: greyed so
-   it reads as "this is what would be used", not a value you typed. */
-input.auto-detected { color: var(--text-dim); font-style: italic; }
+/* An auto-detected path shown in a blank "Blank = auto-detect" field, OR a
+   SELECT still sitting on its unmodified shipped default (NEW-DEFAULT-VALUE-
+   PLACEHOLDER - a dropdown has no blank state to hide the value behind the
+   way a number/text box does, so it gets this same grey cue instead): greyed
+   so it reads as "this is what would be used", not a value you typed/chose. */
+input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: italic; }
 
 /* Media section: three per-plugin boxes (image/music/video) side by side on a
    wide screen, stacking on narrow/mobile - each keeps its own Save so the three
