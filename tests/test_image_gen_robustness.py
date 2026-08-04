@@ -186,3 +186,89 @@ class TestSidecarContent:
         assert sidecar["seed"] == 1234
         assert sidecar["prompt"] == "a fox"
         assert sidecar["guidance"] == 3.0
+
+
+class TestSafeLoraName:
+    """is_safe_lora_name is the ONE shared predicate every entry point that can
+    supply lora_name relies on (the HTTP image route's plug.py, this module's
+    own _build_image_workflow, and the coder agent's generate_image tool,
+    which calls generate_image directly and has no confinement of its own -
+    see TestLoraNameEngineValidation below)."""
+
+    def test_accepts_a_plain_filename(self):
+        assert comfy.is_safe_lora_name("my_style.safetensors") is True
+
+    def test_rejects_empty(self):
+        assert comfy.is_safe_lora_name("") is False
+
+    def test_rejects_forward_slash_traversal(self):
+        assert comfy.is_safe_lora_name("../secrets.safetensors") is False
+
+    def test_rejects_backslash_traversal(self):
+        assert comfy.is_safe_lora_name("..\\secrets.safetensors") is False
+
+    def test_rejects_nested_path(self):
+        assert comfy.is_safe_lora_name("sub/dir.safetensors") is False
+
+    def test_rejects_bare_dot_components(self):
+        assert comfy.is_safe_lora_name(".") is False
+        assert comfy.is_safe_lora_name("..") is False
+
+    def test_rejects_drive_relative_no_separator(self):
+        # "C:evil" carries no path separator at all - ntpath still treats it
+        # as drive-qualified (drive-relative), same shape confined_under's
+        # per-component check exists to catch.
+        assert comfy.is_safe_lora_name("C:evil.safetensors") is False
+
+    def test_rejects_nul_byte(self):
+        assert comfy.is_safe_lora_name("evil\x00.safetensors") is False
+
+    def test_rejects_implausibly_long_name(self):
+        assert comfy.is_safe_lora_name("a" * 256 + ".safetensors") is False
+
+    def test_accepts_name_at_the_length_boundary(self):
+        name = "a" * (comfy._MAX_LORA_NAME_LEN - len(".safetensors")) + ".safetensors"
+        assert len(name) == comfy._MAX_LORA_NAME_LEN
+        assert comfy.is_safe_lora_name(name) is True
+
+
+class TestLoraNameEngineValidation:
+    """The coder agent's generate_image tool (localm/plugins/coder/tools/media.py)
+    calls localm.image_gen.comfy.generate_image DIRECTLY - it never goes
+    through the HTTP image route's plug.py._validate_lora_name, which only
+    guards browser-originated requests. So the check must also live INSIDE
+    _build_image_workflow itself (is_safe_lora_name, asserted directly above)
+    as the backstop no caller can bypass. This drives the real generate_image
+    end to end (only urlopen is stubbed) to prove that backstop actually
+    fires - and, critically, fires BEFORE the submit-time network calls, not
+    after ComfyUI has already been asked to run the graph."""
+
+    def test_unsafe_lora_name_rejected_before_submit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(comfy, "workflow_path",
+                            lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+        out = tmp_path / "art.png"
+        submitted = []
+
+        def fake_urlopen(req, timeout=None):
+            url = req if isinstance(req, str) else req.full_url
+            if "/system_stats" in url:
+                m = MagicMock()
+                m.read.return_value = b"{}"
+                m.__enter__ = lambda s=m: s
+                m.__exit__ = MagicMock(return_value=False)
+                return m
+            submitted.append(url)
+            raise AssertionError(f"must not reach the network for {url} - "
+                                 "the invalid lora_name should have been "
+                                 "rejected before any submit-time call")
+
+        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             patch.object(comfy, "_localm_unload"):
+            ok, msg = comfy.generate_image(
+                "a fox", out, seed=1234,
+                lora_name="../../secrets.safetensors")
+
+        assert ok is False
+        assert "Invalid LoRA name" in msg
+        assert not submitted, f"reached the network anyway: {submitted}"
+        assert not out.exists()
