@@ -775,7 +775,7 @@ def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
     monkeypatch.setattr(ch, "_tracked_files", lambda: [clean])
     monkeypatch.setattr(ch, "_changelog_append_only", lambda: [])
     monkeypatch.setattr(ch, "_raw_accessor_violations", lambda t: [])
-    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     assert ch.main([]) == 0
 
 
@@ -1066,7 +1066,7 @@ def test_hygiene_main_warns_on_a_new_duplicate(tmp_path, monkeypatch, capsys):
     --strict) - a second detector wired into the same warning channel."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
-    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1097,7 +1097,7 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     (the knob escalates warnings, it does not invent them)."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
-    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1219,7 +1219,7 @@ def test_added_note_is_report_only_and_rides_along_with_a_warning(
     are theirs."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
-    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1255,7 +1255,7 @@ def test_added_note_does_not_inflate_the_strict_failure_count(
     that is, by design, never a failure."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
-    monkeypatch.setattr(ch, "_manifest_problems", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
