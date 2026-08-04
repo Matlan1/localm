@@ -1527,8 +1527,8 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             # like the corrupt-marker case above - report rather than drop it.
             pass
         trace = ""
+        tp = _trace_path_for_marker(d, marker)
         try:
-            tp = _trace_path_for_marker(d, marker)
             if tp.exists():
                 trace = tp.read_text(encoding="utf-8").strip()
         except Exception:
@@ -1542,6 +1542,17 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             # If the marker cannot be removed the next start may re-report this
             # same crash (a duplicate, not a lost one). Tolerable; do not abort the
             # report we are about to file over a failed unlink.
+            pass
+        # Delete the trace WITH its marker, now that its content (if any) has
+        # been folded into ctx below - otherwise it survives forever: nothing
+        # else ever removes a server-crash-trace.<instance_id>.txt, so run/
+        # accumulates one per instance that has EVER armed, permanently
+        # (NEW-CRASH-NOTICE-USELESS D; 4 already present on the maintainer's
+        # box, all 0 bytes). Best-effort, same as the marker unlink above -
+        # a failure here must not block or duplicate the report.
+        try:
+            tp.unlink(missing_ok=True)
+        except Exception:
             pass
         ctx = {"prior_run": info}
         if trace:
