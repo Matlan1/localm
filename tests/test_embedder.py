@@ -1006,6 +1006,85 @@ def _stub_embedder(n_ctx=8):
     return e
 
 
+class TestGGUFEmbedderLoadStderrWrapping:
+    """The isolated child's native model-load calls (llama_load_model_from_file /
+    llama_init_from_model) must run inside debuglog.dedup_native_stderr(), not
+    with the child's raw inherited fd 2 left unmanaged - the exact gap #951's
+    embedder-load spew came from (create_tensor/load_tensors/sched_reserve/
+    graph_reserve landing raw, ungrouped, with no live view and no repeat
+    collapsing at all, unlike every load path in llamacpp/llama.py).
+
+    Mocked at the _api boundary rather than a real GGUF, mirroring
+    test_lazy_grammar.py's pattern for the equivalent llama.py decision - the
+    real load path itself is covered by the @real_gguf tests elsewhere in
+    this file."""
+
+    def _patch_native_calls(self, monkeypatch, events):
+        import localm.inference.backends.llamacpp._api as api_module
+
+        def _load(path, mp):
+            events.append("load")
+            return "model_ptr"
+
+        def _init(model, cp):
+            events.append("init")
+            return "ctx_ptr"
+
+        monkeypatch.setattr(api_module, "has_embeddings_api", lambda: True)
+        monkeypatch.setattr(api_module, "llama_backend_init", lambda: None)
+        monkeypatch.setattr(api_module, "llama_model_default_params",
+                            lambda: types.SimpleNamespace())
+        monkeypatch.setattr(api_module, "llama_load_model_from_file", _load)
+        monkeypatch.setattr(api_module, "llama_model_get_vocab", lambda model: "vocab")
+        monkeypatch.setattr(api_module, "llama_model_n_embd", lambda model: 384)
+        monkeypatch.setattr(api_module, "llama_model_n_ctx_train", lambda model: 512)
+        monkeypatch.setattr(api_module, "has_model_meta_api", lambda: False)
+        monkeypatch.setattr(api_module, "llama_context_default_params",
+                            lambda: types.SimpleNamespace())
+        monkeypatch.setattr(api_module, "llama_init_from_model", _init)
+        monkeypatch.setattr(api_module, "has_memory_api", lambda: False)
+        # close()/__del__ safety net: the fake pointers above are plain
+        # strings, not real ctypes handles, so the REAL native free functions
+        # must never see them - a GGUFEmbedder that outlives this test's
+        # monkeypatch teardown (garbage-collected later, calling __del__ with
+        # the real api restored) would otherwise pass "ctx_ptr"/"model_ptr"
+        # into the actual native free() and crash the interpreter. The test
+        # itself also closes explicitly (below) while these are still active,
+        # so this is a backstop, not the primary guard.
+        monkeypatch.setattr(api_module, "llama_free", lambda ctx: None)
+        monkeypatch.setattr(api_module, "llama_free_model", lambda model: None)
+        monkeypatch.setattr("localm.discover.apply_main_gpu", lambda *a, **k: None)
+        monkeypatch.setattr("localm.discover.apply_gpu_split", lambda *a, **k: None)
+
+    def test_load_and_init_run_inside_one_dedup_native_stderr_scope(self, monkeypatch):
+        import contextlib
+
+        events = []
+        self._patch_native_calls(monkeypatch, events)
+
+        @contextlib.contextmanager
+        def spy_dedup():
+            events.append("enter")
+            yield
+            events.append("exit")
+
+        monkeypatch.setattr(emb, "dedup_native_stderr", spy_dedup)
+
+        embedder = emb.GGUFEmbedder("<stub-path>", n_gpu_layers=0)
+        try:
+            # ONE contiguous scope covering BOTH native calls, not two
+            # separate entries and not left unwrapped - re-entering
+            # dedup_native_stderr per call would pay its background-thread
+            # cost twice for one load.
+            assert events == ["enter", "load", "init", "exit"], events
+        finally:
+            # Clear the fake pointers while llama_free/llama_free_model are
+            # still mocked (see _patch_native_calls) - a later __del__, after
+            # monkeypatch has reverted to the real native functions, must
+            # find nothing left to free.
+            embedder.close()
+
+
 class TestResolveEmbedCtx:
     """The embedding window auto-sizing decision (_resolve_embed_ctx), in
     isolation from the native load path: a model's own declared training
