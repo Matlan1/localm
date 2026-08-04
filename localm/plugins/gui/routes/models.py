@@ -644,6 +644,17 @@ def register(app: FastAPI, ctx) -> None:
     async def media_preflight(kind: str, req: MediaPreflightRequest):
         if kind not in ("image", "video", "music"):
             raise HTTPException(404, f"Unknown media kind: {kind}")
+        if kind == "image" and req.lora_name:
+            # Same lexical guard plug.py's _validate_lora_name applies to the real
+            # generate route - reused, not reimplemented, so a path-traversal/UNC
+            # shaped value is rejected here too rather than silently producing a
+            # check-workflow missing its LoraLoader node (see is_safe_lora_name's
+            # docstring: every entry point that can supply lora_name converges here).
+            from localm.image_gen.comfy import is_safe_lora_name
+            stripped = req.lora_name.strip()
+            if not is_safe_lora_name(stripped):
+                raise HTTPException(400, "Invalid LoRA name")
+            req.lora_name = stripped
         from localm.media.comfy_client import describe_missing_models
         from localm.media.managed_comfy import comfy_models_dest_dir, resolve_comfy_target
         from localm.model_manager.registry import resolve_comfy_model_source

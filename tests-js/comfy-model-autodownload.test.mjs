@@ -59,16 +59,49 @@ test("nothing missing: resolves true, no modal, no pull POST", async () => {
   assert.deepEqual(pulls, []);
 });
 
-test("missing WITHOUT a curated source: falls through, no modal", async () => {
+test("missing WITHOUT a curated source: no modal, but an honest toast+log message", async () => {
+  // Previously this fell through completely silent - the user learned nothing
+  // until the real generate call failed. checkModelsBeforeGenerate must still
+  // never block (no modal, no pull POST - the real preflight_models() gate
+  // stays authoritative), but it must now say something, generically, for ANY
+  // non-curated class_type (a LoRA is the motivating case, but this asserts a
+  // plain CheckpointLoaderSimple miss too, proving the message is not LoRA-only).
   const pulls = [];
   const missing = [{ class_type: "CheckpointLoaderSimple", input_name: "ckpt_name",
                      filename: "custom.safetensors", source: null, dest_dir: null }];
   const { window: win } = loadApp({ fetchImpl: makeFetch({ missing, pulls }) });
   await tick();
-  const proceed = await win.checkModelsBeforeGenerate("image", null);
+  const log = win.document.createElement("div");
+  const proceed = await win.checkModelsBeforeGenerate("image", log);
   assert.equal(proceed, true);
   assert.notEqual(win.document.querySelector("#modal").style.display, "flex");
   assert.deepEqual(pulls, []);
+
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes("custom.safetensors"), "toast names the missing file");
+  assert.ok(toastEl.textContent.includes("CheckpointLoaderSimple.ckpt_name"),
+    "toast names the class_type/input_name generically, not LoRA-specific wording");
+  assert.ok(toastEl.textContent.toLowerCase().includes("no automatic download"),
+    "toast is honest that it cannot auto-fetch this file");
+  assert.equal(toastEl.className, "show error", "surfaced with error-level visual weight");
+  assert.ok(log.textContent.includes("custom.safetensors"), "the persistent log also gets the line");
+});
+
+test("missing WITHOUT a curated source: a LoRA miss gets the same honest message", async () => {
+  // The generic path exercised with the motivating case: a LoraLoader's
+  // lora_name slot behaves identically to any other non-curated class_type.
+  const pulls = [];
+  const missing = [{ class_type: "LoraLoader", input_name: "lora_name",
+                     filename: "my_style.safetensors", source: null, dest_dir: null }];
+  const { window: win } = loadApp({ fetchImpl: makeFetch({ missing, pulls }) });
+  await tick();
+  const proceed = await win.checkModelsBeforeGenerate("image", null, { lora_name: "my_style.safetensors" });
+  assert.equal(proceed, true);
+  assert.notEqual(win.document.querySelector("#modal").style.display, "flex");
+  assert.deepEqual(pulls, []);
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes("my_style.safetensors"));
+  assert.ok(toastEl.textContent.includes("LoraLoader.lora_name"));
 });
 
 test("missing WITH a curated source: shows repo/file/size, offers Download", async () => {

@@ -609,15 +609,32 @@ function _offerModelDownload(missingModel, log) {
   });
 }
 
+/** Report ONE missing model that has NO curated download source: an honest,
+ *  distinct state instead of vanishing silently behind checkModelsBeforeGenerate's
+ *  curated-only filter. Generic over class_type/input_name - not LoRA-specific -
+ *  so the same message covers any future non-curated model type (a checkpoint or
+ *  VAE outside the pinned few also hits this, not just a LoRA). Never blocks:
+ *  the real generate call's own preflight_models() gate remains authoritative. */
+function _reportUncuratedMiss(missingModel, log) {
+  const { filename, class_type, input_name } = missingModel;
+  const msg = `'${filename}' is missing (needed by ${class_type}.${input_name}) - `
+    + "localm has no automatic download source for it. Add it to your ComfyUI "
+    + "installation's matching models folder, then try again.";
+  toast(msg, true);
+  if (log) {
+    log.style.display = "block";
+    log.textContent += msg + "\n";
+  }
+}
+
 /** Pre-generate model-existence check: calls the read-only preflight endpoint
- *  for *kind* ("image" | "video" | "music") and, for each missing model that
- *  has a curated download source, offers it via _offerModelDownload before
- *  the caller submits its real generate request. Always resolves true
- *  (proceed) - a missing model with NO curated source, or one the user chose
- *  not to download, falls through unchanged to the real generate call's own
- *  preflight_models() gate, which fails with today's exact existing message.
- *  Best-effort: any failure to reach the pre-check itself also resolves true,
- *  so this can never block generation on its own account. */
+ *  for *kind* ("image" | "video" | "music"). A missing model WITH a curated
+ *  download source is offered via _offerModelDownload; one WITHOUT gets an
+ *  honest _reportUncuratedMiss instead of disappearing - the user learns what's
+ *  missing and where to put it before submitting, not only from the real
+ *  generate call's later preflight_models() failure. Always resolves true
+ *  (proceed) - neither path blocks generation on its own account.
+ *  Best-effort: any failure to reach the pre-check itself also resolves true. */
 export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
   let data;
   try {
@@ -629,9 +646,10 @@ export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
   } catch (e) {
     return true;
   }
-  const curated = ((data && data.missing) || []).filter((m) => m.source);
-  for (const m of curated) {
-    await _offerModelDownload(m, log);
+  const missing = (data && data.missing) || [];
+  for (const m of missing) {
+    if (m.source) await _offerModelDownload(m, log);
+    else _reportUncuratedMiss(m, log);
   }
   return true;
 }
