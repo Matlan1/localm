@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// D2: search results show what a model IS - architecture family, MoE-ness,
-// parameter count - on top of D1/#990's type badge. All three are display-only
-// fields discover.py attaches to a classified row (see dev-notes/ADR-0004);
+// Search results show what a model IS - architecture family, MoE-ness,
+// parameter count - on top of #990's type badge. All three are display-only
+// fields discover.py attaches to a classified row (see dev-notes/ADR-0005);
 // these tests cover the rendering in discRepoRow, not the server-side fields
 // (that is tests/test_discover.py::TestArchitectureMoeParamCount). Same
 // harness/fetch-mock style as models-discover-type-scoped.test.mjs.
@@ -102,6 +102,31 @@ test("discover-arch-moe: fmtParamCount formats B/M/plain thresholds and empty in
   assert.equal(window.fmtParamCount(500), "500 params");
   assert.equal(window.fmtParamCount(0), "");
   assert.equal(window.fmtParamCount(null), "");
+});
+
+test("discover-arch-moe: a legend explains the 'likely' MoE badge WITHOUT relying on hover (touch has no hover)", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true, results: [
+    { id: "TheBloke/Mixtral-8x7B-v0.1-GGUF", downloads: 1, likes: 0, updated: "",
+      formats: ["gguf"], detected_type: "llm", architecture: "llama", moe: "likely" },
+  ] };
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload }) });
+  await window.discoverSearch();
+  const legend = window.document.querySelector("#disc-results .moe-legend");
+  assert.ok(legend, "a persistent (non-tooltip) legend renders");
+  assert.match(legend.textContent, /inferred from the model's name/i);
+});
+
+test("discover-arch-moe: no legend when nothing on screen needs it", async () => {
+  const payload = { query: "", vram: {}, hf_backend_available: true, results: [
+    { id: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", downloads: 1, likes: 0, updated: "",
+      formats: ["gguf"], detected_type: "llm", architecture: "qwen3moe", moe: "confirmed" },
+    { id: "org/no-moe-evidence", downloads: 1, likes: 0, updated: "",
+      formats: ["gguf"], detected_type: "llm", architecture: "llama", moe: null },
+  ] };
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ discoverPayload: payload }) });
+  await window.discoverSearch();
+  assert.equal(window.document.querySelector("#disc-results .moe-legend"), null,
+    "no results carry an inferred (not confirmed) MoE signal, so no legend clutters the page");
 });
 
 test("discover-arch-moe: these badges are purely additive - every result still renders regardless", async () => {

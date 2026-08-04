@@ -439,7 +439,7 @@ function discRepoRow(m, gpus) {
   if (m.detected_type) {
     head.appendChild(el("span", "type-badge type-" + m.detected_type, m.detected_type));
   }
-  // What the model actually IS (D2): architecture family, MoE-ness, param
+  // What the model actually IS: architecture family, MoE-ness, param
   // count - all DISPLAY ONLY, from discover.py's classified-row fields, never
   // gating which results show. Not colored into the type-badge palette (all 7
   // --cat-* hues are already spoken for by MODEL_TYPES) - a shared hue here
@@ -539,6 +539,14 @@ export async function discoverSearch() {
     if (!data.results.length) {
       box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
+    }
+    // A dashed "MoE?" pill's meaning must not depend on a hover-only tooltip
+    // (touch devices have no hover at all) - shown once, persistently, only
+    // when a result on screen actually carries that inferred-not-confirmed
+    // signal, so it never clutters a search with no MoE-named results.
+    if (data.results.some((m) => m.moe === "likely")) {
+      box.appendChild(el("div", "sub moe-legend",
+        "MoE? = inferred from the model's name, not confirmed by its own header"));
     }
     for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
   } catch (e) {

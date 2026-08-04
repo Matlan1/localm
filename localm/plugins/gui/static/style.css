@@ -1959,7 +1959,7 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .disc-repo .head .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .disc-repo .head .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
 .disc-repo .head .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
-/* what the model IS: architecture family + MoE-ness + param count (D2).
+/* what the model IS: architecture family + MoE-ness + param count.
    Deliberately monochrome/outlined, not colored into the .type-badge palette -
    every --cat-* hue is already spoken for by MODEL_TYPES, and reusing one here
    would misread as "this is the model's type" the moment both badges show. */
@@ -1979,6 +1979,7 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
    certain as a confirmed badge (see discover.py's _moe_signal). */
 .moe-badge.moe-likely { border: 1px dashed var(--border); }
 .param-count { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.moe-legend { margin: 2px 0 8px; }
 /* non-blocking "no HF runtime" hint under the toggles */
 .disc-hf-hint { border-left: 2px solid var(--yellow); padding-left: 8px; margin: 4px 0; color: var(--text-dim); }
 

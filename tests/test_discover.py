@@ -419,9 +419,9 @@ class TestGgufClassifyExpand:
 
 class TestArchitectureMoeParamCount:
     """architecture/moe/param_count: the display-only fields a classified search
-    result carries about WHAT the model is (D2, layered on D1/#990's
-    classify_hf_metadata). Real repo shapes, verified live against the HF API
-    while designing this (see dev-notes/ADR-0004): gguf.total tracks the
+    result carries about WHAT the model is, layered on #990's
+    classify_hf_metadata. Real repo shapes, verified live against the HF API
+    while designing this (see dev-notes/ADR-0005): gguf.total tracks the
     model's total parameter count (stable across quants of the same repo, not
     a byte size), and architecture-contains-"moe" is reliable but NOT
     exhaustive - TheBloke/Mixtral-8x7B-v0.1-GGUF (real MoE) reports
@@ -439,7 +439,7 @@ class TestArchitectureMoeParamCount:
         assert r["param_count"] == 30532122624
 
     def test_likely_moe_from_repo_name_when_architecture_does_not_say_so(self, monkeypatch):
-        """Live-verified counter-example (ADR-0004): this real Mixtral repo's
+        """Live-verified counter-example (ADR-0005): this real Mixtral repo's
         architecture reports 'llama', not 'mixtral'/anything containing 'moe' -
         an older conversion predating the dedicated arch tag. The name-pattern
         fallback must catch it, and must NOT claim it as confirmed."""
