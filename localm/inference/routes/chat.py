@@ -167,12 +167,23 @@ def register(app: FastAPI, ctx) -> None:
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar: {e}")
                 except RuntimeError as e:
-                    # Defense in depth: a crashed/faulted native worker surfaces
-                    # here as a bare RuntimeError (not InvalidGrammarError), which
-                    # would otherwise escape as an unhandled 500. The structural
-                    # check above should catch the confirmed crash shape before
-                    # this point; this is the safety net for whatever it does not.
-                    raise HTTPException(400, f"Invalid grammar: {e}")
+                    # A bare RuntimeError here (as opposed to InvalidGrammarError
+                    # above) means the isolated worker process crashed, timed
+                    # out, or returned something unexpected while checking the
+                    # grammar (see ModelRunner._simple_request) - the grammar
+                    # itself is not the problem. Labeling this "Invalid grammar"
+                    # told the caller to fix the wrong thing, and since it was
+                    # also a bare 400 with no visible body to most HTTP clients
+                    # (#964: an agent only ever saw "400 Client Error: Bad
+                    # Request", never this text), the real cause was invisible
+                    # twice over. Report it as the worker fault it is, matching
+                    # how /v1/embeddings reports the identical isolated-worker-
+                    # crash shape (503) below. The worker is already dead or
+                    # dying at this point (GgufBackend.loaded goes False), so
+                    # the model reloads cleanly on the next request.
+                    raise HTTPException(
+                        503, f"Grammar validation failed: the model worker "
+                        f"faulted ({e}). It will reload on the next request.")
 
             if req.stream:
                 # Ownership of the pin transfers to _pin_engine, which releases it
@@ -428,12 +439,15 @@ def register(app: FastAPI, ctx) -> None:
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar: {e}")
                 except RuntimeError as e:
-                    # Defense in depth: a crashed/faulted native worker surfaces
-                    # here as a bare RuntimeError (not InvalidGrammarError), which
-                    # would otherwise escape as an unhandled 500. The structural
-                    # check above should catch the confirmed crash shape before
-                    # this point; this is the safety net for whatever it does not.
-                    raise HTTPException(400, f"Invalid grammar: {e}")
+                    # Same fault-attribution fix as /v1/chat/completions above:
+                    # a bare RuntimeError here means the isolated worker
+                    # crashed/timed out/returned something unexpected, not that
+                    # the grammar is invalid. Report it as a worker fault (503,
+                    # matching /v1/embeddings' identical crash handling below),
+                    # not a caller error about their grammar.
+                    raise HTTPException(
+                        503, f"Grammar validation failed: the model worker "
+                        f"faulted ({e}). It will reload on the next request.")
 
             if req.stream:
                 streaming_handoff = True

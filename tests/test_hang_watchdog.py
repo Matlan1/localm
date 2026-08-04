@@ -144,6 +144,69 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
     assert "LOCALM HANG WATCHDOG" in text, text
 
 
+# --------------------------------------------------------------------------- #
+# GitHub #955/#950: loop_lag telemetry was not lag - it was time-since-last-
+# heartbeat-tick, which saws 0..1s on a perfectly healthy loop for no reason
+# other than where "now" falls in the heartbeat's own cycle. _loop_lag_seconds()
+# replaces the raw gap with a real scheduling-delay figure.
+# --------------------------------------------------------------------------- #
+
+def test_loop_lag_seconds_is_real_scheduling_delay_not_time_since_tick(monkeypatch):
+    """Deterministic formula check: ~0 at every point in a healthy cycle -
+    including right at the next tick boundary, the worst case for the raw
+    (unfixed) formula - and the real overshoot only when a tick was genuinely
+    late (the loop was actually blocked)."""
+    from localm.inference import http_server as hs
+
+    monkeypatch.setattr(hs, "_hb_monotonic", 100.0)
+
+    for now, why in (
+        (100.0, "just ticked"),
+        (100.0 + hs._HEARTBEAT_INTERVAL_S * 0.5, "mid-cycle"),
+        (100.0 + hs._HEARTBEAT_INTERVAL_S, "exactly at the next tick boundary"),
+    ):
+        monkeypatch.setattr(hs.time, "monotonic", lambda now=now: now)
+        assert hs._loop_lag_seconds() == 0.0, why
+
+    # A tick that really was late (the loop was blocked) reports the actual
+    # overshoot, not the inflated raw gap.
+    late_by = 4.2
+    monkeypatch.setattr(
+        hs.time, "monotonic",
+        lambda: 100.0 + hs._HEARTBEAT_INTERVAL_S + late_by)
+    assert hs._loop_lag_seconds() == pytest.approx(late_by)
+
+
+@pytest.mark.anyio
+async def test_loop_lag_seconds_stays_near_zero_across_a_real_heartbeat_cycle():
+    """End-to-end proof, driving the REAL heartbeat coroutine (not a manually
+    staled _hb_monotonic) across more than one full tick: on this healthy,
+    unblocked loop every sampled _loop_lag_seconds() must stay near zero. The
+    pre-fix formula would show up to ~1s of fake "lag" here purely from
+    sampling mid-cycle - this is the property #955/#950 asked to be verified
+    across a full cycle, not from a single sample."""
+    from localm.inference import http_server as hs
+
+    hb = asyncio.create_task(hs._hang_heartbeat_loop())
+    try:
+        await asyncio.sleep(0.01)   # let the new heartbeat task tick once first
+        samples = []
+        deadline = time.monotonic() + hs._HEARTBEAT_INTERVAL_S * 1.5
+        while time.monotonic() < deadline:
+            samples.append(hs._loop_lag_seconds())
+            await asyncio.sleep(0.05)
+        assert len(samples) > 10, "not enough samples to cover a full cycle"
+        assert max(samples) < 0.5, (
+            f"loop_lag sawtoothed on a healthy loop: max={max(samples):.3f}s "
+            f"(samples={[round(s, 3) for s in samples]})")
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except asyncio.CancelledError:
+            pass
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     import localm.config as cfg

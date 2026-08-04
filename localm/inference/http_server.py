@@ -113,11 +113,36 @@ _switch_cancel: Optional["threading.Event"] = None
 # {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
 
-# Hang watchdog: a monotonic heartbeat bumped ~1/s by _hang_heartbeat_loop (an
-# async task ON the loop) and read by the off-loop watchdog thread + the debug
-# request log. A growing (now - _hb_monotonic) means the single event loop has
-# stopped making progress, i.e. something is blocking it (the diagnosed hang).
+# Hang watchdog: a monotonic heartbeat bumped every _HEARTBEAT_INTERVAL_S by
+# _hang_heartbeat_loop (an async task ON the loop) and read by the off-loop
+# watchdog thread + the debug request log. A growing (now - _hb_monotonic)
+# means the single event loop has stopped making progress, i.e. something is
+# blocking it (the diagnosed hang) - the off-loop watchdog thread compares
+# this raw gap against its own multi-second threshold (hang_watchdog_
+# threshold(), 10s by default) and is unaffected by the note below.
+#
+# _loop_lag_seconds() (below) answers a DIFFERENT question and must be used
+# for anything reported to a human. Raw (now - _hb_monotonic) saws between 0
+# and ~_HEARTBEAT_INTERVAL_S on a perfectly healthy loop - that is just how
+# far into the current tick cycle "now" happens to land, not evidence of lag
+# (GitHub #955/#950: this raw value was logged as "loop_lag" on every debug
+# request, so a healthy server reported up to a full second of fake "lag" on
+# a sawtooth, sending the maintainer chasing ghosts). Subtracting the
+# interval turns it into a real scheduling-delay figure: ~0 when healthy,
+# and positive only when a tick itself was late, i.e. something actually
+# blocked the loop.
+_HEARTBEAT_INTERVAL_S = 1.0
 _hb_monotonic = time.monotonic()
+
+
+def _loop_lag_seconds() -> float:
+    """Real event-loop scheduling delay, in seconds - NOT time-since-last-
+    heartbeat-tick (see the comment above _hb_monotonic). ~0.0 on a healthy
+    loop; grows only when a heartbeat tick was itself delayed, meaning
+    something blocked the loop. This is what gets reported to a human (the
+    debug request log, /debug/stacks); the raw gap is for the watchdog's own
+    large-threshold hang detection only."""
+    return max(0.0, (time.monotonic() - _hb_monotonic) - _HEARTBEAT_INTERVAL_S)
 
 def _default_engine_factory(name: str) -> Engine:
     from localm.config import load_registry
@@ -1573,13 +1598,14 @@ async def _gpu_registry_heartbeat_loop() -> None:
 
 
 async def _hang_heartbeat_loop() -> None:
-    """Bump _hb_monotonic every ~1s so the off-loop watchdog thread can tell when
-    the single event loop has stopped making progress (a hang). The ONLY
-    steady-state cost is one wakeup per second."""
+    """Bump _hb_monotonic every _HEARTBEAT_INTERVAL_S so the off-loop watchdog
+    thread can tell when the single event loop has stopped making progress (a
+    hang), and so _loop_lag_seconds() can report a real scheduling-delay
+    figure. The ONLY steady-state cost is one wakeup per interval."""
     global _hb_monotonic
     while True:
         _hb_monotonic = time.monotonic()
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
 
 
 def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
@@ -2925,15 +2951,17 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         async def _log_requests(request, call_next):
             start = time.perf_counter()
             response = await call_next(request)
-            # loop_lag = how far behind the 1s heartbeat is right now; a large
-            # value means this request was served just after the loop was blocked,
-            # correlating a slow/frozen request with a preceding event-loop stall.
+            # loop_lag = real scheduling delay (_loop_lag_seconds, see the
+            # comment above _hb_monotonic) - ~0 on a healthy server, and only
+            # positive when a preceding event-loop stall pushed the last
+            # heartbeat tick late. This is NOT time-since-last-tick, which
+            # saws 0..1s even when nothing is wrong (#955/#950).
             _dbg.debug(
                 "%s %s -> %d (%.0f ms, loop_lag=%.2fs)",
                 request.method, request.url.path,
                 response.status_code,
                 (time.perf_counter() - start) * 1000,
-                time.monotonic() - _hb_monotonic,
+                _loop_lag_seconds(),
             )
             return response
 
@@ -2996,7 +3024,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         except Exception:
             executors = {}
         return {"pid": os.getpid(),
-                "loop_lag_s": round(time.monotonic() - _hb_monotonic, 2),
+                "loop_lag_s": round(_loop_lag_seconds(), 2),
                 "threads": threads, "tasks": tasks, "executors": executors}
 
     # CORS: localhost-only by default. A wildcard here would let ANY website
