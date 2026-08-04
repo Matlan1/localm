@@ -810,7 +810,7 @@ def stop_cmd(instance_id, stop_all, timeout):
             resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,
                                  timeout=5, verify=tls.requests_verify(url))
             if resp.status_code in (401, 403):
-                # The open-mode management gate (H5) refuses an unauthenticated
+                # The open-mode management gate refuses an unauthenticated
                 # POST from a bare local client with no shell/API-key credential -
                 # this is the DEFAULT case for a plain `localm run`/`gui`/`serve`
                 # with no LOCALM_API_KEY configured (the same gate `localm unload`

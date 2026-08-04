@@ -36,7 +36,7 @@ def test_cross_origin_patch_refused(client):
 
 def test_same_origin_patch_allowed(client):
     # same-origin (Origin host:port matches Host) passes the cross-origin guard;
-    # in open mode it must also carry the shell token (H5).
+    # in open mode it must also carry the shell token.
     token = client.app.state.shell_token
     r = client.patch("/v1/config", json={"n_ctx": 8192},
                      headers={"Origin": "http://testserver", "Host": "testserver",
@@ -173,7 +173,7 @@ class TestShellTokenMetadataGetOriginGate:
     def test_allowlisted_cors_origin_metadata_get_with_token_allowed(
             self, tmp_path, monkeypatch):
         # an explicitly configured cors_origins entry is trusted the same way
-        # the unsafe-method branch already trusts it (F2's counterpart for GET)
+        # the unsafe-method branch already trusts it
         import localm.config as cfg
         home = tmp_path / ".localm"
         home.mkdir(parents=True, exist_ok=True)
