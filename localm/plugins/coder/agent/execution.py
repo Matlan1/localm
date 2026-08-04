@@ -461,7 +461,7 @@ class _ExecutionMixin:
                 # No duration_s: the tool never ran, which is a different fact
                 # from "ran and took 0.0s" - the client renders nothing for an
                 # absent field and a real "0.0s" for a present zero, so the two
-                # must not collapse into the same value (F5).
+                # must not collapse into the same value.
                 self._emit("tool_result", tool=call.name, ok=False,
                            summary="blocked by network policy (net_mode=off)")
                 return result

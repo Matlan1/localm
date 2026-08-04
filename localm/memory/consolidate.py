@@ -62,7 +62,7 @@ UPDATE_MIN_CONF = 0.7       # below this, an UPDATE is downgraded to ADD (keep b
 # accept/reject instead; below it, it is ignored (a weak contradiction does not nag).
 SUPERSEDE_MIN_CONF = 0.7
 SYNTH_IMP_CAP = 0.85        # synth memories never reach user-confirmed importance
-# Semantic-match gate (F9): when the lexical ratio is below MATCH_THRESHOLD but
+# Semantic-match gate: when the lexical ratio is below MATCH_THRESHOLD but
 # an embedder is present, a candidate whose cosine to an existing record clears
 # this still goes to the ADD/UPDATE/DELETE decision, so a PARAPHRASED
 # contradiction ('lives in Berlin' vs 'moved to Munich') is resolved instead of
@@ -442,7 +442,7 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
         # When the LEXICAL matcher finds nothing close, ask the SEMANTIC matcher:
         # a paraphrased contradiction shares few tokens (low ratio) but is
         # cosine-near an existing fact, so it must reach the decide step rather
-        # than blind-ADD a second, conflicting record (F9). Only used when an
+        # than blind-ADD a second, conflicting record. Only used when an
         # embedder is present; falls back to the lexical-only behavior otherwise.
         semantic_hit = False
         if (matched is None or ratio < MATCH_THRESHOLD) and embed_fn is not None:

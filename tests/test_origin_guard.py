@@ -45,7 +45,7 @@ def test_same_origin_patch_allowed(client):
 
 
 def test_no_origin_open_mode_needs_shell_token(client):
-    # H5: a no-Origin client (CLI/SDK/curl) can no longer drive open-mode
+    # A no-Origin client (CLI/SDK/curl) can no longer drive open-mode
     # management - the gap this gate closes. Without the shell token -> 403;
     # with it -> 200.
     assert client.patch("/v1/config", json={"n_ctx": 8192}).status_code == 403
@@ -100,7 +100,7 @@ def test_inference_api_cross_origin_allowed(client):
 def test_configured_cors_origin_passes_cross_origin_but_still_needs_token(
         tmp_path, monkeypatch):
     # An allow-listed origin passes the cross-origin guard, but in open mode a
-    # state change still needs the shell token (F2): a forgeable Origin header is
+    # state change still needs the shell token: a forgeable Origin header is
     # not a management credential, so a configured external origin must use a key
     # (or the loopback shell token) to manage.
     import localm.config as cfg
@@ -114,7 +114,7 @@ def test_configured_cors_origin_passes_cross_origin_but_still_needs_token(
     save_config({"cors_origins": ["https://app.example"]})
     app = create_app(None)
     client = TestClient(app)
-    # NEGATIVE (F2): an allow-listed Origin alone no longer bypasses the gate.
+    # NEGATIVE: an allow-listed Origin alone no longer bypasses the gate.
     refused = client.patch("/v1/config", json={"n_ctx": 8192},
                            headers={"Origin": "https://app.example"})
     assert refused.status_code == 403

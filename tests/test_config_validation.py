@@ -505,7 +505,7 @@ class TestPatchConfig:
         monkeypatch.setattr(cfg, "HOME_DIR", home)
         monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
         monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
-        # H5: management routes need the loopback shell token in open mode; the
+        # Management routes need the loopback shell token in open mode; the
         # GUI carries it, so do these config-validation tests.
         app = create_app(None)
         return TestClient(

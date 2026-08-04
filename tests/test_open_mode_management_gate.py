@@ -1,4 +1,4 @@
-"""H5: open-mode management gate.
+"""Open-mode management gate.
 
 In open mode (no API key configured) the management endpoints used to run fully
 unauthenticated, so a no-Origin local client (curl / a script) could mint a key,

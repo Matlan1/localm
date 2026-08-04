@@ -114,7 +114,7 @@ class TestOwnerKey:
 class TestOwnerSessionRevocation:
     """`key recover` / `key clear` must sign out live browser sessions.
 
-    Owner (ADMIN) browser sessions are decoupled from the key value (S1) and are
+    Owner (ADMIN) browser sessions are decoupled from the key value and are
     exempt from the per-request keystore recheck, so they SURVIVE an owner-key roll
     by design - correct for the GUI's own roll, but the CLI recovery path exists to
     lock a compromised owner OUT, so a captured owner cookie must not outlive it.
