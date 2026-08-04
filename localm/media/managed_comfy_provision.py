@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -163,25 +164,58 @@ def _isolated_env() -> dict:
 
 def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = None,
          timeout: Optional[int] = None) -> tuple[bool, str]:
-    """Run *cmd*, stream its combined output to *on_progress*, return (ok, output).
-    A missing executable or a timeout is a clean (False, reason), never a raise -
-    the caller turns it into an honest ProvisionResult. Runs with ``_isolated_env()``
-    since every caller of this helper drives the user's or the managed venv."""
+    """Run *cmd*, streaming its combined output to *on_progress* AS EACH LINE ARRIVES
+    (not only after the whole command exits). This is the one shared helper behind
+    every git/pip/venv step in both provisioning pipelines and `comfy update`, so a
+    caller that could see nothing until a multi-minute `pip install` of a
+    hardware-matched torch wheel (or a full `git clone`) finished is exactly what
+    made a real setup read as "a couple of lines, then silence for minutes" (#953).
+
+    A missing executable or a timeout is still a clean (False, reason), never a
+    raise - the caller turns it into an honest ProvisionResult. Runs with
+    ``_isolated_env()`` since every caller of this helper drives the user's or the
+    managed venv.
+
+    Streams via a Popen + background reader thread (the same shape
+    ``JobManager.start_cli`` already uses one process-hop further out, in
+    plugins/gui/jobs.py) rather than ``subprocess.run(capture_output=True)``, which
+    buffers the whole child output and only hands it over once the process exits.
+    The reader thread only does line I/O and calls the best-effort progress sink
+    (``_emit``, which never raises); the timeout is still enforced in THIS thread via
+    ``proc.wait(timeout=...)``, so a hung child is killed exactly as before."""
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
-        proc = subprocess.run(
-            cmd, cwd=(str(cwd) if cwd else None), capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace", env=_isolated_env())
+        proc = subprocess.Popen(
+            cmd, cwd=(str(cwd) if cwd else None), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+            bufsize=1, env=_isolated_env())
     except FileNotFoundError as e:
         return False, f"{cmd[0]} not found: {e}"
-    except subprocess.TimeoutExpired:
-        return False, f"timed out after {timeout}s"
     except OSError as e:
         return False, str(e)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    for line in out.splitlines():
-        _emit(on_progress, line)
-    return proc.returncode == 0, out
+
+    lines: list[str] = []
+
+    def _read_stdout() -> None:
+        try:
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip("\r\n")
+                lines.append(line)
+                _emit(on_progress, line)
+        except ValueError:
+            pass  # the pipe was closed under us (process killed on timeout)
+
+    reader = threading.Thread(target=_read_stdout, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        reader.join(timeout=5)
+        return False, f"timed out after {timeout}s"
+    reader.join(timeout=5)
+    return proc.returncode == 0, "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
