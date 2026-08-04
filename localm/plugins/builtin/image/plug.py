@@ -20,7 +20,6 @@ see backend.py. Ships DISABLED by default.
 from __future__ import annotations
 
 import json
-import ntpath
 import os
 import shutil
 import time
@@ -30,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
@@ -71,24 +71,15 @@ def _image_path(name: str) -> Path:
 
 
 def _validate_lora_name(raw: str) -> str:
-    """Lexical safety for a LoRA filename before it becomes a value in the
-    ComfyUI workflow graph (comfy.py injects a LoraLoader node with it - see
-    ``_build_image_workflow``). This is NOT a local filesystem path (ComfyUI
-    resolves it against its OWN models directory, not localm's), so there is
-    no base directory to confine it under the way ``pathsafe.confined_name``
-    does for real local paths.
-
-    The primary check is still ComfyUI's own live enumeration: preflight_models()
-    (called on the built workflow before submission) rejects any value that is
-    not an exact match to an installed LoRA file. That check is best-effort and
-    silently skipped when ComfyUI's /object_info cannot be reached (see its
-    docstring) - deferred to submit-time validation. This lexical check runs
-    regardless of ComfyUI's reachability, so a path-traversal/absolute/UNC
-    shaped value can never reach ComfyUI at all, mirroring the confinement
-    ``media/paths.py`` applies to the img2img input and move-dest paths."""
+    """HTTP-layer wrapper over ``comfy.is_safe_lora_name`` - a 400 up front,
+    before this route's VRAM-swap/background-job dance ever starts, rather
+    than a job that fails partway through with the same message. That shared
+    predicate (not a route-local copy) is also enforced again inside
+    ``_build_image_workflow`` itself, so the coder agent's ``generate_image``
+    tool and any other caller that reaches ``comfy.generate_image`` directly -
+    bypassing this route entirely - cannot skip the check either."""
     name = raw.strip()
-    if (not name or "/" in name or "\\" in name or name in (".", "..")
-            or ntpath.splitdrive(name)[0]):
+    if not is_safe_lora_name(name):
         raise HTTPException(400, "Invalid LoRA name")
     return name
 
