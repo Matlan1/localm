@@ -242,12 +242,22 @@ DEFAULT_CONFIG: dict = {
     "hf_first_token_timeout_s": 900.0,
     # Bounded wait for one HF embed() RPC. Separate from and more generous
     # than the dedicated GGUF-based embedder's own timeout: HFBackend.embed()
-    # loops over texts one at a time with no batching, /v1/embeddings passes
-    # its input through with no size cap, and an HF load never quantizes -
-    # so a large batch against a full-precision CPU-fallback model can
-    # plausibly run far longer than the dedicated small-model embedder ever
-    # needs to.
+    # loops over texts one at a time with no batching, and an HF load never
+    # quantizes - so a large batch against a full-precision CPU-fallback
+    # model can plausibly run far longer than the dedicated small-model
+    # embedder ever needs to. hf_embed_max_texts/hf_embed_max_chars below
+    # reject an oversized request outright; this timeout bounds whatever is
+    # allowed through.
     "hf_embed_timeout_s": 600.0,
+    # Per-request caps on an HF-backed /v1/embeddings request, enforced by
+    # HFBackend.embed() before a batch ever reaches the isolated worker.
+    # Two independent axes: many texts means many one-at-a-time forward
+    # passes, while a huge individual or aggregate text can be slow to even
+    # tokenize (the sentence-transformer `.encode()` path truncates nothing
+    # at all). Not applicable to GGUF (can_embed is a fixed False there) or
+    # the dedicated on-device embedder (a separate, purpose-built path).
+    "hf_embed_max_texts": 256,
+    "hf_embed_max_chars": 200_000,
     # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
     # explicit selection (device 0). A stale index falls back to device 0 with
     # a logged warning, not a wrong/out-of-range GPU (see

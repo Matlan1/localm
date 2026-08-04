@@ -26,6 +26,8 @@ from localm.console import console
 from localm.debuglog import logger
 
 from ._hf_runner import (
+    EMBED_MAX_CHARS_DEFAULT,
+    EMBED_MAX_TEXTS_DEFAULT,
     EMBED_TIMEOUT_DEFAULT,
     FIRST_TOKEN_TIMEOUT_DEFAULT,
     LOAD_TIMEOUT_DEFAULT,
@@ -35,6 +37,7 @@ from ._hf_runner import (
 from .base import (
     IMAGE_UNSUPPORTED_MESSAGE,
     BaseBackend,
+    EmbedBatchTooLargeError,
     UnsupportedInputError,
     messages_contain_image,
 )
@@ -304,6 +307,35 @@ class HFBackend(BaseBackend):
                            "(%r); using the default %.0fs", raw, EMBED_TIMEOUT_DEFAULT)
             return EMBED_TIMEOUT_DEFAULT
 
+    @staticmethod
+    def _embed_max_texts() -> int:
+        """Max texts accepted in one embed() call, from config
+        (``hf_embed_max_texts``) or the built-in default - see
+        ``_hf_runner.EMBED_MAX_TEXTS_DEFAULT`` for why this exists."""
+        from localm.config import load_config
+        raw = load_config().get("hf_embed_max_texts")
+        try:
+            return int(raw or EMBED_MAX_TEXTS_DEFAULT)
+        except (TypeError, ValueError):
+            logger.warning("hf_embed_max_texts is set but not a valid number "
+                           "(%r); using the default %d", raw, EMBED_MAX_TEXTS_DEFAULT)
+            return EMBED_MAX_TEXTS_DEFAULT
+
+    @staticmethod
+    def _embed_max_chars() -> int:
+        """Max total characters, summed across every text, accepted in one
+        embed() call, from config (``hf_embed_max_chars``) or the built-in
+        default - see ``_hf_runner.EMBED_MAX_CHARS_DEFAULT`` for why this
+        exists."""
+        from localm.config import load_config
+        raw = load_config().get("hf_embed_max_chars")
+        try:
+            return int(raw or EMBED_MAX_CHARS_DEFAULT)
+        except (TypeError, ValueError):
+            logger.warning("hf_embed_max_chars is set but not a valid number "
+                           "(%r); using the default %d", raw, EMBED_MAX_CHARS_DEFAULT)
+            return EMBED_MAX_CHARS_DEFAULT
+
     def unload(self) -> None:
         # Ask the isolated worker to close cleanly, killing it if it does not
         # exit promptly. Safe to call when the worker already crashed or was
@@ -366,6 +398,24 @@ class HFBackend(BaseBackend):
         """
         if self._runner is None or not self.loaded:
             raise RuntimeError("Model not loaded - call load() first")
+        # Checked HERE, before the batch ever reaches self._runner - i.e.
+        # before it crosses into the isolated worker process at all, so a
+        # rejected request costs nothing beyond this check. This is the only
+        # caller of HFRunner.embed()/HFWorker.embed() in production, so one
+        # enforcement point is complete; no duplicate check is needed on the
+        # other side of the IPC boundary.
+        max_texts = self._embed_max_texts()
+        if len(texts) > max_texts:
+            raise EmbedBatchTooLargeError(
+                f"Too many texts in one /v1/embeddings request: {len(texts)} "
+                f"(max {max_texts}). Split the batch across multiple requests.")
+        max_chars = self._embed_max_chars()
+        total_chars = sum(len(t) for t in texts)
+        if total_chars > max_chars:
+            raise EmbedBatchTooLargeError(
+                f"/v1/embeddings request too large: {total_chars} characters "
+                f"across {len(texts)} texts (max {max_chars}). Split the "
+                f"batch across multiple requests.")
         return self._runner.embed(texts, timeout=self._embed_timeout_seconds())
 
     # ------------------------------------------------------------------ #
