@@ -18,6 +18,7 @@ def _mock_non_streaming_response(content: str, usage: dict, reasoning: str = Non
     if reasoning is not None:
         message["reasoning_content"] = reasoning
     resp = MagicMock()
+    resp.status_code = 200
     resp.raise_for_status = MagicMock()
     resp.json.return_value = {
         "choices": [{"message": message}],
@@ -164,6 +165,7 @@ class TestHTTPBackendChatStream(unittest.TestCase):
         })
 
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.raise_for_status = MagicMock()
@@ -207,6 +209,7 @@ class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
         chunks = [{"choices": [{"delta": d, "finish_reason": None}]} for d in delta_dicts]
         chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.raise_for_status = MagicMock()
