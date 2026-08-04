@@ -404,8 +404,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             return
 
     from localm.config import PortInUseError, load_registry, pick_port
-    from localm.model_manager import (get_model_info, is_auto_chat_eligible,
-                                      sync_models_dir)
+    from localm.model_manager import (get_model_info, get_model_mmproj,
+                                      is_auto_chat_eligible, sync_models_dir)
 
     # Pick up models added to (or gone missing from) the models folder since last run.
     _sync = sync_models_dir()
@@ -514,11 +514,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         if m_info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = m_info
+        # VIS-1: an explicit --mmproj always wins; otherwise fall back to the
+        # model's own recorded/sibling projector (get_model_mmproj), or the
+        # common case - a pulled vision GGUF, no --mmproj flag given -
+        # silently loses image support on every load AND every switch this
+        # factory serves (#957).
+        mmproj_path = mmproj or get_model_mmproj(name, allow_direct_path=allow_direct_path)
         return Engine(
             str(m_path),
             n_ctx=ctx,
             n_gpu_layers=gpu_layers,
-            mmproj_path=mmproj,
+            mmproj_path=mmproj_path,
             device=device,
             display_name=name if name in load_registry() else m_hint,
         )
