@@ -114,28 +114,35 @@ def test_gguf_count_messages_tokens_uses_real_tokenizer_not_heuristic(gguf_backe
     a stub), so a regression of the exact bug fails here even though it would
     still pass every mocked unit test.
 
-    count_tokens is a SEPARATE RPC unaffected by the bug (it always passed a
-    plain str) - an exact tokenizer count of the raw content with no chat
-    template applied. count_messages_tokens applies the model's own chat
-    template FIRST (role/turn markers, BOS, etc.), so a REAL tokenizer call
-    must return AT LEAST as many tokens as the raw content alone - the
-    heuristic knows nothing about the template and would not reflect it."""
+    THE PRECISE DISCRIMINATOR (verified live against the real degrade path,
+    not assumed from the code alone): when count_messages_tokens' own RPC
+    fails, GgufBackend.count_messages_tokens falls to
+    ``super().count_messages_tokens(messages)`` (BaseBackend) - but that base
+    method calls ``self.count_tokens(text)``, which polymorphically resolves
+    to GgufBackend's OWN count_tokens override, a SEPARATE RPC unaffected by
+    this bug (it always passed a plain str). So the degrade is NOT the naive
+    chars/4 heuristic as it might appear from gguf.py alone - it is a REAL
+    exact tokenizer count of the raw, UNTEMPLATED content, which is why a
+    weaker ``>=`` comparison against count_tokens() would not have caught
+    this bug (both sides evaluate to the exact same RPC result). The chat
+    template adds real role/turn markup (e.g. SmolLM2's
+    ``<|im_start|>user\\n...<|im_end|>\\n``) on top of the raw content, so a
+    correctly-applied template must add tokens - the comparison has to be
+    STRICT."""
     text = "The quick brown fox jumps over the lazy dog."
     messages = [{"role": "user", "content": text}]
 
     raw_tokens = gguf_backend.count_tokens(text)
     templated_tokens = gguf_backend.count_messages_tokens(messages)
-    heuristic_tokens = max(1, len(text) // 4)
 
     assert raw_tokens > 0
-    assert templated_tokens >= raw_tokens, (
-        f"count_messages_tokens returned {templated_tokens}, fewer than the "
-        f"raw content's own {raw_tokens} tokens - the chat template was not "
-        "applied by a real tokenizer call (see #956)")
-    assert templated_tokens != heuristic_tokens, (
-        f"count_messages_tokens returned exactly the chars/4 heuristic "
-        f"({heuristic_tokens}) instead of a real tokenizer count - the "
-        "worker RPC may be silently failing again (see #956)")
+    assert templated_tokens > raw_tokens, (
+        f"count_messages_tokens returned {templated_tokens}, not more than "
+        f"the raw content's own {raw_tokens} tokens - the chat template was "
+        "not applied by a real tokenizer call. This is the exact shape of "
+        "the #956 regression: the RPC failed and silently fell back to a "
+        "real count of the UNTEMPLATED text (which equals raw_tokens "
+        "exactly), not a documented heuristic - see the docstring above.")
 
 
 def test_gguf_grammar_request_never_breaks_chat(gguf_backend):
