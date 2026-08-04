@@ -76,6 +76,43 @@ class TestHTTPBackendChat(unittest.TestCase):
         self.assertEqual(backend.last_usage["total_tokens"], 3)
 
 
+class TestHTTPBackendSetModel(unittest.TestCase):
+    """A coder session's backend was pinned at construction forever - every
+    chat()/chat_stream() call sends the ORIGINAL model name (self._model in
+    _body()) with no way to repoint it, so a later model switch elsewhere in
+    the app never reached an already-running session."""
+
+    def test_model_id_reflects_the_construction_time_model(self):
+        backend = _make_backend()
+        self.assertEqual(backend.model_id, "test-model")
+
+    def test_set_model_changes_model_id(self):
+        backend = _make_backend()
+        backend.set_model("other-model")
+        self.assertEqual(backend.model_id, "other-model")
+
+    @patch("requests.post")
+    def test_set_model_changes_the_next_request_body(self, mock_post):
+        """The whole point: set_model() must actually change what is SENT, not
+        just what model_id reports back."""
+        mock_post.return_value = _mock_non_streaming_response(
+            "hi", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+        backend = _make_backend()
+        backend.set_model("other-model")
+        backend.chat([{"role": "user", "content": "x"}])
+        sent_body = mock_post.call_args.kwargs["json"]
+        self.assertEqual(sent_body["model"], "other-model")
+
+    def test_set_model_does_not_rebuild_the_backend(self):
+        """Repointing must be in-place mutation, not a new object - a caller
+        holding a reference (the Agent) must see the change without being
+        reconstructed, which would lose conversation history."""
+        backend = _make_backend()
+        before = id(backend)
+        backend.set_model("other-model")
+        self.assertEqual(id(backend), before)
+
+
 class TestHTTPBackendChatReasoning(unittest.TestCase):
     """AUD-HIGH-17-3: chat() must capture the server's H4 `reasoning_content`
     field into last_reasoning WITHOUT mixing it into the returned text - the

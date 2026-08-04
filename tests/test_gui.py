@@ -1553,6 +1553,88 @@ class TestSessionExtras:
                 client.delete(f"/api/coder/sessions/{r.json()['id']}")
         assert switched == ["model-b"]
 
+    def test_set_model_repoints_backend_and_info(self, coder_app, tmp_path):
+        """The bug this closes: a session's model was pinned forever at
+        creation - the backend kept sending the ORIGINAL name on every request
+        no matter what the user later switched to elsewhere. set_model must
+        change both what info() reports and what the backend actually sends."""
+        app, switched = coder_app
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "model-b"})
+                assert r.status_code == 200
+                assert r.json()["model"] == "model-b"
+                # GET /sessions must see the repoint too, not just this call's
+                # own response - info() must not be able to drift again.
+                listed = client.get("/api/coder/sessions").json()["sessions"]
+                assert listed[0]["model"] == "model-b"
+                sess = app.state.coder_sessions.get(sid)
+                assert sess.agent.backend.model_id == "model-b"
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert switched == ["model-b"]
+
+    def test_set_model_rejects_unknown_model_404(self, coder_app, tmp_path):
+        app, switched = coder_app
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "ghost"})
+                assert r.status_code == 404
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert switched == []          # a rejected switch never touches the engine
+
+    def test_set_model_needs_owner_for_a_restricted_caller(self, coder_app, tmp_path,
+                                                            monkeypatch):
+        """A per-session model switch repoints the ONE shared engine for
+        EVERYONE - a scoped/restricted key must not trigger it, same rule as
+        create_session's own optional model switch (plug.py:201-207)."""
+        app, switched = coder_app
+        # The coder plugin is loaded under a synthetic sys.modules name, not
+        # localm.plugins.builtin.coder.plug (PluginManager._import_module) -
+        # patch THAT module object or the running route never sees it.
+        import sys
+        plug_mod = sys.modules["_localm_plugin_coder"]
+        monkeypatch.setattr(plug_mod, "_principal_from_request",
+                            lambda request: (False, "scoped-principal"))
+        monkeypatch.setattr("localm.inference.http_server.caller_scopes",
+                            lambda request: set())
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "model-b"})
+        assert r.status_code == 403
+        assert switched == []          # the shared engine was never touched
+
+    def test_set_model_rejects_mid_task(self, coder_app, tmp_path):
+        """Repointing a session while it is mid-turn would answer that turn
+        with a model that changed under it - the same 'or the agent is
+        mid-task' guard undo()/compact() already use."""
+        app, switched = coder_app
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                app.state.coder_sessions.get(sid).busy = True
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "model-b"})
+                assert r.status_code == 409
+                app.state.coder_sessions.get(sid).busy = False
+                client.delete(f"/api/coder/sessions/{sid}")
+        assert switched == []          # rejected before the engine was touched
+
+    def test_set_model_unknown_session_404(self, coder_app):
+        app, _ = coder_app
+        with TestClient(app) as client:
+            r = client.post("/api/coder/sessions/zzz/model", json={"model": "x"})
+        assert r.status_code == 404
+
     def test_replay_rebuilds_history(self, coder_app, tmp_path):
         app, _ = coder_app
         with TestClient(app) as client:

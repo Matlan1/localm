@@ -357,6 +357,33 @@ class CoderSession:
                 return False
         return self.agent.compact()
 
+    def set_model(self, model: str) -> bool:
+        """Repoint this session's backend at a different model, in place -
+        conversation history, tools and agent state are untouched (no new
+        Agent/backend is built). Without this, a session's model is pinned at
+        creation forever: the backend keeps sending the ORIGINAL model name on
+        every request (see HTTPBackend._body()), so a later model switch
+        elsewhere in the app never reaches an already-running session, and the
+        session's own next request can reload that stale model - dragging it
+        back into VRAM even after the user deliberately switched away from it.
+
+        False when the agent is mid-task (same "do not repoint under a running
+        turn" as undo()/compact()'s busy guard - a turn answered by a model
+        that changed under it would be a torn response) or the backend does
+        not support being repointed (only HTTPBackend does today; a future
+        backend type without set_model degrades to "not supported" rather than
+        an AttributeError, matching the getattr(backend, "model_id", "") tolerance
+        already used in __init__)."""
+        with self._lock:
+            if self.busy:
+                return False
+        set_model_fn = getattr(self.agent.backend, "set_model", None)
+        if set_model_fn is None:
+            return False
+        set_model_fn(model)
+        self.model = model          # keep info() truthful - see its docstring
+        return True
+
     def audit_log_path(self) -> Optional[Path]:
         """Path of the JSONL audit log (log/full modes), or None in privacy mode."""
         return getattr(self.agent._audit, "path", None)
@@ -430,7 +457,11 @@ class CoderSession:
         return True
 
     def info(self) -> dict:
-        """Summary dict for the session list endpoint."""
+        """Summary dict for the session list endpoint.
+
+        "model" is whatever set_model() last set (or the creation-time model,
+        if it was never called) - always the name this session's NEXT request
+        actually uses, not a snapshot that can go stale (see set_model())."""
         return {
             "id": self.id,
             "cwd": str(self.cwd),
