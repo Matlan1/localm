@@ -100,6 +100,50 @@ class TestPreflightRoute:
         assert entry["source"]["size_bytes"] == 12_708_281_504
         assert entry["dest_dir"] == str(Path(str(tmp_path / "external-comfy")) / "models" / "unet")
 
+    @pytest.mark.parametrize("bad_name", [
+        "../secrets.safetensors", "..\\secrets.safetensors",
+        "sub/dir.safetensors", "sub\\dir.safetensors",
+        "C:evil.safetensors", "..",
+    ])
+    def test_lora_name_traversal_rejected(self, scoped_app, bad_name):
+        """Mirrors plug.py's identical test for the real /api/imagine route -
+        the preflight route reuses the same is_safe_lora_name() predicate (see
+        image_gen/comfy.py) rather than re-implementing the check, so a
+        traversal/absolute/UNC-shaped value must be rejected here too, before
+        it ever reaches _build_check_workflow's LoraLoader injection."""
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/media/image/preflight", json={"lora_name": bad_name})
+        assert r.status_code == 400
+
+    def test_lora_name_whitespace_is_trimmed_before_use(self, scoped_app, tmp_path):
+        """A safe lora_name with incidental leading/trailing whitespace must not
+        be rejected, and the TRIMMED value (not the raw one) is what reaches
+        _build_image_workflow. Asserts the exact kwarg _build_image_workflow is
+        called with directly (rather than checking describe_missing_models's
+        output) because _pick_variant's precision/quant-insensitive matching
+        tokenizes on any non-alphanumeric character - including whitespace - so
+        a padded and unpadded filename normalize to the SAME base and an
+        untrimmed value would still resolve as "not missing" even without the
+        strip. That made an earlier version of this test pass whether or not
+        stripping actually happened - this asserts the value itself instead."""
+        fake_wf = tmp_path / "wf.json"
+        fake_wf.write_text(json.dumps({}))
+        captured = {}
+
+        def fake_build(workflow, **kwargs):
+            captured.update(kwargs)
+            return True, "", None
+
+        from localm.media import comfy_client as cc
+        with patch.object(cc, "comfy_object_info", return_value=None), \
+             patch("localm.image_gen.comfy.workflow_path", return_value=fake_wf), \
+             patch("localm.image_gen.comfy._build_image_workflow", side_effect=fake_build):
+            with TestClient(scoped_app) as c:
+                r = c.post("/api/media/image/preflight",
+                           json={"lora_name": "  my_style.safetensors  "})
+        assert r.status_code == 200, r.text
+        assert captured.get("lora_name") == "my_style.safetensors"
+
     def test_reports_uncurated_missing_file_with_null_source(self, scoped_app, tmp_path):
         fake_info = {
             "CheckpointLoaderSimple": {

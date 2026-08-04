@@ -462,7 +462,8 @@ $("img-generate").onclick = async () => {
   log.textContent = "";
   $("img-result").replaceChildren();
   try {
-    await checkModelsBeforeGenerate("image", log, { model_overrides: modelOverrides.image });
+    await checkModelsBeforeGenerate("image", log,
+      { model_overrides: modelOverrides.image, lora_name: loraName || undefined });
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });
