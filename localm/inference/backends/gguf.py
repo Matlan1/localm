@@ -215,6 +215,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         from localm.inference.backends.llamacpp._runner import ModelRunner
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+        # load() resolves this before _check_vram; fall back for a direct
+        # _load_native() call (e.g. in tests) so the value is never None here.
+        # Resolved HERE, before the VRAM-display read below, so that read can
+        # be skipped for a CPU-only load (see there for why that matters).
+        gpu_layers = self.effective_gpu_layers
+        if gpu_layers is None:
+            gpu_layers = self._effective_gpu_layers()
+            self.effective_gpu_layers = gpu_layers
+
         # discover.list_gpus (not the raw torch _vram_levels() this line used to
         # call), so the before/after console line gets the SAME cross-process
         # correction and trust gate as every other VRAM display surface (see the
@@ -225,21 +234,29 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # wait_for_inflight=True is safe here for the same reason it already is a
         # few lines below for resolve_auto_split_ratios: this always runs off the
         # event loop (an executor/CLI thread), never the server's single loop.
+        #
+        # SKIPPED for a CPU-only load (gpu_layers == 0), mirroring _check_vram's
+        # own "CPU-only run, VRAM is irrelevant" a few lines up the call chain
+        # (load() calls _check_vram() before _load_native()). A GPU load always
+        # reaches here with torch already resident in this process - _check_vram
+        # -> _free_vram_bytes() already paid the GPU driver's one-time init cost,
+        # measured live at 0.000s for list_gpus() once that has run. A CPU-only
+        # load never touches VRAM anywhere else in the preflight, so without this
+        # guard it would be the FIRST VRAM touch of the process and pay the
+        # isolated-probe cold cost TWICE (before AND after) for a console line
+        # with nothing to report (this load never places anything on a GPU) -
+        # measured live at ~2.5-3.4s PER CALL when torch is not yet resident.
         from localm.discover import list_gpus
-        try:
-            vram_before, vram_before_status = list_gpus(
-                return_status=True, wait_for_inflight=True)
-        except Exception:
-            vram_before, vram_before_status = [], None
+        vram_before, vram_before_status = [], None
+        if gpu_layers != 0:
+            try:
+                vram_before, vram_before_status = list_gpus(
+                    return_status=True, wait_for_inflight=True)
+            except Exception:
+                vram_before, vram_before_status = [], None
 
         ctx_max = self._effective_ctx_max()
         self.effective_ctx_max = ctx_max
-        # load() resolves this before _check_vram; fall back for a direct
-        # _load_native() call (e.g. in tests) so the value is never None here.
-        gpu_layers = self.effective_gpu_layers
-        if gpu_layers is None:
-            gpu_layers = self._effective_gpu_layers()
-            self.effective_gpu_layers = gpu_layers
 
         # Resolve the effective split distribution HERE, parent-side, and pin
         # it into the worker: with gpu_split_ratios unset this is the auto
@@ -364,30 +381,35 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # torch's allocator counters (memory_allocated/reserved) are a different
         # thing again: they see only torch's own allocations and always read 0.00 for
         # llama.dll, which is why they are not used here.
-        from localm.sysstats import _vram_reading_trusted
-        try:
-            vram_after, vram_after_status = list_gpus(
-                return_status=True, wait_for_inflight=True)
-        except Exception:
-            vram_after, vram_after_status = [], None
-        for i, gpu in enumerate(vram_after):
-            total = gpu.get("total")
-            if not total:
-                continue
-            if _vram_reading_trusted(gpu, vram_after_status):
-                free = gpu["free"]
-                used = (total - free) / 1024**3
-                line = (f"  vram     : {used:.2f} GB in use / "
-                        f"{total / 1024**3:.2f} GB total (device {i}")
-                before = vram_before[i] if i < len(vram_before) else None
-                if before is not None and _vram_reading_trusted(before, vram_before_status):
-                    delta = (before["free"] - free) / 1024**3
-                    line += f", {delta:+.2f} GB this load"
-                line += ")"
-            else:
-                line = (f"  vram     : {total / 1024**3:.2f} GB total (device {i}"
-                        f", used/free reading not trusted on this platform)")
-            console.print(f"[dim]{line}[/dim]")
+        #
+        # SKIPPED for a CPU-only load - see the vram_before guard above for the
+        # cost reasoning; nothing was placed on the GPU this load, so there is
+        # nothing this line could report anyway.
+        if gpu_layers != 0:
+            from localm.sysstats import _vram_reading_trusted
+            try:
+                vram_after, vram_after_status = list_gpus(
+                    return_status=True, wait_for_inflight=True)
+            except Exception:
+                vram_after, vram_after_status = [], None
+            for i, gpu in enumerate(vram_after):
+                total = gpu.get("total")
+                if not total:
+                    continue
+                if _vram_reading_trusted(gpu, vram_after_status):
+                    free = gpu["free"]
+                    used = (total - free) / 1024**3
+                    line = (f"  vram     : {used:.2f} GB in use / "
+                            f"{total / 1024**3:.2f} GB total (device {i}")
+                    before = vram_before[i] if i < len(vram_before) else None
+                    if before is not None and _vram_reading_trusted(before, vram_before_status):
+                        delta = (before["free"] - free) / 1024**3
+                        line += f", {delta:+.2f} GB this load"
+                    line += ")"
+                else:
+                    line = (f"  vram     : {total / 1024**3:.2f} GB total (device {i}"
+                            f", used/free reading not trusted on this platform)")
+                console.print(f"[dim]{line}[/dim]")
 
         console.print("[green]✓[/green] Model loaded")
 

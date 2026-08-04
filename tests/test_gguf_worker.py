@@ -121,6 +121,33 @@ class TestTokenisation:
         args, _ = fake_template.call_args
         assert args[1] == [{"role": "user", "content": "part one part two"}]
 
+    def test_count_messages_tokens_passes_str_not_bytes_to_tokenize(self, tmp_path):
+        """#956 fast/always-run regression pin, paired with the slow real-model
+        test in test_gguf_smoke_integration.py (marked real_gguf, excluded
+        from every routine `-m "not integration"` selection - a real GGUF load
+        is not something every test run should pay for). _StubLlm.tokenize
+        above ignores its `text` argument entirely, so it would happily accept
+        bytes and never catch a regression of the original
+        `prompt.encode("utf-8")` bug (LlamaCpp.tokenize takes str, not bytes -
+        its _Tokenizer.encode does `text.encode(...)` itself, so bytes has no
+        such method). This stub asserts the type directly instead, so a
+        regression fails immediately here, in every test run, with no model
+        and no subprocess needed."""
+        w = _worker(str(tmp_path / "m.gguf"))
+
+        class _TypeCheckedLlm(_StubLlm):
+            def tokenize(self, text, add_bos=True):
+                assert isinstance(text, str), (
+                    f"tokenize() received {type(text).__name__}, not str - "
+                    "this is the exact #956 regression")
+                return super().tokenize(text, add_bos=add_bos)
+
+        w._llm = _TypeCheckedLlm(tokens=[1, 2, 3])
+        with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
+                   return_value="<|im_start|>user\nhi<|im_end|>\n"):
+            count = w.count_messages_tokens([{"role": "user", "content": "hi"}])
+        assert count == 3
+
     def test_check_grammar_delegates_to_llm(self, tmp_path):
         w = _worker(str(tmp_path / "m.gguf"))
         w._llm = MagicMock()
