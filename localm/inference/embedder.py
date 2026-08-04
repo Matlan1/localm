@@ -288,10 +288,46 @@ def _nonlocal_spec_reason(spec: str) -> Optional[str]:
     return None
 
 
+def _set_resolve_outcome(reason: Optional[str]) -> None:
+    """The ONE place any RESOLVE-side code may touch ``_LAST_ERROR`` - never
+    assigned directly anywhere else in this module below this point. Every
+    resolve-side writer (``_record_resolve_failure``, ``_record_resolve_success``,
+    and ``_download_known``'s two policy-decline branches) routes through this
+    single choke point, specifically so the guard below cannot be silently
+    reopened by a future write site that forgets to carry it - the exact way
+    this bug happened the first time: ``_record_resolve_success`` got the
+    guard, ``_record_resolve_failure`` and ``_download_known`` (added in the
+    same change) did not, and a status poll silently destroyed a genuine load
+    failure the instant it re-resolved a not-yet-downloaded known key (#996's
+    own regression, root-caused live against a real corrupted-then-deleted
+    model file).
+
+    While ``_LOAD_FAILED`` is latched, NOTHING here may touch ``_LAST_ERROR``:
+      * A successful resolve proves a file exists - already true before that
+        load attempt failed too, so re-confirming it proves nothing new.
+      * A resolve FAILURE for the SAME spec cannot even happen once
+        ``_LOAD_FAILED`` is true for that spec: reaching a load attempt at all
+        requires the file to have been found first, so a "not found" or
+        "known key not downloaded" verdict for the identical spec is a
+        contradiction, not a real case.
+      * A resolve failure while ``_LOAD_FAILED`` is latched can therefore only
+        be racing a STALE flag left over from a DIFFERENT spec that was never
+        reset (a hand-edited config bypassing the picker route's own
+        ``reset_embedder()``) - and the latched load failure, being the more
+        specific, harder-won fact, still wins over a dangling reason about a
+        spec nobody has actively selected in a while.
+    Only an ACTUAL new load attempt (``get_embedder()``'s own except/success
+    branches, which set ``_LOAD_FAILED`` themselves) or an explicit
+    ``reset_embedder()`` (a real model-selection change) may override this."""
+    global _LAST_ERROR
+    if not _LOAD_FAILED:
+        _LAST_ERROR = reason
+
+
 def _record_resolve_failure(reason: str) -> None:
-    """Record *reason* as the current resolve failure for ``last_error()`` (every
-    call, unconditionally), and log it - WARNING the first time this exact reason
-    is seen, DEBUG on repeats of the same one.
+    """Record *reason* as the current resolve failure for ``last_error()``
+    (subject to ``_set_resolve_outcome``'s guard), and log it - WARNING the
+    first time this exact reason is seen, DEBUG on repeats of the same one.
 
     The dedup matters because ``resolve_embedding_model_path`` can run on every
     single ``embed_texts()`` call while no embedder is loaded: ``get_embedder()``
@@ -303,8 +339,8 @@ def _record_resolve_failure(reason: str) -> None:
     diff-review notes: a warning on somebody else's timer). ``last_error()`` still
     carries the reason on every single call regardless of the log level, so the
     GUI is never blind to it even once the log goes quiet."""
-    global _LAST_ERROR, _LAST_RESOLVE_WARNED
-    _LAST_ERROR = reason
+    global _LAST_RESOLVE_WARNED
+    _set_resolve_outcome(reason)
     if _LAST_RESOLVE_WARNED != reason:
         logger.warning(reason)
         _LAST_RESOLVE_WARNED = reason
@@ -313,23 +349,13 @@ def _record_resolve_failure(reason: str) -> None:
 
 
 def _record_resolve_success() -> None:
-    """Clear a prior RESOLVE failure once the spec resolves - a fixed config (or
-    one that never needed fixing) must not keep reporting a stale reason via
-    ``last_error()``, and a later, DIFFERENT misconfiguration must warn again
-    rather than staying silenced by a dedup entry from an unrelated failure.
-
-    Does NOT clear ``_LAST_ERROR`` while ``_LOAD_FAILED`` is latched. That flag
-    means a LOAD attempt for the currently configured spec already failed (e.g.
-    the file resolves fine but is not actually an embedding model) - a more
-    specific, still-true fact than "this call found a path". resolve_embedding_
-    model_path() re-runs on every get_embedder() call and every GET
-    /api/rag/embedding status poll while no embedder is loaded, so without this
-    guard the very NEXT status check after a load failure would silently wipe
-    the reason it exists to report - only reset_embedder() (an explicit
-    model-selection change) may clear a load failure."""
-    global _LAST_ERROR, _LAST_RESOLVE_WARNED
-    if not _LOAD_FAILED:
-        _LAST_ERROR = None
+    """Clear a prior RESOLVE failure once the spec resolves (subject to
+    ``_set_resolve_outcome``'s guard) - a fixed config (or one that never
+    needed fixing) must not keep reporting a stale reason via ``last_error()``,
+    and a later, DIFFERENT misconfiguration must warn again rather than
+    staying silenced by a dedup entry from an unrelated failure."""
+    global _LAST_RESOLVE_WARNED
+    _set_resolve_outcome(None)
     _LAST_RESOLVE_WARNED = None
 
 
@@ -458,25 +484,16 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     """Fetch a known embedding GGUF, gated by the network policy.
 
     Every failure path also records into ``last_error()`` (like
-    ``resolve_embedding_model_path``'s own failure branches), so GET
-    /api/rag/embedding's ``error`` field explains a policy-gated or failed
-    download too - EXCEPT while ``_LOAD_FAILED`` is latched, matching
-    ``_record_resolve_success()``'s own guard. A "not auto-downloading" or
-    "network is off" verdict is not new evidence about anything: it fires only
-    when the known-key file is ALSO not on disk, and that combination cannot
-    coexist with a REAL load failure for this exact spec, whose entire
-    precondition is that the file WAS found and WAS attempted. It can only
-    coexist with a stale ``_LOAD_FAILED`` left over from a DIFFERENT spec that
-    was never reset (a hand-edited config, bypassing the picker route's own
-    ``reset_embedder()``) - and a policy-declined download for the CURRENT
-    spec is strictly more useful there than a dangling reason about a spec
-    nobody has selected in a while. The log LEVEL for the two policy-gated
-    branches stays INFO regardless of whether the write is skipped - an unset
-    net_mode or a deliberately offline box is an expected state, not a defect
-    worth a WARNING - only the download-failure branch below (a real fault)
-    warns, deduped the same way as ``resolve_embedding_model_path``'s own
-    WARNING-worthy failures."""
-    global _LAST_ERROR
+    ``resolve_embedding_model_path``'s own failure branches - both policy
+    branches below route through the SAME ``_set_resolve_outcome`` choke
+    point, so its ``_LOAD_FAILED`` guard applies here too without being
+    re-implemented), so GET /api/rag/embedding's ``error`` field explains a
+    policy-gated or failed download too. The log LEVEL for the two
+    policy-gated branches stays INFO regardless of whether the write is
+    skipped - an unset net_mode or a deliberately offline box is an expected
+    state, not a defect worth a WARNING - only the download-failure branch
+    below (a real fault) warns, deduped the same way as
+    ``resolve_embedding_model_path``'s own WARNING-worthy failures."""
     from localm.netpolicy import network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
@@ -486,14 +503,12 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
             f"(net_mode={network_mode()}); run 'localm setup-embeddings' or set "
             "net_mode=allow to enable semantic search (memory/RAG use lexical "
             "BM25 until then)")
-        if not _LOAD_FAILED:
-            _LAST_ERROR = reason
+        _set_resolve_outcome(reason)
         logger.info(reason)
         return None
     if network_mode() == "off":
         reason = f"embedding model {name!r} missing and network is off; lexical-only"
-        if not _LOAD_FAILED:
-            _LAST_ERROR = reason
+        _set_resolve_outcome(reason)
         logger.info(reason)
         return None
     try:
