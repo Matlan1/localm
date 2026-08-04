@@ -48,6 +48,7 @@ from .agents import (
 )
 from .parallel import tool_dispatch_parallel
 from .media import tool_generate_image
+from .rag import tool_rag_list_collections, tool_rag_search
 from .tasks import tool_read_todos, tool_set_todos
 
 @dataclass
@@ -62,6 +63,16 @@ class ToolDef:
     # and MCP tools are detected by name, so this is the seam for a future plugin
     # tool that returns fetched content to flag itself as untrusted.
     untrusted_output: bool = False
+    # A NON-mutating tool that should still ask before running, ORed into
+    # execution.py's needs_confirm alongside `destructive` and net_mode=="ask"
+    # (agent/execution.py). Deliberately separate from `destructive`: that flag
+    # also triggers dry-run-skip and an undo-snapshot, both meaningless for a
+    # read. For rag_search: a collection is not scoped to the coder's cwd (unlike
+    # a file read, which is implicitly already in scope), so its content can
+    # enter the model's context unprompted - the same reasoning docs/network.md
+    # gives for fetch_url/web_search defaulting to net_mode=ask despite being
+    # non-destructive reads.
+    ask_by_default: bool = False
 
 
 # The ONLY tools a RESTRICTED (shareable, non-owner) coder session may use: an
@@ -451,6 +462,42 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
             "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},
         },
+    ),
+    "rag_list_collections": ToolDef(
+        name="rag_list_collections",
+        fn=tool_rag_list_collections,
+        description=(
+            "List every indexed RAG (Knowledge) collection with its stats: "
+            "name, document/chunk counts, and retrieval mode (hybrid or BM25). "
+            "Metadata only, no document content. Use before rag_search if you "
+            "do not already know the collection name."
+        ),
+        params={},
+        # Not in SAFE_RESTRICTED_TOOLS (see ADR-0006): a restricted coder
+        # session never sees this tool at all.
+    ),
+    "rag_search": ToolDef(
+        name="rag_search",
+        fn=tool_rag_search,
+        description=(
+            "Search a RAG (Knowledge) collection - the user's own indexed "
+            "documents (manuals, notes, code, papers) - and return the top-k "
+            "matching excerpts with their source and a relevance score. Use "
+            "rag_list_collections first to see what collections exist."
+        ),
+        params={
+            "collection": {"type": "string", "description": "Collection name (see rag_list_collections)", "required": True},
+            "query":      {"type": "string", "description": "What to search for",                          "required": True},
+            "k":          {"type": "int",    "description": "How many excerpts to return (default 4, max 20)", "required": False},
+        },
+        # Not destructive (reads nothing that mutates state) but still asks by
+        # default: a collection is not scoped to the coder's cwd, so its
+        # content can enter the model's context unprompted - see ADR-0006 and
+        # the ask_by_default field comment above. Also marked untrusted_output:
+        # retrieved document text is external, attacker-influenceable content,
+        # same class as fetch_url/web_search (provenance.py).
+        ask_by_default=True,
+        untrusted_output=True,
     ),
     "run_tests": ToolDef(
         name="run_tests",
