@@ -273,6 +273,22 @@ export async function refreshModelsPage() {
         else toast(data.detail || "Alias failed", true);
       };
       actions.appendChild(aliasBtn);
+      const renameBtn = el("button", "", "rename");
+      renameBtn.title = "Rename this model (unlike alias, the old name stops working)";
+      renameBtn.onclick = async () => {
+        const name = prompt(`Rename '${m.name}' to:`, m.name);
+        if (!name || name.trim() === m.name) return;
+        const r = await fetch("/api/models/rename", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ model: m.name, new_name: name.trim() }),
+        });
+        const data = await r.json().catch(() => ({}));
+        // Same discipline as alias above: the server sanitizes the name, so
+        // report what it actually stored, not the raw text typed in.
+        if (r.ok) { toast(`Renamed to '${data.new_name || name.trim()}'`); refreshModelsPage(); }
+        else toast(data.detail || "Rename failed", true);
+      };
+      actions.appendChild(renameBtn);
       if (m.loaded) {
         const unload = el("button", "", "unload");
         unload.title = "Release this model from GPU/CPU memory (it reloads "

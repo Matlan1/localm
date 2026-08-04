@@ -254,6 +254,11 @@ class AliasRequest(BaseModel):
     alias: str
 
 
+class RenameModelRequest(BaseModel):
+    model: str
+    new_name: str
+
+
 class SetTypeRequest(BaseModel):
     model: str
     model_type: str

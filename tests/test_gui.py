@@ -3731,3 +3731,93 @@ def test_alias_route_still_takes_an_already_safe_name(gui_app, alias_env):
         assert client.post("/api/models/alias",
                            json={"model": "gemma3-12b",
                                  "alias": "daily-driver"}).status_code == 409
+
+
+# ---------------------------------------------------------------------------
+#  POST /api/models/rename - same REG-562 discipline as alias (report the
+#  sanitized name the server actually stored, never fake success on a lost
+#  race), PLUS the engine re-key a true rename needs that alias never did.
+# ---------------------------------------------------------------------------
+
+def test_rename_route_reports_the_name_it_actually_stored(gui_app, alias_env):
+    from localm import model_manager as mm
+    app, _ = gui_app
+    _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
+
+    with TestClient(app) as client:
+        r = client.post("/api/models/rename",
+                        json={"model": "gemma3-12b", "new_name": "daily driver"})
+        assert r.status_code == 200, r.text
+        stored = mm.load_registry()
+        assert "daily-driver" in stored
+        assert "daily driver" not in stored
+        assert "gemma3-12b" not in stored, "rename MOVES the key, unlike alias"
+        assert r.json()["new_name"] == "daily-driver", (
+            "the route must report the name it actually created")
+
+
+def test_rename_route_refuses_a_sanitized_collision_instead_of_faking_success(gui_app, alias_env):
+    from localm import model_manager as mm
+    app, _ = gui_app
+    _seed_registry(mm, {
+        "gemma3-12b": {"path": "x/g.gguf", "source": "local"},
+        "daily-driver": {"path": "x/other.gguf", "source": "local"},   # taken
+    })
+
+    with TestClient(app) as client:
+        r = client.post("/api/models/rename",
+                        json={"model": "gemma3-12b", "new_name": "daily driver"})
+        assert r.status_code == 409, (
+            f"a collision must be refused, not reported as success: {r.text}")
+        stored = mm.load_registry()
+        assert stored["daily-driver"]["path"] == "x/other.gguf", "untouched"
+        assert stored["gemma3-12b"]["path"] == "x/g.gguf", "the rename must not have moved it"
+
+
+def test_rename_route_404_for_an_unregistered_model(gui_app, alias_env):
+    app, _ = gui_app
+    with TestClient(app) as client:
+        r = client.post("/api/models/rename",
+                        json={"model": "ghost", "new_name": "whatever"})
+        assert r.status_code == 404, r.text
+
+
+def test_rename_route_rekeys_a_loaded_engine(gui_app, alias_env):
+    """The concrete hazard rekey_loaded_model exists to close: without it, a
+    still-loaded engine is orphaned under its old display_name after the
+    registry entry moves. This drives the REAL http_server module state (the
+    same one active_model()/the remove-model guard read in production), not
+    the gui_app fixture's own switch_model/active_model test doubles - those
+    are independent of _hs._engines."""
+    from localm import model_manager as mm
+    from localm.inference import http_server as hs
+
+    class _FakeEngine:
+        def __init__(self, name):
+            self.display_name = name
+            self.loaded = True
+
+    app, _ = gui_app
+    _seed_registry(mm, {"gemma3-12b": {"path": "x/g.gguf", "source": "local"}})
+
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    eng = _FakeEngine("gemma3-12b")
+    hs._engines["gemma3-12b"] = eng
+    hs._engines_lru.append("gemma3-12b")
+    hs._active_model_name = "gemma3-12b"
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/rename",
+                            json={"model": "gemma3-12b", "new_name": "daily-driver"})
+            assert r.status_code == 200, r.text
+        assert "gemma3-12b" not in hs._engines
+        assert hs._engines["daily-driver"] is eng
+        assert eng.display_name == "daily-driver", (
+            "active_model() reads engine.display_name directly - a rename that "
+            "does not update it leaves the guard comparing against a stale name")
+        assert hs._active_model_name == "daily-driver"
+    finally:
+        hs._engines.clear()
+        hs._engines_lru.clear()
+        hs._active_model_name = None
