@@ -241,7 +241,19 @@ export async function refreshModelsPage() {
       if (!m.active) {
         const use = el("button", "primary", "use");
         use.onclick = async () => {
+          // switchModel() already drives the sidebar's #status-dot/#status-text
+          // for the real load duration (a genuine blocking VRAM-check/evict/
+          // load, not fire-and-forget) - but that status line lives inside the
+          // off-canvas #sidebar, invisible on mobile until the drawer opens, and
+          // easy to miss even on desktop since it is not on this button. Give
+          // the button its OWN inline cue too, mirroring settings.js's
+          // comfyAction prev-label/busy-label swap (the established pattern for
+          // an async button in this codebase) rather than the bigger
+          // .reconnect-spinner, which is sized for a full-panel state, not an
+          // inline table button.
+          const prevLabel = use.textContent;
           use.disabled = true;
+          use.textContent = "loading…";
           try {
             const res = await switchModel(m.name);
             if (!res || res.status !== "superseded") {
@@ -253,7 +265,7 @@ export async function refreshModelsPage() {
             }
           } catch (e) {
             toast("Load failed: " + e.message, true);
-          } finally { use.disabled = false; }
+          } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);
       }
