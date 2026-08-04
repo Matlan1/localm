@@ -195,6 +195,77 @@ def test_serve_async_tls_relays_a_real_handshake_and_shuts_down_cleanly(tmp_path
     asyncio.run(go())
 
 
+def test_serve_async_plain_cancels_an_inflight_connection_on_shutdown():
+    """Regression for issue #963 / F2: asyncio.start_server()'s
+    client_connected_cb creates a Task for each connection that nothing keeps
+    a reference to, so a connection still blocked in _relay's pumps at
+    shutdown was invisible to demux.wait_closed() (which only waits for the
+    LISTENING socket, never for handler tasks already running) and was
+    silently destroyed mid-flight instead of being closed ("Task was
+    destroyed but it is pending!"). With the fix, shutdown cancels and awaits
+    the tracked task, whose finally closes the writer - so the client sees a
+    clean EOF as PART of shutdown, not eventually or never."""
+    async def go():
+        port = _free_port()
+        task = asyncio.ensure_future(
+            portmux._serve_async_plain(_tiny_asgi_app, "127.0.0.1", port, "warning"))
+        await _wait_connectable(port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            # One byte only, never the rest of a request line: the internal
+            # uvicorn never gets a full HTTP request, so both pump directions
+            # block on read() and the connection's task stays pending - the
+            # exact state the bug describes.
+            writer.write(b"G")
+            await writer.drain()
+            await asyncio.sleep(0.1)   # let accept + relay-connect land
+
+            await _shutdown(task)
+
+            # The server must have closed THIS connection as part of its OWN
+            # shutdown - not left it for the OS to reap whenever the process
+            # exits. A short timeout distinguishes "closed promptly by the
+            # fix" from "never closed" (hangs until wait_for's own timeout -
+            # a clear failure, not a slow pass).
+            data = await asyncio.wait_for(reader.read(-1), timeout=2)
+            assert data == b""
+        finally:
+            writer.close()
+    asyncio.run(go())
+
+
+def test_serve_async_tls_cancels_an_inflight_connection_on_shutdown(tmp_path):
+    """Same regression, TLS variant - the bug report names only the plain
+    path's _on_conn, but _serve_async wires an identical untracked callback
+    and must not be the one left unfixed."""
+    cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
+    ca = str(tls.ca_cert_path(tmp_path))
+
+    async def go():
+        port = _free_port()
+        task = asyncio.ensure_future(
+            portmux._serve_async(_tiny_asgi_app, "127.0.0.1", port, cert, key, "warning"))
+        await _wait_connectable(port)
+        ctx = ssl.create_default_context(cafile=ca)
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", port, ssl=ctx, server_hostname="127.0.0.1")
+        try:
+            # A real completed TLS handshake, then a partial request line only
+            # - the internal uvicorn never gets a full request, so the pumps
+            # block and the connection task stays pending through shutdown.
+            writer.write(b"G")
+            await writer.drain()
+            await asyncio.sleep(0.1)
+
+            await _shutdown(task)
+
+            data = await asyncio.wait_for(reader.read(-1), timeout=2)
+            assert data == b""
+        finally:
+            writer.close()
+    asyncio.run(go())
+
+
 def test_serve_async_propagates_a_bad_tls_cert_instead_of_hanging(tmp_path):
     # Trust-relevant: a corrupt/missing certificate must surface loudly (the
     # server never comes up, the caller finds out immediately) rather than
