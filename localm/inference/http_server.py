@@ -141,7 +141,18 @@ def _loop_lag_seconds() -> float:
     loop; grows only when a heartbeat tick was itself delayed, meaning
     something blocked the loop. This is what gets reported to a human (the
     debug request log, /debug/stacks); the raw gap is for the watchdog's own
-    large-threshold hang detection only."""
+    large-threshold hang detection only.
+
+    RESOLUTION LIMIT, by construction: a stall shorter than
+    _HEARTBEAT_INTERVAL_S (currently 1.0s) reads as exactly 0.0, identical to
+    a perfectly healthy loop - a 1Hz heartbeat cannot see a sub-interval
+    block. "loop_lag=0.0" therefore means "no stall LONGER than the
+    heartbeat interval was detected", not "the loop was never blocked at
+    all". A finer-grained sampler would close this gap at the cost of a
+    second background task and more wakeups purely for a diagnostic counter,
+    which is not worth it: the hang watchdog (large-threshold, above) already
+    owns detecting a real freeze; this value is for correlating a slow
+    request with a preceding stall, not for catching sub-second ones."""
     return max(0.0, (time.monotonic() - _hb_monotonic) - _HEARTBEAT_INTERVAL_S)
 
 def _default_engine_factory(name: str) -> Engine:
@@ -2955,7 +2966,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             # comment above _hb_monotonic) - ~0 on a healthy server, and only
             # positive when a preceding event-loop stall pushed the last
             # heartbeat tick late. This is NOT time-since-last-tick, which
-            # saws 0..1s even when nothing is wrong (#955/#950).
+            # saws 0..1s even when nothing is wrong (#955/#950). Resolution
+            # limit: a stall shorter than _HEARTBEAT_INTERVAL_S also reads 0.0
+            # (see _loop_lag_seconds' docstring) - 0.0 means "no stall LONGER
+            # than the interval", not "no stall at all".
             _dbg.debug(
                 "%s %s -> %d (%.0f ms, loop_lag=%.2fs)",
                 request.method, request.url.path,
