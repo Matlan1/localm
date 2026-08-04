@@ -238,6 +238,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         model_path, _display_hint = info
 
         from ..inference.engine import Engine
+        from ..model_manager import get_model_mmproj
         from ..model_manager import load_registry as _reg
 
         # Priority: registered alias > Ollama manifest hint > engine auto-derive
@@ -246,9 +247,16 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         else:
             display_name = _display_hint  # None or Ollama suggested name
 
+        # VIS-1: an explicit --mmproj always wins; otherwise fall back to the
+        # model's own recorded/sibling projector, or a pulled vision GGUF run
+        # straight from the CLI (no --mmproj flag given) silently loses image
+        # support (#957). allow_direct_path=True matches the get_model_info
+        # call above: *model* is operator-typed on this command line.
+        mmproj_path = mmproj or get_model_mmproj(model, allow_direct_path=True)
+
         engine = Engine(
             str(model_path),
-            mmproj_path=mmproj,
+            mmproj_path=mmproj_path,
             n_ctx=ctx,
             n_gpu_layers=gpu_layers,
             device=device,

@@ -385,6 +385,24 @@ def get_model_info(name: str, *, allow_direct_path: bool = False):
 
 
 
+def _pick_mmproj_candidate(model_stem: str, names: List[str]) -> Optional[str]:
+    """Disambiguate a single mmproj (vision projector) filename out of *names*
+    (already filtered to mmproj-looking GGUF filenames) for a model named
+    *model_stem*. A lone candidate wins outright; with more than one, prefer a
+    name that shares the model's leading token, and give up (None) rather than
+    guess when that still doesn't narrow it to one - never silently attach the
+    wrong projector. Shared by find_sibling_mmproj (a directory glob) and
+    pull.py's HF-repo-listing lookup (same disambiguation, a different
+    candidate source)."""
+    if not names:
+        return None
+    if len(names) == 1:
+        return names[0]
+    stem = model_stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
+    matches = [n for n in names if stem and stem in n.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
 def find_sibling_mmproj(model_path) -> Optional[Path]:
     """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model.
 
@@ -401,12 +419,9 @@ def find_sibling_mmproj(model_path) -> Optional[Path]:
              if f.name != p.name and "mmproj" in f.name.lower()]
     if not cands:
         return None
-    if len(cands) == 1:
-        return cands[0]
-    # Ambiguous: prefer a projector whose name shares the model's leading token.
-    stem = p.stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
-    matches = [f for f in cands if stem and stem in f.name.lower()]
-    return matches[0] if len(matches) == 1 else None
+    by_name = {f.name: f for f in cands}
+    picked = _pick_mmproj_candidate(p.stem, list(by_name.keys()))
+    return by_name[picked] if picked else None
 
 
 
@@ -479,6 +494,36 @@ def _hf_is_vision(model_dir: Path) -> bool:
     return False
 
 
+
+
+# Filename/repo-id tokens that reliably signal a vision-language GGUF release,
+# curated from real HuggingFace GGUF repo naming conventions (mradermacher,
+# bartowski, ggml-org, unsloth). A NAME heuristic only - unlike gguf_is_mmproj
+# (hard GGUF metadata baked into the file), the main LLM's own GGUF header
+# carries no vision marker, so this is the only signal available before a
+# companion projector is even known to exist. It is used SOLELY to decide
+# whether pull.py prints an informational note when no mmproj sibling was
+# found; it never changes what gets downloaded, verified, or how a model is
+# typed - a false positive here costs one extra console line, never a wrong
+# classification.
+_VISION_NAME_TOKENS = frozenset({
+    "vl", "vlm", "vision", "llava", "idefics", "idefics2", "idefics3",
+    "internvl", "moondream", "pixtral", "paligemma", "smolvlm", "cogvlm",
+    "fuyu", "kosmos", "kosmos2",
+})
+
+
+def _looks_like_vision_gguf_name(repo_id: str, filename: str) -> bool:
+    """Best-effort NAME-based signal that a GGUF pull spec names a
+    vision-language model - see ``_VISION_NAME_TOKENS`` for what this checks
+    and why it is name-only. Used by pull.py to decide whether a missing
+    mmproj projector is worth flagging at pull time; never used to type or
+    refuse a pull."""
+    ident = f"{repo_id}/{filename}".lower()
+    tokens = re.split(r"[^a-z0-9]+", ident)
+    if any(t in _VISION_NAME_TOKENS for t in tokens):
+        return True
+    return "minicpm-v" in ident or "minicpmv" in ident
 
 
 def vision_capable_models() -> List[str]:
@@ -861,10 +906,16 @@ def _register(
     source: str = "local",
     sha256: Optional[str] = None,
     model_type: str = "llm",
+    mmproj: Optional[Path] = None,
 ) -> None:
+    """*mmproj*, when given, is a vision projector already verified and placed
+    on disk (pull.py's job) and is recorded on the entry so get_model_mmproj
+    finds it without depending on the directory-sibling fallback (#957)."""
     entry = {"path": str(path.resolve()), "source": source, "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
+    if mmproj:
+        entry["mmproj"] = str(Path(mmproj).resolve())
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -1252,6 +1303,7 @@ def _register_with_dedup(
     digest: Optional[str] = None,
     size: Optional[int] = None,
     model_type: str = "llm",
+    mmproj: Optional[Path] = None,
 ) -> None:
     """
     Register a model, detecting duplicates first.
@@ -1261,23 +1313,33 @@ def _register_with_dedup(
     used only when no digest was computed). ``on_duplicate`` is one of
     "ask" / "alias" / "copy" / "move" / "register" / "skip" - "ask" prompts
     interactively and degrades to "skip" without a TTY.
+
+    *mmproj*, when given, is a verified vision projector to record on the
+    entry (see ``_register``); backfilled onto an already-registered same-file
+    entry the same way a fresh ``digest`` is.
     """
     import click
 
     reg = _mm.load_registry()
     aliases = find_aliases_by_path(p, reg)
 
-    # Same name, same file - true no-op (but backfill a fresh digest)
+    # Same name, same file - true no-op (but backfill a fresh digest / mmproj)
     if model_name in aliases:
         console.print(
             f"[yellow]'{model_name}' is already registered for this exact "
             f"file[/yellow] [dim]({p})[/dim]"
         )
-        if digest and not reg[model_name].get("sha256"):
+        need_sha_backfill = bool(digest) and not reg[model_name].get("sha256")
+        need_mmproj_backfill = bool(mmproj) and not reg[model_name].get("mmproj")
+        if need_sha_backfill or need_mmproj_backfill:
             def _backfill(r: dict) -> None:      # atomic RMW
                 e = r.get(model_name)
-                if isinstance(e, dict) and not e.get("sha256"):
+                if not isinstance(e, dict):
+                    return
+                if need_sha_backfill and not e.get("sha256"):
                     e["sha256"] = digest.lower()
+                if need_mmproj_backfill and not e.get("mmproj"):
+                    e["mmproj"] = str(Path(mmproj).resolve())
             _mm.update_registry(_backfill)
         others = [a for a in aliases if a != model_name]
         if others:
@@ -1339,6 +1401,8 @@ def _register_with_dedup(
                 entry = {"path": dest_str, "source": source, "model_type": model_type}
                 if digest:
                     entry["sha256"] = digest.lower()
+                if mmproj:
+                    entry["mmproj"] = str(Path(mmproj).resolve())
 
                 # Move first so the file lands under MODELS_DIR (where a launch-time
                 # sync_models_dir can always recover it), THEN commit the registry in
@@ -1361,7 +1425,8 @@ def _register_with_dedup(
             p = dest
         # action == "register" falls through unchanged
 
-    _mm._register(model_name, p, source, sha256=digest, model_type=model_type)
+    _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
+                  mmproj=mmproj)
     console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
 
 

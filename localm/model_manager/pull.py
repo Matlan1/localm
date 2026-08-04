@@ -305,7 +305,7 @@ def pull_model(
             res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256,
                                    redownload=redownload, model_type=detected_type,
                                    dest_dir=dest_dir, register=register,
-                                   type_is_auto=type_is_auto)
+                                   type_is_auto=type_is_auto, mmproj_spec=mmproj_spec)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
@@ -319,9 +319,19 @@ def pull_model(
         console.print("Run [bold]localm models[/bold] for GGUF shortcuts.")
         res = False
 
-    if res and mmproj_spec:
+    # A single-file GGUF spec already threaded mmproj_spec into _pull_gguf_file
+    # above (fetched AND recorded on the registry entry). This tail only
+    # covers the other dispatch shapes (a direct URL / a full HF snapshot),
+    # where the main model isn't a llama.cpp GGUF registration to attach a
+    # projector to - just download the file for the user to wire up by hand.
+    if res and mmproj_spec and not is_single_file_spec:
         console.print(f"Pulling mmproj: {mmproj_spec}")
-        if ":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"):
+        # "/" must be present (an owner/repo), same precondition
+        # _fetch_explicit_mmproj enforces: without it a bare "file.gguf" (no
+        # repo) passes the .endswith(".gguf") half of this check and then
+        # crashes _pull_gguf_file's own identical split with an IndexError.
+        if "/" in mmproj_spec and (
+                ":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf")):
             _mm._pull_gguf_file(mmproj_spec, name=None, register=False)
         else:
             console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
@@ -388,6 +398,227 @@ def _hf_file_sha256(repo_id: str, filename: str) -> Optional[str]:
 
 
 
+def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
+    """Deterministic pick among several mmproj filenames found in the SAME
+    repo, once stem-matching (``_pick_mmproj_candidate``) couldn't narrow them
+    to one. Unlike a cross-model directory glob (``find_sibling_mmproj``),
+    every candidate here already comes from the ONE repo the caller is
+    pulling from, so they are near-certainly quantised variants of the SAME
+    projector for the SAME model rather than projectors for different models -
+    guessing among them costs precision, never correctness. Prefers the
+    conventional highest-precision f16 build; falls back to a sorted-first
+    pick for determinism."""
+    f16 = [c for c in cands if "f16" in c.lower()]
+    return f16[0] if f16 else sorted(cands)[0]
+
+
+def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
+    """*repo_id*'s file listing, or None when it could not be fetched at all
+    (offline, API error, rate limit) - kept distinct from "fetched, and it
+    lists none": a listing FAILURE must never be read as "this repo has no
+    projector" (AGENTS.md rule 5 - do not collapse 'could not look' into
+    'looked and found nothing'), or a transient HF API hiccup would print a
+    false "no vision projector found" note."""
+    try:
+        from huggingface_hub import HfApi
+        return HfApi().list_repo_files(repo_id)
+    except Exception as e:
+        logger.debug("could not list files for %s to look for an mmproj "
+                     "sibling: %s", repo_id, e)
+        return None
+
+
+def _pick_mmproj_from_listing(
+    files: List[str], model_filename: str, base_dir: Path,
+) -> Optional[str]:
+    """The mmproj (vision projector) filename among *files* (a repo's file
+    listing) that pairs with *model_filename*, or None when none qualify.
+
+    *files* comes from a REMOTE HF repo listing, so every candidate is
+    confined through ``_safe_models_filename`` (the same guard an explicit
+    --mmproj filename gets, GAP-CLI-2) before it is even considered for
+    picking - not merely rejected after being chosen. A single-path-component
+    check alone (e.g. "no '/'") is not enough: on Windows a value with no
+    forward slash at all can still be a drive-qualified or backslash-relative
+    path, and ``_safe_models_filename`` is what actually rejects those, plus
+    confines the result to land inside *base_dir*."""
+    cands = [f for f in files
+             if f != model_filename and "mmproj" in f.lower()
+             and f.lower().endswith(".gguf")
+             and _mm._safe_models_filename(f, base_dir) is not None]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    picked = _mm._pick_mmproj_candidate(Path(model_filename).stem, cands)
+    if picked:
+        return picked
+    # _pick_mmproj_candidate gave up, which happens for two different reasons
+    # it cannot itself distinguish: NONE of the candidates share the model's
+    # leading token (no confirmed relation to *this* model at all - guessing
+    # here risks attaching a genuinely different model's projector), or
+    # SEVERAL do (confirmed related, merely ambiguous between quantised
+    # variants of the SAME projector). Only the second is safe to guess in:
+    # _pick_best_of_same_repo_mmprojs's "same repo" trust assumption only
+    # holds once every candidate it sees is already known to be about this
+    # model, never as a blanket license to pick among total strangers.
+    stem = Path(model_filename).stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
+    stem_matches = [c for c in cands if stem and stem in c.lower()]
+    if len(stem_matches) >= 2:
+        return _pick_best_of_same_repo_mmprojs(stem_matches)
+    return None
+
+
+def _hf_repo_mmproj_filename(
+    repo_id: str, model_filename: str, base_dir: Path,
+) -> Optional[str]:
+    """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
+    that pairs with *model_filename*, or None when the repo ships none (or its
+    listing could not be fetched at all). A free HuggingFace metadata call
+    (repo file listing, no download) - this is what lets a GUI/MCP pull attach
+    a vision model's projector automatically, instead of requiring the CLI
+    --mmproj flag the user would otherwise have to name by hand."""
+    files = _hf_repo_files(repo_id)
+    if files is None:
+        return None
+    return _pick_mmproj_from_listing(files, model_filename, base_dir)
+
+
+def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
+    """Auto-attach companion: look for a vision projector shipped in the SAME
+    HF repo as *filename* and fetch it too - the repo listing is available at
+    pull time, which is exactly when this decision is cheap (#957: a GUI pull
+    of a vision GGUF silently had no projector, so the model downloaded but
+    could never actually see an image).
+
+    Returns the local Path of a verified projector to record on the model's
+    registry entry, or None. When the listing could not be fetched at all,
+    stays silent (see ``_hf_repo_files``) - only when the repo listing was
+    genuinely read and *filename* looks like a vision-language release (by
+    name) with no usable projector among it does this print an informational
+    note, so the gap is visible at pull time rather than discovered silently
+    at first image - registry.py's ``vision_input_guidance`` is the analogous
+    message for the chat-time case.
+    """
+    files = _hf_repo_files(repo_id)
+    if files is None:
+        return None
+    candidate = _pick_mmproj_from_listing(files, filename, base_dir)
+    if candidate is None:
+        if _mm._looks_like_vision_gguf_name(repo_id, filename):
+            console.print(
+                "[yellow]Note:[/yellow] this looks like a vision-language "
+                f"model, but no vision projector (mmproj) file was found in "
+                f"{repo_id}. It may not be able to see images - if the "
+                "projector lives in a different repo, pull it explicitly "
+                "with [bold]--mmproj <repo>:<file>[/bold]."
+            )
+        return None
+
+    dest = base_dir / candidate
+    if not dest.exists():
+        console.print(f"Pulling vision projector: {candidate}")
+        try:
+            from huggingface_hub import hf_hub_download
+            local = hf_hub_download(repo_id=repo_id, filename=candidate,
+                                     local_dir=str(base_dir))
+            if Path(local) != dest:
+                shutil.move(local, dest)
+        except Exception as e:
+            console.print(
+                f"[yellow]Found a vision projector ({candidate}) in {repo_id} "
+                f"but could not download it: {e}. Vision may not work for "
+                "this model.[/yellow]"
+            )
+            return None
+
+    if not _mm.gguf_is_mmproj(dest):
+        # Hard-verify what was just fetched: the filename match is only a
+        # heuristic, and attaching a file that fails the real GGUF-metadata
+        # check would silently hand the backend a bad projector instead of the
+        # honest "none found" state (AGENTS.md rule 5).
+        console.print(
+            f"[yellow]{candidate} does not look like a valid vision "
+            "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
+        )
+        return None
+    return dest
+
+
+def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
+    """Download the user-named --mmproj file (owner/repo:file.gguf) into
+    *base_dir* and return its local path, verified as a real vision projector
+    - or None on a bad spec, failed download, or failed verification (always
+    printed, never silent). An explicit --mmproj always wins over the
+    same-repo auto-detection in ``_maybe_fetch_repo_mmproj``: the caller only
+    reaches here when the user named one (never silently override a user's
+    explicit choice)."""
+    # "/" must be present (an owner/repo) as well as one of the two file
+    # markers - matching pull_model's own is_single_file_spec check. Without
+    # the "/" precondition a bare "file.gguf" (ends in .gguf, no repo at all)
+    # passed this guard and then crashed the else branch below with an
+    # IndexError on parts[1], since rsplit("/", 1) on a "/"-free string
+    # returns a ONE-element list.
+    if not ("/" in mmproj_spec
+            and (":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"))):
+        console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
+        return None
+    if ":" in mmproj_spec:
+        m_repo, m_file = mmproj_spec.rsplit(":", 1)
+    else:
+        parts = mmproj_spec.rsplit("/", 1)
+        m_repo, m_file = parts[0], parts[1]
+
+    # Same traversal guard as the main file (GAP-CLI-2): m_file comes from a
+    # spec, which may be user- or client-supplied over MCP.
+    safe = _mm._safe_models_filename(m_file, base_dir)
+    if safe is None:
+        console.print(f"[red]Unsafe mmproj filename:[/red] {m_file}")
+        return None
+
+    dest = base_dir / safe
+    if not dest.exists():
+        console.print(f"Pulling mmproj: {mmproj_spec}")
+        try:
+            from huggingface_hub import hf_hub_download
+            local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir))
+            if Path(local) != dest:
+                shutil.move(local, dest)
+        except Exception as e:
+            console.print(f"[red]mmproj download failed:[/red] {e}")
+            return None
+
+    if not _mm.gguf_is_mmproj(dest):
+        console.print(
+            f"[yellow]{safe} does not look like a valid vision projector "
+            "(GGUF metadata check failed) - not attaching it.[/yellow]"
+        )
+        return None
+    return dest
+
+
+def _mmproj_for_registration(
+    reg_type: str,
+    repo_id: str,
+    filename: str,
+    base_dir: Path,
+    dest_dir: Optional[Path],
+    mmproj_spec: Optional[str],
+) -> Optional[Path]:
+    """The vision-projector Path to record on this pull's registry entry, or
+    None. An explicit --mmproj wins when given, else the same-repo listing is
+    auto-checked. Skipped entirely for a foreign destination (ComfyUI's
+    dest_dir - not one of localm's own chat models), anything that isn't a
+    plain 'llm' registration (a projector cannot itself need a projector, and
+    an embedding/lora/etc. pull was never going to see an image), and a
+    *filename* that already looks like a projector by its own name."""
+    if dest_dir is not None or reg_type != "llm" or "mmproj" in filename.lower():
+        return None
+    if mmproj_spec:
+        return _fetch_explicit_mmproj(mmproj_spec, base_dir)
+    return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir)
+
+
 def _pull_gguf_file(
     spec: str,
     name: Optional[str],
@@ -397,6 +628,7 @@ def _pull_gguf_file(
     model_type: str = "llm",
     dest_dir: Optional[Path] = None,
     type_is_auto: bool = False,
+    mmproj_spec: Optional[str] = None,
 ) -> bool:
     """Download a single file from a HuggingFace repo (despite the name, not
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
@@ -413,6 +645,15 @@ def _pull_gguf_file(
     controls whether the download is added to localm's own model registry -
     a file routed elsewhere (e.g. for ComfyUI, not for localm's own chat-model
     catalog) should normally pass ``register=False``.
+
+    ``mmproj_spec``, when given, is the user's explicit ``--mmproj
+    owner/repo:file.gguf`` choice and always wins over the automatic
+    same-repo projector lookup below (never silently override an explicit
+    choice). When it is None and the pulled file registers as a plain 'llm',
+    the HF repo's own file listing is checked for a vision-projector (mmproj)
+    sibling and, if found, fetched and recorded on the registry entry - a GUI
+    or MCP pull never had a way to pass --mmproj, so without this a vision
+    GGUF downloaded with no way to ever see an image (#957).
     """
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
@@ -490,8 +731,11 @@ def _pull_gguf_file(
                 elif _mm.gguf_embedding_signal(dest):
                     console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
                     reg_type = "embedding"
+            mmproj_path = _mmproj_for_registration(
+                reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 digest=verify_digest, model_type=reg_type)
+                                 digest=verify_digest, model_type=reg_type,
+                                 mmproj=mmproj_path)
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
@@ -584,8 +828,10 @@ def _pull_gguf_file(
             elif _mm.gguf_embedding_signal(base_dir / filename):
                 console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
                 reg_type = "embedding"
+        mmproj_path = _mmproj_for_registration(
+            reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
-                  sha256=verify_digest, model_type=reg_type)
+                  sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path)
         console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
     else:
         console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
