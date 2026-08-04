@@ -148,14 +148,25 @@ def test_route_rejects_invalid_grammar_with_400_not_silent_200():
 
 def test_route_reports_worker_crash_during_grammar_check_as_a_fault_not_bad_grammar():
     """GitHub #964: a bare RuntimeError from engine.validate_grammar() means the
-    isolated worker crashed/timed out (ModelRunner._simple_request), which has
-    nothing to do with whether the caller's grammar is valid. Before the fix
-    this was mislabeled a 400 "Invalid grammar: <crash message>" - telling the
-    caller to fix the wrong thing, and via a bare `raise_for_status()`-style
-    client that only shows the status line, invisible twice over. It must be a
-    503 that names the worker fault, matching /v1/embeddings' identical
-    isolated-worker-crash handling in this same file - and generation must
-    never start on top of a fault we could not actually validate against."""
+    isolated worker faulted (crashed, timed out, or replied unexpectedly -
+    ModelRunner._simple_request has four such shapes), which has nothing to do
+    with whether the caller's grammar is valid. Before the fix this was
+    mislabeled a 400 "Invalid grammar: <fault message>", telling the caller to
+    fix the wrong thing. It must be a 503 that names the worker fault instead
+    (with no promise of an automatic reload - only two of the four shapes
+    actually kill the worker, see the route's own comment), matching
+    /v1/embeddings' identical isolated-worker-crash handling in this same
+    file - and generation must never start on top of a fault we could not
+    actually validate against.
+
+    This closes the MISLABELING, not the whole #964 report. The bug was filed
+    via the coder plugin's own HTTP client (localm/plugins/coder/backends/
+    http.py), which never reads a response body except on 401/403 and now
+    retries 503 for up to ~30s (400 was not retried) - so for THAT specific
+    caller the improved detail text below is still never seen, and 500ms
+    became ~30s of blind retries first. That gap is in a file this fix does
+    not own. This test uses a client that DOES read the body (TestClient +
+    r.json()) and only proves the server side is now honest."""
     import os
 
     from fastapi.testclient import TestClient
@@ -185,6 +196,13 @@ def test_route_reports_worker_crash_during_grammar_check_as_a_fault_not_bad_gram
     assert "invalid grammar" not in detail, (
         f"a worker crash must not be blamed on the caller's grammar: {r.text}")
     assert "worker" in detail or "crashed" in detail, r.text
+    # Regression pin: only two of _simple_request's four RuntimeError shapes
+    # actually kill the worker (see the route's comment) - "reload" must not
+    # be promised unconditionally, since that claim is false for the other
+    # two shapes and this same message text covers all of them.
+    assert "reload" not in detail, (
+        f"the message must not promise a reload it cannot guarantee for "
+        f"every RuntimeError shape: {r.text}")
     engine.chat_stream.assert_not_called()
 
 
@@ -218,6 +236,9 @@ def test_completions_route_reports_worker_crash_during_grammar_check_as_a_fault(
     detail = r.json()["detail"].lower()
     assert "invalid grammar" not in detail, r.text
     assert "worker" in detail or "timed out" in detail, r.text
+    assert "reload" not in detail, (
+        f"the message must not promise a reload it cannot guarantee for "
+        f"every RuntimeError shape: {r.text}")
     engine.chat_stream.assert_not_called()
 
 

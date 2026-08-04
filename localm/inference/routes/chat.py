@@ -172,18 +172,36 @@ def register(app: FastAPI, ctx) -> None:
                     # out, or returned something unexpected while checking the
                     # grammar (see ModelRunner._simple_request) - the grammar
                     # itself is not the problem. Labeling this "Invalid grammar"
-                    # told the caller to fix the wrong thing, and since it was
-                    # also a bare 400 with no visible body to most HTTP clients
-                    # (#964: an agent only ever saw "400 Client Error: Bad
-                    # Request", never this text), the real cause was invisible
-                    # twice over. Report it as the worker fault it is, matching
-                    # how /v1/embeddings reports the identical isolated-worker-
-                    # crash shape (503) below. The worker is already dead or
-                    # dying at this point (GgufBackend.loaded goes False), so
-                    # the model reloads cleanly on the next request.
+                    # told the caller to fix the wrong thing, so report it as
+                    # the worker fault it is (503, matching how /v1/embeddings
+                    # reports the identical isolated-worker-crash shape below).
+                    #
+                    # Do NOT claim the model will reload: _simple_request has
+                    # FOUR RuntimeError shapes and only two of them actually
+                    # kill the worker (a confirmed-dead process, or the
+                    # explicit shutdown() on timeout) - the other two (the
+                    # worker's own generic `except Exception` catch replying
+                    # untagged, or an unexpected response) leave it alive, so
+                    # GgufBackend.loaded stays True and the SAME worker serves
+                    # the next request. A prior version of this message
+                    # promised a reload unconditionally; that was false for
+                    # half the cases and has been removed rather than fixed
+                    # with a check this file cannot make (which sub-case
+                    # occurred is only known inside ModelRunner).
+                    #
+                    # This also does not fully close the #964 visibility gap:
+                    # it helps any client that reads the response body, but
+                    # the coder plugin's own HTTP client (localm/plugins/
+                    # coder/backends/http.py's _raise_for_status) does not
+                    # read the body except for 401/403, and 503 is in its
+                    # retry set (400 was not) - so for that specific caller
+                    # this trades an instant, mislabeled failure for up to
+                    # ~30s of retries ending in the same detail-less message.
+                    # That gap is in a file this session does not own; fixing
+                    # it is tracked separately.
                     raise HTTPException(
                         503, f"Grammar validation failed: the model worker "
-                        f"faulted ({e}). It will reload on the next request.")
+                        f"faulted ({e}).")
 
             if req.stream:
                 # Ownership of the pin transfers to _pin_engine, which releases it
@@ -439,15 +457,14 @@ def register(app: FastAPI, ctx) -> None:
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar: {e}")
                 except RuntimeError as e:
-                    # Same fault-attribution fix as /v1/chat/completions above:
-                    # a bare RuntimeError here means the isolated worker
-                    # crashed/timed out/returned something unexpected, not that
-                    # the grammar is invalid. Report it as a worker fault (503,
-                    # matching /v1/embeddings' identical crash handling below),
-                    # not a caller error about their grammar.
+                    # Same fault-attribution fix as /v1/chat/completions above,
+                    # including NOT claiming the model will reload (only two
+                    # of _simple_request's four RuntimeError shapes actually
+                    # kill the worker - see that comment for the full
+                    # reasoning and the coder-plugin visibility caveat).
                     raise HTTPException(
                         503, f"Grammar validation failed: the model worker "
-                        f"faulted ({e}). It will reload on the next request.")
+                        f"faulted ({e}).")
 
             if req.stream:
                 streaming_handoff = True
