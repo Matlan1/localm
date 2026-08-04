@@ -9,6 +9,7 @@ tmp dir, never the user's real data.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -360,6 +361,101 @@ def test_all_skips_malformed_lines(home, tmp_path):
     store.path.write_text(store.path.read_text(encoding="utf-8") + "not json\n",
                           encoding="utf-8")
     assert len(store.all()) == 1        # the bad line is skipped, not fatal
+
+
+# --------------------------------------------------------------------------- #
+#  JSONL round trip: every separator str.splitlines() breaks on, that          #
+#  json.dumps(ensure_ascii=False) writes RAW - see localm/jsonl.py.            #
+# --------------------------------------------------------------------------- #
+
+def test_add_load_save_round_trip_preserves_a_u0085_bearing_episode(home, tmp_path):
+    """str.splitlines() splits on U+0085 (NEL) as well as LINE FEED, and
+    json.dumps(ensure_ascii=False) writes U+0085 RAW - so a lesson containing one
+    used to be torn into two unparseable fragments and silently dropped, first on
+    load and then for good on the next save (add() rewrites the whole file from
+    whatever all() returned). Measured in the wild against a real RAG collection
+    (localm/jsonl.py); same defect, same fix (split_jsonl/dumps_lines) here."""
+    sep = "\x85"
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="t1", lesson=f"before{sep}after", files=["a.py"]))
+
+    # load: a fresh store instance reads the file back.
+    reloaded = EpisodeStore(tmp_path)
+    eps = reloaded.all()
+    assert len(eps) == 1, "the U+0085-bearing episode was dropped on load"
+    assert eps[0].lesson == f"before{sep}after"
+
+    # write side: the file on disk must not carry the raw separator - any OTHER
+    # line-oriented reader (or a pre-fix legacy consumer) has to stay safe too.
+    raw = reloaded.path.read_text(encoding="utf-8")
+    assert sep not in raw, f"{sep!r} written raw into the episodes log"
+
+    # save: add() reads the existing log via all() and rewrites the WHOLE file -
+    # the step that permanently deletes a record the read side failed to recover.
+    reloaded.add(Episode(task="t2", lesson="L2"))
+    final = EpisodeStore(tmp_path).all()
+    assert len(final) == 2, "the earlier episode was lost on the next save cycle"
+    assert final[0].lesson == f"before{sep}after"
+    assert final[1].lesson == "L2"
+
+    # read side, independent of write escaping: a file carrying the RAW separator
+    # (written before this fix existed, or by any other producer) must still
+    # round-trip, not just one this store's own writer just escaped.
+    legacy_line = json.dumps({"task": "legacy", "lesson": f"x{sep}y"},
+                             ensure_ascii=False)
+    store.path.write_text(store.path.read_text(encoding="utf-8") + legacy_line + "\n",
+                          encoding="utf-8")
+    legacy_eps = store.all()
+    assert len(legacy_eps) == 3, "a legacy record with a raw separator was dropped"
+    assert legacy_eps[-1].lesson == f"x{sep}y"
+
+
+def test_forget_and_restore_preserve_a_u0085_bearing_episode(home, tmp_path):
+    """The archive sidecar (_archive()/forgotten()/restore()) carries the identical
+    U+0085 hazard as the live log above - see the why-comments at _archive(),
+    forgotten() and restore() in episodes.py."""
+    sep = "\x85"
+    store = EpisodeStore(tmp_path)
+    keep = store.add(Episode(task="keep this one", lesson="keep"))
+    plain = store.add(Episode(task="a plain second task", lesson="plain"))
+    tainted = store.add(Episode(task="a totally different tainted subject",
+                                lesson=f"before{sep}after"))
+
+    assert store.forget(plain.id) is True
+    assert store.forget(tainted.id) is True
+
+    # write side (_archive): the sidecar on disk must not carry the raw separator.
+    archive_raw = store.archive_path.read_text(encoding="utf-8")
+    assert sep not in archive_raw, f"{sep!r} written raw into the archive sidecar"
+
+    # load (forgotten): both archived episodes must come back intact.
+    rows = {r["task"]: r for r in store.forgotten()}
+    assert len(rows) == 2, "an archived episode was dropped"
+    assert (rows["a totally different tainted subject"]["lesson"]
+            == f"before{sep}after")
+
+    # save (restore rewrites the archive, carrying the OTHER entry forward): the
+    # tainted record must survive a rewrite it was never itself the subject of.
+    restored = store.restore(plain.id)
+    assert restored is not None and store.last_restore_archive_ok
+    archive_raw2 = store.archive_path.read_text(encoding="utf-8")
+    assert sep not in archive_raw2, (
+        f"{sep!r} written raw into the archive sidecar by the restore rewrite")
+    rows2 = store.forgotten()
+    assert len(rows2) == 1 and rows2[0]["lesson"] == f"before{sep}after"
+
+    # read side, independent of write escaping: a raw separator injected directly
+    # into the archive (e.g. written before this fix existed) must still load.
+    legacy_line = json.dumps({"task": "legacy", "lesson": f"x{sep}y",
+                              "forgotten_at": 0.0, "reason": "forget"},
+                             ensure_ascii=False)
+    store.archive_path.write_text(
+        store.archive_path.read_text(encoding="utf-8") + legacy_line + "\n",
+        encoding="utf-8")
+    legacy_rows = store.forgotten()
+    assert len(legacy_rows) == 2, (
+        "a legacy archived record with a raw separator was dropped")
+    assert keep.id not in {r.get("id") for r in legacy_rows}   # never forgotten
 
 
 def test_concurrent_add_and_all_survive_a_racing_replace(home, tmp_path):

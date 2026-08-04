@@ -54,7 +54,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm.jsonl import split_jsonl
+from localm.jsonl import dumps_line, dumps_lines, split_jsonl
 from localm.storekit import NamespaceLockRegistry
 
 from .provenance import neutralise
@@ -387,7 +387,12 @@ class EpisodeStore:
                     raise
                 time.sleep(delay)
         out: list = []
-        for line in text.splitlines():
+        # split_jsonl, NOT str.splitlines(): JSONL is delimited by LINE FEED and
+        # nothing else, but splitlines() also breaks on U+0085/U+2028/U+2029, which
+        # json.dumps(ensure_ascii=False) writes RAW. That tears one record into two
+        # unparseable fragments, silently dropping the episode here and then, on
+        # the next add()'s rewrite, for good. See localm/jsonl.py.
+        for line in split_jsonl(text):
             line = line.strip()
             if not line:
                 continue
@@ -403,7 +408,11 @@ class EpisodeStore:
         a transient PermissionError: on Windows, a concurrent reader with the
         destination open can momentarily deny the rename."""
         self._file.parent.mkdir(parents=True, exist_ok=True)
-        body = "\n".join(json.dumps(e.to_dict(), ensure_ascii=False) for e in eps)
+        # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
+        # would otherwise emit raw (U+0085/U+2028/U+2029), so a record can never
+        # again be split in half by a line-oriented reader - ours or anyone's. See
+        # localm/jsonl.py.
+        body = dumps_lines(e.to_dict() for e in eps)
         tmp = _tmp_for(self._file)
         tmp.write_text(body + "\n", encoding="utf-8")
         for delay in (*_PERMISSION_RETRY_DELAYS, None):
@@ -431,11 +440,17 @@ class EpisodeStore:
             af = self.archive_path
             prior = []
             if af.is_file():
+                # split_jsonl, NOT str.splitlines(): see the why-comment in all()
+                # above and localm/jsonl.py - the same U+0085/U+2028/U+2029
+                # corruption applies to the archive sidecar.
                 prior = [ln for ln in split_jsonl(af.read_text(encoding="utf-8"))
                          if ln.strip()]
             now = time.time()
-            new = [json.dumps({**e.to_dict(), "forgotten_at": now,
-                               "reason": reason}, ensure_ascii=False)
+            # dumps_line, NOT json.dumps: escapes the same line-break-alikes on the
+            # way out, so a freshly-archived episode can never be split in half by a
+            # line-oriented reader on the next load. See the why-comment in
+            # _write_all() above and localm/jsonl.py.
+            new = [dumps_line({**e.to_dict(), "forgotten_at": now, "reason": reason})
                    for e in episodes]
             lines = (prior + new)[-_ARCHIVE_MAX:]
             af.parent.mkdir(parents=True, exist_ok=True)
@@ -485,7 +500,10 @@ class EpisodeStore:
             self.last_forgotten_ok = False
             return []
         out: list = []
-        for line in text.splitlines():
+        # split_jsonl, NOT str.splitlines(): see the why-comment in all() above and
+        # localm/jsonl.py - the same U+0085/U+2028/U+2029 corruption applies to the
+        # archive sidecar.
+        for line in split_jsonl(text):
             line = line.strip()
             if not line:
                 continue
@@ -661,11 +679,14 @@ class EpisodeStore:
                     if (r.get("id"), r.get("forgotten_at")) not in superseded]
             try:
                 # temp + replace, like every other write here: a half-written archive
-                # would cost the user the rest of their recovery copies.
+                # would cost the user the rest of their recovery copies. dumps_line,
+                # NOT json.dumps: same line-break-alike escaping as _archive() above
+                # (see localm/jsonl.py) - this rewrite must not reintroduce the raw
+                # U+0085/U+2028/U+2029 corruption for the entries it carries forward.
                 af = self.archive_path
                 tmp = _tmp_for(af)
                 tmp.write_text(
-                    "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep),
+                    "".join(dumps_line(r) + "\n" for r in keep),
                     encoding="utf-8")
                 tmp.replace(af)
             except OSError as e:
