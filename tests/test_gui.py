@@ -2949,6 +2949,82 @@ class TestImageGeneration:
             self._wait_job(client, r.json()["job_id"])
         assert seen.get("url") == "http://127.0.0.1:9999"
 
+    def test_lora_forwarded_to_backend(self, img_app, monkeypatch):
+        """A selected LoRA (plus its strengths) reaches the shared ComfyUI
+        plumbing's generate_image() - the same call path clip_name1/2 and
+        model_overrides already use."""
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
+        seen = {}
+
+        def fake_gen(prompt, out_path, **kw):
+            seen.update(kw)
+            Path(out_path).write_bytes(b"x")
+            return True, "ok"
+        monkeypatch.setattr(comfy, "generate_image", fake_gen)
+
+        with TestClient(app) as client:
+            r = client.post("/api/imagine", json={
+                "prompt": "a fox in snow",
+                "lora_name": "my_style.safetensors",
+                "lora_strength_model": 0.8,
+                "lora_strength_clip": 0.4,
+            })
+            assert r.status_code == 200, r.text
+            self._wait_job(client, r.json()["job_id"])
+        assert seen.get("lora_name") == "my_style.safetensors"
+        assert seen.get("lora_strength_model") == 0.8
+        assert seen.get("lora_strength_clip") == 0.4
+
+    def test_lora_strength_omitted_keeps_generate_image_default(self, img_app, monkeypatch):
+        """Leaving the strength fields blank must not send an explicit None that
+        would override generate_image()'s own defaults (1.0 / 0.5) - mirrors how
+        img-seed/img-guidance/img-denoise are left blank rather than pre-filled
+        (the NEW-DEFAULT-VALUE-PLACEHOLDER anti-pattern this avoids)."""
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
+        seen = {}
+
+        def fake_gen(prompt, out_path, **kw):
+            seen.update(kw)
+            Path(out_path).write_bytes(b"x")
+            return True, "ok"
+        monkeypatch.setattr(comfy, "generate_image", fake_gen)
+
+        with TestClient(app) as client:
+            r = client.post("/api/imagine", json={
+                "prompt": "a fox in snow",
+                "lora_name": "my_style.safetensors",
+            })
+            assert r.status_code == 200, r.text
+            self._wait_job(client, r.json()["job_id"])
+        assert seen.get("lora_name") == "my_style.safetensors"
+        assert "lora_strength_model" not in seen
+        assert "lora_strength_clip" not in seen
+
+    @pytest.mark.parametrize("bad_name", [
+        "../secrets.safetensors", "..\\secrets.safetensors",
+        "sub/dir.safetensors", "sub\\dir.safetensors",
+        "C:evil.safetensors", "..",
+    ])
+    def test_lora_name_traversal_rejected(self, img_app, bad_name):
+        """A lora_name is a value ComfyUI writes straight into a LoraLoader
+        node - see plug.py's _validate_lora_name. ComfyUI's own live-enumeration
+        preflight check is best-effort (skipped when /object_info cannot be
+        reached), so this lexical rejection must hold on its own, before any
+        network call."""
+        app, _ = img_app
+        with TestClient(app) as client:
+            r = client.post("/api/imagine",
+                            json={"prompt": "x", "lora_name": bad_name})
+        assert r.status_code == 400
+
 
 class TestImageComfyModelPicker:
     """/api/imagine/comfy-models + /api/imagine/comfy-launch - the Workflow
@@ -2964,7 +3040,33 @@ class TestImageComfyModelPicker:
         data = r.json()
         assert data["reachable"] is False
         assert data["slots"] == []
+        assert data["loras"] == []
         assert "message" in data and data["message"]
+
+    def test_comfy_models_returns_loras_when_reachable(self, img_app, monkeypatch):
+        """LoRA files are enumerated independently of the workflow's own model
+        slots (see backend._comfy_lora_options's docstring): the base template
+        carries no LoraLoader node until a generation actually injects one, so
+        the node walk behind ``slots`` would never surface it."""
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        # _comfy_model_slots (-> workflow_model_slots) resolves ITS OWN
+        # comfy_object_info call from comfy_client's module globals, a separate
+        # binding from the one patched below (image_gen.comfy's re-export) -
+        # patch it directly, same as test_comfy_models_returns_slots_when_reachable,
+        # so this stays a real reachable=True response instead of an unmocked
+        # network attempt landing on the unreachable branch and discarding loras.
+        monkeypatch.setattr(comfy, "workflow_model_slots", lambda workflow, api_url: [])
+        fake_info = {"LoraLoader": {"input": {"required": {
+            "lora_name": [["style_a.safetensors", "style_b.safetensors"]],
+        }}}}
+        monkeypatch.setattr(comfy, "comfy_object_info", lambda *a, **k: fake_info)
+        with TestClient(app) as client:
+            r = client.get("/api/imagine/comfy-models")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["reachable"] is True
+        assert data["loras"] == ["style_a.safetensors", "style_b.safetensors"]
 
     def test_comfy_models_returns_slots_when_reachable(self, img_app, monkeypatch):
         # backend.py is loaded via the plugin engine's own unique module spec
