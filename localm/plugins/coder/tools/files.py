@@ -304,6 +304,10 @@ class _ModelRegexTooSlow(RuntimeError):
     """A model-supplied pattern exceeded its per-match time budget."""
 
 
+class _ModelRegexTooExpensive(RuntimeError):
+    """A model-supplied pattern exhausted memory while matching."""
+
+
 def _model_regex_flags(ignore_case: bool = False):
     """Translate our flag intent into the `regex` engine's flags."""
     import regex
@@ -314,7 +318,8 @@ def _model_regex_flags(ignore_case: bool = False):
 
 
 def _run_model_regex(op, *args, **kwargs):
-    """Run one match operation under the time budget, or raise _ModelRegexTooSlow.
+    """Run one match operation under the time budget, or raise
+    _ModelRegexTooSlow / _ModelRegexTooExpensive.
 
     The budget is PER OPERATION, so a glob of many files cannot each burn it
     silently - the caps below bound how much text is offered in the first place,
@@ -333,6 +338,20 @@ def _run_model_regex(op, *args, **kwargs):
             r"(for example `(\s*)*` or `(a|a)*`) can cost time that doubles with "
             "every extra character of input. Simplify the pattern - a plain "
             "substring or a single quantifier is usually what was meant."
+        ) from exc
+    except MemoryError as exc:
+        # A DIFFERENT fact from _ModelRegexTooSlow, so it gets its own message:
+        # this is memory exhaustion, not a time-budget overrun, and saying
+        # "took longer than Xs" here would be false. It is still the same CLASS
+        # of fact as a timeout though - about the PATTERN, not the file - so it
+        # is reported the same way (see the two call sites that catch both).
+        raise _ModelRegexTooExpensive(
+            "the search pattern exhausted memory while matching a single file "
+            "and was stopped. Patterns with nested or recursive quantifiers "
+            r"(for example `(?:a(?R)?b){e<=1}` or `(\s*)*`) can allocate "
+            "unbounded backtracking state as well as unbounded time. Simplify "
+            "the pattern - a plain substring or a single quantifier is usually "
+            "what was meant."
         ) from exc
 
 
@@ -1091,12 +1110,15 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     for file_idx, fp in enumerate(files):
         try:
             hits, hit_total = _grep_file_hits(fp, rx, context, per_file_cap)
-        except _ModelRegexTooSlow as e:
+        except (_ModelRegexTooSlow, _ModelRegexTooExpensive) as e:
             # BEFORE the generic handler on purpose. Falling through to it would
-            # file a runaway pattern under "could not read this file", which is
-            # both wrong and unactionable - the user would go looking at the file.
-            # A pattern too slow to run is a fact about the PATTERN, so it aborts
-            # the call and says so rather than degrading into a partial result.
+            # file a runaway pattern under "could not read this file" (MemoryError
+            # IS an Exception subclass, so it would fall straight into the generic
+            # handler below and be reported that way), which is both wrong and
+            # unactionable - the user would go looking at the file. A pattern too
+            # slow or too memory-hungry to run is a fact about the PATTERN, so it
+            # aborts the call and says so rather than degrading into a partial
+            # result.
             return ToolResult.error(str(e))
         except Exception:
             # Record (do not silence) the skip so an incomplete match set is not reported as complete.
@@ -1284,12 +1306,17 @@ def tool_search_replace(
             if not matches:
                 continue
             new_text = _run_model_regex(rx.sub, replacement, text)
-        except _ModelRegexTooSlow as e:
+        except (_ModelRegexTooSlow, _ModelRegexTooExpensive) as e:
             # Abort before writing anything. This tool MUTATES, so a partial
             # sweep is worse than none: half the glob rewritten and the rest not
             # is a state nobody asked for and the caller cannot tell from success.
             # `changes` is applied after this loop, so returning here leaves the
-            # working tree untouched.
+            # working tree untouched. Before this except also named
+            # _ModelRegexTooExpensive, a MemoryError here escaped the try block
+            # entirely (no handler matched it) and reached execution.py's
+            # generic `except Exception as e: ToolResult.error(f"Tool error: {e}")`
+            # - and str(MemoryError()) is '', so it surfaced as an empty
+            # "Tool error: " with no indication anything about the pattern.
             return ToolResult.error(str(e))
         try:
             rel = fp.relative_to(cwd)

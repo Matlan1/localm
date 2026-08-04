@@ -21,6 +21,19 @@ catastrophic sets, neither containing the other:
 ``regex`` is immune to the first and ~2.7x WORSE on the second - the textbook
 alternation shape a model writes by accident when searching for alternatives.
 An engine swap alone would have MOVED the vulnerability while looking like a fix.
+
+A THIRD failure mode joined these two when the `regex` dependency was bumped
+from 2026.7.10 to 2026.7.19 (#967): a pathological recursive/possessive pattern
+that used to SEGFAULT the process now raises a catchable ``MemoryError``
+instead - a strict improvement, but ``_run_model_regex`` originally caught only
+``regex.error`` and ``TimeoutError``, so the new, catchable ``MemoryError`` fell
+through uncaught into each caller's GENERIC exception handler and was
+misattributed: `grep` reported it as an unreadable FILE ("N file(s) could not
+be read"), and `search_replace` let it escape to the tool-dispatch layer's
+``except Exception as e: ToolResult.error(f"Tool error: {e}")`` as a bare,
+empty ``"Tool error: "`` (``str(MemoryError())`` is ``''``). Both are wrong for
+the same reason the first two failure modes are handled specially: the fact is
+about the PATTERN, not the file.
 """
 
 from __future__ import annotations
@@ -28,16 +41,38 @@ from __future__ import annotations
 import time
 
 import pytest
+import regex as _regex_module
 
 from localm.plugins.coder.tools.files import (
-    _MODEL_REGEX_MAX_LINE, _MODEL_REGEX_TIMEOUT, _ModelRegexTooSlow,
-    _compile_model_pattern, _model_regex_flags, _run_model_regex, tool_grep,
-    tool_search_replace)
+    _MODEL_REGEX_MAX_LINE, _MODEL_REGEX_TIMEOUT, _ModelRegexTooExpensive,
+    _ModelRegexTooSlow, _compile_model_pattern, _model_regex_flags,
+    _run_model_regex, tool_grep, tool_search_replace)
 
 # The witness the `regex` ENGINE is catastrophic on. Sized so the timeout fires
 # well inside the budget rather than sitting on the boundary.
 _ENGINE_KILLER = r"(a|a)*$"
 _ENGINE_KILLER_INPUT = "a" * 60 + "!"
+
+# The witness that exhausts MEMORY rather than time: a recursive possessive
+# quantifier the `regex` engine (2026.7.19+) turns into an unbounded
+# backtracking allocation instead of an infinite loop. On regex < 2026.7.19
+# this SEGFAULTS THE PROCESS instead of raising - see the version guard below,
+# which turns that crash into a clear skip rather than a silent, whole-worker
+# crash that would take out every other test sharing the process.
+_MEMORY_KILLER = r"(?:a(?R)?b){e<=1}"
+_MEMORY_KILLER_INPUT = "aabb"
+
+_REGEX_VERSION = tuple(int(p) for p in _regex_module.__version__.split(".")[:3])
+_regex_too_old_for_memory_probe = pytest.mark.skipif(
+    _REGEX_VERSION < (2026, 7, 19),
+    reason=(
+        f"regex=={_regex_module.__version__} is older than 2026.7.19: on this "
+        "engine _MEMORY_KILLER SEGFAULTS the process instead of raising "
+        "MemoryError (the bug these tests exist to catch only became "
+        "catchable in 2026.7.19, see #967). Sync the venv before running this "
+        "test rather than risk crashing the whole run."
+    ),
+)
 
 
 def _timed(fn, *a, **kw):
@@ -87,6 +122,67 @@ def test_the_timeout_is_what_stops_it_not_luck():
     rx = _compile_model_pattern(_ENGINE_KILLER, _model_regex_flags())
     with pytest.raises(_ModelRegexTooSlow):
         _run_model_regex(rx.search, _ENGINE_KILLER_INPUT)
+
+
+# ---------------------------------------------------------------------------
+#  Memory exhaustion is a DIFFERENT fact than a timeout, and must be
+#  attributed to the PATTERN, not misfiled as an unreadable file or an empty
+#  "Tool error: " (MemoryError IS an Exception subclass, so it silently falls
+#  through to the generic handler unless caught specifically - see #967).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def memory_hostile_repo(tmp_path):
+    (tmp_path / "a.txt").write_text(_MEMORY_KILLER_INPUT, encoding="utf-8")
+    return tmp_path
+
+
+@_regex_too_old_for_memory_probe
+def test_grep_aborts_a_memory_exhausting_pattern_and_names_the_pattern(memory_hostile_repo):
+    """Before the fix this fell through to the generic per-file handler and was
+    reported as 'N file(s) could not be read and were not searched' - wrong and
+    unactionable, since nothing is wrong with the file. It must also NOT reuse
+    the timeout wording ('took longer than'/'timed out'): that would be false,
+    since this is memory exhaustion on a bounded, non-timed-out match."""
+    result = tool_grep(memory_hostile_repo, _MEMORY_KILLER)
+    assert result.ok is False, "a memory-exhausting pattern must not report success"
+    message = (result.output or "") + (result.summary or "")
+    assert "could not be read" not in message, \
+        "must not be misfiled as an unreadable file"
+    assert "not searched" not in message
+    assert "longer than" not in message, "must not claim a timeout that did not happen"
+    assert "memory" in message.lower(), "the message must name what actually happened"
+    assert "pattern" in message.lower(), "the message must name the PATTERN as the cause"
+
+
+@_regex_too_old_for_memory_probe
+def test_search_replace_aborts_before_writing_anything_on_memory_exhaustion(memory_hostile_repo):
+    """Before the fix this escaped tool_search_replace's try block entirely (no
+    handler matched MemoryError) and reached execution.py's generic
+    `except Exception as e: ToolResult.error(f"Tool error: {e}")` - and
+    str(MemoryError()) is '', so it surfaced as a bare, empty 'Tool error: '.
+    search_replace MUTATES, so it must also abort before writing anything."""
+    before = (memory_hostile_repo / "a.txt").read_text(encoding="utf-8")
+    result = tool_search_replace(memory_hostile_repo, _MEMORY_KILLER, "REPLACED",
+                                 glob="**/*")
+    assert result.ok is False
+    message = (result.output or "") + (result.summary or "")
+    assert message.strip(), "must not surface as an empty 'Tool error: '"
+    assert "memory" in message.lower()
+    assert "pattern" in message.lower()
+    assert (memory_hostile_repo / "a.txt").read_text(encoding="utf-8") == before, \
+        "the file was modified despite the abort"
+
+
+@_regex_too_old_for_memory_probe
+def test_the_memoryerror_is_what_stops_it_not_luck():
+    """Asserts the MECHANISM, mirroring test_the_timeout_is_what_stops_it_not_luck:
+    a broad `except Exception` would also make this pass without actually
+    distinguishing memory exhaustion from a timeout, which is exactly the bug
+    (both misattributions passed every OTHER test in this file)."""
+    rx = _compile_model_pattern(_MEMORY_KILLER, _model_regex_flags(ignore_case=True))
+    with pytest.raises(_ModelRegexTooExpensive):
+        _run_model_regex(rx.search, _MEMORY_KILLER_INPUT)
 
 
 # ---------------------------------------------------------------------------
