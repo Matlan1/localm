@@ -9,6 +9,7 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   POST   /api/coder/sessions/{id}/confirm       - answer a pending confirmation
   POST   /api/coder/sessions/{id}/undo          - revert the last file write
   POST   /api/coder/sessions/{id}/compact       - summarise old history
+  POST   /api/coder/sessions/{id}/model         - repoint this session's model
   GET    /api/coder/sessions/{id}/log           - parsed JSONL audit log (log/full)
   GET    /api/coder/sessions/{id}/files         - files changed this session
   GET    /api/coder/sessions/{id}/files/diff    - cumulative session diff
@@ -73,6 +74,10 @@ class CreateSessionRequest(BaseModel):
 
 class MessageRequest(BaseModel):
     text: str
+
+
+class SetModelRequest(BaseModel):
+    model: str
 
 
 class ConfirmRequest(BaseModel):
@@ -414,6 +419,67 @@ async def session_stop(session_id: str, request: Request):
     session = _get_session(request, session_id)
     session.stop()
     return {"status": "stopping"}
+
+
+@_router.post("/api/coder/sessions/{session_id}/model")
+async def session_set_model(session_id: str, req: SetModelRequest, request: Request):
+    """Repoint an existing session's pinned model.
+
+    Without this route a session's model is fixed forever at creation time
+    (CoderSession.set_model's docstring in sessions.py has the full story of
+    why that is a bug, not just a limitation) - the GUI's model switcher had no
+    way to reach an already-running coder session at all, so it kept sending
+    the ORIGINAL model on every request and could reload it right back into
+    VRAM after the user deliberately switched away from it.
+
+    Same trust model as create_session's optional model switch above: a
+    per-session model change repoints the ONE shared engine for EVERYONE, so a
+    scoped key must not trigger it (DoS / interfering with the owner's
+    session) - mirrored here rather than factored out, since the "did the
+    caller actually ask for a change" gate differs (there it is optional and
+    compared against active_model(); here it is the whole point of the call)."""
+    session = _get_session(request, session_id)
+    if session.busy:
+        # Fail fast, before the (expensive, globally-visible) switch_model call
+        # below - session.set_model()'s own lock-protected busy check is the
+        # authoritative gate against the case where this races a message.
+        raise HTTPException(409, "Session is busy; cannot switch models mid-task")
+
+    active_model = request.app.state.active_model
+    is_owner, _ = _principal_from_request(request)
+    from localm import scopes as _S
+    from localm.inference.http_server import caller_scopes as _caller_scopes
+    held = _caller_scopes(request) or set()
+    restricted = not (is_owner or _S.CODER_FULL in held)
+
+    if req.model != active_model():
+        if restricted:
+            raise HTTPException(
+                403, "Switching models needs the owner key; a scoped key uses the "
+                "active model.")
+        from localm.config import load_registry
+        if req.model not in load_registry():
+            raise HTTPException(404, f"Model not registered: {req.model}")
+        switch_model = getattr(request.app.state, "switch_model", None)
+        if switch_model is None:
+            raise HTTPException(503, "Model switching needs the localm GUI server.")
+        try:
+            res = await switch_model(req.model)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to load {req.model}: {e}")
+        # switch_model preempts an in-flight load of a DIFFERENT model (single-
+        # slot, http_server.switch_engine's preempt=True default) - a newer
+        # switch elsewhere can abandon THIS one mid-load, and it reports that
+        # by returning {"status": "superseded"} rather than raising. Reporting
+        # 200 here would tell the caller its switch happened when it did not
+        # (get_engine() itself guards the identical case at http_server.py).
+        if isinstance(res, dict) and res.get("status") == "superseded":
+            raise HTTPException(
+                503, f"Model load was superseded by a newer request: {res.get('by')}")
+
+    if not session.set_model(req.model):
+        raise HTTPException(409, "Session is busy; cannot switch models mid-task")
+    return session.info()
 
 
 @_router.delete("/api/coder/sessions/{session_id}")

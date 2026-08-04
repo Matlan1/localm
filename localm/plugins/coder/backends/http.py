@@ -261,6 +261,16 @@ class HTTPBackend(BaseLLMBackend):
     def model_id(self) -> str:
         return self._model
 
+    def set_model(self, model: str) -> None:
+        """Repoint this backend at a different model NAME, in place.
+
+        Every chat()/chat_stream() call sends ``self._model`` in the request
+        body (see _body()/_anthropic_body()), so this is the one thing a caller
+        needs to change to make a live session's NEXT request target a
+        different model - no new backend/Agent needed, so conversation history
+        survives. Mirrors set_tools()'s in-place-mutation shape."""
+        self._model = model
+
     @property
     def last_usage(self) -> dict:
         """Usage dict from the most recent call: {prompt_tokens, completion_tokens, total_tokens}."""
