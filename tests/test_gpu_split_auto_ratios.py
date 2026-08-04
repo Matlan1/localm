@@ -541,7 +541,6 @@ class TestChatParamChain:
 
     def test_load_native_pins_auto_ratios_into_worker_params(
             self, tmp_path, monkeypatch):
-        from localm.inference.backends.gguf import GgufBackend
         seen = {}
 
         def _resolve(*a, **k):
@@ -564,7 +563,6 @@ class TestChatParamChain:
 
     def test_load_native_passes_none_when_auto_declines(
             self, tmp_path, monkeypatch):
-        from localm.inference.backends.gguf import GgufBackend
         monkeypatch.setattr(discover, "resolve_auto_split_ratios",
                             lambda *a, **k: None)
         b = self._backend(tmp_path)
