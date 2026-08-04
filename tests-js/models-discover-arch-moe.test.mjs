@@ -44,7 +44,7 @@ test("discover-arch-moe: a confirmed-MoE result shows architecture + a solid MoE
 });
 
 test("discover-arch-moe: a name-inferred MoE result is visibly weaker than a confirmed one", async () => {
-  // Live-verified counter-example (ADR-0004): TheBloke/Mixtral-8x7B-v0.1-GGUF
+  // Live-verified counter-example (ADR-0005): TheBloke/Mixtral-8x7B-v0.1-GGUF
   // is real MoE but its architecture header says 'llama', not anything
   // containing 'moe' - discover.py falls back to the repo-name pattern and
   // marks it 'likely', never 'confirmed'.
