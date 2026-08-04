@@ -675,6 +675,96 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
     assert e is not None and e.model_path.endswith("bge-small.gguf")
 
 
+def test_get_embedder_on_progress_announces_stages_on_success(monkeypatch):
+    """ADR-0004 Unit B: on_progress (used by the 'warm up now' job) receives
+    coarse stage announcements around the existing load steps - purely additive,
+    the isolated child's own IPC protocol is untouched (this test only fakes the
+    PARENT-side IsolatedEmbedder construction)."""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
+                                 "n_gpu_layers": 99, "net_mode": "off"})
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/bge-small.gguf")
+
+    class _Ok:
+        dim = 5
+
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Ok)
+
+    messages: list[str] = []
+    e = emb.get_embedder(on_progress=messages.append)
+
+    assert e is not None
+    assert any("resolv" in m.lower() for m in messages), messages
+    assert any("loading" in m.lower() for m in messages), messages
+    assert any("ready" in m.lower() and "5" in m for m in messages), messages
+
+
+def test_get_embedder_on_progress_reports_no_model_available(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
+                                 "n_gpu_layers": 99, "net_mode": "off"})
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: None)
+
+    messages: list[str] = []
+    assert emb.get_embedder(on_progress=messages.append) is None
+    assert any("no embedding model" in m.lower() for m in messages), messages
+
+
+def test_get_embedder_on_progress_reports_load_failure(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "x", "n_gpu_layers": 99,
+                                 "net_mode": "off"})
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/not-an-embedder.gguf")
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("this llama.dll build does not expose the embeddings API")
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Boom)
+
+    messages: list[str] = []
+    assert emb.get_embedder(on_progress=messages.append) is None
+    assert any("load failed" in m.lower() and "embeddings api" in m.lower()
+              for m in messages), messages
+
+
+def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
+    """The '_emit never aborts a load' contract (mirrors
+    managed_comfy_provision._emit): a broken progress sink must not turn a
+    successful load into a failure."""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
+                                 "n_gpu_layers": 99, "net_mode": "off"})
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/bge-small.gguf")
+
+    class _Ok:
+        dim = 5
+
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Ok)
+
+    def _raising_sink(msg):
+        raise RuntimeError("boom")
+
+    e = emb.get_embedder(on_progress=_raising_sink)
+    assert e is not None and e.dim == 5
+
+
 def test_loaded_dim_and_last_error_track_state(monkeypatch):
     """loaded_dim()/last_error() power the GUI picker: a load FAILURE records why
     (so the user learns a wrong pick is not an embedding model) and reports no dim;

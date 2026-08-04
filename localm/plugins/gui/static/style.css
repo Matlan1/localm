@@ -1733,6 +1733,9 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .pathlist-add { margin-top: 6px; align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; }
 /* "in use" tag on the folder list the current RAG indexing mode enforces. */
 .rag-inuse { color: var(--accent, #4a9eff); font-weight: 600; font-size: 0.85em; }
+/* "Warm up now" action under the embedding_model settings field (ADR-0004). */
+.embedding-warmup-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.embedding-warmup-status { color: var(--text-muted, #888); }
 /* Plugin catalog: "requires X (missing)" warning under a plugin's description. */
 .plugin-missing-req { color: var(--danger, #d9534f); }
 

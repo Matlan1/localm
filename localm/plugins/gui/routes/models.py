@@ -330,6 +330,44 @@ def register(app: FastAPI, ctx) -> None:
             return await unload_one_model(req.model)
         return await unload_all_models()
 
+    @app.post("/api/embedding/warmup",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def embedding_warmup(request: Request):
+        """Load the shared embedder NOW, from an explicit user action, instead of
+        the first real /v1/embeddings / memory-consolidate / RAG-recall call
+        silently paying the cost - measured up to two 300s timeout windows (a
+        VRAM-eviction wait plus the isolated child's spawn+native-load) on a cold
+        server, even after ``localm setup-embeddings`` (which only pre-fetches
+        the file, never warms the singleton - a restart resets it too).
+
+        Coarse PARENT-side stage events only (ADR-0004 Unit B): the isolated
+        embedder child's own load/embed IPC protocol is untouched. Uses the same
+        JobManager/SSE mechanism as model pull/remove - a 9th consumer of an
+        already-proven primitive, not a new channel."""
+        from localm.inference.embedder import get_embedder, last_error, loaded_dim
+        already = loaded_dim()
+        if already is not None:
+            def _already_warm(job):
+                job.push({"type": "line",
+                         "text": f"Already warm ({already}-dim)."})
+                return True
+            job = jobs.start_fn("embedding-warmup", _already_warm,
+                                owner=principal_id(request))
+            return {"job_id": job.id}
+
+        def _warm(job):
+            emb = get_embedder(
+                on_progress=lambda msg: job.push({"type": "line", "text": msg}))
+            if emb is None:
+                why = last_error() or "no embedding model is configured"
+                job.push({"type": "line",
+                         "text": f"Could not warm up the embedder: {why}"})
+                return False
+            return True
+
+        job = jobs.start_fn("embedding-warmup", _warm, owner=principal_id(request))
+        return {"job_id": job.id}
+
     @app.get("/api/vram-estimate", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):
         """Approximate VRAM needed to load *model* (defaults to the active one)

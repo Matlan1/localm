@@ -1041,6 +1041,7 @@ export async function refreshSettingsPage() {
   // refresh: each may rebuild the nav, but they preserve the active section.
   buildSettingsNav();
   syncRagIndexingModeHint();
+  syncEmbeddingWarmupButton();
   refreshPairingQR();
   refreshCompanion();
   refreshKeysPanel();
@@ -1071,6 +1072,46 @@ export function syncRagIndexingModeHint() {
   };
   sel.addEventListener("change", apply);
   apply();
+}
+
+/** ADR-0004 Unit B: a "Warm up now" action next to the embedding_model field, so
+ *  a user can pay the (possibly minute-long) first-load cost explicitly instead
+ *  of it happening silently on their first real memory/RAG/embeddings call -
+ *  measured up to two 300s timeout windows on a cold server. Coarse STAGE text
+ *  (not a spinner), streamed via the same job/SSE mechanism model pull already
+ *  uses. Runs every refreshSettingsPage() rebuild, appending to the freshly
+ *  built field wrapper - no de-dup needed, the whole form is rebuilt each time.
+ *  No-op when the field is absent (a non-owner never receives it - admin_only). */
+export function syncEmbeddingWarmupButton() {
+  const wrap = document.querySelector('[data-field-key="embedding_model"]');
+  if (!wrap) return;
+  const row = el("div", "embedding-warmup-row");
+  const btn = el("button", "btn", "Warm up now");
+  btn.type = "button";
+  const status = el("span", "embedding-warmup-status sub");
+  row.appendChild(btn);
+  row.appendChild(status);
+  wrap.appendChild(row);
+
+  btn.onclick = async () => {
+    btn.disabled = true;
+    status.textContent = "Starting...";
+    try {
+      const r = await fetch("/api/embedding/warmup",
+                            { method: "POST", headers: authHeaders() });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const end = await streamJob(data.job_id, (line) => { status.textContent = line; });
+      if (end.status !== "done") {
+        toast("Warm-up did not finish cleanly - see the status line above", true);
+      }
+    } catch (e) {
+      status.textContent = "Warm-up failed: " + e.message;
+      toast("Warm-up failed: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
 }
 
 // Media plugins, in display order, that the Media section configures.
