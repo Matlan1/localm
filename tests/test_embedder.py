@@ -62,6 +62,69 @@ def test_resolve_empty_returns_none(monkeypatch):
     assert emb.resolve_embedding_model_path() is None
 
 
+def test_resolve_unknown_records_last_error(monkeypatch):
+    """A spec matching nothing at all must not just return None - last_error()
+    is the GUI's only channel for this (#949), so it must name the spec."""
+    _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "not-a-real-model-xyz" in err
+
+
+def test_resolve_registered_directory_is_reported_as_hf_not_gguf(tmp_path, monkeypatch):
+    """localm's own model pull can register a HuggingFace-format embedding model
+    as a DIRECTORY of shards (get_model_info's contract is 'exists', not 'is a
+    loadable GGUF'). #949: this used to fall through to the generic 'not a path,
+    a registered model, or a known key' message - indistinguishable from a name
+    that was never found at all, even though the model genuinely was found. Must
+    now say specifically it is a directory, not a GGUF, via last_error()."""
+    hf_dir = tmp_path / "bge-large-en-v1.5"
+    hf_dir.mkdir()
+    (hf_dir / "config.json").write_text("{}")
+    _cfg(monkeypatch, embedding_model="bge-large-en-v1.5")
+
+    import localm.model_manager.registry as registry
+    monkeypatch.setattr(registry, "get_model_info",
+                        lambda name, **k: (str(hf_dir), None))
+
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "directory" in err and "HuggingFace" in err
+    assert "not a path, a registered model, or a known key" not in err
+
+
+def test_resolve_success_clears_prior_last_error(tmp_path, monkeypatch):
+    """A fixed (or always-fine) config must not keep reporting a stale reason
+    from an earlier, unrelated failed resolve."""
+    _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
+    assert emb.resolve_embedding_model_path() is None
+    assert emb.last_error() is not None
+
+    f = tmp_path / "my-embed.gguf"
+    f.write_bytes(b"GGUF stub")
+    _cfg(monkeypatch, embedding_model=str(f))
+    assert emb.resolve_embedding_model_path() == str(f)
+    assert emb.last_error() is None
+
+
+def test_resolve_failure_warns_once_then_quiets(monkeypatch, caplog):
+    """resolve_embedding_model_path re-runs on every embed_texts() call while no
+    embedder is loaded (get_embedder never caches a missing-model result). An
+    UNCHANGED misconfiguration must warn once, not flood the log on every call -
+    but last_error() must still carry the reason every time (checked above)."""
+    _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
+    caplog.set_level(logging.DEBUG, logger="localm")
+
+    for _ in range(3):
+        assert emb.resolve_embedding_model_path() is None
+
+    matching = [r for r in caplog.records if "not-a-real-model-xyz" in r.getMessage()]
+    warnings = [r for r in matching if r.levelno == logging.WARNING]
+    debugs = [r for r in matching if r.levelno == logging.DEBUG]
+    assert len(warnings) == 1
+    assert len(debugs) == 2
+
+
 # --------------------------------------------------------------------------- #
 #  engine.embed dispatch                                                       #
 # --------------------------------------------------------------------------- #
