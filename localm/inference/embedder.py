@@ -36,8 +36,14 @@ is either a filesystem path, a registered model name, or a known key (default
 ``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
 downloaded on demand, gated by the network policy (never behind ``net_mode=off``;
 auto only under ``net_mode=allow`` - otherwise the user runs ``localm setup-embeddings``).
-When no embedding model can be resolved, callers degrade to lexical-only retrieval
-(surfaced via a debug log, never a silent success).
+When no embedding model can be resolved, callers degrade to lexical-only retrieval;
+the reason is recorded for ``last_error()`` (what the GUI's RAG-embedding status
+reads) on every resolve attempt, not only when a load is actually attempted - a
+registered model can name something real (localm pulled it, it is on disk) and
+still not be usable HERE, because this embedder loads a single GGUF file only. The
+common way that happens is a HuggingFace-format pull (a directory of shards, not a
+GGUF): that is a real, different embedding path - see ``inference/backends/hf.py``'s
+``HFBackend``, used when such a checkpoint is loaded as the primary model instead.
 
 The native load (and every ``embed()`` call - it hits ``llama_decode``, the
 same abort-prone native call class) runs inside an ISOLATED CHILD PROCESS
@@ -282,13 +288,65 @@ def _nonlocal_spec_reason(spec: str) -> Optional[str]:
     return None
 
 
+def _record_resolve_failure(reason: str) -> None:
+    """Record *reason* as the current resolve failure for ``last_error()`` (every
+    call, unconditionally), and log it - WARNING the first time this exact reason
+    is seen, DEBUG on repeats of the same one.
+
+    The dedup matters because ``resolve_embedding_model_path`` can run on every
+    single ``embed_texts()`` call while no embedder is loaded: ``get_embedder()``
+    deliberately never caches a missing-model result (so a mid-session
+    ``localm setup-embeddings`` is picked up without a restart - see its
+    docstring), which means an UNCHANGED misconfiguration re-hits this function on
+    every embed, not once. Logging WARNING every time would flood the log for the
+    life of the process (the exact failure mode named in this project's own
+    diff-review notes: a warning on somebody else's timer). ``last_error()`` still
+    carries the reason on every single call regardless of the log level, so the
+    GUI is never blind to it even once the log goes quiet."""
+    global _LAST_ERROR, _LAST_RESOLVE_WARNED
+    _LAST_ERROR = reason
+    if _LAST_RESOLVE_WARNED != reason:
+        logger.warning(reason)
+        _LAST_RESOLVE_WARNED = reason
+    else:
+        logger.debug(reason)
+
+
+def _record_resolve_success() -> None:
+    """Clear a prior RESOLVE failure once the spec resolves - a fixed config (or
+    one that never needed fixing) must not keep reporting a stale reason via
+    ``last_error()``, and a later, DIFFERENT misconfiguration must warn again
+    rather than staying silenced by a dedup entry from an unrelated failure.
+
+    Does NOT clear ``_LAST_ERROR`` while ``_LOAD_FAILED`` is latched. That flag
+    means a LOAD attempt for the currently configured spec already failed (e.g.
+    the file resolves fine but is not actually an embedding model) - a more
+    specific, still-true fact than "this call found a path". resolve_embedding_
+    model_path() re-runs on every get_embedder() call and every GET
+    /api/rag/embedding status poll while no embedder is loaded, so without this
+    guard the very NEXT status check after a load failure would silently wipe
+    the reason it exists to report - only reset_embedder() (an explicit
+    model-selection change) may clear a load failure."""
+    global _LAST_ERROR, _LAST_RESOLVE_WARNED
+    if not _LOAD_FAILED:
+        _LAST_ERROR = None
+    _LAST_RESOLVE_WARNED = None
+
+
 def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Optional[str]:
     """Resolve the configured embedding model to a GGUF path, or None.
 
     Order: an explicit filesystem path -> a registered model name -> a known key
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
     ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
-    force the fetch); default follows net_mode (auto only under 'allow')."""
+    force the fetch); default follows net_mode (auto only under 'allow').
+
+    Every failure to resolve is recorded via ``last_error()`` (see
+    ``_record_resolve_failure``/``_record_resolve_success``) - including a
+    registered model that names something real but is not a single GGUF file
+    (almost always a HuggingFace-format pull: a directory of safetensors shards,
+    not a file), which used to be indistinguishable from "not found at all" and
+    surfaced only as a DEBUG log line nobody but the operator could see (#949)."""
     from localm.config import load_config
     spec = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
     if not spec:
@@ -301,59 +359,129 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     #    net-NTLMv2 credential outbound. That happens before any of the three
     #    lookups below could reject the value, so the check cannot go after them.
     #    Returning None rather than raising keeps the documented contract ("not
-    #    resolvable -> None -> lexical fallback"), but the reason is logged at
-    #    WARNING, never swallowed: a silently ignored setting otherwise looks
+    #    resolvable -> None -> lexical fallback"), but the reason is recorded and
+    #    logged, never swallowed: a silently ignored setting otherwise looks
     #    identical to a model that is merely not downloaded yet (rule 5).
     bad = _nonlocal_spec_reason(spec)
     if bad:
-        logger.warning("ignoring embedding_model %r: %s. Use a known key %s, a "
-                       "registered model name, or a local GGUF path.",
-                       spec, bad, tuple(KNOWN_EMBEDDING_MODELS))
+        _record_resolve_failure(
+            f"ignoring embedding_model {spec!r}: {bad}. Use a known key "
+            f"{tuple(KNOWN_EMBEDDING_MODELS)}, a registered model name, or a "
+            "local GGUF path.")
         return None
 
     # 1. An explicit path to a GGUF.
     p = Path(spec).expanduser()
     if p.is_file():
+        _record_resolve_success()
         return str(p)
 
-    # 2. A registered model name.
+    # 2. A registered model name. A hit that does not resolve to a single FILE is
+    #    a REAL, DIFFERENT outcome from "not registered at all" - the spec named
+    #    something that genuinely exists (get_model_info found it), it is just not
+    #    something this GGUF-only embedder can load. localm's own model pull can
+    #    produce exactly this: a HuggingFace-format model lands as a DIRECTORY
+    #    (shards, config.json, tokenizer files), and get_model_info's own contract
+    #    is "exists" (file or directory), not "is a loadable GGUF" - collapsing
+    #    the two into the same "not found" message (as this used to) hid exactly
+    #    the case in #949, where localm itself downloaded the model successfully
+    #    and then denied it existed.
+    registered_not_gguf = None   # None: no registry hit; else bool, is it a directory
     try:
         from localm.model_manager.registry import get_model_info
         info = get_model_info(spec)
         if info:
             path = info[0] if isinstance(info, tuple) else info
-            if path and Path(path).is_file():
-                return str(path)
+            # Same ordering rule as step 0's spec check: refuse a UNC/device path
+            # BEFORE any stat, never after. A registered entry's stored path is
+            # normally trustworthy (it was written by a separately-authorized
+            # `localm pull`/`add`, not derived live from this request), but this
+            # function has no way to tell "the registry" from "a hand-edited
+            # registry.json" apart, and the cost of being wrong is the same
+            # outbound SMB/NTLM auto-auth step 0 exists to prevent. Treating a
+            # UNC hit as "nothing usable here" (fall through, same as an absent
+            # entry) costs nothing: no legitimate registration produces one.
+            from localm.pathsafe import is_unc_or_device_path
+            if path and not is_unc_or_device_path(str(path)):
+                p2 = Path(path)
+                if p2.is_file():
+                    _record_resolve_success()
+                    return str(path)
+                try:
+                    registered_not_gguf = p2.is_dir()
+                except OSError:
+                    # A stat that fails differently from the is_file() above (a
+                    # permission error, a race with something deleting the path)
+                    # - still a real registry hit, just of unknown shape. Report
+                    # it generically rather than letting the exception escape:
+                    # embed_texts() has no try/except around get_embedder(), and
+                    # /v1/embeddings only catches RuntimeError, so an uncaught
+                    # OSError here would reach the caller as an opaque 500
+                    # instead of the informative 422 this function exists to
+                    # produce.
+                    registered_not_gguf = False
     except Exception:
         pass
 
     # 3. A known embedding-model key.
     known = KNOWN_EMBEDDING_MODELS.get(spec)
     if not known:
-        logger.debug("embedding_model %r is not a path, a registered model, or a "
-                     "known key %s", spec, tuple(KNOWN_EMBEDDING_MODELS))
+        if registered_not_gguf is not None:
+            kind = ("a directory (a HuggingFace-format model)"
+                    if registered_not_gguf else "not a single file")
+            reason = (
+                f"embedding_model {spec!r} is registered but resolves to {kind}, "
+                "not a GGUF file. This dedicated embedder only loads a GGUF "
+                f"embedding model: pick a known key {tuple(KNOWN_EMBEDDING_MODELS)}, "
+                "a registered GGUF model, or a local .gguf path. A HuggingFace "
+                "embedding checkpoint is used directly when loaded as the primary "
+                "model instead, not via embedding_model.")
+        else:
+            reason = (
+                f"embedding_model {spec!r} is not a path, a registered model, or "
+                f"a known key {tuple(KNOWN_EMBEDDING_MODELS)}.")
+        _record_resolve_failure(reason)
         return None
     repo, filename = known
     dest = _embeddings_dir() / filename
     if dest.is_file():
+        _record_resolve_success()
         return str(dest)
-    return _download_known(spec, repo, filename, dest, allow_download)
+    result = _download_known(spec, repo, filename, dest, allow_download)
+    if result:
+        _record_resolve_success()
+    return result
 
 
 def _download_known(name: str, repo: str, filename: str, dest: Path,
                     allow_download: Optional[bool]) -> Optional[str]:
-    """Fetch a known embedding GGUF, gated by the network policy."""
+    """Fetch a known embedding GGUF, gated by the network policy.
+
+    Every failure path also records into ``last_error()`` (like
+    ``resolve_embedding_model_path``'s own failure branches), so GET
+    /api/rag/embedding's ``error`` field explains a policy-gated or failed
+    download too. The log LEVEL for the two policy-gated branches stays INFO -
+    an unset net_mode or a deliberately offline box is an expected state, not a
+    defect worth a WARNING - only the download-failure branch (a real fault)
+    warns, deduped the same way as ``resolve_embedding_model_path``'s own
+    WARNING-worthy failures."""
+    global _LAST_ERROR
     from localm.netpolicy import network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
-        logger.info(
-            "embedding model %r not present and not auto-downloading (net_mode=%s); "
-            "run 'localm setup-embeddings' or set net_mode=allow to enable semantic "
-            "search (memory/RAG use lexical BM25 until then)", name, network_mode())
+        reason = (
+            f"embedding model {name!r} not present and not auto-downloading "
+            f"(net_mode={network_mode()}); run 'localm setup-embeddings' or set "
+            "net_mode=allow to enable semantic search (memory/RAG use lexical "
+            "BM25 until then)")
+        _LAST_ERROR = reason
+        logger.info(reason)
         return None
     if network_mode() == "off":
-        logger.info("embedding model %r missing and network is off; lexical-only", name)
+        reason = f"embedding model {name!r} missing and network is off; lexical-only"
+        _LAST_ERROR = reason
+        logger.info(reason)
         return None
     try:
         from huggingface_hub import hf_hub_download
@@ -366,7 +494,7 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
             return str(got_p)
         return str(dest) if dest.is_file() else (str(got_p) if got_p.is_file() else None)
     except Exception as e:
-        logger.warning("embedding model download failed (%s); lexical-only", e)
+        _record_resolve_failure(f"embedding model {name!r} download failed ({e}); lexical-only")
         return None
 
 
@@ -874,7 +1002,14 @@ _EMBEDDER: Optional[IsolatedEmbedder] = None
 # 422 - until a restart even right after `setup-embeddings`.)
 _LOAD_FAILED = False
 _TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode=allow)
-_LAST_ERROR: Optional[str] = None   # why the last load failed (for the GUI picker)
+# Why the last LOAD or RESOLVE failed (for the GUI picker) - see last_error(),
+# _record_resolve_failure/_record_resolve_success above resolve_embedding_model_path.
+_LAST_ERROR: Optional[str] = None
+# Dedup key for _record_resolve_failure's WARNING-once-then-DEBUG: the reason last
+# logged at WARNING, so an unchanged misconfiguration does not re-warn on every
+# embed_texts() call (resolve_embedding_model_path re-runs on every one while no
+# embedder is loaded - see the _EMBEDDER caching comment above).
+_LAST_RESOLVE_WARNED: Optional[str] = None
 
 
 def _explicit_embedder_gpu_layers(cfg: dict) -> Optional[int]:
@@ -1136,8 +1271,13 @@ def active_requests() -> int:
 
 
 def last_error() -> Optional[str]:
-    """Why the last embedding-model LOAD failed (e.g. the model is not an embedding
-    model), or None. For the GUI picker to tell the user what went wrong.
+    """Why the last embedding-model LOAD or RESOLVE failed (e.g. the model is not
+    an embedding model, or the configured spec resolves to a HuggingFace-format
+    directory rather than a GGUF file), or None. For the GUI picker to tell the
+    user what went wrong - resolve_embedding_model_path records a failure here on
+    every call, not only when a load is actually attempted (see
+    _record_resolve_failure), so GET /api/rag/embedding can explain a broken
+    embedding_model without anyone having to trigger an embed first.
 
     PATH-SCRUBBED on the way out. The stored message is the raw exception text,
     which for a load failure reads "failed to load embedding model:
@@ -1186,13 +1326,13 @@ def reset_embedder(*, force: bool = True) -> bool:
 
     A pinned (``force=False``, busy) embedder is a full no-op, including the
     negative caches: nothing actually changed, so nothing is cleared.
-    Otherwise ``_LOAD_FAILED``/``_TRIED_DOWNLOAD``/``_LAST_ERROR`` are always
-    cleared alongside ``_EMBEDDER`` - even when no embedder was loaded at
-    all (only a cached load FAILURE), matching the original unconditional
-    behavior: a caller resetting a failed-load state expects the next
-    ``get_embedder()`` to retry fresh, not keep returning the stale cached
-    failure."""
-    global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR
+    Otherwise ``_LOAD_FAILED``/``_TRIED_DOWNLOAD``/``_LAST_ERROR``/
+    ``_LAST_RESOLVE_WARNED`` are always cleared alongside ``_EMBEDDER`` - even
+    when no embedder was loaded at all (only a cached load FAILURE), matching
+    the original unconditional behavior: a caller resetting a failed-load state
+    expects the next ``get_embedder()`` to retry fresh, not keep returning the
+    stale cached failure (or a suppressed re-warn of it)."""
+    global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR, _LAST_RESOLVE_WARNED
     with _LOCK:
         if not force and _EMBEDDER is not None and _EMBEDDER.active_requests > 0:
             return False
@@ -1203,6 +1343,7 @@ def reset_embedder(*, force: bool = True) -> bool:
         _LOAD_FAILED = False
         _TRIED_DOWNLOAD = False
         _LAST_ERROR = None
+        _LAST_RESOLVE_WARNED = None
         return cleared
 
 

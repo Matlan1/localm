@@ -51,6 +51,7 @@ export async function imgDownload(name) {
 
 export async function refreshImageHistory() {
   refreshReloadToggle();
+  refreshLoraPicker();
   try {
     const r = await fetch("/api/imagine/history", { headers: authHeaders() });
     if (!r.ok) {
@@ -252,6 +253,9 @@ export function showImageDetail(item) {
         $("img-guidance").value = item.meta.guidance ?? "";
         $("img-denoise").value = item.meta.denoise ?? "";
         $("img-input").value = item.meta.input_image || "";
+        $("img-lora").value = item.meta.lora_name || "";
+        $("img-lora-strength-model").value = item.meta.lora_strength_model ?? "";
+        $("img-lora-strength-clip").value = item.meta.lora_strength_clip ?? "";
         closeModal();
         toast("Settings restored - tweak and generate");
       };
@@ -366,6 +370,35 @@ export async function refreshReloadToggle() {
   } catch (e) { /* server unreachable */ }
 }
 
+/* LoRA picker - populated from ComfyUI's live-installed LoRA files (the same
+   /api/imagine/comfy-models call the Workflow panel's model picker uses, see
+   comfyModelPicker in workflow.js; loras is enumerated independently there
+   since a LoraLoader node is not normally in the active workflow graph).
+   Keeps the current selection across a refresh rather than resetting it back
+   to "None" every time the panel reloads. */
+export async function refreshLoraPicker() {
+  const sel = $("img-lora");
+  if (!sel) return;
+  const previous = sel.value;
+  let data;
+  try {
+    const r = await fetch("/api/imagine/comfy-models", { headers: authHeaders() });
+    data = await r.json();
+  } catch (e) { return; }
+  sel.replaceChildren();
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = data.reachable ? "None" : "None (ComfyUI not running)";
+  sel.appendChild(none);
+  for (const name of (data.loras || [])) {
+    const o = document.createElement("option");
+    o.value = name;
+    o.textContent = name;
+    sel.appendChild(o);
+  }
+  sel.value = [...sel.options].some((o) => o.value === previous) ? previous : "";
+}
+
 $("img-reload-llm").onchange = async () => {
   const value = $("img-reload-llm").checked;
   const r = await fetch("/v1/config", {
@@ -414,6 +447,12 @@ $("img-generate").onclick = async () => {
     denoise: num("img-denoise"),
     input_image: $("img-input").value.trim() || null,
   };
+  const loraName = $("img-lora").value;
+  if (loraName) {
+    body.lora_name = loraName;
+    body.lora_strength_model = num("img-lora-strength-model");
+    body.lora_strength_clip = num("img-lora-strength-clip");
+  }
   if (modelOverrides.image && Object.keys(modelOverrides.image).length) {
     body.model_overrides = modelOverrides.image;
   }

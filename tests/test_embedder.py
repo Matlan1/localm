@@ -62,6 +62,152 @@ def test_resolve_empty_returns_none(monkeypatch):
     assert emb.resolve_embedding_model_path() is None
 
 
+def test_resolve_unknown_records_last_error(monkeypatch):
+    """A spec matching nothing at all must not just return None - last_error()
+    is the GUI's only channel for this (#949), so it must name the spec."""
+    _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "not-a-real-model-xyz" in err
+
+
+def test_resolve_registered_directory_is_reported_as_hf_not_gguf(tmp_path, monkeypatch):
+    """localm's own model pull can register a HuggingFace-format embedding model
+    as a DIRECTORY of shards (get_model_info's contract is 'exists', not 'is a
+    loadable GGUF'). #949: this used to fall through to the generic 'not a path,
+    a registered model, or a known key' message - indistinguishable from a name
+    that was never found at all, even though the model genuinely was found. Must
+    now say specifically it is a directory, not a GGUF, via last_error()."""
+    hf_dir = tmp_path / "bge-large-en-v1.5"
+    hf_dir.mkdir()
+    (hf_dir / "config.json").write_text("{}")
+    _cfg(monkeypatch, embedding_model="bge-large-en-v1.5")
+
+    import localm.model_manager.registry as registry
+    monkeypatch.setattr(registry, "get_model_info",
+                        lambda name, **k: (str(hf_dir), None))
+
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "directory" in err and "HuggingFace" in err
+    assert "not a path, a registered model, or a known key" not in err
+
+
+def test_resolve_registered_unc_path_is_never_statted(monkeypatch):
+    """A registered entry whose stored path is UNC/device-shaped (a hand-edited
+    registry, never a legitimate `localm pull`/`add`) must be refused the same
+    way step 0 refuses a UNC embedding_model spec directly - BEFORE any
+    filesystem call, never after. A real stat reaches the Windows SMB
+    redirector and can block for minutes on an unroutable host or
+    auto-authenticate against a reachable one.
+
+    Uses a side-effect counter, NOT a raise, to detect a regression: the
+    registry-lookup block this guard sits in is wrapped in a broad
+    'except Exception: pass' (to tolerate a broken registry), which would
+    silently swallow an AssertionError raised from inside is_file()/is_dir()
+    and make the test pass whether or not the guard actually fired - proven by
+    running this exact scenario against the pre-fix code before adding the
+    guard, which showed exactly that false pass. The spy never touches the
+    real filesystem/network either way, so the test cannot hang."""
+    _cfg(monkeypatch, embedding_model="sneaky-entry")
+
+    unc = r"\\attacker-host\share\fake.gguf"
+    import localm.model_manager.registry as registry
+    monkeypatch.setattr(registry, "get_model_info", lambda name, **k: (unc, None))
+
+    stat_calls = []
+
+    class _SpyPath:
+        def is_file(self):
+            stat_calls.append("is_file")
+            return False
+
+        def is_dir(self):
+            stat_calls.append("is_dir")
+            return False
+
+    real_path = emb.Path
+
+    def _spy_path(*a, **k):
+        if a and a[0] == unc:
+            return _SpyPath()
+        return real_path(*a, **k)
+
+    monkeypatch.setattr(emb, "Path", _spy_path)
+    assert emb.resolve_embedding_model_path() is None
+    assert stat_calls == [], f"a UNC-shaped registered path was statted: {stat_calls}"
+
+
+def test_resolve_success_clears_prior_last_error(tmp_path, monkeypatch):
+    """A fixed (or always-fine) config must not keep reporting a stale reason
+    from an earlier, unrelated failed resolve."""
+    _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
+    assert emb.resolve_embedding_model_path() is None
+    assert emb.last_error() is not None
+
+    f = tmp_path / "my-embed.gguf"
+    f.write_bytes(b"GGUF stub")
+    _cfg(monkeypatch, embedding_model=str(f))
+    assert emb.resolve_embedding_model_path() == str(f)
+    assert emb.last_error() is None
+
+
+def test_load_failure_survives_a_later_resolve_success_probe(tmp_path, monkeypatch):
+    """Regression: GET /api/rag/embedding's status handler calls
+    resolve_embedding_model_path() directly (the same call get_embedder() makes)
+    purely to compute 'installed'. A file that resolves fine at the path level
+    but is NOT actually a usable embedding model (the real #949-adjacent case:
+    wrong pooling, corrupt file, or - as here - a build that lacks the
+    embeddings API) must not have its LOAD failure explanation wiped by that
+    later resolve-only probe just because the path itself still exists. Only
+    reset_embedder() may clear a latched load failure."""
+    f = tmp_path / "not-an-embedder.gguf"
+    f.write_bytes(b"GGUF stub")
+    _cfg(monkeypatch, embedding_model=str(f))
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("this llama.dll build does not expose the embeddings API")
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Boom)
+    assert emb.get_embedder() is None
+    assert "embeddings API" in (emb.last_error() or "")
+
+    # The status-poll probe: same file, resolves fine at the path level.
+    assert emb.resolve_embedding_model_path() == str(f)
+    assert "embeddings API" in (emb.last_error() or ""), (
+        "a resolve-only probe must not erase a real load failure")
+
+
+def test_download_gated_by_net_policy_records_last_error(monkeypatch):
+    """A known key that is not yet downloaded, with auto-download blocked by
+    policy (net_mode off), still explains itself via last_error() - INFO-level
+    in the log (an expected state, not a defect: see _download_known), but not
+    silent to the GUI status endpoint that reads last_error()."""
+    _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="off")
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "bge-small-en-v1.5" in err and "not auto-downloading" in err
+
+
+def test_resolve_failure_warns_once_then_quiets(monkeypatch, caplog):
+    """resolve_embedding_model_path re-runs on every embed_texts() call while no
+    embedder is loaded (get_embedder never caches a missing-model result). An
+    UNCHANGED misconfiguration must warn once, not flood the log on every call -
+    but last_error() must still carry the reason every time (checked above)."""
+    _cfg(monkeypatch, embedding_model="not-a-real-model-xyz")
+    caplog.set_level(logging.DEBUG, logger="localm")
+
+    for _ in range(3):
+        assert emb.resolve_embedding_model_path() is None
+
+    matching = [r for r in caplog.records if "not-a-real-model-xyz" in r.getMessage()]
+    warnings = [r for r in matching if r.levelno == logging.WARNING]
+    debugs = [r for r in matching if r.levelno == logging.DEBUG]
+    assert len(warnings) == 1
+    assert len(debugs) == 2
+
+
 # --------------------------------------------------------------------------- #
 #  engine.embed dispatch                                                       #
 # --------------------------------------------------------------------------- #

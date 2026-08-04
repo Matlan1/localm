@@ -140,11 +140,15 @@ def test_scan_folder_walk(tmp_path, temp_registry):
     model_file.write_bytes(b"UNET")
 
     with patch("localm.model_manager.scan.get_comfy_workdir", return_value=str(comfy_dir)):
-        # We query with ComfyUI offline
-        with patch("requests.get") as mock_get:
-            mock_get.side_effect = Exception("offline")
+        # We query with ComfyUI offline. `requests.get` is NOT the real call
+        # this code path makes (it fetches /object_info via urllib, see
+        # test_scan_object_info_reconcile's note above) - patching it was a
+        # no-op that let an unmocked network call reach the real ComfyUI
+        # default port (127.0.0.1:8188), a false-premise-of-offline shape
+        # fixed the same way as test_gui.py's comfy-model-picker test.
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
             res = scan_comfy_models(comfy_url="http://localhost:8188")
-            
+
     assert res.added >= 1
     
     # Reload registry
@@ -237,7 +241,7 @@ def test_scan_workdir_override_never_touches_configured_comfy_workdir(tmp_path, 
         raise AssertionError("get_comfy_workdir() must not be called with an explicit workdir override")
 
     with patch("localm.model_manager.scan.get_comfy_workdir", side_effect=_boom):
-        with patch("requests.get", side_effect=Exception("offline")):
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
             res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
 
     assert res.added == 5
@@ -250,7 +254,7 @@ def test_scan_workdir_override_categorizes_every_convention(tmp_path, temp_regis
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
-    with patch("requests.get", side_effect=Exception("offline")):
+    with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
         res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
 
     assert res.added == 5
@@ -268,7 +272,7 @@ def test_preview_comfy_models_registers_nothing(tmp_path, temp_registry):
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
-    with patch("requests.get", side_effect=Exception("offline")):
+    with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
         preview = preview_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
 
     assert mm.load_registry() == {}, "a preview must not register anything"
@@ -285,7 +289,7 @@ def test_preview_then_scan_totals_agree(tmp_path, temp_registry):
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
-    with patch("requests.get", side_effect=Exception("offline")):
+    with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
         preview = preview_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
         total_new = sum(preview.counts.values())
         res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
@@ -300,7 +304,7 @@ def test_preview_excludes_already_registered_files(tmp_path, temp_registry):
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
-    with patch("requests.get", side_effect=Exception("offline")):
+    with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
         scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
         preview = preview_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
 

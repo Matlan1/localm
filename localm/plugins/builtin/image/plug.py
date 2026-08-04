@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
@@ -48,6 +49,9 @@ class ImagineRequest(BaseModel):
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
+    lora_name: str | None = None              # from the live LoRA picker, or None
+    lora_strength_model: float | None = None  # None keeps generate_image()'s default (1.0)
+    lora_strength_clip: float | None = None   # None keeps generate_image()'s default (0.5)
 
 
 class MoveFileRequest(BaseModel):
@@ -66,6 +70,20 @@ def _image_path(name: str) -> Path:
     return confined_file(_images_dir(), name, "image")
 
 
+def _validate_lora_name(raw: str) -> str:
+    """HTTP-layer wrapper over ``comfy.is_safe_lora_name`` - a 400 up front,
+    before this route's VRAM-swap/background-job dance ever starts, rather
+    than a job that fails partway through with the same message. That shared
+    predicate (not a route-local copy) is also enforced again inside
+    ``_build_image_workflow`` itself, so the coder agent's ``generate_image``
+    tool and any other caller that reaches ``comfy.generate_image`` directly -
+    bypassing this route entirely - cannot skip the check either."""
+    name = raw.strip()
+    if not is_safe_lora_name(name):
+        raise HTTPException(400, "Invalid LoRA name")
+    return name
+
+
 @_router.post("/api/imagine")
 async def imagine(req: ImagineRequest, request: Request):
     if not req.prompt.strip():
@@ -73,6 +91,7 @@ async def imagine(req: ImagineRequest, request: Request):
     input_image = None
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
+    lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
 
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
@@ -148,6 +167,9 @@ async def imagine(req: ImagineRequest, request: Request):
             input_image=input_image,
             denoise=req.denoise,
             model_overrides=req.model_overrides,
+            lora_name=lora_name,
+            lora_strength_model=req.lora_strength_model,
+            lora_strength_clip=req.lora_strength_clip,
             swap=gen_swap,
             delete_outputs=delete_outputs,
             cancel_check=lambda: job.cancel_requested,
@@ -269,23 +291,33 @@ async def imagine_history(request: Request):
 @_router.get("/api/imagine/comfy-models")
 async def imagine_comfy_models():
     """Model-file slots the active image workflow exposes (for the Workflow
-    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
-    about unreachability (rule 5) - never a silently-empty picker.
+    panel's model-picker dropdowns), plus the LoRA files ComfyUI currently has
+    installed (for the generation form's LoRA picker), resolved against the
+    live ComfyUI. Honest about unreachability (rule 5) - never a
+    silently-empty picker.
 
-    The slot resolution is a blocking urlopen of ComfyUI's /object_info (commonly
-    several MB, 10s timeout), so it runs OFF the event loop - inline it froze the
-    whole server, and every concurrent chat stream and job SSE with it, whenever
-    ComfyUI was slow or cold (REG-638), the same way the /comfy-launch route below
-    already offloads its own slow call."""
+    LoRAs are enumerated separately from ``slots``: a LoraLoader node is not
+    normally present in the active workflow JSON (the plugin injects one at
+    generation time only when a LoRA is requested - see comfy.py's
+    ``_build_image_workflow``), so the ``workflow_model_slots`` node walk that
+    builds ``slots`` would never surface it.
+
+    The slot/LoRA resolution is a blocking urlopen of ComfyUI's /object_info
+    (commonly several MB, 10s timeout), so it runs OFF the event loop - inline
+    it froze the whole server, and every concurrent chat stream and job SSE
+    with it, whenever ComfyUI was slow or cold (REG-638), the same way the
+    /comfy-launch route below already offloads its own slow call."""
     from fastapi.concurrency import run_in_threadpool
 
     from localm.config import load_config
     s = _backend.settings(load_config())
     slots = await run_in_threadpool(_backend._comfy_model_slots, s)
+    loras = await run_in_threadpool(_backend._comfy_lora_options, s)
     if slots is None:
-        return {"reachable": False, "api_url": s["api_url"], "slots": [],
+        return {"reachable": False, "api_url": s["api_url"], "slots": [], "loras": [],
                 "message": "ComfyUI is not running - launch it to see available models."}
-    return {"reachable": True, "api_url": s["api_url"], "slots": slots}
+    return {"reachable": True, "api_url": s["api_url"], "slots": slots,
+            "loras": loras or []}
 
 
 @_router.post("/api/imagine/comfy-launch")

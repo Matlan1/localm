@@ -97,7 +97,7 @@ from localm.config import load_config  # noqa: F401
 # patch several of them, and other callers import them from here historically);
 # listing them in __all__ marks the imports as intentional re-exports, not dead.
 __all__ = [
-    "generate_image", "apply_fast_dequant",
+    "generate_image", "apply_fast_dequant", "is_safe_lora_name",
     "_amd_rocm_launch_env", "_combo_options", "_comfy_alive",
     "_comfy_output_root", "_derive_workdir_from_cmd", "_format_missing",
     "_image_dimensions", "_is_link", "_link_source_id", "_localm_unload",
@@ -143,6 +143,36 @@ def workflow_path() -> Path:
 # GGUF UNet loader node classes whose `dequant_dtype` controls how the quantized
 # weights are unpacked for compute.
 _GGUF_UNET_LOADERS = ("UnetLoaderGGUF", "UnetLoaderGGUFAdvanced")
+
+# Common NTFS/ext4 filename-component limit - a real LoRA filename is never
+# longer than this, so it is a cheap, safe upper bound.
+_MAX_LORA_NAME_LEN = 255
+
+
+def is_safe_lora_name(name: str) -> bool:
+    """True when *name* is safe to embed as a ComfyUI ``LoraLoader.lora_name``
+    value.
+
+    A LoRA name is never a local filesystem path - ComfyUI resolves it against
+    its OWN models directory, not localm's - so there is no base directory to
+    confine it under the way ``pathsafe.confined_name``/``confined_under`` do
+    for a real local path. This is instead a pure lexical predicate (no
+    filesystem call): reject empty, a NUL byte, an implausibly long value, any
+    path separator, a bare "." / ".." component, or an ``ntpath.splitdrive``-
+    detected drive prefix (catches ``C:evil``, which carries no separator).
+
+    Called from EVERY entry point that can supply ``lora_name`` - not just the
+    HTTP image route, which only protects browser-originated requests. The
+    coder agent's ``generate_image`` tool (and any future MCP wiring) calls
+    straight into ``generate_image``/``_build_image_workflow`` below, so this
+    also runs there as the backstop no caller can bypass, regardless of where
+    the value entered."""
+    if not name or len(name) > _MAX_LORA_NAME_LEN or "\x00" in name:
+        return False
+    if "/" in name or "\\" in name or name in (".", ".."):
+        return False
+    import ntpath
+    return not ntpath.splitdrive(name)[0]
 
 
 def apply_fast_dequant(workflow: dict) -> int:
@@ -295,6 +325,8 @@ def _build_image_workflow(
     # 7. Inject LoRA (fresh id so it cannot collide with a user's own graph)
     lora_id: Optional[str] = None
     if lora_name:
+        if not is_safe_lora_name(lora_name):
+            return False, f"Invalid LoRA name: {lora_name!r}", None
         lora_id = next_node_id(workflow)
         workflow[lora_id] = {
             "inputs": {

@@ -116,6 +116,22 @@ class TestFluxImageTool(unittest.TestCase):
         _, kwargs = mock_gen.call_args
         self.assertFalse(kwargs.get("delete_outputs"))
 
+    @patch("localm.image_gen.comfy.ensure_comfy", return_value=(True, "up"))
+    def test_lora_name_traversal_rejected(self, mock_ensure):
+        """This tool calls localm.image_gen.comfy.generate_image DIRECTLY - it
+        never goes through the HTTP image route's plug.py._validate_lora_name
+        (that guard only covers browser-originated requests), so a malicious
+        lora_name reaching this tool must be caught by the SAME check inside
+        _build_image_workflow itself (comfy.is_safe_lora_name). ensure_comfy is
+        stubbed only to reach that check; everything past it (preflight,
+        submit) must never run, which the absence of the output file confirms."""
+        result = tool_generate_image(
+            self.cwd, "a photorealistic cat", self.output_path,
+            lora_name="../../secrets.safetensors")
+        self.assertFalse(result.ok)
+        self.assertIn("Invalid LoRA name", result.output)
+        self.assertFalse(self.abs_output_path.exists())
+
     @patch("urllib.request.urlopen")
     def test_generate_image_connection_failure(self, mock_urlopen):
         # Force a connection refusal - the fail-fast probe catches it now

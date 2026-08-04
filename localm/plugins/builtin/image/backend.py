@@ -96,6 +96,21 @@ def _comfy_model_slots(s: dict) -> Optional[list]:
     return _comfy.workflow_model_slots(workflow, s["api_url"])
 
 
+def _comfy_lora_options(s: dict) -> Optional[list]:
+    """LoRA filenames the live ComfyUI currently has installed (``LoraLoader``'s
+    ``lora_name`` combo from ``/object_info``). Independent of
+    ``_comfy_model_slots`` / ``workflow_model_slots``, which only walks nodes
+    already PRESENT in the active workflow JSON - a LoraLoader node is not one
+    of them, since the image plugin injects it fresh at generation time only
+    when a LoRA is actually requested (see comfy.py's ``_build_image_workflow``).
+    None when ComfyUI is not reachable, matching ``_comfy_model_slots``'s
+    reachability contract."""
+    info = _comfy.comfy_object_info(s["api_url"])
+    if info is None:
+        return None
+    return _comfy._combo_options(info.get("LoraLoader", {}), "lora_name") or []
+
+
 def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     self_url: str, write_sidecar: bool,
                     guidance: Optional[float] = None,
@@ -104,6 +119,9 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     input_image: Optional[Path] = None,
                     denoise: Optional[float] = None,
                     model_overrides: Optional[dict] = None,
+                    lora_name: Optional[str] = None,
+                    lora_strength_model: Optional[float] = None,
+                    lora_strength_clip: Optional[float] = None,
                     swap: bool = True,
                     delete_outputs: Optional[bool] = None,
                     cancel_check=None,
@@ -111,6 +129,16 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     on_progress=None) -> tuple[bool, str]:
     if delete_outputs is None:
         delete_outputs = bool(s.get("delete_outputs", False))
+    # Only forward the strength kwargs when the caller actually set them, so an
+    # unset (None) strength keeps generate_image()'s own defaults (1.0 / 0.5)
+    # instead of this facade silently overriding them with None.
+    lora_kwargs = {}
+    if lora_name:
+        lora_kwargs["lora_name"] = lora_name
+        if lora_strength_model is not None:
+            lora_kwargs["lora_strength_model"] = lora_strength_model
+        if lora_strength_clip is not None:
+            lora_kwargs["lora_strength_clip"] = lora_strength_clip
     return _comfy.generate_image(
         prompt, out_path,
         api_url=s["api_url"],
@@ -131,6 +159,7 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
         cancel_check=cancel_check,
         placement=placement,
         on_progress=on_progress,
+        **lora_kwargs,
     )
 
 

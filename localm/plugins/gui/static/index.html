@@ -352,6 +352,12 @@
             <div><label>Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)"></div>
             <div><label>Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default"></div>
           </div>
+          <div class="grid2">
+            <div><label>LoRA</label><select id="img-lora"><option value="">None</option></select></div>
+            <div></div>
+            <div><label>LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)"></div>
+            <div><label>LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)"></div>
+          </div>
           <label>Input image path (optional, img2img)</label>
           <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false">
           <div class="actions">
