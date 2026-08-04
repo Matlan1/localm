@@ -464,6 +464,52 @@ class VramSizingMixin:
             )
         return p.stat().st_size if p.is_file() else 0
 
+    def _effective_model_bytes_for_vram(self) -> int:
+        """VRAM-resident weight bytes for THIS load: ``_model_bytes()``, minus
+        whatever ``n_cpu_moe`` pins to SYSTEM RAM instead (see llama.py's
+        ``_apply_cpu_moe`` - the routed-expert tensors of the first
+        ``n_cpu_moe`` layers never touch VRAM at all).
+
+        Every caller here that reasons about "how much VRAM will this load
+        need" - ``_check_vram``, ``_auto_gpu_layers``, ``_auto_ctx_max`` - used
+        to call the raw ``_model_bytes()`` directly and never looked at
+        ``n_cpu_moe``, so a Mixture-of-Experts model that genuinely fits once
+        its experts are pinned to RAM was refused (``_check_vram``) or
+        under-offloaded (``_auto_gpu_layers``)/under-budgeted for context
+        (``_auto_ctx_max``) on arithmetic that assumed a placement the user
+        had explicitly overridden.
+
+        Computed via ``gguf_moe_pinned_expert_bytes``, which reads each
+        pinned tensor's EXACT size from the file's own tensor-info offsets
+        (no per-quantization-type guess) - this is not a heuristic estimate,
+        it is the real number, whenever it can be read at all.
+
+        Falls back to the unadjusted ``_model_bytes()`` (today's behavior,
+        never a regression) when ``n_cpu_moe`` is unset/0, the header cannot
+        be parsed, or nothing in the pinned range matched (e.g. a dense
+        model, where ``n_cpu_moe`` already has no effect per
+        ``_apply_cpu_moe``'s own ``gguf_expert_count() == 0`` guard - in that
+        case charging the whole file IS the correct answer, not a fallback).
+        Memoised per instance: the file read happens once per load even
+        though every caller above asks."""
+        model_bytes = self._model_bytes()
+        n_cpu_moe = getattr(self, "n_cpu_moe", 0) or 0
+        if n_cpu_moe <= 0:
+            return model_bytes
+        pinned = getattr(self, "_gguf_moe_pinned_bytes", None)
+        if pinned is None:
+            from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
+            try:
+                pinned = gguf_moe_pinned_expert_bytes(
+                    Path(self.model_path), n_cpu_moe)
+            except Exception as exc:  # contracted not to raise - surface if it does
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf MoE expert-byte probe failed (%s); charging "
+                           "the whole file for VRAM sizing", type(exc).__name__)
+                pinned = None
+            self._gguf_moe_pinned_bytes = pinned if pinned is not None else 0
+        return max(0, model_bytes - self._gguf_moe_pinned_bytes)
+
     def _vram_holder_hint(self) -> str:
         """Best-effort: name a concrete live sibling localm instance holding
         VRAM on this same GPU device (port, model, how long ago it last
@@ -601,7 +647,13 @@ class VramSizingMixin:
             if free is None:
                 return  # can't measure (no torch / no GPU) - nothing useful to say
             total = self._total_vram_bytes()
-        model_bytes = self._model_bytes()
+        # _effective_model_bytes_for_vram(), not the raw _model_bytes(): an
+        # n_cpu_moe load pins its routed-expert weights to system RAM, where
+        # they never draw on this budget at all - see that method's
+        # docstring. Without this a Mixture-of-Experts model that genuinely
+        # fits once its experts are pinned was refused here on arithmetic
+        # that assumed a placement the user had explicitly overridden.
+        model_bytes = self._effective_model_bytes_for_vram()
         kv_cache = self.n_ctx * self._kv_bytes_per_token()
         # Charge only the offloaded fraction of the weights: a partial load
         # (0 < g < 99, whether auto-sized or a user's explicit -g) puts only some
@@ -809,7 +861,11 @@ class VramSizingMixin:
             free = self._free_vram_bytes()
         if free is None:
             return self._AUTO_CTX_FALLBACK
-        model = self._model_bytes()
+        # _effective_model_bytes_for_vram(), not the raw _model_bytes() - see
+        # _check_vram's identical reasoning: an n_cpu_moe load's pinned
+        # expert weights never draw on this budget, so charging the whole
+        # file here under-budgets the context ceiling for no reason.
+        model = self._effective_model_bytes_for_vram()
         budget = (free - model - self._VRAM_OVERHEAD_BYTES
                   - embedder_ctx_reservation_bytes())
         if budget <= 0:
@@ -880,13 +936,19 @@ class VramSizingMixin:
             free = self._free_vram_bytes()
         if free is None:
             return None                       # unmeasurable - honest fallback (A0)
-        model = self._model_bytes()
-        if model <= 0:
+        if self._model_bytes() <= 0:
             return self._DEFAULT_GPU_LAYERS    # can't size - attempt full offload
+        # _effective_model_bytes_for_vram(), not the raw _model_bytes() (only
+        # the EXISTENCE check above needs the raw file size) - see
+        # _check_vram's identical reasoning: an n_cpu_moe load's pinned
+        # expert weights never draw on this budget, so charging the whole
+        # file here under-offloaded an MoE model (or refused full offload)
+        # on arithmetic blind to where n_cpu_moe actually put its weights.
+        model = self._effective_model_bytes_for_vram()
         kv = self.n_ctx * self._kv_bytes_per_token()
         overhead = self._VRAM_OVERHEAD_BYTES
-        if free >= model + kv + overhead:
-            return self._DEFAULT_GPU_LAYERS    # full offload fits
+        if model <= 0 or free >= model + kv + overhead:
+            return self._DEFAULT_GPU_LAYERS    # full offload fits (or nothing left to size)
         weight_budget = free - kv - overhead
         if weight_budget <= 0:
             return 0                           # no room even for one layer's share

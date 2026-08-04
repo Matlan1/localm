@@ -505,17 +505,6 @@ def _build_sampler(
     return chain
 
 
-# The FUSED per-layer expert weights, as llama.cpp's converters name them:
-# blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps. Only these move. The router
-# (ffn_gate_inp) and any SHARED expert stay wherever the layer assignment put them
-# on purpose: they are read for EVERY token, and they are tiny, so moving them to
-# system RAM would cost per-token bandwidth for almost no VRAM back.
-# Built by concatenation rather than a format string so the literal stays a plain
-# regex with no interpolation machinery around it.
-_MOE_TENSOR_PREFIX = r"blk\."
-_MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
-
-
 def _apply_cpu_moe(mp, n_layers: int, model_path: str):
     """Keep the first *n_layers* layers' EXPERT weights in system RAM.
 
@@ -531,11 +520,24 @@ def _apply_cpu_moe(mp, n_layers: int, model_path: str):
     proceeds, because a normal load is a working load - it just says so."""
     from ._loader import cpu_buffer_type
     from localm.debuglog import logger as _dbg
-
+    # The FUSED per-layer expert weights, as llama.cpp's converters name them:
+    # blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps. Only these move. The
+    # router (ffn_gate_inp) and any SHARED expert stay wherever the layer
+    # assignment put them on purpose: they are read for EVERY token, and they
+    # are tiny, so moving them to system RAM would cost per-token bandwidth
+    # for almost no VRAM back.
+    #
+    # SINGLE SOURCE OF TRUTH, imported rather than redefined here: the VRAM
+    # preflight (llamacpp/_sizing.py, via model_manager.gguf.gguf_moe_pinned_
+    # expert_bytes) needs to know EXACTLY which tensors this pins, before the
+    # load, to charge them correctly - a second, independently-maintained
+    # copy of this pattern would risk silently disagreeing with what
+    # actually gets pinned here.
     # A dense model has no expert tensors, so every pattern below would match
     # nothing and the setting would silently do nothing. Say so instead: a control
     # that appears to apply but cannot is exactly the silent no-op rule 5 forbids.
-    from localm.model_manager.gguf import gguf_expert_count
+    from localm.model_manager.gguf import (
+        _MOE_TENSOR_PREFIX, _MOE_TENSOR_SUFFIX, gguf_expert_count)
     from pathlib import Path as _Path
     if gguf_expert_count(_Path(model_path)) == 0:
         from localm.console import console
