@@ -328,6 +328,52 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         return None
 
 
+class _CancelCriteria:
+    """Duck-typed transformers StoppingCriteria that polls a shared
+    threading.Event for a real, cooperative mid-stream cancel - the same idea
+    as GgufBackend's ctrl_q relay into llama.cpp's native progress-callback
+    hook, built on the hook transformers actually exposes instead.
+
+    Verified directly against transformers' generation/utils.py: the decode
+    loop calls every StoppingCriteria in ``stopping_criteria=`` once per
+    generated token, right after that token is pushed onto the streamer
+    (``unfinished_sequences = unfinished_sequences & ~stopping_criteria(...)``),
+    so setting *cancel_event* stops generation within one extra token rather
+    than waiting for max_new_tokens or a full process kill. See
+    _hf_runner.py's module docstring for how the event gets set from a
+    parent-process disconnect.
+
+    Deliberately does NOT subclass ``transformers.StoppingCriteria`` - that
+    would force ``from transformers import StoppingCriteria`` at MODULE
+    IMPORT time, which is exactly the eager transformers/torch import this
+    file avoids everywhere else (see ``_declared_generative``'s docstring:
+    importing transformers pulls in torch, which conflicts with an
+    already-loaded llama.dll in the same process). Verified this is safe:
+    ``StoppingCriteriaList.__call__`` and ``_merge_criteria_processor_list``
+    (transformers' generation/utils.py) call/compare criteria purely by duck
+    typing (``criteria(input_ids, scores, **kwargs)`` / ``type(custom) is
+    type(default)``) - the only ``isinstance(..., StoppingCriteria)`` in the
+    whole generate() path only selects a warning message's wording for a
+    type COLLISION with a built-in criterion, which this class's unique type
+    never triggers. Mirrors ``_SafeGrammarProcessor`` above, which duck-types
+    ``LogitsProcessor`` for the identical reason.
+
+    __call__ must return a torch.BoolTensor of shape (batch_size,) -
+    StoppingCriteriaList.__call__ ORs every criterion's result together
+    (``is_done = is_done | criteria(...)``), so a plain Python bool would
+    break under that ``|``.
+    """
+
+    def __init__(self, cancel_event: threading.Event):
+        self._cancel_event = cancel_event
+
+    def __call__(self, input_ids, scores, **kwargs):
+        import torch
+        stop = self._cancel_event.is_set()
+        return torch.full((input_ids.shape[0],), stop, dtype=torch.bool,
+                          device=input_ids.device)
+
+
 # transformers' naming convention for a GENERATIVE task head. A checkpoint whose
 # declared architecture ends in one of these generates text; anything else (the
 # bare ``*Model`` encoders: BertModel, XLMRobertaModel, NomicBertModel,
@@ -797,6 +843,7 @@ class HFWorker:
         grammar_lazy: bool = False,
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Iterator[str]:
         # xgrammar has no trigger/lazy mode: a lazy request must not silently
         # become a STRICT constraint (a strict grammar stalls thinking models),
@@ -820,7 +867,10 @@ class HFWorker:
             if messages_contain_image(messages):
                 raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
 
-        from transformers import StoppingCriteriaList, TextIteratorStreamer
+        from transformers import (
+            StoppingCriteriaList,
+            TextIteratorStreamer,
+        )
 
         tokenizer = self._tokenizer
         model = self._model
@@ -924,6 +974,23 @@ class HFWorker:
         lp = _grammar_processor(grammar, tokenizer, model)
         if lp is not None:
             gen_kwargs["logits_processor"] = lp
+
+        # Cooperative mid-stream cancel (optional): a disconnect relayed from
+        # the parent sets *cancel_event*, and _CancelCriteria makes
+        # generate()'s own decode loop see it and stop within one extra
+        # token - see _hf_runner.py's module docstring for the full
+        # mechanism. cancel_event=None (the default, e.g. any direct or
+        # standalone caller) preserves the exact prior unconstrained behavior.
+        # APPENDED to gen_kwargs["stopping_criteria"] (already carrying
+        # finish_observer, added unconditionally above) rather than replacing
+        # it - StoppingCriteriaList evaluates every criterion it holds
+        # (StoppingCriteriaList.__call__ ORs them together), so both the
+        # finish-reason observer and the cancel check must run on every
+        # decode step. Overwriting the list here would silently disable
+        # finish_observer on every real production call, since the parent
+        # (_hf_runner.py's dispatch loop) always passes a cancel_event.
+        if cancel_event is not None:
+            gen_kwargs["stopping_criteria"].append(_CancelCriteria(cancel_event))
 
         thread = threading.Thread(
             target=model.generate, kwargs=gen_kwargs, daemon=True

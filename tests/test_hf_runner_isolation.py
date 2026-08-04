@@ -28,9 +28,11 @@ synchronous timeout contract - see TestExecutorPoolReclaim below.
 from __future__ import annotations
 
 import asyncio
+import multiprocessing as mp
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -298,3 +300,106 @@ class TestExecutorPoolReclaim:
                 pool.shutdown(wait=False)
 
         asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Cooperative mid-stream cancel: HFRunner's ctrl_q/_cancel_stream_and_drain,
+# mirroring tests/test_runner_stream_timeouts.py's fake-child pattern for
+# GGUF's ModelRunner - only the native decode is faked (a plain
+# threading.Thread reading real req_q/ctrl_q and writing real resp_q); the
+# real HFRunner poll/lock/drain logic under test runs over real
+# multiprocessing.Queues, with _proc replaced by a liveness-only stand-in so
+# no real subprocess or model is needed.
+# --------------------------------------------------------------------------- #
+
+class _AliveProc:
+    """Stands in for the worker process's liveness check only; the queues and
+    the parent-side poll/drain loop under test are real."""
+
+    def __init__(self):
+        self.terminated = False
+
+    def is_alive(self):
+        return not self.terminated
+
+    def terminate(self):
+        self.terminated = True
+
+    def join(self, timeout=None):
+        return None
+
+    exitcode = 0
+
+
+def _make_runner():
+    ctx = mp.get_context("spawn")
+    r = HFRunner()
+    r._req_q, r._resp_q, r._ctrl_q = ctx.Queue(), ctx.Queue(), ctx.Queue()
+    r._proc = _AliveProc()
+    return r
+
+
+class TestCooperativeCancel:
+    def test_cancel_stream_gets_done_without_killing_the_worker(self):
+        """A worker that cooperates with cancel_stream (streams a couple of
+        chunks, then confirms "done" once it sees the ctrl_q signal - what
+        the real control-thread + StoppingCriteria produce) must leave the
+        process ALIVE. This is the core proof that HF's mid-stream cancel is
+        now cooperative, not kill-based - see _hf_runner.py's module
+        docstring."""
+        r = _make_runner()
+
+        def _child():
+            cmd = r._req_q.get(timeout=5)
+            assert cmd[0] == "chat_stream"
+            r._resp_q.put(("chunk", "Hel"))
+            r._resp_q.put(("chunk", "lo"))
+            msg = r._ctrl_q.get(timeout=5)
+            assert msg == ("cancel_stream",)
+            r._resp_q.put(("done", {}))
+
+        child = threading.Thread(target=_child, daemon=True)
+        child.start()
+        try:
+            gen = r.chat_stream(messages=[])
+            assert next(gen) == "Hel"
+            gen.close()   # what a real client disconnect does
+        finally:
+            child.join(2)
+
+        assert not r._proc.terminated, (
+            "a cooperative cancel must not kill the worker - it confirmed "
+            "'done' without ever needing shutdown(grace=0)")
+        assert r.is_alive()
+        assert r._req_q is not None, "a live worker's queues must not be torn down"
+
+    def test_drain_timeout_falls_back_to_killing_the_worker(self, monkeypatch):
+        """If the child never confirms cancel_stream (a genuinely wedged
+        native call - the same uninterruptible-from-Python risk this module
+        exists to contain), the drain must NOT assume success: it falls back
+        to killing the worker, mirroring ModelRunner's identical fallback
+        (tests/test_runner_stream_timeouts.py's
+        TestBackendRecoversAfterDrainTimeoutKill)."""
+        monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
+        r = _make_runner()
+        fake_proc = r._proc
+        stop = threading.Event()
+
+        def _child():
+            r._req_q.get(timeout=5)
+            r._resp_q.put(("chunk", "hi"))
+            stop.wait(30)   # wedged: never confirms the cancel
+
+        child = threading.Thread(target=_child, daemon=True)
+        child.start()
+        try:
+            gen = r.chat_stream(messages=[])
+            assert next(gen) == "hi"
+            gen.close()
+        finally:
+            stop.set(); child.join(2)
+
+        assert fake_proc.terminated, (
+            "a drain timeout must fall back to killing the worker, not "
+            "silently assume the cancel succeeded")
+        assert r._req_q is None, "shutdown() must have torn down the queues"

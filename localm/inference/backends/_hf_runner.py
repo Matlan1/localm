@@ -14,31 +14,44 @@ backend in its own disposable child process is what makes a hang killable
 without taking the server down with it.
 
 Mirrors ``backends/llamacpp/_runner.py``'s ``ModelRunner`` (PR #606) and
-``_embedder_runner.py``'s ``EmbedderRunner`` almost exactly: two
+``_embedder_runner.py``'s ``EmbedderRunner`` closely: three
 ``multiprocessing.Queue``s, tagged-tuple commands/responses, ``proc.
 is_alive()``/``exitcode`` for crash detection, a bounded RPC timeout per
 command that kills the child and raises on expiry rather than waiting
-forever. ONE deliberate structural difference from ``ModelRunner``: NO
-``ctrl_q``. GGUF's mid-stream cancel is graceful (a ``ctrl_q`` signal the
-child's control-thread relays into llama.cpp's own progress-callback hook,
-which the native sampler loop actually checks between tokens) because
-llama.cpp exposes that hook. Transformers exposes nothing equivalent -
-``model.generate()`` runs to completion or crash on its own background
-thread with no way to ask it to stop early - so trying a cooperative signal
-first, the way ``ModelRunner._cancel_stream_and_drain`` does, would be a
-pure, structural wait for zero benefit on every single HF cancel. HF's
-cancel is KILL-BASED ONLY: a disconnected stream calls ``shutdown(grace=0)``
-directly, and the next request to this backend transparently respawns and
-reloads. This is still a strict improvement over the in-process code this
-replaces, which could not reclaim the leaked ``model.generate()`` thread at
-all (killing an expendable child does; killing the server's own thread does
-not exist as an option). The accepted cost: a disconnect-heavy client
-against a large/slow-loading model now serializes its later requests behind
-a full reload rather than a graceful resume - see ``hf.py`` for the fuller
-trade-off writeup.
+forever.
 
-Protocol (two ``multiprocessing.Queue``s, tagged tuples, one command
-processed at a time):
+Mid-stream cancellation is COOPERATIVE, the same shape as ``ModelRunner``'s
+``ctrl_q``/``_cancel_stream_and_drain`` design, though built on a different
+hook: transformers exposes nothing shaped like llama.cpp's native
+progress-callback, but ``generate()``'s own decode loop calls every
+``StoppingCriteria`` in ``stopping_criteria=`` once per generated token
+(verified directly against transformers' own ``generation/utils.py``:
+``unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids,
+scores)``, checked right after each token is pushed onto the streamer) - so a
+``StoppingCriteria`` that polls a ``threading.Event`` is a real per-token
+cancel hook. A disconnected stream now sends ``("cancel_stream",)`` over
+``ctrl_q``; the child's control-thread ``.set()``s a ``threading.Event`` the
+worker passes into ``model.generate()`` as a ``StoppingCriteria``
+(``_hf_worker.py``'s ``_CancelCriteria``); and the SAME worker process keeps
+serving the next request instead of respawning. One residual limit, shared
+with GGUF: cancellation still cannot interrupt an in-flight forward pass or
+the prompt prefill - the check only runs between decode steps, so a
+cancelled stream still finishes its current token (at most one extra token
+past the signal) before stopping. If the child never confirms within
+``_CANCEL_DRAIN_TIMEOUT`` (a genuinely wedged native call - the same
+uninterruptible-from-Python risk this whole module exists to contain),
+``_cancel_stream_and_drain`` falls back to ``shutdown(grace=0)`` exactly as
+before: kill is now the timeout fallback, not the primary path. The
+previously accepted cost (a disconnect-heavy client serializing its later
+requests behind a full reload) no longer applies to the common case; see
+``hf.py`` for what changed on the parent-proxy side (nothing - it already
+propagates ``GeneratorExit`` through untouched and already reads worker
+liveness live).
+
+Protocol (three ``multiprocessing.Queue``s, tagged tuples; ``req_q``/
+``resp_q`` process one command at a time, ``ctrl_q`` is drained by a
+dedicated control-thread so a cancel signal takes effect even while the main
+dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
 
 ``req_q`` (parent -> child):
     ("load", {model_path, device})
@@ -50,6 +63,9 @@ processed at a time):
     ("embed", texts)
     ("shutdown", None)
 
+``ctrl_q`` (parent -> child):
+    ("cancel_stream",)
+
 ``resp_q`` (child -> parent):
     ("ok", value)              - success (value shape depends on command;
                                   "load" returns {supports_images, can_embed})
@@ -57,13 +73,21 @@ processed at a time):
                                   optional typed-exception tag (e.g.
                                   "UnsupportedInputError")
     ("chunk", text)            - one streamed token (chat_stream only)
-    ("done", {"finish_reason": "stop"|"length"}) - end of one chat_stream.
-                                  finish_reason is HFWorker.last_finish_reason,
-                                  computed for real by HFWorker.chat_stream
-                                  (see _hf_worker.py's _FinishReasonObserver) -
-                                  "stop" when the model produced its own
-                                  end-of-sequence token, "length" when the
-                                  max_tokens budget ran out first. Mirrors
+    ("done", {"finish_reason": "stop"|"length"}) - end of one chat_stream,
+                                  whether it ran to completion, hit a genuine
+                                  end-of-sequence token, was cut off by
+                                  max_tokens, or was stopped by a cooperative
+                                  cancel (see ``_CancelCriteria`` above -
+                                  reported as "stop", the same value a normal
+                                  EOS gets, since a cancel is not a length
+                                  cutoff). finish_reason is
+                                  ``HFWorker.last_finish_reason``, computed for
+                                  real by ``HFWorker.chat_stream`` (see
+                                  ``_hf_worker.py``'s ``_FinishReasonObserver``)
+                                  - "stop" when the model produced its own
+                                  end-of-sequence token (or was cancelled),
+                                  "length" when the max_tokens budget ran out
+                                  first with no EOS ever produced. Mirrors
                                   GgufBackend/ModelRunner's identical "done"
                                   envelope shape (llamacpp/_runner.py).
 
@@ -122,7 +146,7 @@ def _simulate_fault(mode: str) -> None:
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
 
-def _runner_entry(req_q, resp_q) -> None:
+def _runner_entry(req_q, resp_q, ctrl_q) -> None:
     """Process target. Wraps ``_runner_main`` so any exception escaping it is
     logged via the ``logging`` module before the process dies, not left to
     multiprocessing's own ``traceback.print_exc()`` alone - mirrors
@@ -134,7 +158,7 @@ def _runner_entry(req_q, resp_q) -> None:
     Deliberately RE-RAISES: this only ADDS a capture, never changes how or
     whether the process exits."""
     try:
-        _runner_main(req_q, resp_q)
+        _runner_main(req_q, resp_q, ctrl_q)
     except BaseException:
         from localm.debuglog import attach_child_logging, logger
         attach_child_logging()
@@ -142,13 +166,16 @@ def _runner_entry(req_q, resp_q) -> None:
         raise
 
 
-def _runner_main(req_q, resp_q) -> None:
+def _runner_main(req_q, resp_q, ctrl_q) -> None:
     """Long-lived child: owns one HFWorker (one loaded model) for its whole
-    process lifetime, dispatching one request at a time. Fully sequential,
-    single-threaded dispatch (no separate control thread) - there is no
-    cooperative cancel signal to relay (see module docstring), so unlike
-    ``ModelRunner`` there is nothing a second thread would ever need to do
-    here."""
+    process lifetime, dispatching one request at a time on ``req_q``/
+    ``resp_q``. A dedicated control-thread drains ``ctrl_q`` for a
+    mid-stream cancel signal and sets ``stream_cancel_event``, which the
+    active ``chat_stream``'s ``StoppingCriteria`` polls (see
+    ``_hf_worker.py``'s ``_CancelCriteria``) - mirrors
+    ``llamacpp/_runner.py``'s ``_control_loop``, minus the load-cancel
+    message HF never supported (``spawn_and_load`` below still takes no
+    ``cancel_event`` - see its docstring for why)."""
     from localm.debuglog import attach_child_logging
     attach_child_logging()   # native/tokenizer failure diagnostics land in
                               # the shared debug log from this process too.
@@ -166,6 +193,19 @@ def _runner_main(req_q, resp_q) -> None:
 
     from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import UnsupportedInputError
+
+    stream_cancel_event = threading.Event()
+
+    def _control_loop() -> None:
+        while True:
+            msg = ctrl_q.get()
+            if msg is None:
+                return
+            kind = msg[0] if isinstance(msg, tuple) else msg
+            if kind == "cancel_stream":
+                stream_cancel_event.set()
+
+    threading.Thread(target=_control_loop, daemon=True, name="localm-hf-ctrl").start()
 
     worker: Optional[HFWorker] = None
 
@@ -218,8 +258,10 @@ def _runner_main(req_q, resp_q) -> None:
             continue
 
         if name == "chat_stream":
+            stream_cancel_event.clear()   # a stale cancel from a PRIOR stream
+                                           # on this same model must not fire early
             try:
-                gen = worker.chat_stream(**payload)
+                gen = worker.chat_stream(cancel_event=stream_cancel_event, **payload)
                 for token in gen:
                     resp_q.put(("chunk", token))
                 resp_q.put(("done", {"finish_reason": worker.last_finish_reason}))
@@ -302,6 +344,13 @@ FIRST_TOKEN_TIMEOUT_DEFAULT = 900.0
 # HF report surfaces, this is the first constant to revisit.
 _STREAM_CHUNK_TIMEOUT = 120.0
 
+# Bounded wait for a "done" envelope after requesting a mid-stream cancel.
+# Mirrors llamacpp/_runner.py's identical constant - a genuinely wedged
+# native call (the same uninterruptible-from-Python risk this whole module
+# exists to contain) never confirms, so this is the fallback-to-kill bound,
+# not an expected steady-state wait.
+_CANCEL_DRAIN_TIMEOUT = 5.0
+
 # Bounded wait for a simple request/response command (count_tokens,
 # count_messages_tokens). Mirrors llamacpp/_runner.py's
 # _SIMPLE_CMD_TIMEOUT - HF's fast tokenizer path is the same "never touch a
@@ -345,6 +394,7 @@ class HFRunner:
         self._proc = None
         self._req_q = None
         self._resp_q = None
+        self._ctrl_q = None
         # Serialises PARENT-side use of the single response queue - the
         # worker itself is already serial (reads req_q one command at a
         # time), but nothing stops two PARENT threads (a live chat_stream's
@@ -365,8 +415,9 @@ class HFRunner:
         ctx = mp.get_context("spawn")   # explicit: identical on every OS
         self._req_q = ctx.Queue()
         self._resp_q = ctx.Queue()
+        self._ctrl_q = ctx.Queue()
         self._proc = ctx.Process(
-            target=_runner_entry, args=(self._req_q, self._resp_q),
+            target=_runner_entry, args=(self._req_q, self._resp_q, self._ctrl_q),
             name="localm-hf-worker", daemon=True)
         self._proc.start()
 
@@ -414,9 +465,10 @@ class HFRunner:
 
     def chat_stream(self, *, first_chunk_timeout: Optional[float] = None, **kwargs):
         """Yield text tokens. On the caller's ``GeneratorExit`` (a client
-        disconnect or a superseding request), kills the worker directly -
-        see the module docstring for why this is kill-based rather than
-        graceful like GGUF's.
+        disconnect or a superseding request), requests a cooperative cancel
+        and drains for its confirmation - see ``_cancel_stream_and_drain``
+        and the module docstring for the mechanism and its fallback to a
+        kill.
 
         Holds ``_q_lock`` for the whole drive so no concurrent token-count
         RPC can consume this stream's envelopes off the shared response
@@ -474,10 +526,43 @@ class HFRunner:
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")
             except GeneratorExit:
-                # Kill-based only - see module docstring for why no
-                # cooperative drain is attempted first.
-                self.shutdown(grace=0)
+                self._cancel_stream_and_drain()
                 raise
+
+    def _cancel_stream_and_drain(self) -> None:
+        """Ask the child to stop the live generation cooperatively and wait
+        for its confirmation, mirroring ``ModelRunner._cancel_stream_and_drain``
+        exactly. Falls back to a kill if the child never confirms within
+        ``_CANCEL_DRAIN_TIMEOUT`` - never assumes cancellation succeeded
+        without seeing it (rule 5)."""
+        if not self.is_alive():
+            return
+        try:
+            self._ctrl_q.put(("cancel_stream",))
+        except Exception:
+            self.shutdown(grace=0)
+            return
+        deadline = time.monotonic() + _CANCEL_DRAIN_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                result = self._resp_q.get(timeout=0.5)
+            except _queue.Empty:
+                if not self.is_alive():
+                    return   # died on its own - nothing left to drain
+                continue
+            if result[0] == "done":
+                self.last_done = result[1]
+                return
+            # A stray chunk racing the cancel is expected - keep draining.
+        # Timed out waiting for "done": the child may be wedged inside a
+        # native call the cancel flag cannot interrupt. Do NOT silently act
+        # as if cancellation succeeded (rule 5) - kill it so the next
+        # request on this backend spawns a known-good process instead of
+        # reusing one that never confirmed it stopped.
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("hf runner: cancel_stream did not confirm within %.0fs; "
+                     "killing the worker process", _CANCEL_DRAIN_TIMEOUT)
+        self.shutdown(grace=0)
 
     def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,
                         *, try_lock: bool = False):
@@ -553,7 +638,7 @@ class HFRunner:
             except Exception:
                 pass
             proc.join(timeout=5)
-        for q in (self._req_q, self._resp_q):
+        for q in (self._req_q, self._resp_q, self._ctrl_q):
             if q is not None:
                 try:
                     q.close()
@@ -563,3 +648,4 @@ class HFRunner:
         self._proc = None
         self._req_q = None
         self._resp_q = None
+        self._ctrl_q = None
