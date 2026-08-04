@@ -29,11 +29,19 @@ progress-callback, but ``generate()``'s own decode loop calls every
 ``unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids,
 scores)``, checked right after each token is pushed onto the streamer) - so a
 ``StoppingCriteria`` that polls a ``threading.Event`` is a real per-token
-cancel hook. A disconnected stream now sends ``("cancel_stream",)`` over
+cancel hook. A disconnected stream now sends ``("cancel_stream", seq)`` over
 ``ctrl_q``; the child's control-thread ``.set()``s a ``threading.Event`` the
 worker passes into ``model.generate()`` as a ``StoppingCriteria``
 (``_hf_worker.py``'s ``_CancelCriteria``); and the SAME worker process keeps
-serving the next request instead of respawning. One residual limit, shared
+serving the next request instead of respawning. ``seq`` (a monotonically
+increasing id the parent assigns per stream, echoed on both the
+``"chat_stream"`` command and its matching ``"cancel_stream"``) exists
+because ``ctrl_q`` and ``req_q`` are independent queues with no ordering
+relationship: if a stream finishes naturally right as it is also being
+cancelled, the cancel can still be sitting on ``ctrl_q`` when the dispatch
+loop has already moved on to a later, unrelated stream - without the seq
+check (``_ctrl_msg_cancels_seq``), that stale message would wrongly cancel
+the new stream instead of being silently dropped. One residual limit, shared
 with GGUF: cancellation still cannot interrupt an in-flight forward pass or
 the prompt prefill - the check only runs between decode steps, so a
 cancelled stream still finishes its current token (at most one extra token
@@ -57,14 +65,16 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
     ("load", {model_path, device})
     ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
                       repeat_penalty, grammar, grammar_lazy,
-                      grammar_triggers, seed})
+                      grammar_triggers, seed}, seq)
     ("count_tokens", text)
     ("count_messages_tokens", messages)
     ("embed", texts)
     ("shutdown", None)
 
 ``ctrl_q`` (parent -> child):
-    ("cancel_stream",)
+    ("cancel_stream", seq)   - seq must match the CURRENTLY active stream's
+                                seq (see _ctrl_msg_cancels_seq) or it is
+                                silently dropped as stale.
 
 ``resp_q`` (child -> parent):
     ("ok", value)              - success (value shape depends on command;
@@ -142,6 +152,40 @@ def _simulate_fault(mode: str) -> None:
     os.abort()                                    # genuine uncatchable native abort
 
 
+def _ctrl_msg_cancels_seq(msg, current_seq) -> bool:
+    """True when *msg* (a ctrl_q message) is a ``cancel_stream`` targeting
+    *current_seq* - the currently active stream's sequence number, as known
+    at the moment this is evaluated.
+
+    ``ctrl_q`` and ``req_q`` are independent ``multiprocessing.Queue``s with
+    no ordering relationship between them: the parent sending a cancel
+    before starting a new "chat_stream" does NOT guarantee the child's
+    control-thread drains that cancel before the child's dispatch thread
+    moves on. If stream N finishes naturally (its own "done" already sent)
+    right as the parent decides to cancel it, the parent's cancel can still
+    be sitting on ``ctrl_q`` when the dispatch thread starts stream N+1 -
+    without a per-stream identity check, the control-thread would set
+    ``stream_cancel_event`` for N+1 once it finally drains N's stale
+    message, silently truncating an unrelated request to ~1 token.
+
+    Every ``("chat_stream", payload, seq)`` the parent sends and every
+    ``("cancel_stream", seq)`` it later sends for that same request carry
+    the SAME parent-assigned seq (see ``HFRunner.chat_stream`` /
+    ``_cancel_stream_and_drain``), so a cancel only takes effect if its
+    target seq still matches whatever stream is actually current when the
+    control-thread gets to it - a stale one is silently, correctly dropped.
+    ``target_seq is not None`` guards against an accidental match when
+    neither side supplies a real seq (current_seq defaults to None before
+    the first stream starts).
+
+    Pure and side-effect-free so it is unit-testable without a real
+    subprocess or model."""
+    if not isinstance(msg, tuple) or not msg or msg[0] != "cancel_stream":
+        return False
+    target_seq = msg[1] if len(msg) > 1 else None
+    return target_seq is not None and target_seq == current_seq
+
+
 # --------------------------------------------------------------------------- #
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
@@ -195,14 +239,20 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
     from localm.inference.backends.base import UnsupportedInputError
 
     stream_cancel_event = threading.Event()
+    # The seq of the stream currently being dispatched, as told to us by the
+    # parent in its "chat_stream" command - written ONLY by the dispatch
+    # loop below, read ONLY by _control_loop, a single-int handoff safe
+    # under CPython's GIL without an extra Lock (the same assumption
+    # threading.Event's own internal state already relies on). None before
+    # the first stream ever starts.
+    current_seq = [None]
 
     def _control_loop() -> None:
         while True:
             msg = ctrl_q.get()
             if msg is None:
                 return
-            kind = msg[0] if isinstance(msg, tuple) else msg
-            if kind == "cancel_stream":
+            if _ctrl_msg_cancels_seq(msg, current_seq[0]):
                 stream_cancel_event.set()
 
     threading.Thread(target=_control_loop, daemon=True, name="localm-hf-ctrl").start()
@@ -258,6 +308,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             continue
 
         if name == "chat_stream":
+            # cmd[2] is the parent-assigned seq for THIS stream (see
+            # HFRunner.chat_stream) - recorded before clearing the event so
+            # a cancel_stream that arrives for this exact seq is always
+            # honoured, and one that arrives for a DIFFERENT (stale) seq is
+            # rejected by _ctrl_msg_cancels_seq regardless of clear() timing.
+            current_seq[0] = cmd[2] if len(cmd) > 2 else None
             stream_cancel_event.clear()   # a stale cancel from a PRIOR stream
                                            # on this same model must not fire early
             try:
@@ -405,6 +461,15 @@ class HFRunner:
         # request/response cycle. Mirrors ModelRunner._q_lock exactly.
         self._q_lock = threading.Lock()
         self.last_done: dict = {}
+        # Monotonically increasing per-stream id, sent with every
+        # "chat_stream" command and echoed back on the matching
+        # "cancel_stream" - lets the child's control-thread tell a genuine,
+        # still-current cancel apart from a stale one left over from a
+        # stream that already finished (see _ctrl_msg_cancels_seq's
+        # docstring for the race this closes). Parent-assigned rather than
+        # child-assigned: the child has no independent notion of "which
+        # request is this" beyond what the parent tells it.
+        self._stream_seq = 0
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
@@ -478,7 +543,14 @@ class HFRunner:
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
         with self._q_lock:
-            self._req_q.put(("chat_stream", kwargs))
+            # Incremented under _q_lock, not before it: two Python-level
+            # callers racing chat_stream() before either acquires the lock
+            # could otherwise interleave the += 1 (a read then a write, not
+            # atomic under the GIL as a compound op) and hand out the same
+            # seq to two different streams.
+            self._stream_seq += 1
+            my_seq = self._stream_seq
+            self._req_q.put(("chat_stream", kwargs, my_seq))
             try:
                 while True:
                     deadline = time.monotonic() + (
@@ -526,19 +598,27 @@ class HFRunner:
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")
             except GeneratorExit:
-                self._cancel_stream_and_drain()
+                self._cancel_stream_and_drain(my_seq)
                 raise
 
-    def _cancel_stream_and_drain(self) -> None:
+    def _cancel_stream_and_drain(self, seq) -> None:
         """Ask the child to stop the live generation cooperatively and wait
         for its confirmation, mirroring ``ModelRunner._cancel_stream_and_drain``
-        exactly. Falls back to a kill if the child never confirms within
-        ``_CANCEL_DRAIN_TIMEOUT`` - never assumes cancellation succeeded
-        without seeing it (rule 5)."""
+        exactly (including NOT caching the drained "done" envelope onto
+        ``self.last_done`` - a cancelled stream's caller never reaches the
+        code that would read it, since ``GeneratorExit`` unwinds straight
+        past it; see ``hf.py``'s ``chat_stream``). Falls back to a kill if
+        the child never confirms within ``_CANCEL_DRAIN_TIMEOUT`` - never
+        assumes cancellation succeeded without seeing it (rule 5).
+
+        *seq* is this stream's id (see ``HFRunner.__init__``), echoed to the
+        child so its control-thread can tell this genuine, still-current
+        cancel apart from a stale one left over from an already-finished
+        stream - see ``_ctrl_msg_cancels_seq``."""
         if not self.is_alive():
             return
         try:
-            self._ctrl_q.put(("cancel_stream",))
+            self._ctrl_q.put(("cancel_stream", seq))
         except Exception:
             self.shutdown(grace=0)
             return
@@ -551,7 +631,6 @@ class HFRunner:
                     return   # died on its own - nothing left to drain
                 continue
             if result[0] == "done":
-                self.last_done = result[1]
                 return
             # A stray chunk racing the cancel is expected - keep draining.
         # Timed out waiting for "done": the child may be wedged inside a

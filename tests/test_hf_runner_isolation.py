@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import multiprocessing as mp
 import os
+import queue as _queue
 import subprocess
 import sys
 import threading
@@ -352,10 +353,14 @@ class TestCooperativeCancel:
         def _child():
             cmd = r._req_q.get(timeout=5)
             assert cmd[0] == "chat_stream"
+            seq = cmd[2]   # the real HFRunner.chat_stream now sends a seq
             r._resp_q.put(("chunk", "Hel"))
             r._resp_q.put(("chunk", "lo"))
             msg = r._ctrl_q.get(timeout=5)
-            assert msg == ("cancel_stream",)
+            assert msg == ("cancel_stream", seq), (
+                "the real _cancel_stream_and_drain must echo THIS stream's "
+                "own seq, not a bare ('cancel_stream',) - see "
+                "_ctrl_msg_cancels_seq")
             r._resp_q.put(("done", {}))
 
         child = threading.Thread(target=_child, daemon=True)
@@ -379,16 +384,28 @@ class TestCooperativeCancel:
         exists to contain), the drain must NOT assume success: it falls back
         to killing the worker, mirroring ModelRunner's identical fallback
         (tests/test_runner_stream_timeouts.py's
-        TestBackendRecoversAfterDrainTimeoutKill)."""
+        TestBackendRecoversAfterDrainTimeoutKill).
+
+        Also proves the fallback fires only AFTER a genuine cooperative
+        attempt was made, not instead of one: the fake child records the
+        real ctrl_q message it received (with its seq) before wedging, so a
+        regression that short-circuited straight to shutdown(grace=0)
+        without ever touching ctrl_q - which would leave the SAME
+        fake_proc.terminated/_req_q-is-None end state - is still caught."""
         monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
         r = _make_runner()
         fake_proc = r._proc
         stop = threading.Event()
+        received_cancel = []
 
         def _child():
-            r._req_q.get(timeout=5)
+            cmd = r._req_q.get(timeout=5)
             r._resp_q.put(("chunk", "hi"))
-            stop.wait(30)   # wedged: never confirms the cancel
+            try:
+                received_cancel.append(r._ctrl_q.get(timeout=2))
+            except _queue.Empty:
+                pass   # recorded as empty below; the outer assert catches it
+            stop.wait(30)   # wedged AFTER receiving it: never confirms "done"
 
         child = threading.Thread(target=_child, daemon=True)
         child.start()
@@ -399,7 +416,122 @@ class TestCooperativeCancel:
         finally:
             stop.set(); child.join(2)
 
+        assert received_cancel, (
+            "the drain timed out without the child ever seeing a "
+            "cancel_stream message - the cooperative attempt was skipped "
+            "entirely, not genuinely attempted-then-timed-out")
+        assert received_cancel[0][0] == "cancel_stream"
         assert fake_proc.terminated, (
             "a drain timeout must fall back to killing the worker, not "
             "silently assume the cancel succeeded")
         assert r._req_q is None, "shutdown() must have torn down the queues"
+
+
+# --------------------------------------------------------------------------- #
+# Direct unit coverage for the two pieces of the cooperative-cancel mechanism
+# that only ever ran inside a real spawned child process against a real
+# model before this: _ctrl_msg_cancels_seq (the pure decision function that
+# closes the stale-cancel race - see its docstring) and _CancelCriteria (the
+# StoppingCriteria transformers actually calls). Neither needs a real
+# subprocess or a real model, so both run at the fast/non-integration tier -
+# the full real-child-process-plus-real-model path remains the job of
+# test_hf_stream_cancel_integration.py (@pytest.mark.integration).
+# --------------------------------------------------------------------------- #
+
+from localm.inference.backends._hf_runner import _ctrl_msg_cancels_seq  # noqa: E402
+
+
+class TestCtrlMsgCancelsSeq:
+    """_ctrl_msg_cancels_seq is what _control_loop calls to decide whether a
+    drained ctrl_q message should actually stream_cancel_event.set() - the
+    exact logic that closes the stale-cancel race a fresh review found:
+    ctrl_q and req_q are independent queues, so a cancel meant for a stream
+    that already finished can still be drained after the dispatch loop has
+    moved on to a new, unrelated stream. Pure function, no threads/queues
+    needed to test it directly."""
+
+    def test_matching_seq_cancels(self):
+        assert _ctrl_msg_cancels_seq(("cancel_stream", 7), 7) is True
+
+    def test_stale_seq_does_not_cancel(self):
+        """The exact scenario the fix exists for: a cancel meant for stream
+        7 drained after the dispatch loop has already moved on to stream 8
+        must NOT cancel stream 8."""
+        assert _ctrl_msg_cancels_seq(("cancel_stream", 7), 8) is False
+
+    def test_no_current_stream_does_not_cancel(self):
+        """Before the first stream ever starts, current_seq is None - a
+        cancel_stream (which always carries a real int seq from the real
+        HFRunner) must never match a None current_seq."""
+        assert _ctrl_msg_cancels_seq(("cancel_stream", 1), None) is False
+
+    def test_missing_seq_on_the_message_does_not_cancel(self):
+        """A malformed/legacy 1-tuple message carries no target seq at all -
+        target_seq is None, and None must never match, even if
+        current_seq also happens to be None (that would defeat the whole
+        protection when neither side supplies a real seq)."""
+        assert _ctrl_msg_cancels_seq(("cancel_stream",), None) is False
+        assert _ctrl_msg_cancels_seq(("cancel_stream",), 1) is False
+
+    def test_non_cancel_message_is_ignored(self):
+        assert _ctrl_msg_cancels_seq(("something_else", 1), 1) is False
+
+    def test_non_tuple_or_empty_message_is_ignored(self):
+        assert _ctrl_msg_cancels_seq(None, 1) is False
+        assert _ctrl_msg_cancels_seq((), 1) is False
+        assert _ctrl_msg_cancels_seq("cancel_stream", 1) is False
+
+
+class TestCancelCriteriaUnit:
+    """Direct, model-free unit test of _hf_worker.py's _CancelCriteria - the
+    StoppingCriteria transformers' generate() loop actually calls once per
+    decode step. Needs real torch (to build a real input_ids tensor and
+    check the real return dtype/shape contract StoppingCriteriaList relies
+    on - see _CancelCriteria's own docstring on why a plain bool would
+    break under its `|` reduction), but no model and no subprocess."""
+
+    def test_cleared_event_reports_all_false(self):
+        torch = pytest.importorskip("torch")
+        from localm.inference.backends._hf_worker import _CancelCriteria
+
+        event = threading.Event()
+        criteria = _CancelCriteria(event)
+        input_ids = torch.zeros((3, 5), dtype=torch.long)   # batch_size=3
+        result = criteria(input_ids, scores=None)
+
+        assert result.dtype == torch.bool
+        assert tuple(result.shape) == (3,)
+        assert not bool(result.any())
+
+    def test_set_event_reports_all_true(self):
+        torch = pytest.importorskip("torch")
+        from localm.inference.backends._hf_worker import _CancelCriteria
+
+        event = threading.Event()
+        event.set()
+        criteria = _CancelCriteria(event)
+        input_ids = torch.zeros((2, 5), dtype=torch.long)   # batch_size=2
+        result = criteria(input_ids, scores=None)
+
+        assert result.dtype == torch.bool
+        assert tuple(result.shape) == (2,)
+        assert bool(result.all())
+
+    def test_result_survives_stopping_criteria_list_or_reduction(self):
+        """The actual contract that matters: StoppingCriteriaList.__call__
+        does `is_done = is_done | criteria(...)` starting from an all-False
+        bool tensor - reproduce that reduction directly against a real
+        StoppingCriteriaList (not just _CancelCriteria in isolation), so a
+        future change to the class that technically returns "a tensor" but
+        breaks under `|` (e.g. wrong dtype) is still caught."""
+        torch = pytest.importorskip("torch")
+        transformers = pytest.importorskip("transformers")
+        from localm.inference.backends._hf_worker import _CancelCriteria
+
+        event = threading.Event()
+        event.set()
+        criteria_list = transformers.StoppingCriteriaList([_CancelCriteria(event)])
+        input_ids = torch.zeros((1, 3), dtype=torch.long)
+        is_done = torch.zeros(1, dtype=torch.bool)
+        is_done = is_done | criteria_list(input_ids, scores=None)
+        assert bool(is_done.all())
