@@ -464,9 +464,18 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
         if switch_model is None:
             raise HTTPException(503, "Model switching needs the localm GUI server.")
         try:
-            await switch_model(req.model)
+            res = await switch_model(req.model)
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}")
+        # switch_model preempts an in-flight load of a DIFFERENT model (single-
+        # slot, http_server.switch_engine's preempt=True default) - a newer
+        # switch elsewhere can abandon THIS one mid-load, and it reports that
+        # by returning {"status": "superseded"} rather than raising. Reporting
+        # 200 here would tell the caller its switch happened when it did not
+        # (get_engine() itself guards the identical case at http_server.py).
+        if isinstance(res, dict) and res.get("status") == "superseded":
+            raise HTTPException(
+                503, f"Model load was superseded by a newer request: {res.get('by')}")
 
     if not session.set_model(req.model):
         raise HTTPException(409, "Session is busy; cannot switch models mid-task")

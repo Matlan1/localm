@@ -1635,6 +1635,29 @@ class TestSessionExtras:
             r = client.post("/api/coder/sessions/zzz/model", json={"model": "x"})
         assert r.status_code == 404
 
+    def test_set_model_reports_a_superseded_switch_instead_of_success(self, tmp_path):
+        """switch_model (http_server.switch_engine's preempt=True default) can
+        be preempted by a newer switch elsewhere and return {"status":
+        "superseded"} instead of raising - reporting 200 here would tell the
+        caller its switch happened when a different one actually won the race
+        (get_engine() itself guards the identical case, http_server.py:1048)."""
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+
+        async def switch_model(name):
+            return {"status": "superseded", "model": name, "by": "someone-else"}
+
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                  switch_model=switch_model, active_model=lambda: "model-a")
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                sid = client.post("/api/coder/sessions",
+                                  json={"cwd": str(tmp_path)}).json()["id"]
+                r = client.post(f"/api/coder/sessions/{sid}/model",
+                                json={"model": "model-b"})
+        assert r.status_code == 503
+
     def test_replay_rebuilds_history(self, coder_app, tmp_path):
         app, _ = coder_app
         with TestClient(app) as client:
