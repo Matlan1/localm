@@ -164,7 +164,7 @@ class GgufWorker(VramSizingMixin):
         prompt = _apply_model_template(self._llm._model_ptr, text_messages)
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        return len(self._llm.tokenize(prompt.encode("utf-8"), add_bos=add_bos))
+        return len(self._llm.tokenize(prompt, add_bos=add_bos))
 
     def check_grammar(self, grammar: str) -> None:
         """Raises InvalidGrammarError for a malformed GBNF string - see

@@ -97,6 +97,47 @@ def test_gguf_unload_reload_cycle_through_isolated_worker(gguf_backend):
     assert any(c.isalpha() for c in out), f"reload-then-generate broke: {out!r}"
 
 
+def test_gguf_count_messages_tokens_uses_real_tokenizer_not_heuristic(gguf_backend):
+    """#956 regression: llamacpp/_worker.py's count_messages_tokens once
+    called ``self._llm.tokenize(prompt.encode("utf-8"), add_bos=add_bos)`` -
+    but LlamaCpp.tokenize takes ``str``, not ``bytes`` (its _Tokenizer.encode
+    does ``text.encode(...)`` itself), so EVERY call raised AttributeError
+    inside the isolated worker. gguf.py's RPC wrapper caught that silently and
+    fell back to the chars/4 heuristic - permanently, on every prompt, on the
+    primary backend - and the exception log named only the TYPE
+    ("RuntimeError"), never the message, so the cause was invisible.
+
+    tests/test_gguf_worker.py's mocked unit tests never caught this: their
+    _StubLlm.tokenize(self, text, add_bos=True) ignores its `text` argument
+    entirely, so a bytes object sails through unnoticed. This test drives the
+    REAL isolated worker process end to end (a genuinely loaded tiny GGUF, not
+    a stub), so a regression of the exact bug fails here even though it would
+    still pass every mocked unit test.
+
+    count_tokens is a SEPARATE RPC unaffected by the bug (it always passed a
+    plain str) - an exact tokenizer count of the raw content with no chat
+    template applied. count_messages_tokens applies the model's own chat
+    template FIRST (role/turn markers, BOS, etc.), so a REAL tokenizer call
+    must return AT LEAST as many tokens as the raw content alone - the
+    heuristic knows nothing about the template and would not reflect it."""
+    text = "The quick brown fox jumps over the lazy dog."
+    messages = [{"role": "user", "content": text}]
+
+    raw_tokens = gguf_backend.count_tokens(text)
+    templated_tokens = gguf_backend.count_messages_tokens(messages)
+    heuristic_tokens = max(1, len(text) // 4)
+
+    assert raw_tokens > 0
+    assert templated_tokens >= raw_tokens, (
+        f"count_messages_tokens returned {templated_tokens}, fewer than the "
+        f"raw content's own {raw_tokens} tokens - the chat template was not "
+        "applied by a real tokenizer call (see #956)")
+    assert templated_tokens != heuristic_tokens, (
+        f"count_messages_tokens returned exactly the chars/4 heuristic "
+        f"({heuristic_tokens}) instead of a real tokenizer count - the "
+        "worker RPC may be silently failing again (see #956)")
+
+
 def test_gguf_grammar_request_never_breaks_chat(gguf_backend):
     """A grammar request must be SAFE on GGUF: where the native build supports
     grammar it constrains output, and where it does not (some prebuilt llama.dll

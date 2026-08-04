@@ -550,7 +550,7 @@ class TestChatParamChain:
 
         monkeypatch.setattr(discover, "resolve_auto_split_ratios", _resolve)
         b = self._backend(tmp_path)
-        with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
+        with patch("localm.discover.list_gpus", return_value=([], "ok")), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                    "spawn_and_load",
                    return_value={"n_layers": 1, "kv_bytes_per_token": 0,
@@ -568,7 +568,7 @@ class TestChatParamChain:
         monkeypatch.setattr(discover, "resolve_auto_split_ratios",
                             lambda *a, **k: None)
         b = self._backend(tmp_path)
-        with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
+        with patch("localm.discover.list_gpus", return_value=([], "ok")), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                    "spawn_and_load",
                    return_value={"n_layers": 1, "kv_bytes_per_token": 0,

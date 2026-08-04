@@ -286,7 +286,7 @@ class TestPostLoadLayerCountCache:
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
 
         b = _model(tmp_path, 1_000_000, n_gpu_layers=99, auto=False)
-        with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
+        with patch("localm.discover.list_gpus", return_value=([], "ok")), \
              patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
                    return_value={"n_layers": 42, "kv_bytes_per_token": 0,
                                  "supports_images": False}):
