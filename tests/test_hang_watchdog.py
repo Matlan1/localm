@@ -144,6 +144,124 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
     assert "LOCALM HANG WATCHDOG" in text, text
 
 
+# --------------------------------------------------------------------------- #
+# GitHub #955/#950: loop_lag telemetry was not lag - it was time-since-last-
+# heartbeat-tick, which saws 0..1s on a perfectly healthy loop for no reason
+# other than where "now" falls in the heartbeat's own cycle. _loop_lag_seconds()
+# replaces the raw gap with a real scheduling-delay figure.
+# --------------------------------------------------------------------------- #
+
+def test_loop_lag_seconds_is_real_scheduling_delay_not_time_since_tick(monkeypatch):
+    """Deterministic formula check: ~0 at every point in a healthy cycle -
+    including right at the next tick boundary, the worst case for the raw
+    (unfixed) formula - and the real overshoot only when a tick was genuinely
+    late (the loop was actually blocked)."""
+    from localm.inference import http_server as hs
+
+    monkeypatch.setattr(hs, "_hb_monotonic", 100.0)
+
+    for now, why in (
+        (100.0, "just ticked"),
+        (100.0 + hs._HEARTBEAT_INTERVAL_S * 0.5, "mid-cycle"),
+        (100.0 + hs._HEARTBEAT_INTERVAL_S, "exactly at the next tick boundary"),
+    ):
+        monkeypatch.setattr(hs.time, "monotonic", lambda now=now: now)
+        assert hs._loop_lag_seconds() == 0.0, why
+
+    # A tick that really was late (the loop was blocked) reports the actual
+    # overshoot, not the inflated raw gap.
+    late_by = 4.2
+    monkeypatch.setattr(
+        hs.time, "monotonic",
+        lambda: 100.0 + hs._HEARTBEAT_INTERVAL_S + late_by)
+    assert hs._loop_lag_seconds() == pytest.approx(late_by)
+
+
+@pytest.mark.anyio
+async def test_loop_lag_seconds_stays_at_floor_within_a_measured_safe_window():
+    """End-to-end proof, driving the REAL heartbeat coroutine (not a manually
+    staled _hb_monotonic): every sample taken while LESS than one full
+    interval has MEASURABLY elapsed since a confirmed real tick must read
+    exactly 0.0 - the pre-fix formula would show up to ~1s of fake "lag" here
+    purely from sampling mid-cycle (#955/#950).
+
+    Deliberately NOT a wall-clock threshold like `max(samples) < 0.5`: this
+    box runs many concurrent sessions, and a fixed bound would eventually
+    flake on real contention that delays this test's own sampling loop
+    without the fix being wrong (this repo's own load-flake register is full
+    of exactly that shape). Instead each sample is gated on MEASURED elapsed
+    time since the last confirmed tick, so the assertion is mathematically
+    guaranteed by _loop_lag_seconds' own floor(0, gap - interval) formula
+    regardless of how much real scheduling jitter slows this loop down - a
+    slow box just yields fewer safe samples, never a false failure."""
+    from localm.inference import http_server as hs
+
+    hb = asyncio.create_task(hs._hang_heartbeat_loop())
+    try:
+        # Wait for a confirmed real tick (not a stale global from an earlier
+        # test / module import).
+        before = hs._hb_monotonic
+        wait_deadline = time.monotonic() + 3.0
+        while hs._hb_monotonic == before and time.monotonic() < wait_deadline:
+            await asyncio.sleep(0.01)
+        assert hs._hb_monotonic != before, "heartbeat task never ticked"
+        tick_at = hs._hb_monotonic
+
+        # Only samples PROVABLY within one interval of that confirmed tick are
+        # asserted on - safe_until is a hard, measured bound, not a guess.
+        safe_until = tick_at + hs._HEARTBEAT_INTERVAL_S * 0.9
+        checked = 0
+        while time.monotonic() < safe_until:
+            lag = hs._loop_lag_seconds()
+            now = time.monotonic()
+            if now < safe_until and hs._hb_monotonic == tick_at:
+                assert lag == 0.0, (
+                    f"lag={lag:.3f}s only {now - tick_at:.3f}s after a "
+                    f"confirmed tick, well under the "
+                    f"{hs._HEARTBEAT_INTERVAL_S}s interval")
+                checked += 1
+            await asyncio.sleep(0.03)
+        assert checked >= 3, (
+            f"only {checked} sample(s) fell within the measured-safe window - "
+            "the box may be too loaded for this test to say anything; not a "
+            "false pass, but worth knowing")
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_loop_lag_seconds_is_clearly_positive_after_a_real_stall():
+    """The other half of the property: _loop_lag_seconds() must not just
+    unconditionally read 0.0 - a genuine event-loop block (not mid-cycle
+    sampling) must produce a clearly positive value. time.sleep() blocks the
+    real OS thread regardless of asyncio contention, so under real box load
+    this block can only run LONGER than requested, never shorter - the
+    generous margin (interval + 0.8s block, asserting only > 0.3s of
+    reported lag) stays true even then."""
+    from localm.inference import http_server as hs
+
+    hb = asyncio.create_task(hs._hang_heartbeat_loop())
+    try:
+        await asyncio.sleep(0.1)                         # let the first tick land
+        block_for = hs._HEARTBEAT_INTERVAL_S + 0.8
+        time.sleep(block_for)                            # BLOCK the real event loop
+        lag = hs._loop_lag_seconds()
+        assert lag > 0.3, (
+            f"a real ~{block_for:.1f}s block reported lag={lag:.3f}s - the "
+            "fix must surface a genuine stall, not just read zero "
+            "unconditionally")
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except asyncio.CancelledError:
+            pass
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     import localm.config as cfg

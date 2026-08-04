@@ -146,6 +146,102 @@ def test_route_rejects_invalid_grammar_with_400_not_silent_200():
     engine.chat_stream.assert_not_called()
 
 
+def test_route_reports_worker_crash_during_grammar_check_as_a_fault_not_bad_grammar():
+    """GitHub #964: a bare RuntimeError from engine.validate_grammar() means the
+    isolated worker faulted (crashed, timed out, or replied unexpectedly -
+    ModelRunner._simple_request has four such shapes), which has nothing to do
+    with whether the caller's grammar is valid. Before the fix this was
+    mislabeled a 400 "Invalid grammar: <fault message>", telling the caller to
+    fix the wrong thing. It must be a 503 that names the worker fault instead
+    (with no promise of an automatic reload - only two of the four shapes
+    actually kill the worker, see the route's own comment), matching
+    /v1/embeddings' identical isolated-worker-crash handling in this same
+    file - and generation must never start on top of a fault we could not
+    actually validate against.
+
+    This closes the MISLABELING, not the whole #964 report. The bug was filed
+    via the coder plugin's own HTTP client (localm/plugins/coder/backends/
+    http.py), which never reads a response body except on 401/403 and now
+    retries 503 for up to ~30s (400 was not retried) - so for THAT specific
+    caller the improved detail text below is still never seen, and 500ms
+    became ~30s of blind retries first. That gap is in a file this fix does
+    not own. This test uses a client that DOES read the body (TestClient +
+    r.json()) and only proves the server side is now honest."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.validate_grammar.side_effect = RuntimeError(
+        "The model process crashed (exit code -1073740791) while handling "
+        "'check_grammar'.")
+    engine.chat_stream.side_effect = AssertionError(
+        "generation must not start when grammar validation itself faulted")
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    r = client.post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "grammar": 'root ::= "yes" | "no"',
+        "max_tokens": 4,
+    })
+    assert r.status_code == 503, (r.status_code, r.text)
+    detail = r.json()["detail"].lower()
+    assert "invalid grammar" not in detail, (
+        f"a worker crash must not be blamed on the caller's grammar: {r.text}")
+    assert "worker" in detail or "crashed" in detail, r.text
+    # Regression pin: only two of _simple_request's four RuntimeError shapes
+    # actually kill the worker (see the route's comment) - "reload" must not
+    # be promised unconditionally, since that claim is false for the other
+    # two shapes and this same message text covers all of them.
+    assert "reload" not in detail, (
+        f"the message must not promise a reload it cannot guarantee for "
+        f"every RuntimeError shape: {r.text}")
+    engine.chat_stream.assert_not_called()
+
+
+def test_completions_route_reports_worker_crash_during_grammar_check_as_a_fault():
+    """Same fix, same shape, on /v1/completions - the two routes have
+    byte-identical grammar-validation blocks and must not diverge."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.validate_grammar.side_effect = RuntimeError(
+        "'check_grammar' timed out waiting for the model process.")
+    engine.chat_stream.side_effect = AssertionError(
+        "generation must not start when grammar validation itself faulted")
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    r = client.post("/v1/completions", json={
+        "model": "test-model",
+        "prompt": "hi",
+        "grammar": 'root ::= "yes" | "no"',
+        "max_tokens": 4,
+    })
+    assert r.status_code == 503, (r.status_code, r.text)
+    detail = r.json()["detail"].lower()
+    assert "invalid grammar" not in detail, r.text
+    assert "worker" in detail or "timed out" in detail, r.text
+    assert "reload" not in detail, (
+        f"the message must not promise a reload it cannot guarantee for "
+        f"every RuntimeError shape: {r.text}")
+    engine.chat_stream.assert_not_called()
+
+
 def test_route_rejects_pathologically_nested_grammar_before_any_native_call():
     """LM-FZ-001 regression pin: a grammar built of deep unmatched-paren nesting
     (the exact minimized PoC that drove llama.cpp's native GBNF parser into a
