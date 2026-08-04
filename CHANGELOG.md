@@ -365,6 +365,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its own wait before the response reaches the client, it now fails
   immediately on the first try instead. A remote/cloud backend's retry
   behavior is unchanged.
+- **The Knowledge page's embedding status now explains what's actually wrong
+  with a misconfigured embedding model**, instead of looking identical to
+  "nothing is configured at all." If `embedding_model` resolves to something
+  real but not usable - most commonly a HuggingFace-format pull that landed as
+  a folder of shards rather than a single GGUF file - the status page and the
+  `/v1/embeddings` error response now say so specifically, distinguishing
+  "this isn't a GGUF file" from "nothing was found," and explain that a
+  HuggingFace embedding checkpoint works differently (loaded as the primary
+  model, not through this setting). Previously the only trace of what went
+  wrong was a debug-log line you would never see unless you were already
+  looking for it. A genuine load failure is also no longer silently
+  overwritten by an unrelated status check that runs afterward - both the
+  status page and `/v1/embeddings` keep reporting the real reason until it is
+  actually fixed, verified end to end against a corrupted and then a missing
+  model file.
 - **Setup and update output for the bundled ComfyUI installer now appears live
   instead of going silent for minutes at a time.** The log used to buffer all
   output from git/pip/venv steps and only show it once the whole command
@@ -433,7 +448,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in use" on a card that actually had 10.53 GB in use); it now uses the same
   trusted reading the GUI's status bar relies on, and says so plainly when
   that reading can't be trusted rather than showing a number that might be
-  wrong.
+  wrong. For a CPU-only load, where nothing is ever placed on a GPU, this line
+  is now skipped entirely instead of printing a technically-uncorrected
+  reading (and paying the cost of checking one) for nothing to report.
 - **The coder's episode store (its cross-session "lessons learned" log) no
   longer silently drops and then permanently deletes an episode** if its text
   happened to contain certain rare Unicode line-separator characters - the same
