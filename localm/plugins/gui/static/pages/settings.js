@@ -179,11 +179,28 @@ export function buildSettingControl(field) {
       }
       input.value = value == null ? "" : String(value);
       // A dropdown always shows SOME selected option - there is no blank state
-      // to hide the default behind the way a number/text box has - so this is
-      // a visual-only cue (reusing/extending .auto-detected, see style.css)
-      // and read()/the payload are unchanged.
+      // to hide the default behind the way a number/text box has - so the
+      // GREY CUE is visual-only (reusing/extending .auto-detected, see
+      // style.css). The SAVE PAYLOAD still needs the same omit-when-unchanged
+      // contract NUMBER/TEXT get, though, or the grey styling would be lying:
+      // without this, selecting nothing and merely saving some OTHER field in
+      // the same section would silently pin this untouched default as an
+      // explicit override (still displayed grey, but no longer actually
+      // inheriting - a future DEFAULT_CONFIG change would then leave this
+      // install stuck on the old value while its own UI keeps claiming
+      // "default"). Compare against the option shown at RENDER time, not a
+      // live "still equals shipped_default" check - correct either way here
+      // since isShippedDefault was already true, but this is the same shape
+      // as the number/text branches: a value genuinely unchanged from what
+      // was shown is a no-op, independent of whether the user's mouse ever
+      // touched the control.
       if (isShippedDefault) input.classList.add("auto-detected");
-      read = () => (input.value === "" ? null : input.value);
+      const shownAsDefault = isShippedDefault ? input.value : null;
+      read = () => {
+        const v = input.value;
+        if (shownAsDefault !== null && v === shownAsDefault) return undefined;
+        return v === "" ? null : v;
+      };
       break;
     }
     case "toggle": {

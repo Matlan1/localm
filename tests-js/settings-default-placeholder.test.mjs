@@ -138,6 +138,50 @@ test("saving without touching a still-default NUMBER/TEXT field omits both keys 
   assert.ok(!("mdns_name" in patches[0]), "an untouched default TEXT field must be omitted");
 });
 
+test("an untouched still-default SELECT is ALSO omitted, not silently pinned by a sibling field's save", async () => {
+  // The coordinator's review point: NUMBER/TEXT already omit an untouched
+  // default, but SELECT's grey styling alone would be a visual promise the
+  // payload did not keep - saving any OTHER field in the same SECTION would
+  // silently convert "never chosen" into "explicitly set to today's default",
+  // stranding a future DEFAULT_CONFIG change. net_mode here is untouched and
+  // still shows its shipped default; mdns_name (its OWN section, group=
+  // "Server", unlike n_ctx which is group="Engine" and would never reach the
+  // same PATCH regardless) is the one actually touched.
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_FRESH, patches) });
+  await render(win);
+  const mdns = win.document.querySelector('input[data-key="mdns_name"]');
+  mdns.value = "my-new-name";
+  mdns.dispatchEvent(new win.Event("input"));
+  const secId = mdns.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].mdns_name, "my-new-name", "the actually-changed field is sent");
+  assert.ok(!("net_mode" in patches[0]),
+    "an untouched default SELECT must be omitted too - grey styling promises " +
+    "'still inheriting', so the payload must actually still be inheriting");
+});
+
+test("a SELECT with a real override is ALWAYS sent, even when it is not the field being changed this save", async () => {
+  // Mirrors NUMBER/TEXT's existing (unchanged) contract for a real override:
+  // it is not blank/default, so it is not eligible for omission and keeps
+  // being re-sent on every section save - exactly today's pre-fix behavior.
+  // mdns_name is in net_mode's own section (both group="Server") - touch IT,
+  // not n_ctx (a different section/group entirely, which would never reach
+  // net_mode's PATCH regardless of this fix).
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_OVERRIDDEN, patches) });
+  await render(win);
+  const mdns = win.document.querySelector('input[data-key="mdns_name"]');
+  mdns.value = "changed-again";
+  mdns.dispatchEvent(new win.Event("input"));
+  const secId = mdns.closest(".settings-section").dataset.sec;
+  runScript(win, `saveSettingsSection(${JSON.stringify(secId)});`);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches[0].net_mode, "off", "a real override keeps being sent, unaffected by this fix");
+});
+
 test("typing a NUMBER field back to blank after focusing it still omits it (still reads as unchanged)", async () => {
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(SCHEMA_FRESH, patches) });
