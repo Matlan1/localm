@@ -1,0 +1,275 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""NEW-COMFY-SILENT-PARTIAL-APPLY: a ComfyUI node whose weights only partly
+apply (a LoRA key mismatch, missing VAE/UNet keys, ...) is not an
+execution_error - ComfyUI logs a console warning and the run still "succeeds".
+Covers the pure capture mechanism in comfy_client.py (comfy_launch_log_path /
+comfy_console_tail_start / comfy_console_warnings_since) and its wiring into
+generate_image()'s returned message + reproducibility sidecar.
+"""
+
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from localm.image_gen import comfy
+from localm.media import comfy_client as cc
+
+
+def _minimal_png(width: int, height: int) -> bytes:
+    import struct
+    import zlib
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    ihdr = (struct.pack(">I", len(ihdr_data)) + b"IHDR" + ihdr_data
+            + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr_data)))
+    return sig + ihdr
+
+
+class _FakeProc:
+    def __init__(self, pid=4321, alive=True):
+        self.pid = pid
+        self._alive = alive
+
+    def poll(self):
+        return None if self._alive else 0
+
+
+@pytest.fixture
+def spawned():
+    """Register a fake localm-launched ComfyUI process so spawned_pid() /
+    comfy_console_tail_start() treat it as ours, and drop the registration
+    afterwards - _spawned_procs is module-level global state shared across
+    the whole test session (see test_stopcomfy_2026_07_01.py), so a test
+    that forgets to clean up leaks into whichever test runs next."""
+    url = "http://127.0.0.1:8188"
+    cc._remember_spawned(url, _FakeProc())
+    yield url
+    cc._take_spawned(url)
+
+
+class TestConsoleTailStart:
+    def test_none_when_not_localm_launched(self):
+        # No _remember_spawned entry for this URL - nothing to tail, and no
+        # offset should be trusted as meaningful.
+        assert cc.comfy_console_tail_start("http://127.0.0.1:19999") is None
+
+    def test_offset_is_current_log_size(self, spawned):
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"already here\n")
+        assert cc.comfy_console_tail_start(spawned) == len(b"already here\n")
+
+    def test_none_when_log_file_absent(self, spawned):
+        # spawned but nothing has ever been logged (fresh LOCALM_HOME) -
+        # .stat() raises FileNotFoundError; must fail closed to None, not 0
+        # (0 would look like a valid, empty-so-far log).
+        assert not cc.comfy_launch_log_path().exists()
+        assert cc.comfy_console_tail_start(spawned) is None
+
+
+class TestConsoleWarningsSince:
+    def test_no_offset_short_circuits(self, spawned):
+        assert cc.comfy_console_warnings_since(spawned, None) == []
+
+    def test_not_localm_launched_short_circuits(self):
+        # Even given a real-looking offset, no spawned_pid means there is no
+        # process localm can attribute that offset to.
+        assert cc.comfy_console_warnings_since("http://127.0.0.1:19999", 0) == []
+
+    def test_matches_known_pattern_with_count(self, spawned):
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        offset = cc.comfy_console_tail_start(spawned)
+        with open(log, "a", encoding="utf-8") as f:
+            for _ in range(3):
+                f.write("WARNING:root:lora key not loaded: lora_unet_x\n")
+        result = cc.comfy_console_warnings_since(spawned, offset)
+        assert result == [
+            "a LoRA patch key did not match the model and was skipped (x3)"]
+
+    def test_ignores_content_before_the_offset(self, spawned):
+        """The exact scenario the offset exists for: a PRIOR generation's own
+        warning must not bleed into the NEXT generation's report."""
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("lora key not loaded: pre-existing noise\n", encoding="utf-8")
+        offset = cc.comfy_console_tail_start(spawned)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("nothing interesting here\n")
+        assert cc.comfy_console_warnings_since(spawned, offset) == []
+
+    def test_multiple_distinct_patterns(self, spawned):
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        offset = cc.comfy_console_tail_start(spawned)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("lora key not loaded: a\n")
+            f.write("Missing VAE keys ['x', 'y']\n")
+            f.write("Missing VAE keys ['z']\n")
+        result = cc.comfy_console_warnings_since(spawned, offset)
+        assert "a LoRA patch key did not match the model and was skipped" in result
+        assert "some VAE weights were not found in the checkpoint (x2)" in result
+
+    def test_no_match_returns_empty(self, spawned):
+        """The fires-control for every test above: ordinary ComfyUI startup
+        chatter must never be mistaken for a silent-partial-apply warning."""
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        offset = cc.comfy_console_tail_start(spawned)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("Total VRAM 24576 MB, total RAM 65536 MB\n")
+            f.write("got prompt\n")
+        assert cc.comfy_console_warnings_since(spawned, offset) == []
+
+    def test_process_gone_before_check_yields_empty(self, spawned):
+        """If the process we were tailing was stopped/replaced mid-window,
+        whatever the log holds past the offset is no longer attributable to
+        the generation being asked about - must not report it anyway."""
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        offset = cc.comfy_console_tail_start(spawned)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("lora key not loaded: a\n")
+        cc._take_spawned(spawned)
+        assert cc.comfy_console_warnings_since(spawned, offset) == []
+
+
+class TestComfyConsoleWarningWiring:
+    """Drives generate_image() fully (same fake-urlopen pattern as
+    TestSidecarContent in test_image_gen_robustness.py) to prove the
+    capture mechanism is actually wired in, not just correct in isolation."""
+
+    @staticmethod
+    def _fake_urlopen(responses, log_path, extra_on_prompt=""):
+        def fake_urlopen(req, timeout=None):
+            url = req if isinstance(req, str) else req.full_url
+            if "/prompt" in url and extra_on_prompt:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(extra_on_prompt)
+            for key, body in responses.items():
+                if key in url:
+                    m = MagicMock()
+                    m.read.return_value = body
+                    m.__enter__ = lambda s=m: s
+                    m.__exit__ = MagicMock(return_value=False)
+                    return m
+            raise AssertionError(f"unexpected url {url}")
+        return fake_urlopen
+
+    def test_warning_surfaces_in_message_and_sidecar(self, tmp_path, monkeypatch, spawned):
+        monkeypatch.setattr(comfy, "workflow_path",
+                            lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+        out = tmp_path / "art.png"
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+
+        responses = {
+            "/system_stats": b"{}",
+            "/object_info": b"{}",
+            "/prompt": b'{"prompt_id": "p1"}',
+            "/history/p1": json.dumps({
+                "p1": {"outputs": {"9": {"images": [
+                    {"filename": "f.png", "subfolder": "", "type": "output"}
+                ]}}}
+            }).encode(),
+            "/view": _minimal_png(8, 8),
+        }
+        fake_urlopen = self._fake_urlopen(
+            responses, log,
+            extra_on_prompt="WARNING:root:lora key not loaded: proj_lora1\n" * 5)
+
+        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             patch.object(comfy, "_localm_unload"):
+            ok, msg = comfy.generate_image(
+                "a fox", out, seed=1, lora_name="bad.safetensors")
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" in msg
+        assert "LoRA patch key did not match" in msg
+        assert "(x5)" in msg
+
+        sidecar = json.loads((tmp_path / "art.png.json").read_text(encoding="utf-8"))
+        assert "did not match the model" in sidecar["comfy_console_warning"]
+        assert "(x5)" in sidecar["comfy_console_warning"]
+        # lora_name/strengths still record what was REQUESTED, unchanged.
+        assert sidecar["lora_name"] == "bad.safetensors"
+
+    def test_clean_run_never_warns(self, tmp_path, monkeypatch, spawned):
+        """The counterpart fires-control: a successful, compatible generation
+        must not spuriously warn or grow a sidecar field it never observed."""
+        monkeypatch.setattr(comfy, "workflow_path",
+                            lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+        out = tmp_path / "art2.png"
+        log = cc.comfy_launch_log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+
+        responses = {
+            "/system_stats": b"{}",
+            "/object_info": b"{}",
+            "/prompt": b'{"prompt_id": "p2"}',
+            "/history/p2": json.dumps({
+                "p2": {"outputs": {"9": {"images": [
+                    {"filename": "g.png", "subfolder": "", "type": "output"}
+                ]}}}
+            }).encode(),
+            "/view": _minimal_png(8, 8),
+        }
+        fake_urlopen = self._fake_urlopen(responses, log, extra_on_prompt="")
+
+        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             patch.object(comfy, "_localm_unload"):
+            ok, msg = comfy.generate_image("a fox", out, seed=2)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" not in msg
+        sidecar = json.loads((tmp_path / "art2.png.json").read_text(encoding="utf-8"))
+        assert "comfy_console_warning" not in sidecar
+
+    def test_remote_comfy_never_claims_to_have_checked(self, tmp_path, monkeypatch):
+        """No _remember_spawned registration at all - the 'localm did not
+        launch this ComfyUI' case (already running, or remote/LAN per
+        sanitize_comfy_url). Must behave identically to the clean-run case:
+        no warning, no sidecar field - silence, not a false all-clear."""
+        monkeypatch.setattr(comfy, "workflow_path",
+                            lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+        out = tmp_path / "art3.png"
+
+        responses = {
+            "/system_stats": b"{}",
+            "/object_info": b"{}",
+            "/prompt": b'{"prompt_id": "p3"}',
+            "/history/p3": json.dumps({
+                "p3": {"outputs": {"9": {"images": [
+                    {"filename": "h.png", "subfolder": "", "type": "output"}
+                ]}}}
+            }).encode(),
+            "/view": _minimal_png(8, 8),
+        }
+
+        def fake_urlopen(req, timeout=None):
+            url = req if isinstance(req, str) else req.full_url
+            for key, body in responses.items():
+                if key in url:
+                    m = MagicMock()
+                    m.read.return_value = body
+                    m.__enter__ = lambda s=m: s
+                    m.__exit__ = MagicMock(return_value=False)
+                    return m
+            raise AssertionError(f"unexpected url {url}")
+
+        assert cc.spawned_pid("http://127.0.0.1:8188") is None
+        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             patch.object(comfy, "_localm_unload"):
+            ok, msg = comfy.generate_image("a fox", out, seed=3)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" not in msg
+        sidecar = json.loads((tmp_path / "art3.png.json").read_text(encoding="utf-8"))
+        assert "comfy_console_warning" not in sidecar
