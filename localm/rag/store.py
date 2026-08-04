@@ -692,6 +692,12 @@ _NUMPY_DEGRADE_LOGGED: set = set()
 #: Never consulted for state - only for whether to LOG (see _note_vector_degrade).
 _WARNED_DEGRADES: set = set()
 
+#: meta.json key for the derived-stats cache _save() writes and peek_stats() /
+#: peek_detail() read - see the block comment at the end of _save(). Leading
+#: underscore marks it as internal/derived (like _REJECTED_VECTORS), never
+#: user data, so a hand-edited meta.json without it is simply "no cache yet".
+_STATS_CACHE_KEY = "_stats_cache"
+
 
 class Collection:
     def __init__(self, name: str, base: Optional[Path] = None) -> None:
@@ -1001,6 +1007,59 @@ class Collection:
         else:
             self.vector_degrade_reason = None
         self._bm25 = None
+        # Cache the LISTING-relevant fields that are NOT otherwise persisted -
+        # vector_degrade_reason and the vector-coverage math above live only on
+        # this Python object - so a listing can answer from meta.json alone,
+        # without reconstructing this Collection at all (see peek_stats() /
+        # peek_detail() below and rag/plug.py's rag_collections/rag_detail,
+        # which used to pay a full _load() - parsing every chunk AND every
+        # embedding vector - just to report counts; measured at 2.7-3.8s on the
+        # single-worker event loop, freezing every other in-flight request for
+        # that long).
+        #
+        # Computed from the SAME state stats() itself would read, and written
+        # right after that state was saved to disk, so it cannot drift from
+        # what a fresh stats() would say right now via THIS class. It CAN go
+        # stale if something else edits chunks.jsonl or vectors.json without
+        # going through this class - and that is not just a hypothetical
+        # "external tampering" case: a crash mid-write between this method's
+        # OWN chunks.jsonl and vectors.json writes above is exactly the shape
+        # test_rag_degraded_vectors_preserved.py already simulates (a
+        # vectors.json that no longer matches the chunks it should describe),
+        # and _load() is trusted to catch that on the NEXT load. A cache that
+        # ignored this would silently keep reporting the collection healthy
+        # in a LISTING while a real open (query/detail without the cache, or
+        # any write) correctly reports it degraded - precisely the "answers
+        # wrong instead of not at all" failure this whole design exists to
+        # avoid, and it was caught exactly this way in review (see
+        # tests/test_rag_peek_stats.py, which hand-edits vectors.json after a
+        # save and asserts the cache is NOT trusted).
+        #
+        # The fix is a cheap (mtime_ns, size) fingerprint of both files, taken
+        # AFTER they were written above so it reflects what this save just
+        # put on disk. peek_stats()/peek_detail() stat() (never read) both
+        # files again and refuse the cache the instant either one no longer
+        # matches - two os.stat() calls, not a re-parse, so this stays cheap.
+        # peek_stats()/peek_detail() also fall back to a full load whenever
+        # this cache is missing entirely (an old collection never resaved
+        # under this code, e.g.), so a caller always gets a correct answer -
+        # just not always a free one.
+        #
+        # A second, small atomic write rather than folding this into the
+        # meta.json write at the top of this method: that write happens BEFORE
+        # vector_degrade_reason is finalised above, and reordering this
+        # carefully-sequenced method (the vectors_file_rejected quarantine
+        # above is deliberately decided before anything writes or unlinks that
+        # filename) is a bigger risk than one extra write on what is already an
+        # infrequent, multi-write path.
+        self._meta[_STATS_CACHE_KEY] = {
+            "n_chunks": len(self._chunks),
+            "has_vectors": self._has_vectors(self._chunks, self._vectors),
+            "vector_degrade_reason": self.vector_degrade_reason,
+            "corrupt": self.corrupt,
+            "fingerprint": self._file_fingerprint(),
+        }
+        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
 
     def _vector_index_complete(self) -> bool:
         """True when every chunk currently has a usable vector.
@@ -1266,7 +1325,11 @@ class Collection:
         from individually named files or uploads, and for one whose meta.json was
         corrupt (the roots cannot be reconstructed from chunk sources the way the
         docs map can - re-add the folder to restore them)."""
-        roots = self._meta.get("roots")
+        return self._roots_from_meta(self._meta)
+
+    @staticmethod
+    def _roots_from_meta(meta: dict) -> list:
+        roots = meta.get("roots")
         return sorted(roots) if isinstance(roots, dict) else []
 
     def add_paths(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
@@ -2130,8 +2193,22 @@ class Collection:
     #  Introspection                                                 #
     # ------------------------------------------------------------- #
 
+    @staticmethod
+    def _has_vectors(chunks: list, vectors: Optional[list]) -> bool:
+        """"Has vectors" = whether query() will actually blend embeddings: the
+        same >=80% coverage threshold _vector_scores uses, NOT "every chunk
+        embedded". A partially-embedded collection (80-99%) still does hybrid
+        retrieval, so the retrieval-mode label must not under-report it (rule 5).
+
+        A shared staticmethod (not inlined in stats()) because _save() ALSO
+        needs this exact formula, to cache it into meta.json - see the block
+        comment at the end of _save(). Two independent copies of "0.8" is
+        precisely the kind of second derivation that silently drifts the day
+        only one of them is changed (diff-review-discipline #10)."""
+        present = [v for v in (vectors or []) if v]
+        return bool(present) and len(present) >= 0.8 * len(chunks)
+
     def stats(self) -> dict:
-        present = [v for v in (self._vectors or []) if v]
         docs = self._meta.get("docs", {})
         return {
             "name": self.name,
@@ -2146,11 +2223,7 @@ class Collection:
                              if isinstance(e, dict) and e.get("missing")),
             "n_roots": len(self.roots()),
             "n_chunks": len(self._chunks),
-            # "has vectors" = whether query() will actually blend embeddings: the
-            # same >=80% coverage threshold _vector_scores uses, NOT "every chunk
-            # embedded". A partially-embedded collection (80-99%) still does hybrid
-            # retrieval, so the retrieval-mode label must not under-report it (rule 5).
-            "has_vectors": bool(present) and len(present) >= 0.8 * len(self._chunks),
+            "has_vectors": self._has_vectors(self._chunks, self._vectors),
             "corrupt": self.corrupt,
             # Why semantic search fell back to BM25 (None when vectors are used or
             # legitimately absent); surfaced instead of silently swallowed.
@@ -2158,10 +2231,142 @@ class Collection:
         }
 
     def docs(self) -> list[dict]:
+        return self._docs_from_meta(self._meta)
+
+    @staticmethod
+    def _docs_from_meta(meta: dict) -> list[dict]:
         return [
             {"path": path, **info}
-            for path, info in sorted(self._meta.get("docs", {}).items())
+            for path, info in sorted(meta.get("docs", {}).items())
         ]
+
+    # ------------------------------------------------------------- #
+    #  Lazy stats: answer from meta.json alone, no chunks/vectors    #
+    # ------------------------------------------------------------- #
+
+    def _file_fingerprint(self) -> dict:
+        """(mtime_ns, size) for chunks.jsonl and vectors.json (None for
+        either that does not exist) - a cheap (stat only, no content read)
+        signature of the two files the ``_stats_cache`` block is derived
+        from. Written by _save() right after both files were rewritten above,
+        and checked by ``_fingerprint_matches`` before the cache is ever
+        trusted, so a file that changed WITHOUT going through this class
+        (external tampering, a crash between this save's own two writes, a
+        hand-restored backup) is detected and the cache refused rather than
+        trusted stale. See the block comment in _save() for the concrete
+        failure this closes."""
+        def _stat(name: str) -> "list[int] | None":
+            try:
+                st = (self.dir / name).stat()
+            except OSError:
+                return None
+            return [st.st_mtime_ns, st.st_size]
+        return {"chunks": _stat("chunks.jsonl"), "vectors": _stat("vectors.json")}
+
+    @staticmethod
+    def _fingerprint_matches(coll_dir: Path, recorded) -> bool:
+        """True when *recorded* (the cache's "fingerprint" value) still
+        matches chunks.jsonl and vectors.json on disk RIGHT NOW. Duplicates
+        the same two os.stat() calls as _file_fingerprint() rather than
+        sharing an instance method, because this runs from peek_stats()
+        BEFORE any Collection exists - there is nothing to call it on."""
+        if not isinstance(recorded, dict):
+            return False
+        def _stat(name: str) -> "list[int] | None":
+            try:
+                st = (coll_dir / name).stat()
+            except OSError:
+                return None
+            return [st.st_mtime_ns, st.st_size]
+        return (_stat("chunks.jsonl") == recorded.get("chunks")
+                and _stat("vectors.json") == recorded.get("vectors"))
+
+    @classmethod
+    def _peek_meta(cls, name: str, base: Optional[Path] = None
+                    ) -> "tuple[str, Path, dict] | None":
+        """(checked name, collection dir, parsed meta.json), or None when
+        there is nothing here the lazy path can trust enough to skip the full
+        load: an invalid name, no meta.json, or one that fails to parse. A
+        caller falling back to the real ``Collection(name)`` on None gets
+        EXACTLY today's behaviour (including its corrupt-meta.json recovery),
+        never a second, weaker copy of that recovery logic."""
+        try:
+            checked_name = _check_name(name)
+        except ValueError:
+            return None
+        coll_dir = (base or rag_dir()) / checked_name
+        meta_path = coll_dir / "meta.json"
+        if not meta_path.is_file():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        return checked_name, coll_dir, meta
+
+    @classmethod
+    def _stats_from_meta(cls, checked_name: str, coll_dir: Path,
+                         meta: dict) -> Optional[dict]:
+        """stats()-shaped dict from an already-parsed meta.json, using ONLY the
+        cache _save() writes (see its block comment) - never a re-derivation of
+        has_vectors/vector_degrade_reason from a partial read of chunks.jsonl /
+        vectors.json, which would be exactly the "answers wrong instead of not
+        at all" failure this needs to avoid. None when the cache is absent,
+        its recorded file fingerprint no longer matches chunks.jsonl /
+        vectors.json on disk (see ``_fingerprint_matches`` - the file changed
+        without going through this class since the cache was written), or it
+        otherwise does not look like this class wrote it (a collection never
+        saved under this code, or a hand-edited meta.json) - the caller must
+        fall back to the full, authoritative Collection(name).stats()."""
+        cache = meta.get(_STATS_CACHE_KEY)
+        if not isinstance(cache, dict) or not isinstance(cache.get("n_chunks"), int):
+            return None
+        if not cls._fingerprint_matches(coll_dir, cache.get("fingerprint")):
+            return None
+        docs = meta.get("docs", {})
+        if not isinstance(docs, dict):
+            return None
+        return {
+            "name": checked_name,
+            "created": meta.get("created"),
+            "n_docs": len(docs),
+            "n_missing": sum(1 for e in docs.values()
+                             if isinstance(e, dict) and e.get("missing")),
+            "n_roots": len(cls._roots_from_meta(meta)),
+            "n_chunks": cache["n_chunks"],
+            "has_vectors": bool(cache.get("has_vectors")),
+            "corrupt": bool(cache.get("corrupt")),
+            "vector_degrade_reason": cache.get("vector_degrade_reason"),
+        }
+
+    @classmethod
+    def peek_stats(cls, name: str, base: Optional[Path] = None) -> Optional[dict]:
+        """``stats()`` without constructing a full ``Collection`` - reads
+        meta.json alone and trusts its cached derived fields, never
+        chunks.jsonl or vectors.json. None means "cannot answer cheaply and
+        correctly" (see ``_stats_from_meta``); the caller MUST fall back to
+        the real ``Collection(name).stats()`` in that case - which stays
+        exactly as correct, and exactly as expensive, as it always was."""
+        found = cls._peek_meta(name, base)
+        if found is None:
+            return None
+        checked_name, coll_dir, meta = found
+        return cls._stats_from_meta(checked_name, coll_dir, meta)
+
+    @classmethod
+    def peek_detail(cls, name: str, base: Optional[Path] = None) -> Optional[dict]:
+        """``peek_stats()`` plus the docs list, for the collection-detail route -
+        both read meta.json exactly once. Same None contract as peek_stats()."""
+        found = cls._peek_meta(name, base)
+        if found is None:
+            return None
+        checked_name, coll_dir, meta = found
+        stats = cls._stats_from_meta(checked_name, coll_dir, meta)
+        if stats is None:
+            return None
+        return {**stats, "docs": cls._docs_from_meta(meta)}
 
 
 def _cosine(a: list, b: list) -> float:
