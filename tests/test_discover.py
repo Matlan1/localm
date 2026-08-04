@@ -371,6 +371,19 @@ class TestGgufClassifyExpand:
         assert "expand%5B%5D=gguf" not in urls[0]
         assert "expand%5B%5D=config" in urls[0]
 
+    def test_hf_format_classify_keeps_its_own_stats_and_size_expand(self, monkeypatch):
+        """Guards the if/elif split above: fmt=='hf' must still get its own
+        safetensors+downloads+likes+lastModified expand when classify is ALSO
+        on - the new `elif classify` branch (gguf-only) must never suppress the
+        pre-existing, unrelated `if fmt == 'hf'` branch."""
+        urls = _urls_capture(monkeypatch, [
+            {"id": "org/hf-repo", "downloads": 1, "safetensors": {"total": 10},
+             "pipeline_tag": "text-generation", "library_name": "transformers",
+             "tags": ["transformers", "text-generation"]}])
+        hf_search("x", limit=5, formats=["hf"], model_types=["llm"])
+        for field in ("safetensors", "downloads", "likes", "lastModified"):
+            assert f"expand%5B%5D={field}" in urls[0], f"{field} missing from {urls[0]}"
+
     def test_end_to_end_real_repo_shape_resolves_to_llm_via_hf_search(self, monkeypatch):
         """Integration proof (not just the pure classify_hf_metadata unit test)
         that the wiring from HF's raw JSON shape all the way to the row's
