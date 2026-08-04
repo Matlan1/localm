@@ -562,7 +562,7 @@ def gpus_cmd():
     \b
       localm config gpu_split_indices 0,1
     """
-    from .. import discover
+    from .. import discover, gpu_usage
 
     cfg = load_config()
     configured = cfg.get("main_gpu_index")
@@ -596,9 +596,21 @@ def gpus_cmd():
         marker = "  " + " ".join(markers) if markers else ""
         free = g.get("free")
         free_s = f"{free / 1024**3:.1f} GB free / " if isinstance(free, int) else ""
+        # Same "is this reading trustworthy" check as doctor.py's torch VRAM probe:
+        # a PROCESS-tagged reading, or an untagged one on a platform known to be
+        # blind to other processes' VRAM (Windows + AMD ROCm/HIP), must say so
+        # rather than print a number that looks like the whole board's free space
+        # when it is really "free minus every other app" (AGENTS.md rule 5). Gated
+        # on `free` actually being shown - no figure printed means nothing to caveat.
+        blind = isinstance(free, int) and (
+            g.get("free_scope") == discover.FREE_SCOPE_PROCESS
+            or (g.get("free_scope") != discover.FREE_SCOPE_DEVICE
+                and gpu_usage.raw_reading_is_process_scoped()))
+        note = ("  [dim](free counts only this process; other apps' VRAM "
+                "is not visible on this driver)[/dim]" if blind else "")
         console.print(
             f"  [cyan]{g['index']}[/cyan]  {g.get('name') or '?':<30} "
-            f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}")
+            f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}{note}")
     if configured is not None and not any(g["index"] == configured for g in gpus):
         console.print(
             f"[yellow]![/yellow]  configured main_gpu_index={configured} does not "
