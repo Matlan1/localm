@@ -9,12 +9,18 @@ one map omitting modules. Acyclicity needs no map and no allowlist, and the two
 shapes a tier map must carve out - an entry point, and unordered peers - are legal
 by construction because neither can form a cycle.
 
-These tests pin the three things that make the check worth having: it FIRES on a
-real cycle (a check that has never been red proves nothing), it does NOT fire on
-the entry-point and peer shapes, and it ignores function-local imports, which are
-the deliberate, standard way to break a cycle in Python.
+These tests pin the things that make the check worth having: it FIRES on a real
+cycle (a check that has never been red proves nothing), it does NOT fire on the
+entry-point and peer shapes, and it ignores function-local imports, which are the
+deliberate, standard way to break a cycle in Python. They also pin the two things
+a cycle can hide behind that the check must still SEE: a RELATIVE import
+(``from ..x import y``), resolved to its absolute target rather than skipped, and
+an eager import inside a module-level ``try:``/``if:`` body, which runs during
+import exactly like a bare top-level statement despite being indented - unlike a
+``def``/``class`` body nested inside one of them, which stays genuinely deferred.
 """
 
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -155,6 +161,203 @@ def test_unparseable_file_is_reported_not_skipped(tmp_path, monkeypatch):
 def test_absent_localm_package_is_not_an_error(tmp_path, monkeypatch):
     """Not a localm checkout: other gates report that, this one stays quiet."""
     ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+# --------------------------------------------------------------------------- #
+#  Relative imports: must resolve to their absolute target, not be skipped     #
+# --------------------------------------------------------------------------- #
+
+def test_relative_import_cycle_is_detected(tmp_path, monkeypatch):
+    """A cycle built entirely from relative imports (``from ..x.y import z``) must
+    be caught exactly like an absolute one. Before this fix, ``node.level == 0``
+    silently skipped every relative import, so a cycle built only out of them was
+    invisible to the graph."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": "from ..plugins.engine import PluginEngine\n",
+        "plugins/engine.py": "from ..inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "a cycle built from relative imports must be reported"
+    joined = "\n".join(problems)
+    assert "inference" in joined and "plugins" in joined
+
+
+def test_relative_import_from_a_package_init_resolves_correctly(tmp_path, monkeypatch):
+    """A relative import's anchor is ``__package__``, which for a package's
+    ``__init__.py`` IS the package's own name - one level shallower than for a
+    plain sibling module, whose ``__package__`` is its PARENT. Getting this wrong
+    (e.g. always stripping a trailing component, as if every file were a plain
+    module) would resolve a level-2 import from an ``__init__.py`` one package too
+    high and silently miss this cycle."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "plugins/__init__.py": "from ..inference import get_engine\n",
+        "inference/__init__.py": "from ..plugins import get_plugin\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "the package-__init__ relative-import cycle must be reported"
+    joined = "\n".join(problems)
+    assert "inference" in joined and "plugins" in joined
+
+
+def test_relative_self_import_within_a_unit_is_not_a_cycle(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": "from .textnorm import scrub\n",
+        "inference/textnorm.py": "def scrub():\n    pass\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+def test_resolve_relative_import_is_package_vs_plain_module(tmp_path, monkeypatch):
+    """Direct unit test of the resolver's arithmetic (diff-review-discipline: test
+    the relation, not just a literal). Same ``own_module`` string, same level-1
+    import, two different answers depending on ``is_package`` - because a
+    package's ``__init__.py`` IS its own package, while a plain module of the same
+    dotted name is a LEAF one level further down (its package is its parent)."""
+    ch = _load_check_hygiene()
+    node = ast.parse("from .x import y\n").body[0]
+    # localm/plugins/__init__.py: __package__ == "localm.plugins" itself.
+    assert ch._resolve_relative_import(node, "localm.plugins", is_package=True) \
+        == "localm.plugins.x"
+    # localm/plugins.py (a plain module, hypothetically): __package__ == "localm".
+    assert ch._resolve_relative_import(node, "localm.plugins", is_package=False) \
+        == "localm.x"
+
+
+def test_resolve_relative_import_beyond_top_level_returns_none(tmp_path, monkeypatch):
+    """A relative import whose dots walk past the top-level ``localm`` package is
+    invalid Python (fails at runtime with "attempted relative import beyond
+    top-level package") - the resolver must say "nothing to resolve", never guess
+    a plausible-looking but wrong package."""
+    ch = _load_check_hygiene()
+    node = ast.parse("from ... import x\n").body[0]  # level == 3
+    assert ch._resolve_relative_import(node, "localm.cli", is_package=False) is None
+
+
+# --------------------------------------------------------------------------- #
+#  Module-level try:/if: bodies are eager, not deferred like a function body   #
+# --------------------------------------------------------------------------- #
+
+def test_module_level_try_import_is_detected(tmp_path, monkeypatch):
+    """``try: import X except ImportError: ...`` at module level runs eagerly
+    during import - it is the standard optional-dependency idiom, not a deferred
+    import. It must count exactly like a bare top-level import."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "try:\n"
+            "    from localm.plugins.engine import PluginEngine\n"
+            "except ImportError:\n"
+            "    PluginEngine = None\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "an eager import inside a module-level try: body must count"
+    joined = "\n".join(problems)
+    assert "inference" in joined and "plugins" in joined
+
+
+def test_module_level_try_except_handler_import_is_detected(tmp_path, monkeypatch):
+    """The FALLBACK import in an ``except:`` handler is just as eager as the one
+    in the ``try:`` body it replaces - both run during import, only one of them
+    on any given run."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "try:\n"
+            "    import does_not_exist_at_all\n"
+            "except ImportError:\n"
+            "    from localm.plugins.engine import PluginEngine\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "an eager import inside a module-level except: body must count"
+
+
+def test_module_level_if_body_import_is_detected(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "import sys\n"
+            "if sys.platform == 'win32':\n"
+            "    from localm.plugins.engine import PluginEngine\n"
+            "else:\n"
+            "    PluginEngine = None\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "an eager import inside a module-level if: body must count"
+
+
+def test_module_level_if_else_branch_import_is_detected(tmp_path, monkeypatch):
+    """Either branch of an ``if``/``else`` can be the one that actually runs, so
+    either must be able to create a real edge - not just the ``if`` body."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "import sys\n"
+            "if sys.platform == 'win32':\n"
+            "    PluginEngine = None\n"
+            "else:\n"
+            "    from localm.plugins.engine import PluginEngine\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    problems = ch._import_cycle_violations()
+    assert problems, "an eager import inside a module-level if/else body must count"
+
+
+def test_type_checking_guarded_import_does_not_count(tmp_path, monkeypatch):
+    """``if TYPE_CHECKING:`` is False at runtime by definition - an import inside
+    it never actually executes, and is the standard way to add a type-only import
+    WITHOUT creating a real cycle. Build a shape that WOULD be a cycle if this
+    import counted, and confirm it is not reported: counting it would flag the
+    exact idiom Python programs use to avoid a real cycle as if it created one."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from localm.plugins.engine import PluginEngine\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    assert ch._import_cycle_violations() == []
+
+
+def test_def_inside_module_level_try_stays_deferred(tmp_path, monkeypatch):
+    """A function DEFINED inside a module-level ``try:`` block is still a
+    function: an import inside ITS body only runs when the function is later
+    CALLED, exactly like a plain top-level ``def``. Recursing into ``try``/``if``
+    bodies must not also start recursing into a ``def``/``class`` nested inside
+    one of them."""
+    ch = _load_check_hygiene()
+    _pkg(tmp_path, {
+        "inference/engine.py": (
+            "try:\n"
+            "    def go():\n"
+            "        from localm.plugins.engine import PluginEngine\n"
+            "        return PluginEngine\n"
+            "except Exception:\n"
+            "    pass\n"
+        ),
+        "plugins/engine.py": "from localm.inference.engine import Engine\n",
+    })
     monkeypatch.setattr(ch, "REPO", tmp_path)
     assert ch._import_cycle_violations() == []
 
