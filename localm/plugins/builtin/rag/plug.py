@@ -416,24 +416,21 @@ async def rag_collections():
     /health round trip while it ran) - much better than a total freeze, not
     as good as the cache path.
 
-    KNOWN GAP, named rather than silently accepted: ``_load()`` (which builds
-    the full ``stats()``) never calls ``_save()``, so this fallback is NOT
-    merely a one-time migration cost - a collection that is written once and
-    only ever LISTED after that (a common RAG pattern: index once, query
-    many times) stays on this degraded path on every single listing,
-    indefinitely, until something writes to it again. A safe fix exists in
-    principle (opportunistically backfill the cache under a non-blocking
-    ``collection_write_lock(..., timeout=0)``, skipping quietly if it is
-    busy), but doing it correctly needs care this unit's scope did not
-    budget for: the backfilled values must be provably consistent with
-    whatever is on disk AT THE MOMENT the lock is held, not with a snapshot
-    read before it, or a concurrent real write's ACTUAL fresh state could be
-    overwritten by our stale one - the exact "answers wrong instead of not
-    at all" failure this whole fix exists to avoid. Left as a follow-up
-    rather than rushed - the one case where this fallback DOES clear itself
-    is a real write to that same collection (add/reembed/repair/...), which
-    populates the cache as a side effect and removes it from the cold set
-    for good."""
+    FORMERLY A KNOWN GAP, now closed: ``_load()`` (which builds the full
+    ``stats()``) never calls ``_save()``, so a collection that is written
+    once and only ever LISTED after that (a common RAG pattern: index once,
+    query many times) used to stay on this fallback on every single listing,
+    indefinitely, until something else wrote to it. The cold path below now
+    goes through ``Collection.load_and_maybe_backfill()`` instead of a plain
+    ``Collection(n)`` construction - same full load, same cost this call was
+    already paying, plus an opportunistic attempt (under a non-blocking
+    ``collection_write_lock(..., timeout=0)``, skipping quietly if busy) to
+    write the ``_stats_cache`` block from what THIS load just read, so the
+    NEXT listing of the same collection is cheap. See that method's own
+    docstring for why the lock is acquired before the load rather than
+    after, which is what makes the backfilled values provably consistent
+    with disk rather than a snapshot that could have been overtaken by a
+    concurrent real write."""
     from localm.rag import Collection, collection_names
     names = collection_names()
     peeked = {n: Collection.peek_stats(n) for n in names}
@@ -442,7 +439,7 @@ async def rag_collections():
         loop = asyncio.get_running_loop()
         fresh = await loop.run_in_executor(
             get_plugin_executor(),
-            lambda: {n: Collection(n).stats() for n in cold})
+            lambda: {n: Collection.load_and_maybe_backfill(n).stats() for n in cold})
         peeked.update(fresh)
     return {"collections": [peeked[n] for n in names]}
 
@@ -465,9 +462,12 @@ async def rag_create(req: RagCreateRequest):
 @_router.get("/api/rag/collections/{name}")
 async def rag_detail(name: str):
     """Same shape as before (``stats()`` fields plus ``docs``), same cheap-vs-
-    fall-back split as rag_collections above - see its docstring. ``docs()``
-    was already meta.json-only and cheap; it was ``stats()``'s eager
-    ``Collection(name)`` construction (via ``_get_collection``) that paid the
+    fall-back split as rag_collections above - see its docstring, including
+    the same ``load_and_maybe_backfill()`` cold path (this route had the
+    identical gap: a collection only ever viewed here, never listed, was
+    equally cold and equally never backfilled by the old plain-load
+    fallback). ``docs()`` was already meta.json-only and cheap; it was
+    ``stats()``'s eager ``Collection(name)`` construction that paid the
     full-corpus read just for this page."""
     from localm.rag import Collection
     peeked = Collection.peek_detail(name)
@@ -475,7 +475,12 @@ async def rag_detail(name: str):
         return peeked
 
     def load():
-        coll = _get_collection(name)
+        try:
+            coll = Collection.load_and_maybe_backfill(name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not coll.exists():
+            raise HTTPException(404, f"No such collection: {name}")
         return {**coll.stats(), "docs": coll.docs()}
 
     loop = asyncio.get_running_loop()
