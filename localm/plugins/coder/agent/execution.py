@@ -362,7 +362,9 @@ class _ExecutionMixin:
         # own dry_run rather than the pre-call snapshot _UNDOABLE_TOOLS uses -
         # see that constant's comment for why the two sets differ.
         if self.patch_mode and call.name in _PATCH_MODE_ELIGIBLE_TOOLS:
+            t_start = time.monotonic()
             chunk = self._patch_mode_intercept(call)
+            duration_s = time.monotonic() - t_start
             if chunk is not None:
                 self._patch_chunks.append(chunk)
                 # Name the files the DIFF actually covers, not every path the
@@ -392,6 +394,13 @@ class _ExecutionMixin:
                 )
                 if interactive:
                     console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+            # A REAL duration, not omitted: unlike the never-ran paths below,
+            # _patch_mode_intercept actually does the diffing work (a
+            # search_replace sweep can cover many files), so "how long did
+            # this take" is a real fact here, not a fabricated one.
+            self._emit("tool_result", tool=call.name, ok=result.ok,
+                       summary=result.summary, output=result.output[:4000],
+                       duration_s=duration_s)
             return result
 
         # Scope check - reject file operations that fall outside the active glob.
@@ -409,6 +418,10 @@ class _ExecutionMixin:
                 )
                 if interactive:
                     print_tool_error(call.name, result.output)
+                # No duration_s: never reached tool_def.fn (F5 - see the
+                # network-policy branch below for why 0.0 would be wrong here).
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary=f"outside scope '{self.scope}'")
                 return result
 
         # The shell tools are deliberately NOT in _SCOPED_TOOLS: a path-arg check
@@ -427,6 +440,9 @@ class _ExecutionMixin:
             )
             if interactive:
                 console.print("    [dim yellow][dry-run] skipped[/dim yellow]")
+            # No duration_s: skipped, never reached tool_def.fn.
+            self._emit("tool_result", tool=call.name, ok=True,
+                       summary=result.summary)
             return result
 
         # Network policy: model-initiated network tools are governed by
@@ -442,9 +458,12 @@ class _ExecutionMixin:
                 )
                 if interactive:
                     print_tool_error(call.name, result.output)
+                # No duration_s: the tool never ran, which is a different fact
+                # from "ran and took 0.0s" - the client renders nothing for an
+                # absent field and a real "0.0s" for a present zero, so the two
+                # must not collapse into the same value (F5).
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="blocked by network policy (net_mode=off)",
-                           duration_s=0.0)
+                           summary="blocked by network policy (net_mode=off)")
                 return result
 
         # Confirmation for destructive tools (diff preview for write_file)
@@ -473,15 +492,14 @@ class _ExecutionMixin:
                     "non-interactive with no approval handler - denied. Run "
                     "interactively, or use the restricted coder for unattended runs.")
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="denied: confirmation required, none available",
-                           duration_s=0.0)
+                           summary="denied: confirmation required, none available")
                 return result
             if not approved:
                 result = ToolResult.error("Rejected by user.")
                 if interactive:
                     print_tool_result(call.name, result, verbose=False)
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="rejected by user", duration_s=0.0)
+                           summary="rejected by user")
                 return result
 
         # Snapshot file content before undoable writes so /undo can restore

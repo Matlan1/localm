@@ -537,10 +537,13 @@ class TestToolResultDuration:
         # real measurement of the 0.3s sleep, not a stub value.
         assert duration_s >= 0.25
 
-    def test_duration_is_zero_when_denied_before_execution(self, tmp_path):
-        """A tool blocked by network policy never reaches tool_def.fn - it
-        should report 0.0s, not omit the field (an absent field and a real
-        instant tool would be indistinguishable to the GUI otherwise)."""
+    def test_duration_is_omitted_when_denied_before_execution(self, tmp_path):
+        """A tool blocked by network policy never reaches tool_def.fn - the
+        event must OMIT duration_s, not report 0.0 (F5, found in review of
+        #962/S8): coder.js renders a present 0.0 as a real "0.0s", identical to
+        what the ORIGINAL bug displayed for every call. Omitting it lets the
+        client's typeof guard render nothing, distinguishing "never ran" from
+        "ran and was genuinely instantaneous"."""
         events = []
         agent = _make_agent(tmp_path, on_event=events.append)
         call = _make_call("fetch_url", url="http://example.invalid/x")
@@ -549,4 +552,78 @@ class TestToolResultDuration:
         assert not result.ok
         tool_results = [e for e in events if e.get("type") == "tool_result"]
         assert len(tool_results) == 1
-        assert tool_results[0]["duration_s"] == 0.0
+        assert "duration_s" not in tool_results[0]
+
+
+# ---------------------------------------------------------------------------
+#  Every tool_call gets a matching tool_result (F5)
+# ---------------------------------------------------------------------------
+
+class TestToolResultAlwaysEmitted:
+    """Three early-return branches in _execute_tool - patch-mode, scope-
+    violation, dry-run - used to `return result` without ever calling
+    self._emit("tool_result", ...), even though the matching "tool_call" WAS
+    emitted for all three. coder.js's pendingCards queue is a strict
+    push(tool_call)/shift(tool_result) FIFO, so a missing tool_result leaves
+    that card stuck at the head forever - the NEXT tool's tool_result then
+    resolves the WRONG card, and every result after it is off by one for the
+    rest of the session. A test that drives only ONE call at a time (as the
+    three existing patch-mode tests above do) cannot see this shape of bug at
+    all: it only shows up across a SEQUENCE. This test drives four calls
+    covering all three previously-silent branches plus one normal call, and
+    checks the tool_call/tool_result PAIRING, not just that each individually
+    "worked"."""
+
+    def test_dry_run_scope_violation_and_patch_mode_each_pair_with_their_call(
+            self, tmp_path):
+        (tmp_path / "in_scope.py").write_text("x = 1\n", encoding="utf-8")
+        fake = {"destructive_probe": ToolDef(
+            "destructive_probe", lambda cwd, **kw: ToolResult.success("ran"),
+            "d", {}, destructive=True)}
+        events = []
+        agent = _make_agent(tmp_path, scope="in_scope.py", on_event=events.append)
+
+        # 1) dry-run: destructive tool, skipped rather than run.
+        agent.dry_run = True
+        with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", fake):
+            r1 = agent._execute_tool(_make_call("destructive_probe"), interactive=False)
+        agent.dry_run = False
+        assert r1.ok and "[dry-run]" in r1.output
+
+        # 2) scope violation: read_file outside the active scope.
+        r2 = agent._execute_tool(
+            _make_call("read_file", path="outside_scope.py"), interactive=False)
+        assert not r2.ok and "outside the active scope" in r2.output
+
+        # 3) patch-mode: write_file intercepted as a diff, not applied to disk.
+        agent.patch_mode = True
+        r3 = agent._execute_tool(
+            _make_call("write_file", path="in_scope.py", content="x = 2\n"),
+            interactive=False)
+        agent.patch_mode = False
+        assert r3.ok and "[patch-mode]" in r3.output
+        assert (tmp_path / "in_scope.py").read_text(encoding="utf-8") == "x = 1\n"
+
+        # 4) a normal, fully-executed call - the one whose card would resolve
+        # to the WRONG entry if any of 1-3 above failed to emit a tool_result.
+        r4 = agent._execute_tool(_make_call("read_file", path="in_scope.py"),
+                                 interactive=False)
+        assert r4.ok
+
+        calls = [e for e in events if e["type"] == "tool_call"]
+        results = [e for e in events if e["type"] == "tool_result"]
+        expected_tools = ["destructive_probe", "read_file", "write_file", "read_file"]
+        assert [c["tool"] for c in calls] == expected_tools
+        # THE regression check: one tool_result per tool_call, same order. A
+        # length mismatch here is exactly a card left stuck at "…" forever;
+        # an order mismatch is exactly a later result resolving the wrong card.
+        assert len(results) == len(calls)
+        assert [r["tool"] for r in results] == expected_tools
+
+        # duration_s: real for patch-mode (it does real diffing work), absent
+        # for dry-run and scope-violation (never reached tool_def.fn), real
+        # for the normal call.
+        assert "duration_s" not in results[0]        # dry-run
+        assert "duration_s" not in results[1]         # scope violation
+        assert isinstance(results[2]["duration_s"], float)   # patch-mode
+        assert isinstance(results[3]["duration_s"], float)   # normal call
