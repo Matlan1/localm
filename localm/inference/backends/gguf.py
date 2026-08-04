@@ -553,8 +553,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                            "stream; using the heuristic estimate")
             except Exception as e:
                 # An unexpected RPC failure (worker crash/timeout, an encode
-                # error): the super() return below is then a heuristic ESTIMATE,
-                # not an exact count, and context-budgeting downstream is
+                # error): the super() return below calls self.count_tokens(text)
+                # (BaseBackend.count_messages_tokens dispatches polymorphically
+                # onto THIS class, not BaseBackend's own count_tokens) - so the
+                # degrade is actually GgufBackend.count_tokens's own fallback
+                # chain: a real, untemplated tokenizer count when the worker can
+                # still answer plain count_tokens, or the chars/4 heuristic only
+                # if that ALSO fails. Either way it is missing the chat
+                # template's own tokens, so context-budgeting downstream is
                 # trusting an approximation. Log str(e), not just the exception
                 # TYPE - logging only type(e).__name__ is what let a permanent
                 # bytes/str bug in this exact RPC (#956) run silently on every
@@ -562,7 +568,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 # "RuntimeError" in the log to go on.
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("gguf count_messages_tokens RPC failed (%s: %s); "
-                           "using the heuristic estimate", type(e).__name__, e)
+                           "falling back to an untemplated estimate",
+                           type(e).__name__, e)
                 global _count_messages_tokens_rpc_warned
                 if not _count_messages_tokens_rpc_warned:
                     # A permanently failing RPC (a code bug, not a transient
@@ -575,10 +582,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     _count_messages_tokens_rpc_warned = True
                     _dbg.warning(
                         "gguf count_messages_tokens RPC failed (%s: %s); token "
-                        "counts are silently falling back to the chars/4 "
-                        "estimate instead of the real tokenizer (this notice "
-                        "prints once per process; see --debug for every "
-                        "occurrence)", type(e).__name__, e)
+                        "counts are silently falling back to an estimate that "
+                        "ignores the chat template, instead of the real "
+                        "templated count (this notice prints once per "
+                        "process; see --debug for every occurrence)",
+                        type(e).__name__, e)
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #
