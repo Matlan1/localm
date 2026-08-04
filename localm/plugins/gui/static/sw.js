@@ -157,7 +157,12 @@
 // v95: Models page column sort (models.js, style.css) and the rename control
 // (models.js) - a stale-cached client would keep the old unsortable table and
 // have no rename button.
-const CACHE = "localm-shell-v95";
+// v96: pages/models.js changed - the "use" button now shows its own
+// "loading…" state while a model switch is in flight, not just the sidebar
+// status line (invisible on mobile until the drawer opens) - a stale-cached
+// client would keep giving no feedback on this button during a load that can
+// take tens of seconds.
+const CACHE = "localm-shell-v96";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

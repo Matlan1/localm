@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Models page now shows a model switch actually happening.** The "use"
+  button shows "loading…" for the real duration of the switch (which can take
+  tens of seconds), instead of giving no feedback beyond being disabled. The
+  sidebar already had an accurate status line for this, but it lives in a
+  drawer that is closed by default on mobile - the button now carries its own
+  cue everywhere.
 - **HuggingFace model search now shows what a model actually is.** Results
   display the model's architecture family (e.g. `qwen3moe`, `mixtral`), an
   approximate parameter count, and a Mixture-of-Experts badge when one applies.
