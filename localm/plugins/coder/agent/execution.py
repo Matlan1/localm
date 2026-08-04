@@ -466,10 +466,13 @@ class _ExecutionMixin:
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
-        # Confirmation for destructive tools (diff preview for write_file)
-        # and for network tools when net_mode is "ask"
+        # Confirmation for destructive tools (diff preview for write_file),
+        # for network tools when net_mode is "ask", and for a non-mutating
+        # tool that opts in via ask_by_default (e.g. rag_search: content not
+        # scoped to the coder's cwd can otherwise enter the model's context
+        # unprompted - see ToolDef.ask_by_default's own comment, registry.py).
         needs_confirm = (
-            (tool_def.destructive or net_mode == "ask") and (
+            (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default) and (
                 not self.auto_approve or call.name in self.always_confirm
             )
         )
