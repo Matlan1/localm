@@ -31,11 +31,13 @@ def _worker(model_path="model.gguf", **overrides):
 
 class _StubLlm:
     def __init__(self, tokens=None, model_ptr=1234, n_layers=32,
-                 kv_bytes_per_token=90_000, supports_images=False):
+                 kv_bytes_per_token=90_000, supports_images=False,
+                 weight_placement=None):
         self._model_ptr = model_ptr
         self.n_layers = n_layers
         self.kv_bytes_per_token = kv_bytes_per_token
         self.supports_images = supports_images
+        self.weight_placement = weight_placement if weight_placement is not None else []
         self._tokens = tokens if tokens is not None else [1, 2, 3]
 
     def tokenize(self, text, add_bos=True):
@@ -70,8 +72,27 @@ class TestLoad:
         assert kwargs.get("cancel_event") is None
         assert kwargs.get("n_gpu_layers") == 99
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,
-                         "supports_images": True}
+                         "supports_images": True, "weight_placement": []}
         assert w._loaded is True
+
+    def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):
+        """GgufWorker is the only process that can see llama.cpp's own
+        load_tensors report (LlamaCpp.weight_placement, parsed from the
+        captured native stderr) - load() must forward it verbatim in the
+        returned meta so the parent (GgufBackend._load_native) can report it,
+        and must default to [] ("not reported"), never fabricate 0-byte
+        entries, when the stub/real LlamaCpp has nothing to report."""
+        w = _worker(str(tmp_path / "m.gguf"))
+        placement = [{"backend": "ROCm0", "mib": 3.35, "is_ram": False},
+                     {"backend": "ROCm_Host", "mib": 3.20, "is_ram": True}]
+        fake_llamacpp_module = MagicMock()
+        fake_llamacpp_module.LlamaCpp.return_value = _StubLlm(
+            weight_placement=placement)
+        with patch("localm.inference.backends.llamacpp._loader.load_lib"), \
+             patch.dict(sys.modules,
+                        {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
+            meta = w.load()
+        assert meta["weight_placement"] == placement
 
     def test_load_passes_resolved_gpu_layers_and_ctx_max_verbatim(self, tmp_path):
         """The worker never re-derives auto-sizing - it trusts whatever the

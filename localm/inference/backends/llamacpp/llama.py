@@ -16,6 +16,7 @@ import codecs
 import contextlib
 import ctypes
 import os
+import re
 import tempfile
 import threading
 import time
@@ -101,33 +102,78 @@ def _stderr_ctx_for_generate(verbose: bool):
     return dedup_native_stderr
 
 
+# llama.cpp's own load-time report of where each backend's share of the model's
+# weights ended up, e.g. "load_tensors:        ROCm0 model buffer size =   3.35 MiB"
+# or "load_tensors:    ROCm_Host model buffer size =   3.20 MiB". This is the ONLY
+# place that per-backend split is ever reported - llama.h exposes no API for it
+# (verified: no buffer/tensor-size introspection function is bound in _api.py,
+# and none exists to bind), it is a printf inside llama.cpp's own model-loading
+# code. Format confirmed against a real load's captured native stderr on this
+# platform's ROCm build (see dev-notes/moe-placement-report.md).
+_MODEL_BUFFER_RE = re.compile(
+    r"load_tensors:\s*(\S+) model buffer size\s*=\s*([\d.]+)\s*MiB")
+
+
 class _CapturedStderr:
     """Holder yielded by _capture_stderr; .tail() reads the captured native text."""
 
     def __init__(self, path: str) -> None:
         self._path = path
 
+    def _read(self) -> str:
+        try:
+            with open(self._path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
     def tail(self, max_chars: int = 1500) -> str:
         # Best-effort read of the captured native stderr (the OOM / no-backends /
         # bad-quant reason); never raise from a diagnostics helper.
-        try:
-            with open(self._path, "r", encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-        except OSError:
-            return ""
-        text = text.strip()
+        text = self._read().strip()
         return text[-max_chars:] if len(text) > max_chars else text
+
+    def model_buffers(self) -> list:
+        """Every ``load_tensors: <backend> model buffer size = N MiB`` line from
+        the captured native load log, as ``[{"backend", "mib", "is_ram"}, ...]``.
+
+        ``is_ram`` classifies llama.cpp/ggml's own backend naming: a bare "CPU"
+        or "CPU_*" buffer, or any GPU backend's "*_Host" pinned-transfer buffer,
+        is system RAM; a plain device name (ROCm0, CUDA0, Vulkan0, Metal, ...) is
+        that device's VRAM. Best-effort: [] on any read failure, or when this
+        llama.cpp build's output does not match (a future format change) - a
+        caller must treat an empty list as "not reported", never as "0 bytes
+        everywhere" (AGENTS.md rule 5)."""
+        out = []
+        for m in _MODEL_BUFFER_RE.finditer(self._read()):
+            name = m.group(1)
+            out.append({
+                "backend": name,
+                "mib": float(m.group(2)),
+                "is_ram": name == "CPU" or name.startswith("CPU_")
+                          or name.endswith("_Host"),
+            })
+        return out
 
 
 @contextlib.contextmanager
 def _capture_stderr():
     """
     Redirect fd 2 (native stderr) into a temp file for the duration of the block
-    so the load-failure reason is retainable even when chat output must stay
-    clean. On success the temp file is simply discarded (stderr stays clean);
-    on failure the caller surfaces .tail() in the raised error. In debug mode
-    the native stream still also lands in the debug log via _quiet_stderr at
-    other sites, so this only adds the failure-diagnostic capture, not noise.
+    so the load report is retainable even when chat output must stay clean:
+    the failure reason (OOM / no-backends / bad-quant) on a NULL return, and the
+    per-backend weight placement (see _MODEL_BUFFER_RE) on success.
+
+    The temp file is removed when the block exits, so a caller that wants
+    .tail()/.model_buffers() MUST read them from inside the ``with`` block, not
+    after it - reading after exit silently returns "" / [] (this bit a first
+    version of this function, which read the failure detail after the block
+    had already unlinked the file; verified live, see the git history of this
+    docstring). When debug mode is on, the full captured text is ALSO appended
+    to the debug log before removal, matching _quiet_stderr's "debug mode sees
+    the native stream" contract at its other call sites - this capture is the
+    one span _quiet_stderr does not cover (see its docstring), so without this
+    the load's own native report would be invisible even under LOCALM_DEBUG=1.
     """
     fd, path = tempfile.mkstemp(prefix="localm_load_", suffix=".log")
     saved_fd = os.dup(2)
@@ -138,6 +184,16 @@ def _capture_stderr():
     finally:
         os.dup2(saved_fd, 2)
         os.close(saved_fd)
+        from localm.debuglog import native_stderr_target
+        target_fd = native_stderr_target()
+        if target_fd is not None:
+            try:
+                with open(path, "rb") as src:
+                    os.write(target_fd, src.read())
+            except OSError:
+                pass
+            finally:
+                os.close(target_fd)
         with contextlib.suppress(OSError):
             os.unlink(path)
 
@@ -713,13 +769,26 @@ class LlamaCpp:
             mp.progress_callback = ctypes.cast(_load_progress, ctypes.c_void_p)
 
         # Capture native stderr for the load span (non-verbose only) so a NULL
-        # return still carries its cause (OOM / no-backends / bad-quant); else the
-        # only native diagnostic is discarded to devnull and the error is blind
-        # (rule 5). Success path stays clean (captured text discarded). Verbose mode
-        # leaves it (nullcontext); the native stream already reaches terminal/debug.
+        # return still carries its cause (OOM / no-backends / bad-quant), and a
+        # successful return still carries llama.cpp's own load_tensors report of
+        # where each backend's share of the weights actually landed (the only
+        # source for that - see _MODEL_BUFFER_RE). Else the only native
+        # diagnostic is discarded to devnull and both are blind (rule 5). Both
+        # reads happen INSIDE the ``with`` block - _capture_stderr unlinks its
+        # temp file the moment the block exits, so reading after exit silently
+        # returns "" / [] (see that function's docstring). Verbose mode leaves
+        # this untouched (nullcontext, captured=None); the native stream already
+        # reaches terminal/debug directly, and there is nothing captured to parse.
         _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
+        self.weight_placement: list = []
+        _load_failure_detail = ""
         with _load_ctx() as captured:
             self._model_ptr = api.llama_load_model_from_file(model_path, mp)
+            if captured is not None:
+                if self._model_ptr:
+                    self.weight_placement = captured.model_buffers()
+                else:
+                    _load_failure_detail = captured.tail()
         if not self._model_ptr:
             # A NULL return when we asked to cancel is an ABORT, not a failure:
             # the load was superseded by a newer model selection. Report it as
@@ -728,10 +797,9 @@ class LlamaCpp:
                 from localm.inference.backends.base import ModelLoadCancelled
                 raise ModelLoadCancelled(
                     f"Model load aborted (superseded): {model_path}")
-            detail = captured.tail() if captured is not None else ""
-            hint = ("" if detail
+            hint = ("" if _load_failure_detail
                     else " (run with LOCALM_DEBUG=1 for the native load log)")
-            suffix = f"\n{detail}" if detail else ""
+            suffix = f"\n{_load_failure_detail}" if _load_failure_detail else ""
             raise RuntimeError(
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
