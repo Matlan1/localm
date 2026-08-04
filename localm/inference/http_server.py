@@ -175,9 +175,21 @@ _engine_factory = _default_engine_factory
 def _model_file_size(name: str) -> Optional[int]:
     """Best-effort on-disk size for registered model *name*, or None when not
     resolvable (e.g. under pytest with no registry). Mirrors switch_engine's
-    own file_size computation so the VRAM estimate written to the coordination
-    registry is consistent with the number switch_engine itself used to decide
-    whether eviction was needed."""
+    own file_size computation (residency.model_footprint_bytes) for the
+    single-file-vs-directory STAT LOGIC, so the VRAM estimate written to the
+    coordination registry is consistent with the number switch_engine itself
+    used to decide whether eviction was needed - but deliberately NOT for the
+    empty-directory return value: model_footprint_bytes returns int (never
+    None) because its caller always needs a numeric eviction-admission input,
+    even a 0 one; this function feeds a registry field other instances treat
+    as "how much VRAM does this peer hold", where a 0 is read as a REAL
+    measurement (see gpu_registry.py's vram_estimate_bytes and its one
+    consumer's `isinstance(e, int) and e > 0` guard). rglob() matching no
+    files - an empty directory, or one whose real weights sit somewhere
+    rglob does not look - means the size genuinely was not measured, and
+    reporting a suspiciously-precise 0 for "unknown" is exactly the
+    collapsed-two-outcomes failure AGENTS.md rule 5 warns about, even though
+    today's one consumer happens to treat 0 the same as None already."""
     try:
         from pathlib import Path as _Path
         from localm.model_manager import get_model_info
@@ -191,7 +203,8 @@ def _model_file_size(name: str) -> Optional[int]:
         if p.is_file():
             return p.stat().st_size
         if p.is_dir():
-            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            return total if total > 0 else None
     except (OSError, TypeError, ValueError):
         return None
     return None
