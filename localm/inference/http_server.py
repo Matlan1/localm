@@ -393,7 +393,7 @@ def _gpu_placement_fields(engine) -> dict:
 
 
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
-    global _engines, _engines_lru, _active_model_name, _engine_factory
+    global _engines, _engines_lru, _active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
     # Preemption (a newer selection aborts an in-flight load) is SINGLE-slot and
@@ -989,6 +989,14 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 _switch_loading = None
                 
         _engines[name] = new_engine
+        # Seed the per-model activity clock the INSTANT this engine becomes
+        # resident - not when it first answers a request. Without this,
+        # _idle_unload_once's _last_activity_per_model.get(name, _last_activity)
+        # fell back to the GLOBAL _last_activity, which holds whatever OTHER
+        # model was last used - so a model switched to while the PREVIOUS model
+        # was already idle past the TTL looked instantly overdue for eviction,
+        # and could be unloaded before it ever served its first response.
+        _last_activity_per_model[name] = time.monotonic()
         _engines_lru.append(name)
         _active_model_name = name
         _engine = new_engine
@@ -1508,7 +1516,18 @@ async def _idle_unload_once(ttl: int) -> bool:
     for name, engine in list(targets.items()):
         if engine is None or not engine.loaded:
             continue
-            
+
+        # The _last_activity fallback below is intentional, not a leftover: it is
+        # only ever reached for an engine that was assigned to `_engine` directly
+        # without going through switch_engine's registration (a test/script
+        # setting _engine, or a genuinely single-model/direct-path startup with
+        # an empty registry - see switch_engine's own "empty registry" comment).
+        # In that mode there is only ONE model, ever, so "the last activity of
+        # any request" and "the last activity of THIS model" are the same fact -
+        # falling back to it is correct, not a cross-model leak. A model loaded
+        # via switch_engine always has its OWN entry from the instant it is
+        # registered (seeded there), so in the multi-model case this fallback is
+        # never reached at all.
         last_act = _last_activity_per_model.get(name, _last_activity)
         if (time.monotonic() - last_act) < ttl:
             continue
