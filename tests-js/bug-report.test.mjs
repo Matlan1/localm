@@ -55,6 +55,48 @@ test("R47: a blank description does not POST", async () => {
   assert.equal(posts.length, 0, "no POST for an empty description");
 });
 
+test("#958: What I expected / What happened POST as their own fields, and clear on save", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "clicked generate";
+  doc.getElementById("bug-expected").value = "a picture of a cat";
+  doc.getElementById("bug-happened").value = "a blank grey square appeared";
+  doc.getElementById("bug-send").click();
+  await flush();
+  assert.equal(posts.length, 1, "one bug-report POST");
+  assert.equal(posts[0].description, "clicked generate");
+  assert.equal(posts[0].what_i_expected, "a picture of a cat");
+  assert.equal(posts[0].what_happened, "a blank grey square appeared");
+  assert.equal(doc.getElementById("bug-desc").value, "", "description cleared after save");
+  assert.equal(doc.getElementById("bug-expected").value, "", "expected cleared after save");
+  assert.equal(doc.getElementById("bug-happened").value, "", "happened cleared after save");
+});
+
+test("#958: a blank description with 'what happened' filled in still POSTs", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "   ";
+  doc.getElementById("bug-happened").value = "it crashed on startup";
+  doc.getElementById("bug-send").click();
+  await flush();
+  assert.equal(posts.length, 1, "what_happened alone is enough to send");
+  assert.equal(posts[0].what_happened, "it crashed on startup");
+});
+
+test("#958: blank description and blank 'what happened' still refuses to POST", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "";
+  doc.getElementById("bug-expected").value = "something, but not what happened";
+  doc.getElementById("bug-happened").value = "   ";
+  doc.getElementById("bug-send").click();
+  await flush();
+  assert.equal(posts.length, 0, "expected alone (no description/happened) does not POST");
+});
+
 test("R47: the POST carries a browser client context (UA, page, viewport, console errors)", async () => {
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });

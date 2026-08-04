@@ -35,12 +35,21 @@ report - while staying safe:
   * Versions of the dependencies that shape a failure (native runtime, HF + server
     stacks).
   * The in-memory recent-activity log (INFO+ breadcrumbs; the raw model output is
-    DEBUG-level, so chat content never enters it) and, for a GUI report, the
-    browser context + recent JS console errors.
+    DEBUG-level, so it never enters this in-process ring buffer) and, for a GUI
+    report, the browser context + recent JS console errors.
 
 What is NEVER collected: the API key, environment variables (which can hold one),
-config secrets, the raw chat/transcript content, or anything written only at DEBUG
-level. The user also reviews and edits the report before sending, regardless.
+config secrets, or the raw chat/transcript content. The user also reviews and
+edits the report before sending, regardless.
+
+Chat content DOES land in the on-disk debug log at DEBUG level when --debug (or
+keep_diagnostics) is on and the session is not privacy mode - that is what makes
+local debugging with --debug possible at all. What must never happen is that
+content reaching a REPORT: the digest builder (localm/_log_digest.py) drops every
+record from a known debug_content_enabled()-gated write site (the raw model
+reply, a memory-embed content snippet, a web-tool query) before it is ever
+collapsed or classified, so none of them can appear in ``_recent_log_tail``
+regardless of what the content itself says (#961).
 """
 
 from __future__ import annotations
@@ -420,7 +429,9 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
     count - see localm/_log_digest.py. A blind last-N-lines tail used to miss the
     actual failure whenever enough routine activity followed it before the report
     was filed (#617); this survives that regardless of how long the session ran
-    afterward. Home paths are scrubbed. Never raises."""
+    afterward. Chat content (a raw model reply, a memory-embed snippet, a web-tool
+    query) is dropped by build_digest before this ever sees it, whatever the
+    content itself says (#961). Home paths are scrubbed. Never raises."""
     try:
         from pathlib import Path as _P
         if home is None:
@@ -446,10 +457,15 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
         if chosen is None:
             return ""
         raw = chosen.read_text(encoding="utf-8", errors="replace")
-        if len(raw) > _LOG_TAIL_READ_BYTES:
+        truncated = len(raw) > _LOG_TAIL_READ_BYTES
+        if truncated:
             raw = raw[-_LOG_TAIL_READ_BYTES:]
         from localm._log_digest import build_digest
-        return _scrub_secrets(build_digest(raw, max_chars=max_chars))
+        # start_tainted=truncated: a truncated tail can start mid-way through
+        # a debug_content_enabled() write with no header of its own (#961
+        # follow-up) - build_digest must not trust whatever it finds first.
+        return _scrub_secrets(
+            build_digest(raw, max_chars=max_chars, start_tainted=truncated))
     except Exception:
         return ""
 
@@ -602,6 +618,20 @@ def build_report(summary: str, reason: str = "",
     # did not do). _scrub_secrets is idempotent and no-ops on empty text.
     summary = _scrub_secrets(summary)
     reason = _scrub_secrets(reason)
+    ctx = context or {}
+    # A user-composed report (save_user_report/the GUI form) can supply these
+    # three DISTINCT fields via context, the same threading pattern already
+    # used for native_trace/recent_log_tail/hang_traces/client below. Absent
+    # for every automatic (crash/LocalmError) report, which keeps their
+    # existing "What happened" == summary+reason rendering unchanged (#958:
+    # before this, save_user_report always left what_i_did/what_i_expected
+    # empty and duplicated ONE string into the title AND the whole "What
+    # happened" body, so a report never distinguished what the user expected
+    # from what actually happened). Scrubbed here, at the same choke point as
+    # summary/reason above (HON-03/HON-15).
+    what_i_did = _scrub_secrets((ctx.get("what_i_did") or "").strip())
+    what_i_expected = _scrub_secrets((ctx.get("what_i_expected") or "").strip())
+    what_happened = _scrub_secrets((ctx.get("what_happened") or "").strip())
     diag = collect_diagnostics(context)
     err = _format_error(error)
 
@@ -630,10 +660,14 @@ def build_report(summary: str, reason: str = "",
         f"# localm bug report: {summary}",
         "",
         "## What I was doing",
-        "<!-- Please describe what you ran and what you expected. -->",
+        what_i_did or "<!-- Please describe what you ran and what you expected. -->",
         "",
+    ]
+    if what_i_expected:
+        parts += ["## What I expected", what_i_expected, ""]
+    parts += [
         "## What happened",
-        summary + ((f"\n\nReason: {reason}") if reason else ""),
+        what_happened or (summary + ((f"\n\nReason: {reason}") if reason else "")),
         "",
         "## App state",
         "\n".join(_app_state_lines(diag)),
@@ -776,26 +810,45 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         return None
 
 
-def save_user_report(description: str, *, summary: str = "",
+def save_user_report(description: str = "", *, summary: str = "",
+                     what_i_expected: str = "", what_happened: str = "",
                      include_log: bool = False,
                      client: Optional[dict] = None) -> Optional[Path]:
     """Build and save a USER-initiated bug report and return its path (R47).
 
     The shared backend for the GUI "Report a bug" control and the
-    ``localm bug-report`` CLI: the user's *description* fills the "What I was
-    doing" section, the safe environment snapshot is collected as usual (now incl.
-    loaded model, effective backend, session mode, a safe config subset, key
-    dependency versions, and the in-memory recent-activity log), and with
-    *include_log* the current run's on-disk debug log tail is attached
-    (home-scrubbed at source - never the API key, config secrets, or chat data).
-    *client* is an optional GUI-supplied browser context (user agent, page,
-    viewport, recent JS console errors). Returns None on a write failure (the
-    caller surfaces that rather than reporting a false success)."""
+    ``localm bug-report`` CLI: *description* fills the "What I was doing"
+    section, *what_i_expected* and *what_happened* fill their own sections -
+    three DISTINCT fields, not one string echoed three times (#958: a report
+    used to derive its title AND its whole "What happened" body from the same
+    truncated first line of *description*, so a reader could never tell what
+    the user expected from what actually happened). *summary* overrides the
+    title; when omitted it is derived from *what_happened* (falling back to
+    *description* when that too is empty), since "what happened" makes a more
+    useful issue title than "what I was doing". The safe environment snapshot
+    is collected as usual (loaded model, effective backend, session mode, a
+    safe config subset, key dependency versions, and the in-memory
+    recent-activity log), and with *include_log* the current run's on-disk
+    debug log tail is attached (home-scrubbed at source, and with every
+    chat-content record dropped by build_digest regardless of what it says -
+    never the API key, config secrets, or chat content, #961). *client* is an
+    optional GUI-supplied browser context (user agent, page, viewport, recent
+    JS console errors). Returns None on a write failure (the caller surfaces
+    that rather than reporting a false success)."""
     description = (description or "").strip()
+    what_i_expected = (what_i_expected or "").strip()
+    what_happened = (what_happened or "").strip()
     if not summary:
-        summary = description.splitlines()[0] if description else ""
+        title_source = what_happened or description
+        summary = title_source.splitlines()[0] if title_source else ""
     summary = summary.strip()[:120] or "user-reported issue"
     context: dict = {"operation": "gui-bug-report"}
+    if description:
+        context["what_i_did"] = description
+    if what_i_expected:
+        context["what_i_expected"] = what_i_expected
+    if what_happened:
+        context["what_happened"] = what_happened
     if include_log:
         import os
         tail = _recent_log_tail(pid=os.getpid())
@@ -814,14 +867,6 @@ def save_user_report(description: str, *, summary: str = "",
     if isinstance(client, dict) and client:
         context["client"] = client
     text = build_report(summary, context=context)
-    if description:
-        # Drop the user's own words into the otherwise-empty "What I was doing".
-        # Scrub here: this is inserted AFTER build_report's own scrub pass and is
-        # uploaded verbatim in the report body when the user picks upload, so it must
-        # be scrubbed at this injection point too (HON-15).
-        text = text.replace(
-            "<!-- Please describe what you ran and what you expected. -->",
-            _scrub_secrets(description))
     return save_report(text)
 
 

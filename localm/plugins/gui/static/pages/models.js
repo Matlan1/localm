@@ -789,7 +789,12 @@ function downloadBugReport() {
 
 export async function submitBugReport(upload, isRetry = false) {
   const desc = ($("bug-desc").value || "").trim();
-  if (!desc) { toast("Describe the problem first", true); return; }
+  const expected = (($("bug-expected") && $("bug-expected").value) || "").trim();
+  const happened = (($("bug-happened") && $("bug-happened").value) || "").trim();
+  // "What were you doing" and "what happened" are the two fields most likely
+  // to carry the actual report; either alone is enough to send (mirrors the
+  // server's own "description or what_happened" check).
+  if (!desc && !happened) { toast("Describe the problem first", true); return; }
   const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
   const saveBtn = $("bug-send"), upBtn = $("bug-upload");
   if (saveBtn) saveBtn.disabled = true;
@@ -809,7 +814,8 @@ export async function submitBugReport(upload, isRetry = false) {
     const r = await fetch("/api/bug-report", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ description: desc, include_log: includeLog, client,
+      body: JSON.stringify({ description: desc, what_i_expected: expected,
+        what_happened: happened, include_log: includeLog, client,
         upload: !!upload }),
     });
     const data = await r.json().catch(() => ({}));
@@ -855,7 +861,11 @@ export async function submitBugReport(upload, isRetry = false) {
     }
     // Keep the description on ANY failed send so Retry re-uses it; clear it once the
     // report is genuinely done with (sent, or a plain save with no upload attempt).
-    if (sent || (!upload && data.saved)) $("bug-desc").value = "";
+    if (sent || (!upload && data.saved)) {
+      $("bug-desc").value = "";
+      if ($("bug-expected")) $("bug-expected").value = "";
+      if ($("bug-happened")) $("bug-happened").value = "";
+    }
     if (sent) toast("Bug report sent");
     else if (data.rate_limited) toast("Rate limited; wait a bit and click Send again", true);
     else if (uploadFailed) toast("Could not send: " + (data.upload_message || data.upload_error), true);

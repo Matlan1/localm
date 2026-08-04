@@ -38,6 +38,23 @@ This module instead:
     benign content first and never drops an error record silently - if even
     that is not enough, it says plainly how many earlier errors were omitted
     rather than silently truncating them (AGENTS.md rule 5).
+  * Drops every record that is a known debug_content_enabled()-gated write -
+    e.g. the GGUF backend's raw (pre-scrub) model reply - BEFORE anything
+    else touches it, so chat content can never survive collapsing, budget
+    fitting, or being promoted to an ERROR record by its own text (#961: a
+    generated reply routinely contains the words "error"/"exception", which
+    is exactly what promotes an otherwise-benign record to be kept verbatim).
+    See _CONTENT_MARKER_RES. This is a fixed marker on each KNOWN write site,
+    not a scrubber over arbitrary prose - a scrubber is a regex arms race
+    against free-form generated text and will not hold.
+  * Collapses a long RUN of near-duplicate lines WITHIN one benign record's
+    own continuation lines, not just across records. Raw native (ggml/CUDA/
+    HIP) stderr has no "TIMESTAMP LEVEL NAME:" prefix of its own, so a long
+    stretch of it always glues onto ONE record as its continuation lines
+    (see parse_records) - and one giant record is never a "run" of 3+ near-
+    duplicate RECORDS for the record-level collapse above to fold, so a
+    report's whole budget could be spent on ~70 copies of one native line
+    (#958/#952). See _collapse_line_runs.
 """
 
 from __future__ import annotations
@@ -85,6 +102,51 @@ _CONTINUATION_ERROR_SIGNAL_RE = re.compile(
 # A run shorter than this is left expanded - collapsing "2 identical lines"
 # saves nothing and just makes a short, already-readable log harder to follow.
 _MIN_RUN_TO_COLLAPSE = 3
+
+# Debug-level writes gated on localm.debuglog.debug_content_enabled() - i.e.
+# they carry raw CHAT CONTENT (a model reply, an embed-failure snippet of a
+# memory record, a web-tool query derived from the user's prompt) rather than
+# operational data. A bug report must NEVER include chat content (the privacy
+# promise the report form itself makes), so a record matching any of these is
+# dropped whole in build_digest, before collapsing or error-promotion ever see
+# it - see is_content_record. Each pattern anchors to a KNOWN write site's own
+# stable prefix, not to prose content, so it does not rot into a scrubber
+# arms race against arbitrary generated text:
+_CONTENT_MARKER_RES = (
+    # llama.py's _decode_stream(): logger.debug("raw model output:\n%s", ...).
+    # The message's own newline puts nothing else after the marker on the
+    # header line - the reply itself rides in as unleveled CONTINUATION
+    # lines - so anchoring to end-of-line is exact, not a substring guess.
+    re.compile(r"raw model output:\s*$"),
+    # memory/store.py's _embed_one(): the content-bearing branch of that log
+    # statement is "memory embed_one failed for %r: %s" (the snippet is
+    # inline on the header line). Its privacy-mode sibling logs an entirely
+    # different, content-free message ("...failed (content withheld: privacy
+    # mode..."), so this prefix can only match the content-bearing branch.
+    re.compile(r"\bmemory embed_one failed for "),
+    # jobs/webtool.py's scheduled web-tool loop: the content-bearing branch is
+    # "jobs web tool: %s %s" (tool name + the model-derived args dict, e.g. the
+    # search query); the privacy-mode sibling logs the tool name ALONE with
+    # nothing after it ("jobs web tool: %s"). Matched structurally - a known
+    # tool name immediately followed by the start of the args dict's repr -
+    # rather than by content, so only the args-carrying branch has a "{" here.
+    re.compile(r"\bjobs web tool: \S+ \{"),
+)
+
+
+def is_content_record(rec: LogRecord) -> bool:
+    """True when *rec*'s header line is one of the known debug_content_enabled()
+    writes (see _CONTENT_MARKER_RES) - i.e. it carries chat content and must
+    never appear in a bug report, regardless of its level or how it would
+    otherwise be collapsed. Only the header line is checked: every marked
+    write site puts its own message (never the caller's content) there, with
+    any actual content confined to lines[1:] (raw model output) or inline
+    after the marker on lines[0] itself (the other two) - either way the
+    marker is on lines[0]."""
+    if not rec["lines"]:
+        return False
+    header = rec["lines"][0]
+    return any(p.search(header) for p in _CONTENT_MARKER_RES)
 
 
 def parse_records(text: str) -> List[LogRecord]:
@@ -178,6 +240,34 @@ def _record_timestamp(rec: LogRecord) -> str:
     return rec["lines"][0][:19]   # "YYYY-MM-DD HH:MM:SS" prefix, or "" if absent
 
 
+def _collapse_line_runs(lines: List[str]) -> List[str]:
+    """The line-level twin of collapse_records' record-level collapsing,
+    applied WITHIN a single (already-grouped) benign record's own lines: a run
+    of _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate lines (numbers masked,
+    same as record_template) collapses to the last of them plus a repeat
+    count. Needed because a long run of unleveled native (ggml/CUDA/HIP)
+    stderr - no "TIMESTAMP LEVEL NAME:" prefix of its own - always lands as
+    CONTINUATION LINES of whatever record precedes it (see parse_records), so
+    it is never a run of multiple RECORDS for collapse_records itself to fold:
+    one giant multi-line record is not a "run" (#958/#952 - a report whose
+    entire tail was ~70 copies of one native line, because nothing above the
+    single-record level ever collapsed it)."""
+    out: List[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        tmpl = _NUMERIC_RE.sub("#", lines[i])
+        j = i + 1
+        while j < n and _NUMERIC_RE.sub("#", lines[j]) == tmpl:
+            j += 1
+        run_len = j - i
+        if run_len >= _MIN_RUN_TO_COLLAPSE:
+            out.append(f"{lines[j - 1]}  (repeated {run_len}x)")
+        else:
+            out.extend(lines[i:j])
+        i = j
+    return out
+
+
 def collapse_records(records: List[LogRecord]) -> List[str]:
     """Render *records* to lines: every error record kept verbatim; a run of
     _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate BENIGN records (now
@@ -219,31 +309,119 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
             first_ts = _record_timestamp(records[i])
             last_ts = _record_timestamp(records[j - 1])
             span = f"{first_ts} .. {last_ts}" if first_ts and last_ts else f"x{run_len}"
-            survivor = records[j - 1]["lines"]
+            survivor = _collapse_line_runs(records[j - 1]["lines"])
             out.extend(survivor[:-1])
             out.append(f"{survivor[-1]}  (repeated {run_len}x, {span})")
         else:
             for k in range(i, j):
-                out.extend(records[k]["lines"])
+                out.extend(_collapse_line_runs(records[k]["lines"]))
         i = j
     return out
 
 
-def build_digest(text: str, *, max_chars: int = 6000) -> str:
-    """The full pipeline: parse -> collapse near-duplicate benign runs ->
-    keep every error in full -> fit *max_chars*, trimming benign content
-    first and never silently dropping an error. Never raises (returns ""
-    on any unexpected failure, matching the caller's existing best-effort
-    contract)."""
+def _drop_content_records(
+        records: List[LogRecord], *, start_tainted: bool = False
+) -> "tuple[List[LogRecord], int]":
+    """Remove every content record (is_content_record) AND everything that
+    follows one until we are confident we have resynchronized to genuine
+    operational logging - BEFORE anything else touches *records*.
+
+    A content-marker match on a record's OWN header is not sufficient by
+    itself. debuglog.py's writer is a stock logging.FileHandler with no
+    boundary marker between records, so parse_records has no way to know a
+    multi-line debug_content_enabled() write's true extent. If the model's
+    OWN reply text contains a line shaped like localm's own log header
+    ("TIMESTAMP LEVEL name: message" - trivially produced by a coding
+    assistant quoting or discussing a real log line, or by adversarial text
+    injected through an untrusted web page a job tool fetched, LM-DA-014),
+    parse_records incorrectly starts a NEW record right there. That
+    fragment's own header is then attacker/model-controlled text matching
+    none of _CONTENT_MARKER_RES, so checking only each record's own header
+    lets it straight through - reproduced live: a "raw model output:" record
+    whose reply quotes one realistic-looking log line lets everything after
+    that quoted line survive untouched, chat content included.
+
+    So once a content marker fires, every record after it is ALSO dropped -
+    regardless of its own claimed level, since a level marker in that window
+    is exactly as forgeable as any other line - until a run of
+    _MIN_RUN_TO_COLLAPSE (3) CONSECUTIVE, mutually near-duplicate (matching
+    record_template()) records appears. Real operational traffic (routine
+    polling) reliably produces such a run within moments of resuming, so the
+    digest stays useful past the immediate vicinity of a content write;
+    free-form content producing 3 back-to-back near-duplicates immediately
+    after the marker, with nothing else in between, is the residual, accepted
+    risk (same shape as the 137-vs-139 masking trade-off documented in
+    record_template - the fix for a narrower window is widening
+    _CONTENT_MARKER_RES or the resync run length, not weakening this).
+
+    *start_tainted* applies the SAME distrust to the very first record:
+    bugreport.py's _recent_log_tail truncates a huge log file to its last
+    _LOG_TAIL_READ_BYTES, so the truncated text can start mid-way through a
+    content write with no header at all (parse_records' "starts mid-record"
+    branch gives it level==""). Without this, that severed fragment would be
+    trusted immediately, the same gap via a different door.
+
+    Returns (kept, count_dropped)."""
+    kept: List[LogRecord] = []
+    dropped = 0
+    tainted = start_tainted
+    i, n = 0, len(records)
+    while i < n:
+        rec = records[i]
+        if is_content_record(rec):
+            tainted = True
+            dropped += 1
+            i += 1
+            continue
+        if tainted:
+            tmpl = record_template(rec)
+            j = i + 1
+            while (j < n and not is_content_record(records[j])
+                   and record_template(records[j]) == tmpl):
+                j += 1
+            run_len = j - i
+            if run_len >= _MIN_RUN_TO_COLLAPSE:
+                tainted = False
+                kept.extend(records[i:j])
+            else:
+                dropped += run_len
+            i = j
+            continue
+        kept.append(rec)
+        i += 1
+    return kept, dropped
+
+
+def _content_withheld_notice(n: int) -> str:
+    """Placed FIRST when present (same defensive placement as the "N errors
+    omitted" notice below) so it survives the blunt front-anchored truncation
+    build_report applies on top of this digest (bugreport.py's [:4000] slice)."""
+    return (f"... ({n} debug record(s) withheld - chat content is never "
+            "included in a bug report) ...")
+
+
+def build_digest(text: str, *, max_chars: int = 6000, start_tainted: bool = False) -> str:
+    """The full pipeline: parse -> drop chat-content records (and everything
+    until resync, see _drop_content_records) -> collapse near-duplicate
+    benign runs -> keep every error in full -> fit *max_chars*, trimming
+    benign content first and never silently dropping an error. Never raises
+    (returns "" on any unexpected failure, matching the caller's existing
+    best-effort contract). *start_tainted*: see _drop_content_records - pass
+    True when *text* may itself start mid-record (a truncated tail)."""
     try:
         records = parse_records(text)
         if not records:
             return ""
+        records, withheld = _drop_content_records(records, start_tainted=start_tainted)
+        notice = _content_withheld_notice(withheld) if withheld else ""
+        if not records:
+            return notice
         lines = collapse_records(records)
         digest = "\n".join(lines).strip()
-        if len(digest) <= max_chars:
-            return digest
-        return _fit_budget(records, max_chars)
+        full = "\n".join(p for p in (notice, digest) if p).strip()
+        if len(full) <= max_chars:
+            return full
+        return _fit_budget(records, max_chars, content_notice=notice)
     except Exception:
         return ""
 
@@ -257,7 +435,8 @@ _TRUNCATED_MARK = ("... (this error was truncated for space - its start is in "
 _MIN_ERROR_TAIL = 40
 
 
-def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
+def _fit_budget(records: List[LogRecord], max_chars: int, *,
+                content_notice: str = "") -> str:
     """Re-render, this time dropping benign (collapsed or not) lines from the
     FRONT first - oldest activity goes first, errors are never touched -
     until it fits. If the errors alone still exceed the budget, keep the
@@ -268,17 +447,24 @@ def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
     to its tail and marked as truncated. Dropping it whole (keeping only blocks
     that fit entire) returned a digest of just the "N omitted" notice - a bug
     report with no error in it at all, for exactly the giant native-crash
-    traceback this digest exists to carry (REG-619)."""
+    traceback this digest exists to carry (REG-619).
+
+    *content_notice*, when non-empty, is the "N debug record(s) withheld"
+    disclosure from build_digest - already-dropped content records never
+    reach *records* here, but the budget must still leave room for the
+    notice itself so it is never the thing trimmed away."""
+    reserved = len(content_notice) + 1 if content_notice else 0
+    budget = max_chars - reserved
     error_idxs = [i for i, r in enumerate(records) if is_error_record(r)]
     error_blocks = ["\n".join(records[i]["lines"]) for i in error_idxs]
     errors_text = "\n".join(error_blocks)
 
-    if len(errors_text) <= max_chars:
+    if len(errors_text) <= budget:
         # Errors fit; add back as much collapsed benign context as the
         # remaining budget allows, most-recent-first (drop the oldest first).
         benign_lines = collapse_records(
             [r for i, r in enumerate(records) if i not in set(error_idxs)])
-        budget_left = max_chars - len(errors_text) - 2
+        budget_left = budget - len(errors_text) - 2
         kept: List[str] = []
         for ln in reversed(benign_lines):
             if budget_left - len(ln) - 1 < 0:
@@ -286,11 +472,11 @@ def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
             kept.append(ln)
             budget_left -= len(ln) + 1
         kept.reverse()
-        parts = []
+        parts = [content_notice] if content_notice else []
         if kept:
             parts.append("\n".join(kept))
         parts.append(errors_text)
-        return "\n".join(parts).strip()
+        return "\n".join(p for p in parts if p).strip()
 
     # Even the errors alone do not fit: keep the most recent ones (most
     # actionable) and say how many earlier ones were cut - never silent.
@@ -298,7 +484,7 @@ def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
     used = 0
     omitted = 0
     for block in reversed(error_blocks):
-        room = max_chars - 80 - used - 1             # leave space for the notice
+        room = budget - 80 - used - 1                 # leave space for the notice
         if len(block) <= room:
             kept_blocks.append(block)
             used += len(block) + 1
@@ -317,8 +503,8 @@ def _fit_budget(records: List[LogRecord], max_chars: int) -> str:
             continue
         omitted += 1
     kept_blocks.reverse()
-    notice = (f"... ({omitted} earlier error(s) omitted for space - see the "
-              "full log file) ..." if omitted else "")
-    parts = [notice] if notice else []
+    omitted_notice = (f"... ({omitted} earlier error(s) omitted for space - see the "
+                      "full log file) ..." if omitted else "")
+    parts = [p for p in (content_notice, omitted_notice) if p]
     parts.append("\n".join(kept_blocks))
     return "\n".join(p for p in parts if p).strip()

@@ -112,6 +112,80 @@ def test_response_carries_report_markdown_for_download(monkeypatch):
     assert "downloadable please" in data["report_markdown"]
 
 
+def test_what_expected_and_happened_fields_land_in_their_own_sections(monkeypatch):
+    """#958: the GUI's two new optional fields must render as their OWN
+    sections, distinct from ``description`` and from each other - not all
+    three collapsed into one duplicated sentence."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={
+                "description": "clicked generate on the image tab",
+                "what_i_expected": "a picture of a cat",
+                "what_happened": "a blank grey square appeared instead",
+            },
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    body = Path(r.json()["path"]).read_text(encoding="utf-8")
+    assert "## What I expected" in body
+    assert "a picture of a cat" in body
+    assert "a blank grey square appeared instead" in body
+    # The title comes from "what happened" (more useful than the truncated
+    # "what I was doing" text) - and the upload title (below) must match it.
+    assert body.startswith("# localm bug report: a blank grey square")
+
+
+def test_blank_description_with_what_happened_still_accepted(monkeypatch):
+    """A blank ``description`` is fine as long as ``what_happened`` carries
+    the report - the two are independent, optional inputs."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "   ", "what_happened": "it crashed on startup"},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    body = Path(r.json()["path"]).read_text(encoding="utf-8")
+    assert "it crashed on startup" in body
+
+
+def test_upload_title_prefers_what_happened_over_description(monkeypatch):
+    """The uploaded (public GitHub issue) title must match the report body's
+    own H1 - both derived from what_happened when present, not the
+    (different, older) description-only derivation."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    from localm import bugreport
+
+    captured = {}
+
+    def _fake_upload(title, body, **kw):
+        captured["title"] = title
+        return {"url": "https://github.com/Matlan1/localm/issues/999"}
+
+    monkeypatch.setattr(bugreport, "upload_report", _fake_upload)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={
+                "description": "clicked generate on the image tab",
+                "what_happened": "a blank grey square appeared instead",
+                "upload": True,
+            },
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    assert captured["title"].startswith("a blank grey square")
+
+
 def test_upload_failure_returns_stage_and_message(monkeypatch):
     """A failed upload is surfaced with the diagnosed stage + friendly message (not
     a false success), and the report file + downloadable markdown are still there."""

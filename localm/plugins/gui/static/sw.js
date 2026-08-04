@@ -137,7 +137,11 @@
 // model's architecture family, a Mixture-of-Experts badge, and an approximate
 // parameter count) - a stale-cached client would keep the old rows with none
 // of that information.
-const CACHE = "localm-shell-v90";
+// v91: the "Report a bug" form (index.html) and its handler (models.js) split
+// into what-I-did / what-I-expected / what-happened fields (#958) - a
+// stale-cached client would keep the old single-textarea form and the new
+// fields would never reach the server.
+const CACHE = "localm-shell-v91";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
