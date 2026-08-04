@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm-managed ComfyUI: STAGE S4 patch set (design decision 7).
+"""localm-managed ComfyUI: the compatibility patch set applied to localm's own,
+fully-owned ComfyUI checkout.
 
 localm pins a known-good ComfyUI commit and carries a small, versioned set of
 localm-owned patches ON TOP of it. Because this is localm's OWN, fully-owned
