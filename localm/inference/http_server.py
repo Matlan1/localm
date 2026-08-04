@@ -1777,7 +1777,7 @@ def _diagnostics_allowed() -> bool:
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
-# S2: the browser GUI authenticates with an HttpOnly session cookie whose value is
+# The browser GUI authenticates with an HttpOnly session cookie whose value is
 # an OPAQUE session id (localm.sessions), NOT the API key - page JS cannot read it,
 # and rolling the key does not invalidate it. Cookie-sourced auth on a state change
 # must also carry a CSRF token in this header, an HMAC DERIVED from the session
@@ -3002,7 +3002,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # request.app.state.chat_pipeline. A pipeline with no hooks is a no-op.
     app.state.chat_pipeline = ChatPipeline()
 
-    # Per-process "shell token" (H5): in open mode the management routes require
+    # Per-process "shell token": in open mode the management routes require
     # this token, which the loopback GUI shell injects into the SPA (web.py
     # _gui_index). It gates the no-Origin local-client path that bearer auth /
     # the Origin guard alone do not cover. Per-process so it dies on restart;
@@ -4030,7 +4030,7 @@ async def _generate_full(engine, messages: list, request=None, *,
 
 
 def _memory_used_header(ctx) -> dict:
-    """F11 observability: render the memory plugin's per-turn recall (stashed in
+    """Observability: render the memory plugin's per-turn recall (stashed in
     ``ctx.state`` by its inlet) into a response-header dict so a client can show a
     "used N memories" chip and the recall degrade reason. Empty when memory did
     not run for this turn (plugin disabled, privacy mode, recall off). The value is
