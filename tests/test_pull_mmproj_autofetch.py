@@ -215,6 +215,86 @@ class TestAmbiguousMultipleCandidates:
         assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
 
 
+class TestTraversalGuardOnRepoListing:
+    """The repo file listing is REMOTE, untrusted input (a malicious/compromised
+    repo could list anything). A candidate must be confined the same way an
+    explicit --mmproj filename already is (GAP-CLI-2) - filtered out before it
+    is even considered, not merely rejected after being picked."""
+
+    def test_unsafe_candidate_is_filtered_before_picking(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        evil = "..\\..\\evil-mmproj.gguf"
+        _wire_repo_listing(monkeypatch, ["main.gguf", evil, "mmproj-main-f16.gguf"])
+        downloaded = _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        # The legit candidate still wins - an unsafe sibling in the listing
+        # must not poison the whole auto-detect.
+        assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
+        assert evil not in downloaded
+        assert not (models_dir.parent / "evil-mmproj.gguf").exists()
+
+    def test_only_unsafe_candidate_yields_no_projector_not_a_crash(
+            self, fake_registry, monkeypatch, capsys):
+        store, models_dir = fake_registry
+        evil = "..\\..\\evil-mmproj.gguf"
+        _wire_repo_listing(monkeypatch, ["main.gguf", evil])
+        downloaded = _wire_download(monkeypatch, {})
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        assert "mmproj" not in store["main"]
+        assert evil not in downloaded    # only the main model's own file downloads
+        assert not (models_dir.parent / "evil-mmproj.gguf").exists()
+
+
+class TestBareExplicitMmprojSpecRejectedCleanly:
+    """A --mmproj value with no 'owner/repo' at all (just a bare filename) must
+    be refused with the clean message, never an IndexError from the
+    rsplit('/', 1) parse (that value has no '/' to split on)."""
+
+    def test_bare_filename_mmproj_spec_does_not_crash(
+            self, fake_registry, monkeypatch, capsys):
+        store, _ = fake_registry
+        _wire_repo_listing(monkeypatch, ["main.gguf"])
+        _wire_download(monkeypatch, {})
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None, mmproj_spec="justafile.gguf")
+
+        assert ok is True
+        assert "mmproj" not in store["main"]
+        out = capsys.readouterr().out.lower()
+        assert "mmproj spec must be a specific file" in out
+
+
+class TestAmbiguityNeverCrossAttaches:
+    """_pick_best_of_same_repo_mmprojs's 'same repo, near-certainly the same
+    projector' trust assumption only holds once a candidate is already known
+    to be about THIS model. Candidates that share no relation to the model's
+    own name at all must never be guessed among."""
+
+    def test_completely_unrelated_candidates_stay_unattached(
+            self, fake_registry, monkeypatch):
+        """Neither candidate's name has anything to do with 'main' - a repo
+        listing two unrelated models' projectors must not resolve to either."""
+        store, _ = fake_registry
+        _wire_repo_listing(monkeypatch, [
+            "main.gguf", "mmproj-alpha-f16.gguf", "mmproj-beta-f16.gguf"])
+        _wire_download(monkeypatch, {
+            "mmproj-alpha-f16.gguf": _CLIP_BYTES,
+            "mmproj-beta-f16.gguf": _CLIP_BYTES,
+        })
+
+        ok = mm._pull_gguf_file("o/r:main.gguf", None)
+
+        assert ok is True
+        assert "mmproj" not in store["main"]
+
+
 class TestVerificationRejectsBadCandidate:
     def test_non_clip_candidate_is_not_attached(self, fake_registry, monkeypatch, capsys):
         """The filename match ('mmproj' substring) is only a heuristic - the

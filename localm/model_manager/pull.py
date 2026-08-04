@@ -326,7 +326,12 @@ def pull_model(
     # projector to - just download the file for the user to wire up by hand.
     if res and mmproj_spec and not is_single_file_spec:
         console.print(f"Pulling mmproj: {mmproj_spec}")
-        if ":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"):
+        # "/" must be present (an owner/repo), same precondition
+        # _fetch_explicit_mmproj enforces: without it a bare "file.gguf" (no
+        # repo) passes the .endswith(".gguf") half of this check and then
+        # crashes _pull_gguf_file's own identical split with an IndexError.
+        if "/" in mmproj_spec and (
+                ":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf")):
             _mm._pull_gguf_file(mmproj_spec, name=None, register=False)
         else:
             console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
@@ -423,24 +428,50 @@ def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
         return None
 
 
-def _pick_mmproj_from_listing(files: List[str], model_filename: str) -> Optional[str]:
+def _pick_mmproj_from_listing(
+    files: List[str], model_filename: str, base_dir: Path,
+) -> Optional[str]:
     """The mmproj (vision projector) filename among *files* (a repo's file
     listing) that pairs with *model_filename*, or None when none qualify.
-    Only top-level filenames are considered: a candidate inside a
-    subdirectory would need its own destination handling this pull path does
-    not have."""
+
+    *files* comes from a REMOTE HF repo listing, so every candidate is
+    confined through ``_safe_models_filename`` (the same guard an explicit
+    --mmproj filename gets, GAP-CLI-2) before it is even considered for
+    picking - not merely rejected after being chosen. A single-path-component
+    check alone (e.g. "no '/'") is not enough: on Windows a value with no
+    forward slash at all can still be a drive-qualified or backslash-relative
+    path, and ``_safe_models_filename`` is what actually rejects those, plus
+    confines the result to land inside *base_dir*."""
     cands = [f for f in files
-             if "/" not in f and f.lower().endswith(".gguf")
-             and "mmproj" in f.lower() and f != model_filename]
+             if f != model_filename and "mmproj" in f.lower()
+             and f.lower().endswith(".gguf")
+             and _mm._safe_models_filename(f, base_dir) is not None]
     if not cands:
         return None
     if len(cands) == 1:
         return cands[0]
     picked = _mm._pick_mmproj_candidate(Path(model_filename).stem, cands)
-    return picked or _pick_best_of_same_repo_mmprojs(cands)
+    if picked:
+        return picked
+    # _pick_mmproj_candidate gave up, which happens for two different reasons
+    # it cannot itself distinguish: NONE of the candidates share the model's
+    # leading token (no confirmed relation to *this* model at all - guessing
+    # here risks attaching a genuinely different model's projector), or
+    # SEVERAL do (confirmed related, merely ambiguous between quantised
+    # variants of the SAME projector). Only the second is safe to guess in:
+    # _pick_best_of_same_repo_mmprojs's "same repo" trust assumption only
+    # holds once every candidate it sees is already known to be about this
+    # model, never as a blanket license to pick among total strangers.
+    stem = Path(model_filename).stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
+    stem_matches = [c for c in cands if stem and stem in c.lower()]
+    if len(stem_matches) >= 2:
+        return _pick_best_of_same_repo_mmprojs(stem_matches)
+    return None
 
 
-def _hf_repo_mmproj_filename(repo_id: str, model_filename: str) -> Optional[str]:
+def _hf_repo_mmproj_filename(
+    repo_id: str, model_filename: str, base_dir: Path,
+) -> Optional[str]:
     """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
     that pairs with *model_filename*, or None when the repo ships none (or its
     listing could not be fetched at all). A free HuggingFace metadata call
@@ -450,7 +481,7 @@ def _hf_repo_mmproj_filename(repo_id: str, model_filename: str) -> Optional[str]
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
-    return _pick_mmproj_from_listing(files, model_filename)
+    return _pick_mmproj_from_listing(files, model_filename, base_dir)
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
@@ -472,7 +503,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
-    candidate = _pick_mmproj_from_listing(files, filename)
+    candidate = _pick_mmproj_from_listing(files, filename, base_dir)
     if candidate is None:
         if _mm._looks_like_vision_gguf_name(repo_id, filename):
             console.print(
@@ -522,7 +553,14 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
     same-repo auto-detection in ``_maybe_fetch_repo_mmproj``: the caller only
     reaches here when the user named one (never silently override a user's
     explicit choice)."""
-    if not (":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf")):
+    # "/" must be present (an owner/repo) as well as one of the two file
+    # markers - matching pull_model's own is_single_file_spec check. Without
+    # the "/" precondition a bare "file.gguf" (ends in .gguf, no repo at all)
+    # passed this guard and then crashed the else branch below with an
+    # IndexError on parts[1], since rsplit("/", 1) on a "/"-free string
+    # returns a ONE-element list.
+    if not ("/" in mmproj_spec
+            and (":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"))):
         console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
         return None
     if ":" in mmproj_spec:
