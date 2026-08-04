@@ -411,6 +411,30 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                             f", used/free reading not trusted on this platform)")
                 console.print(f"[dim]{line}[/dim]")
 
+        # MoE expert placement (opt-in, n_cpu_moe): llama.cpp's own load_tensors
+        # report of where each backend's share of the weights landed - the only
+        # ground truth for whether n_cpu_moe actually moved anything (see
+        # GgufWorker.load's docstring; there is no llama.h API for this, only
+        # this captured printf). Gated on n_cpu_moe>0 so an ordinary load stays
+        # as quiet as before. An empty report is stated honestly rather than
+        # silently showing nothing: a user who set n_cpu_moe and sees no
+        # confirmation cannot otherwise tell "it worked but there is nothing to
+        # show" from "it silently did nothing" (AGENTS.md rule 5).
+        if self.n_cpu_moe > 0:
+            placement = meta.get("weight_placement") or []
+            if placement:
+                ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
+                vram_mib = sum(b["mib"] for b in placement if not b["is_ram"])
+                console.print(
+                    f"[dim]  moe placement: {ram_mib:.2f} MiB system RAM / "
+                    f"{vram_mib:.2f} MiB VRAM across {len(placement)} backend "
+                    f"buffer(s) (n_cpu_moe={self.n_cpu_moe})[/dim]")
+            else:
+                console.print(
+                    "[dim]  moe placement: not reported by this llama.cpp "
+                    f"build (n_cpu_moe={self.n_cpu_moe} was still "
+                    "requested)[/dim]")
+
         console.print("[green]✓[/green] Model loaded")
 
     @staticmethod
