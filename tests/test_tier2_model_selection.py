@@ -13,8 +13,21 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _PATH = (Path(__file__).resolve().parent.parent / "scripts" / "tier2_gpu_split"
           / "model_selection.py")
+if not _PATH.is_file():
+    # scripts/tier2_gpu_split/ is gitignored, maintainer-only tooling (AGENTS.md
+    # rule 6) - never committed, so a fresh clone (or any worktree that did not
+    # get it copied in) genuinely does not have this file. A tracked test must
+    # never hard-crash COLLECTION over a file the repo itself excludes - that
+    # breaks `pytest` for every external contributor, not just here. Skip with a
+    # reason instead of importing; the test still runs normally once the
+    # harness is present locally.
+    pytest.skip(f"{_PATH} not present (gitignored maintainer-only harness, "
+               "AGENTS.md rule 6) - skipping tests that need it",
+               allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("model_selection", _PATH)
 model_selection = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(model_selection)
