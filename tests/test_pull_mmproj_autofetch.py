@@ -142,6 +142,30 @@ class TestNoCandidate:
         out = capsys.readouterr().out.lower()
         assert "vision" in out and "projector" in out
 
+    def test_listing_api_failure_is_silent_not_a_false_negative(
+            self, fake_registry, monkeypatch, capsys):
+        """A repo-listing FAILURE (network hiccup, HF API error) must never be
+        read as 'this repo has no projector' - that would print a false 'no
+        vision projector found' note on an unmeasured premise. Distinguishing
+        the two matters even though the functional outcome (no auto-fetch) is
+        the same either way."""
+        store, _ = fake_registry
+
+        class _FailingHfApi:
+            def list_repo_files(self, repo_id):
+                raise RuntimeError("simulated HF API outage")
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FailingHfApi)
+        _wire_download(monkeypatch, {})
+
+        ok = mm._pull_gguf_file("mrader/Qwen3-VL-8B-GGUF:Qwen3-VL-8B.gguf", None)
+
+        assert ok is True
+        assert "mmproj" not in store["Qwen3-VL-8B"]
+        out = capsys.readouterr().out.lower()
+        assert "projector" not in out
+
     def test_non_vision_name_with_no_projector_is_silent(
             self, fake_registry, monkeypatch, capsys):
         store, _ = fake_registry

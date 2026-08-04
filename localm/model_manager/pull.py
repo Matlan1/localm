@@ -407,22 +407,28 @@ def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
     return f16[0] if f16 else sorted(cands)[0]
 
 
-def _hf_repo_mmproj_filename(repo_id: str, model_filename: str) -> Optional[str]:
-    """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
-    that pairs with *model_filename*, or None when the repo ships none. A free
-    HuggingFace metadata call (repo file listing, no download) - this is what
-    lets a GUI/MCP pull attach a vision model's projector automatically,
-    instead of requiring the CLI --mmproj flag the user would otherwise have
-    to name by hand. Only top-level filenames are considered: a candidate
-    inside a subdirectory would need its own destination handling this pull
-    path does not have."""
+def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
+    """*repo_id*'s file listing, or None when it could not be fetched at all
+    (offline, API error, rate limit) - kept distinct from "fetched, and it
+    lists none": a listing FAILURE must never be read as "this repo has no
+    projector" (AGENTS.md rule 5 - do not collapse 'could not look' into
+    'looked and found nothing'), or a transient HF API hiccup would print a
+    false "no vision projector found" note."""
     try:
         from huggingface_hub import HfApi
-        files = HfApi().list_repo_files(repo_id)
+        return HfApi().list_repo_files(repo_id)
     except Exception as e:
         logger.debug("could not list files for %s to look for an mmproj "
                      "sibling: %s", repo_id, e)
         return None
+
+
+def _pick_mmproj_from_listing(files: List[str], model_filename: str) -> Optional[str]:
+    """The mmproj (vision projector) filename among *files* (a repo's file
+    listing) that pairs with *model_filename*, or None when none qualify.
+    Only top-level filenames are considered: a candidate inside a
+    subdirectory would need its own destination handling this pull path does
+    not have."""
     cands = [f for f in files
              if "/" not in f and f.lower().endswith(".gguf")
              and "mmproj" in f.lower() and f != model_filename]
@@ -434,6 +440,19 @@ def _hf_repo_mmproj_filename(repo_id: str, model_filename: str) -> Optional[str]
     return picked or _pick_best_of_same_repo_mmprojs(cands)
 
 
+def _hf_repo_mmproj_filename(repo_id: str, model_filename: str) -> Optional[str]:
+    """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
+    that pairs with *model_filename*, or None when the repo ships none (or its
+    listing could not be fetched at all). A free HuggingFace metadata call
+    (repo file listing, no download) - this is what lets a GUI/MCP pull attach
+    a vision model's projector automatically, instead of requiring the CLI
+    --mmproj flag the user would otherwise have to name by hand."""
+    files = _hf_repo_files(repo_id)
+    if files is None:
+        return None
+    return _pick_mmproj_from_listing(files, model_filename)
+
+
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
     """Auto-attach companion: look for a vision projector shipped in the SAME
     HF repo as *filename* and fetch it too - the repo listing is available at
@@ -442,13 +461,18 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
     could never actually see an image).
 
     Returns the local Path of a verified projector to record on the model's
-    registry entry, or None. When *filename* looks like a vision-language
-    release (by name) but no usable projector could be found, prints an
-    informational note so the gap is visible at pull time rather than
-    discovered silently at first image - registry.py's ``vision_input_guidance``
-    is the analogous message for the chat-time case.
+    registry entry, or None. When the listing could not be fetched at all,
+    stays silent (see ``_hf_repo_files``) - only when the repo listing was
+    genuinely read and *filename* looks like a vision-language release (by
+    name) with no usable projector among it does this print an informational
+    note, so the gap is visible at pull time rather than discovered silently
+    at first image - registry.py's ``vision_input_guidance`` is the analogous
+    message for the chat-time case.
     """
-    candidate = _hf_repo_mmproj_filename(repo_id, filename)
+    files = _hf_repo_files(repo_id)
+    if files is None:
+        return None
+    candidate = _pick_mmproj_from_listing(files, filename)
     if candidate is None:
         if _mm._looks_like_vision_gguf_name(repo_id, filename):
             console.print(
