@@ -229,6 +229,19 @@ def test_sign_release_script_roundtrip(tmp_path, monkeypatch):
     import importlib.util
     from pathlib import Path
     script = Path(updater.__file__).resolve().parents[1] / "scripts" / "sign_release.py"
+    if not script.is_file():
+        # scripts/sign_release.py is gitignored, maintainer-only release
+        # tooling (AGENTS.md rule 6) - never committed, so a fresh clone or a
+        # worktree that never got it copied in genuinely does not have this
+        # file. This import runs at TEST-EXECUTION time (unlike
+        # tests/test_tier2_model_selection.py's module-level guard, which
+        # skips before collection even starts), so a plain pytest.skip here
+        # is enough - no allow_module_level needed. The rest of this file
+        # (signature verification against the updater's own code) is
+        # unaffected and keeps running.
+        pytest.skip(f"{script} not present (gitignored maintainer-only "
+                    "release tooling, AGENTS.md rule 6) - skipping the "
+                    "sign_release.py round-trip")
     spec = importlib.util.spec_from_file_location("sign_release", script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

@@ -219,18 +219,32 @@ class TestServerModes:
 
 class TestCheckpointPrivacyGate:
     def _agent(self, tmp_path, mode):
-        import threading
+        # A REAL Agent, not a Agent.__new__(Agent) stub with hand-picked
+        # attributes: that shape broke twice (once for _todos/B2, again for
+        # _changed_files) because save_checkpoint's serialised state keeps
+        # growing and nothing forces a hand-built stub to grow with it - each
+        # gap surfaces as an AttributeError that reads exactly like a
+        # production bug, not a stale fixture (it did, here, for several
+        # minutes). A real __init__ can never go stale relative to itself, so
+        # this is immune to the NEXT field save_checkpoint learns to read.
+        # Same construction pattern as tests/plugins/coder/test_session_mode.py's
+        # _make_agent - a MagicMock backend plus patched make_audit_log/
+        # load_memory/ProjectMap keeps this as cheap as the old stub.
         from localm.plugins.coder.agent import Agent
-        agent = Agent.__new__(Agent)     # deliberately minimal: __init__ skipped
-        agent.mode = mode
-        agent.cwd = tmp_path
+        backend = MagicMock()
+        backend.model_id = "test-model"
+        backend.last_usage = {}
+        with patch("localm.plugins.coder.agent.make_audit_log") as mock_factory, \
+             patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+             patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
+            mock_pm.build.return_value.file_count.return_value = 0
+            mock_factory.return_value = NullAuditLog()
+            agent = Agent(backend=backend, cwd=tmp_path, mode=mode)
         agent._turns = 1
         agent._total_tokens = 10
         agent._messages = [{"role": "user", "content": "secret stuff"}]
-        # The checkpoint also carries the model's task list (B2), so this
-        # hand-built agent needs the state __init__ would have given it.
+        # The checkpoint also carries the model's task list (B2).
         agent._todos = [{"text": "secret plan step", "status": "in_progress"}]
-        agent._todos_lock = threading.Lock()
         return agent
 
     def test_privacy_mode_writes_no_checkpoint(self, tmp_path, monkeypatch):
