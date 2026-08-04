@@ -385,9 +385,66 @@ async def _index_sync(index_call):
 
 @_router.get("/api/rag/collections")
 async def rag_collections():
+    """List every collection's stats.
+
+    ``Collection(n).stats()`` used to be called directly here, on the event
+    loop, for every collection: construction runs ``_load()``, which parses
+    ALL of chunks.jsonl and vectors.json just to report counts - measured at
+    2.7-3.8s on a real tree, freezing every other in-flight request for that
+    long on the single-worker loop (this endpoint has no write to protect, so
+    nothing here needed that cost in the first place).
+
+    ``Collection.peek_stats()`` answers from meta.json alone (see its
+    docstring and the cache _save() writes), which is both cheap AND correct -
+    not a coarser approximation, the SAME numbers a full load would produce,
+    just already known. This is the real fix, and it is what every collection
+    uses once it has been saved even once under this code (measured: 6
+    collections / 3500 chunks each, eager 3.28s -> cached 0.003s, byte-
+    identical output).
+
+    A collection that predates this cache (never resaved under this code)
+    falls back to the real, full stats() - moved off the loop, so it no
+    longer stalls the loop COMPLETELY the way every collection used to
+    (measured live, real server + an independent /health poller: the old
+    direct call starves the poller entirely, zero responses for the full
+    span; the executor-wrapped fallback still lets ~4 through instead of the
+    ~25 an unaffected 50ms poller would get - a real server measurement, not
+    just the in-process one). It is NOT a complete fix for that fallback case
+    by itself: json.loads on a large vectors.json is CPU-bound C code that
+    does not release the GIL, so even off the loop it still visibly slows
+    other requests via GIL contention (measured up to 641ms for a single
+    /health round trip while it ran) - much better than a total freeze, not
+    as good as the cache path.
+
+    KNOWN GAP, named rather than silently accepted: ``_load()`` (which builds
+    the full ``stats()``) never calls ``_save()``, so this fallback is NOT
+    merely a one-time migration cost - a collection that is written once and
+    only ever LISTED after that (a common RAG pattern: index once, query
+    many times) stays on this degraded path on every single listing,
+    indefinitely, until something writes to it again. A safe fix exists in
+    principle (opportunistically backfill the cache under a non-blocking
+    ``collection_write_lock(..., timeout=0)``, skipping quietly if it is
+    busy), but doing it correctly needs care this unit's scope did not
+    budget for: the backfilled values must be provably consistent with
+    whatever is on disk AT THE MOMENT the lock is held, not with a snapshot
+    read before it, or a concurrent real write's ACTUAL fresh state could be
+    overwritten by our stale one - the exact "answers wrong instead of not
+    at all" failure this whole fix exists to avoid. Left as a follow-up
+    rather than rushed - the one case where this fallback DOES clear itself
+    is a real write to that same collection (add/reembed/repair/...), which
+    populates the cache as a side effect and removes it from the cold set
+    for good."""
     from localm.rag import Collection, collection_names
-    return {"collections": [Collection(n).stats()
-                            for n in collection_names()]}
+    names = collection_names()
+    peeked = {n: Collection.peek_stats(n) for n in names}
+    cold = [n for n, s in peeked.items() if s is None]
+    if cold:
+        loop = asyncio.get_running_loop()
+        fresh = await loop.run_in_executor(
+            get_plugin_executor(),
+            lambda: {n: Collection(n).stats() for n in cold})
+        peeked.update(fresh)
+    return {"collections": [peeked[n] for n in names]}
 
 
 @_router.post("/api/rag/collections")
@@ -407,8 +464,22 @@ async def rag_create(req: RagCreateRequest):
 
 @_router.get("/api/rag/collections/{name}")
 async def rag_detail(name: str):
-    coll = _get_collection(name)
-    return {**coll.stats(), "docs": coll.docs()}
+    """Same shape as before (``stats()`` fields plus ``docs``), same cheap-vs-
+    fall-back split as rag_collections above - see its docstring. ``docs()``
+    was already meta.json-only and cheap; it was ``stats()``'s eager
+    ``Collection(name)`` construction (via ``_get_collection``) that paid the
+    full-corpus read just for this page."""
+    from localm.rag import Collection
+    peeked = Collection.peek_detail(name)
+    if peeked is not None:
+        return peeked
+
+    def load():
+        coll = _get_collection(name)
+        return {**coll.stats(), "docs": coll.docs()}
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(get_plugin_executor(), load)
 
 
 @_router.delete("/api/rag/collections/{name}")
