@@ -93,7 +93,7 @@ def test_auto_consolidation_grows_memory_after_a_turn(chat_home, monkeypatch):
     monkeypatch.setenv("LOCALM_MODE", "log")            # writes allowed
     _seed_session(home)
     eng = _StubEngine(_facts_reply())
-    monkeypatch.setattr(plug, "_ENGINE", eng)
+    monkeypatch.setattr(plug, "_live_engine", lambda: eng)
     # Run the background pass synchronously so the test is deterministic.
     monkeypatch.setattr(plug._threading, "Thread", _SyncThread)
 
@@ -110,7 +110,7 @@ def test_privacy_mode_never_auto_consolidates(chat_home, monkeypatch):
     monkeypatch.setenv("LOCALM_MODE", "privacy")
     _seed_session(home)
     eng = _StubEngine(_facts_reply())
-    monkeypatch.setattr(plug, "_ENGINE", eng)
+    monkeypatch.setattr(plug, "_live_engine", lambda: eng)
     spawned = []
     monkeypatch.setattr(plug._threading, "Thread", _record_thread(spawned))
 
@@ -125,7 +125,7 @@ def test_debounce_blocks_a_second_run_within_the_interval(chat_home, monkeypatch
     home, plug = chat_home
     monkeypatch.setenv("LOCALM_MODE", "log")
     _seed_session(home)
-    monkeypatch.setattr(plug, "_ENGINE", _StubEngine(_facts_reply()))
+    monkeypatch.setattr(plug, "_live_engine", lambda: _StubEngine(_facts_reply()))
     spawned = []
     monkeypatch.setattr(plug._threading, "Thread", _record_thread(spawned))
     # First outlet stamps the marker (recent), so the second is debounced.
@@ -140,7 +140,7 @@ def test_disabled_config_skips_auto(chat_home, monkeypatch):
     (home / "config.json").write_text(
         json.dumps({"memory_auto_consolidate": False}), encoding="utf-8")
     _seed_session(home)
-    monkeypatch.setattr(plug, "_ENGINE", _StubEngine(_facts_reply()))
+    monkeypatch.setattr(plug, "_live_engine", lambda: _StubEngine(_facts_reply()))
     spawned = []
     monkeypatch.setattr(plug._threading, "Thread", _record_thread(spawned))
     plug._memory_outlet("reply", [], {})
@@ -151,7 +151,7 @@ def test_no_model_loaded_skips_auto(chat_home, monkeypatch):
     home, plug = chat_home
     monkeypatch.setenv("LOCALM_MODE", "log")
     _seed_session(home)
-    monkeypatch.setattr(plug, "_ENGINE", None)          # no model
+    monkeypatch.setattr(plug, "_live_engine", lambda: None)          # no model
     spawned = []
     monkeypatch.setattr(plug._threading, "Thread", _record_thread(spawned))
     plug._memory_outlet("reply", [], {})

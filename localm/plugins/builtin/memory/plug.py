@@ -44,10 +44,22 @@ _router = APIRouter()
 _MEMORY_MAX = 64_000                 # characters - keep injection bounded
 _OWNER = "owner"
 
-# The inference engine handle, stashed at register() for the manual
-# POST /api/memory/consolidate route and the auto-consolidate pass (both need a
-# model). None until wired.
-_ENGINE = None
+# The plugin host, stashed at register() so the manual POST /api/memory/consolidate
+# route and the auto-consolidate pass can resolve a LIVE engine handle on every USE
+# via host.engine() (PluginManager.inference_engine, plugins/engine.py), instead of
+# pinning to whatever was loaded when register() ran. register() runs at startup
+# before any model is loaded, and a later switch_engine rebinds
+# http_server._engines to a brand-new Engine object per model (unloading the old
+# one) - caching the ENGINE itself here (rather than the host) meant every
+# consolidation after the first model switch ran forever against a stale, unloaded
+# engine (#959). None until wired (headless / api-mode).
+_HOST = None
+
+
+def _live_engine():
+    """The inference engine, resolved LIVE via the stashed host on every call - see
+    _HOST above. None when no plugin host is wired, or no engine is currently live."""
+    return _HOST.engine() if _HOST is not None else None
 
 
 # ------------------------------------------------------------------ #
@@ -515,19 +527,35 @@ async def memory_consolidate(request: Request = None):
     """Manually distil durable facts from recent sessions into the store (the
     opt-in consolidation trigger). Gated on privacy; needs a loaded model."""
     _require_writable()
-    if _ENGINE is None or not getattr(_ENGINE, "loaded", False):
-        raise HTTPException(503, "Load a model first to consolidate memory")
-
-    def complete(prompt: str) -> str:
-        # strip_think: memory must never ingest the reasoning channel (audit C1
-        # store-poisoning; the /v1 routes strip it for clients, internal consumers
-        # must do the same).
-        from localm.textnorm import strip_think
-        return strip_think("".join(_ENGINE.chat_stream(
-            [{"role": "user", "content": prompt}]))).strip()
-
     principal = _request_principal(request)
-    return synthesize_memory(complete, principal=principal)
+
+    # Offloaded (#953): synthesize_memory drives a full blocking LLM generation
+    # per candidate (complete(), below) plus _embed_fn() resolution, which can
+    # itself trigger a VRAM swap lasting minutes (BUG #648) - exactly the shape
+    # every other mutating route in this file already offloads via _off_loop.
+    # This route was the one exception, calling the engine's chat_stream() straight
+    # on the event loop, which starves the /api/stats heartbeat for the whole run.
+    #
+    # eng is resolved HERE, inside the offloaded call, so complete() closes over a
+    # freshly-live engine (#959) rather than a value captured at plugin register()
+    # time - and the whole request uses that one resolution throughout, so a model
+    # swap mid-request can't leave complete() calling into a torn-down engine.
+    def _do_consolidate():
+        eng = _live_engine()
+        if eng is None or not getattr(eng, "loaded", False):
+            raise HTTPException(503, "Load a model first to consolidate memory")
+
+        def complete(prompt: str) -> str:
+            # strip_think: memory must never ingest the reasoning channel (audit
+            # C1 store-poisoning; the /v1 routes strip it for clients, internal
+            # consumers must do the same).
+            from localm.textnorm import strip_think
+            return strip_think("".join(eng.chat_stream(
+                [{"role": "user", "content": prompt}]))).strip()
+
+        return synthesize_memory(complete, principal=principal)
+
+    return await _off_loop(_do_consolidate)
 
 
 # ------------------------------------------------------------------ #
@@ -960,7 +988,11 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     global _auto_running
     from localm.debuglog import logger
     try:
-        eng = _ENGINE
+        # Resolved ONCE here, at thread start, and reused for the whole pass - a
+        # snapshot is correct in this one spot (unlike the per-call resolution
+        # elsewhere in this file, #959): the engine must not swap out from under
+        # consolidation while it is mid-run.
+        eng = _live_engine()
         if eng is None or not getattr(eng, "loaded", False):
             return
         from localm.textnorm import strip_think
@@ -1005,7 +1037,15 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
         return
     if not _persist_enabled():
         return                                # privacy: no new traces
-    if _ENGINE is None or not getattr(_ENGINE, "loaded", False):
+    if not getattr(_live_engine(), "loaded", False):
+        # This outlet only fires after a completed chat turn, which by
+        # construction just used A loaded model - so this branch should be rare
+        # post-#959 (fully off, or a swap landed between generation and here).
+        # Pre-#959 this was silent, so background memory growth stopped dead
+        # after the first model switch with no trace (rule 5); log it.
+        from localm.debuglog import logger
+        logger.debug("memory auto-consolidate: no engine currently loaded, "
+                     "skipping this turn")
         return                                # no model to distil with
     import os
     import time as _time
@@ -1201,22 +1241,17 @@ async def _memory_inlet_hook(messages, ctx):
 
 
 def register(host) -> None:
-    global _ENGINE
+    global _HOST
     host.mount_router(_router)
     host.register_chat_hook("inlet", _memory_inlet_hook)
     # Outlet: after each turn, grow the memory unattended (debounced, background,
     # log/full mode only). Disabling this plugin removes both hooks.
     host.register_chat_hook("outlet", _memory_outlet)
-    try:
-        _ENGINE = host.engine()
-    except Exception as e:
-        # No live engine at register time (headless / api-mode): memory falls back
-        # to lexical recall and skips auto-consolidation. Benign, but log so it is
-        # traceable rather than a silent degrade (AGENTS.md rule 5).
-        from localm.debuglog import logger
-        logger.debug("memory: no inference engine at register (%s); semantic recall "
-                     "and auto-consolidation degrade until one is available", e)
-        _ENGINE = None
+    # Stash the HOST, not host.engine()'s current return value (#959): the engine
+    # is resolved fresh via _live_engine() at every use site instead, so a later
+    # model switch is picked up rather than pinning to whatever (if anything) was
+    # loaded at this moment - register() runs at startup, before any model load.
+    _HOST = host
 
 
 def unregister() -> None:
