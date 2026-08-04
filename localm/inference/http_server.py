@@ -131,8 +131,27 @@ _gpu_coord: Optional[dict] = None
 # interval turns it into a real scheduling-delay figure: ~0 when healthy,
 # and positive only when a tick itself was late, i.e. something actually
 # blocked the loop.
+#
+# None (not a real.monotonic() value) UNTIL THE HEARTBEAT TASK'S OWN FIRST
+# TICK - deliberately NOT seeded at import time. _hang_heartbeat_loop() is
+# only created once lifespan() starts, and only updates this on its first
+# actual turn on the loop; a module-import-time seed left a COLD-START WINDOW
+# (import -> first tick, which a slow startup/model-load can stretch to a
+# minute-plus) where "now - _hb_monotonic" measures elapsed-since-import, not
+# scheduling delay - a NUMBER THAT GROWS WITH WALL-CLOCK TIME REGARDLESS OF
+# WHAT THE LOOP IS DOING, exactly the #955/#950 defect this module already
+# fixed once, surviving in the one window that fix's own tests never sampled
+# (a fresh module import, not a running heartbeat). Measured live: a /health
+# check during model load read loop_lag=13.50s, and a later request in that
+# same still-cold-started run read 71.11s - growing with elapsed time, not
+# with what either request was doing (see dev-notes/restart-loop-lag-
+# investigation-2026-08-04.md for the full trace that found this). Both
+# readers below (_loop_lag_seconds, the watchdog thread) treat None as "no
+# reading yet" - report 0.0 / skip the check - rather than inventing a
+# number from a timestamp that was never real. Do not "simplify" this back
+# to a time.monotonic() seed; that is the bug, not a redundancy.
 _HEARTBEAT_INTERVAL_S = 1.0
-_hb_monotonic = time.monotonic()
+_hb_monotonic: Optional[float] = None
 
 
 def _loop_lag_seconds() -> float:
@@ -152,7 +171,18 @@ def _loop_lag_seconds() -> float:
     second background task and more wakeups purely for a diagnostic counter,
     which is not worth it: the hang watchdog (large-threshold, above) already
     owns detecting a real freeze; this value is for correlating a slow
-    request with a preceding stall, not for catching sub-second ones."""
+    request with a preceding stall, not for catching sub-second ones.
+
+    COLD START, before the heartbeat task's first tick (_hb_monotonic is
+    still None): reports 0.0, the SAME reading as "healthy", never a growing
+    elapsed-since-import number. This is a deliberate choice between two
+    honest options (report nothing, or report zero) - zero was picked
+    because every caller already treats this as a plain float (the debug
+    request log's "%.2fs" format, /debug/stacks' round(...)), so "nothing"
+    would need every caller updated to handle absence, for a window that
+    only ever under-reports (never claims a stall that is not there)."""
+    if _hb_monotonic is None:
+        return 0.0
     return max(0.0, (time.monotonic() - _hb_monotonic) - _HEARTBEAT_INTERVAL_S)
 
 def _default_engine_factory(name: str) -> Engine:
@@ -1711,6 +1741,14 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
         last_dump = None
         try:
             while not stop.wait(poll):
+                if _hb_monotonic is None:
+                    # Cold start: the heartbeat task has not ticked even once
+                    # yet (see the comment above _hb_monotonic's declaration).
+                    # There is no prior tick to measure a stall AGAINST, so
+                    # skip rather than dump against a fabricated baseline -
+                    # the same "no reading yet, never a fake one" choice
+                    # _loop_lag_seconds() makes.
+                    continue
                 lag = time.monotonic() - _hb_monotonic
                 if lag < threshold:
                     continue
