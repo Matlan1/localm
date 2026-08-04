@@ -739,6 +739,14 @@ def register(app: FastAPI, ctx) -> None:
         _require_registered(req.model)
         if req.model == active_model():
             raise HTTPException(409, "Cannot remove the active model - switch first")
+        # A model can be resident in VRAM (loaded) without being the ACTIVE one -
+        # the same "active" vs "loaded" distinction gui_models's per-row status
+        # draws (mirrored here: _hs._engines.get(name) / engine.loaded). Without
+        # this, removing a background-loaded model deletes the file out from
+        # under a live Engine that still has it open/mmap'd.
+        engine = _hs._engines.get(req.model)
+        if engine is not None and engine.loaded:
+            raise HTTPException(409, "Cannot remove a loaded model - unload it first")
         job = jobs.start_cli("remove", ["rm", req.model, "--yes"],
                              owner=principal_id(request))
         return {"job_id": job.id}
