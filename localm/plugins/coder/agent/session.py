@@ -45,6 +45,15 @@ class _SessionMixin:
         self._error_trace.clear()
         self._shell_baseline_captured = False
         self._git_baseline = None
+        # A cleared conversation is a NEW session, not a continuation of
+        # whatever this agent had resumed - it must get its own checkpoint
+        # identity and title (NEW-CODER-RESUME-DESTROYS-SESSIONS), or a later
+        # interruption would silently overwrite the checkpoint of the session
+        # /clear just discarded, one file collision reintroduced right where
+        # this whole fix started.
+        import uuid
+        self._checkpoint_id = uuid.uuid4().hex[:12]
+        self._session_title = ""
 
     def _rebuild_system_prompt(self) -> None:
         """Single source of truth for (re)building the system prompt.

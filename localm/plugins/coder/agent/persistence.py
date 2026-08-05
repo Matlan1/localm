@@ -17,8 +17,9 @@ import localm.plugins.coder.agent as _agent
 from ..indexer import ProjectMap
 from ..audit import SessionMode
 from .checkpoint import (
-    _checkpoint_path_for, _index_deadline, _legacy_checkpoint_path_for,
-    _read_checkpoint,
+    _checkpoint_path_for, _derive_title, _index_deadline,
+    _legacy_checkpoint_path_for, _legacy_home_checkpoint_path_for,
+    _read_checkpoint, list_checkpoints, migrate_legacy_checkpoint,
 )
 
 
@@ -374,11 +375,18 @@ class _PersistenceMixin:
     @property
     def _checkpoint_path(self) -> Path:
         # Session data lives under HOME, not in the project tree (CODER-4).
-        return _checkpoint_path_for(self.cwd)
+        # Keyed on THIS agent's own stable checkpoint id (core.py), not the
+        # project alone - see _checkpoint_path_for's docstring for why that
+        # used to destroy a sibling session's saved conversation outright.
+        return _checkpoint_path_for(self.cwd, self._checkpoint_id)
 
     @property
     def _legacy_checkpoint_path(self) -> Path:
         return _legacy_checkpoint_path_for(self.cwd)
+
+    @property
+    def _legacy_home_checkpoint_path(self) -> Path:
+        return _legacy_home_checkpoint_path_for(self.cwd)
 
     def save_checkpoint(self) -> None:
         """Persist current conversation state so it can be resumed later.
@@ -394,6 +402,16 @@ class _PersistenceMixin:
             "interrupted_at": datetime.datetime.now().isoformat(timespec="seconds"),
             "turns": self._turns,
             "total_tokens": self._total_tokens,
+            # A short display title for a resume listing (NEW-CODER-RESUME-
+            # DESTROYS-SESSIONS item 3) - captured once, from the RAW first
+            # task/message text before any episodic-memory preamble is
+            # prepended (see _session_title's capture sites in loop.py), so a
+            # listing shows what the user actually asked for rather than
+            # boilerplate. Re-derived from the SAME stored source on every
+            # save rather than only at first-save, so an older checkpoint
+            # missing this field (pre-item-3) still gets a real title the next
+            # time it is saved, not "(untitled session)" forever.
+            "title": _derive_title(self._session_title),
             "messages": self._messages,
             # The model's own task list (tools/tasks.py). An older build simply
             # ignores the extra key, and an older checkpoint restores as no todos.
@@ -434,25 +452,58 @@ class _PersistenceMixin:
             pass  # never let checkpoint failure crash the session
 
     def clear_checkpoint(self) -> None:
-        """Remove any saved checkpoint for this working directory (new HOME
-        location and the legacy in-project one)."""
-        for p in (self._checkpoint_path, self._legacy_checkpoint_path):
+        """Remove THIS agent's own saved checkpoint - its own per-session id
+        under HOME, plus the two legacy shapes (a project can only ever have
+        ONE checkpoint under either legacy layout, so clearing them here on a
+        fresh start is unchanged from what this method always did; it does
+        NOT reach any OTHER session's per-id checkpoint - see
+        _checkpoint_path_for's docstring for why that distinction is the
+        whole point of NEW-CODER-RESUME-DESTROYS-SESSIONS)."""
+        for p in (self._checkpoint_path, self._legacy_checkpoint_path,
+                  self._legacy_home_checkpoint_path):
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 pass
 
-    def load_checkpoint(self) -> dict | None:
+    def load_checkpoint(self, checkpoint_id: Optional[str] = None) -> dict | None:
         """
-        Read the checkpoint file if it exists and is valid.
+        Read a saved checkpoint for this cwd, or None if none is found.
 
-        Checks the new HOME location first, then the legacy in-project path so a
-        checkpoint saved by an older build can still be resumed (CODER-4).
-        Returns the parsed dict, or None if no checkpoint is found.
+        *checkpoint_id* is None (the default) to load the MOST RECENT
+        checkpoint - the zero-argument "continue where I left off" behaviour
+        this always had, unaffected by several sessions now being able to
+        coexist in the same project (NEW-CODER-RESUME-DESTROYS-SESSIONS item
+        3: the common case must not get worse to enable the rare one). Pass a
+        specific id (from list_checkpoints()) to resume a particular one
+        instead of the newest.
+
+        On success this sets self._checkpoint_id, so a LATER save_checkpoint()
+        writes back to the SAME file the resumed conversation came from,
+        rather than minting a fresh one on every save - including when the
+        checkpoint came from a pre-item-3 legacy location, which is migrated
+        into the new per-session layout as part of this same load (see
+        migrate_legacy_checkpoint; explicit-id lookups never fall back to a
+        legacy path, since those predate the id concept entirely).
         """
-        for p in (self._checkpoint_path, self._legacy_checkpoint_path):
-            data = _read_checkpoint(p)
+        if checkpoint_id is not None:
+            data = _read_checkpoint(_checkpoint_path_for(self.cwd, checkpoint_id))
             if data is not None:
+                self._checkpoint_id = checkpoint_id
+            return data
+        entries = list_checkpoints(self.cwd)
+        if entries:
+            newest_id = entries[0]["id"]
+            data = _read_checkpoint(_checkpoint_path_for(self.cwd, newest_id))
+            if data is not None:
+                self._checkpoint_id = newest_id
+                return data
+        for legacy_path in (self._legacy_home_checkpoint_path,
+                            self._legacy_checkpoint_path):
+            data = _read_checkpoint(legacy_path)
+            if data is not None:
+                self._checkpoint_id = migrate_legacy_checkpoint(
+                    self.cwd, legacy_path, data)
                 return data
         return None
 
@@ -465,9 +516,18 @@ class _PersistenceMixin:
         user-writable JSON, so the todos go back through normalize_todos rather
         than being trusted as-is."""
         from ..tools.tasks import normalize_todos
+        from .checkpoint import _first_user_text
         self._messages     = data["messages"]
         self._turns        = data.get("turns", len(self._messages))
         self._total_tokens = data.get("total_tokens", 0)
+        # Keep the restored session's own title stable across resume + a later
+        # save (the guard in loop.py's run_task/chat only sets this once per
+        # Agent, so a fresh Agent being resumed into needs it seeded here or
+        # its NEXT instruction would silently retitle the whole session).
+        # Falls back to re-deriving from the messages for a checkpoint saved
+        # before "title" existed - load_checkpoint()'s migration path already
+        # backfills this, so the fallback is defense, not the normal case.
+        self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))

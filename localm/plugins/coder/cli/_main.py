@@ -418,14 +418,22 @@ def main(
             print_banner(backend.model_id, work_dir,
                          file_count=agent._project_map.file_count(),
                          session_mode=session_mode)
-            # Notify if an interrupted session is waiting
-            ckpt = agent.load_checkpoint()
-            if ckpt:
-                ts = ckpt.get("interrupted_at", "unknown time")
-                turns = ckpt.get("turns", "?")
+            # Notify if an interrupted session is waiting. checkpoint_info() is
+            # a read-only probe (NOT agent.load_checkpoint(), which - since
+            # NEW-CODER-RESUME-DESTROYS-SESSIONS keyed the checkpoint on this
+            # agent's own id - would claim the most recent saved session's
+            # identity as a side effect of merely checking it exists, so
+            # typing a plain message afterward (never /resume) would delete
+            # then silently overwrite THAT session instead of starting fresh
+            # under this agent's own id).
+            from ..agent.checkpoint import checkpoint_info
+            info = checkpoint_info(work_dir)
+            if info:
+                ts = info.get("interrupted_at", "unknown time")
+                turns = info.get("turns", "?")
                 print_warning(
                     f"Interrupted session found ({turns} turns, {ts}). "
-                    "Type /resume to continue."
+                    "Type /resume to continue, or /sessions to see all of them."
                 )
             _repl(agent)
     except CoderAuthError as e:
