@@ -403,6 +403,10 @@ class JobManager:
                             data = json.loads(payload)
                         except ValueError:
                             continue
+                        # popped, not merely read: **data below must never carry
+                        # its own "type" key, or a dict literal's later-key-wins
+                        # rule would let a payload override the "progress" label
+                        # this reader assigns everything else on this channel.
                         etype = data.pop("type", "progress")
                         if etype == "outcome":
                             # An internal producer -> job-runner signal (see
