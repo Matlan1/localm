@@ -24,7 +24,8 @@ import time
 import pytest
 import requests
 
-from localm.cli.models import _fmt_age, _print_activity, read_activity
+from localm.cli.models import _fmt_age, _print_activity
+from localm.selfclient import read_activity
 
 
 class _Resp:
