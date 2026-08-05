@@ -58,6 +58,7 @@ the parent-side handle ``get_embedder()`` actually returns.
 from __future__ import annotations
 
 import atexit
+import ctypes
 import math
 import re
 import threading
@@ -166,6 +167,50 @@ def _resolve_embed_ctx(native_ctx_train: int) -> int:
     (<= 0 - a build too old for llama_model_n_ctx_train, or genuinely absent
     metadata)."""
     return min(native_ctx_train, _EMBED_CTX_CEILING) if native_ctx_train > 0 else _EMBED_CTX_FALLBACK
+
+
+# The largest batch (in TEXTS, not tokens) this embedder will try to pack into
+# one native multi-sequence llama_decode call - see _choose_n_seq_max, which
+# is the reason this needs to be a search rather than a flat constant.
+_EMBED_BATCH_TARGET = 32
+
+
+def _choose_n_seq_max(n_ubatch: int, target_max: int = _EMBED_BATCH_TARGET) -> int:
+    """How many sequences a multi-sequence embed batch may use, for a context
+    whose n_ubatch is *n_ubatch*.
+
+    ROOT CAUSE (measured 2026-08-05 via subprocess-isolated bisection across
+    two models of different dim, three n_ctx values, and both CPU and GPU -
+    see dev-notes/FINDING-embedder-serial-batching-2026-08-04.md): a
+    multi-sequence llama_context whose ``n_seq_max`` does NOT evenly divide
+    its ``n_ubatch`` hits a hard, uncatchable native
+    ``GGML_ASSERT(ggml_can_mul_mat(a, b))`` abort() *during context creation*
+    (llama_init_from_model's own internal graph-reserve warmup pass) - before
+    any real batch is ever submitted. n_ubatch=512 with n_seq_max=8 works;
+    n_seq_max=12 hard-crashes the process. This is NOT a property of the
+    model (confirmed identical across dim=384 and dim=768, and across CPU and
+    GPU) - it is a property of the (n_seq_max, n_ubatch) PAIR, so a fixed
+    hardcoded n_seq_max would still be a latent crash for any future model
+    whose resolved n_ctx (== n_ubatch here) does not happen to be a multiple
+    of it.
+
+    Searches powers of two descending from *target_max*, returning the first
+    that evenly divides n_ubatch. Falls back to 1 - today's exact
+    single-sequence behavior, proven safe by every model this embedder has
+    ever loaded - if nothing larger divides evenly; 1 always divides
+    everything, so this can never return an unsafe value regardless of what
+    n_ctx a future model resolves to. In practice this lands on
+    _EMBED_BATCH_TARGET for every currently-known model (2048, the
+    _EMBED_CTX_CEILING, and 512, the _EMBED_CTX_FALLBACK, are both powers of
+    two, and real GGUF native_ctx_train metadata is essentially always a
+    power of two or otherwise highly composite) - but the search means an
+    unusual future value degrades safely instead of crashing."""
+    n = target_max
+    while n > 1:
+        if n_ubatch % n == 0:
+            return n
+        n //= 2
+    return 1
 
 
 def resolve_pooling_setting(spec: object) -> object:
@@ -572,13 +617,17 @@ class GGUFEmbedder:
                  pooling_type: object = _POOLING_DEFAULT,
                  gpu_split_ratios: Optional[list] = None) -> None:
         from localm.inference.backends.llamacpp import _api as api
-        from localm.inference.backends.llamacpp._structs import llama_token
+        from localm.inference.backends.llamacpp._structs import (
+            llama_pos, llama_seq_id, llama_token)
         self._api = api
         self._llama_token = llama_token
+        self._llama_pos = llama_pos
+        self._llama_seq_id = llama_seq_id
         self.model_path = model_path
         self._lock = threading.RLock()
         # Resolved once the model handle exists, below - None here means "not
-        # yet sized"; _embed_one is never reachable before __init__ finishes.
+        # yet sized"; nothing that reads self.n_ctx is reachable before
+        # __init__ finishes.
         self.n_ctx = n_ctx
         self._model = None
         self._ctx = None
@@ -673,6 +722,12 @@ class GGUFEmbedder:
             cp.n_ctx = self.n_ctx
             cp.n_batch = self.n_ctx
             cp.n_ubatch = self.n_ctx      # non-causal encode needs ubatch >= seq len
+            # How many texts embed() may pack into one native decode call -
+            # see _choose_n_seq_max's own docstring for why this cannot be a
+            # flat constant (a hard native crash, not a graceful error, for
+            # the wrong (n_seq_max, n_ubatch) pairing).
+            self._n_seq_max = _choose_n_seq_max(self.n_ctx)
+            cp.n_seq_max = self._n_seq_max
             cp.embeddings = True
             cp.pooling_type = self.pooling_type
             self._ctx = api.llama_init_from_model(self._model, cp)
@@ -682,10 +737,13 @@ class GGUFEmbedder:
                 raise RuntimeError("failed to create embedding context")
         self._mem = api.llama_get_memory(self._ctx) if api.has_memory_api() else None
 
-    def _embed_one(self, text: str) -> List[float]:
+    def _tokenize(self, text: str) -> List[int]:
+        """Tokenize *text*, truncated to fit n_ctx. Returns ``[]`` only for
+        the degenerate retokenize-failure case below - a real success always
+        yields at least the BERT CLS/SEP special tokens, so an empty list is
+        an unambiguous "could not tokenize this at all" signal to callers,
+        never a legitimate zero-token text."""
         api = self._api
-        if self._mem is not None:
-            api.llama_memory_clear(self._mem, True)
         raw = (text or " ").encode("utf-8")
         buf = (self._llama_token * self.n_ctx)()
         n = api.llama_tokenize(self._vocab, raw, len(raw), buf, self.n_ctx,
@@ -704,7 +762,7 @@ class GGUFEmbedder:
             if n2 <= 0:                      # should not happen; fail visibly
                 logger.warning(
                     "embedder: retokenize of an over-long text failed (%d)", n2)
-                return [0.0] * self.dim
+                return []
             # Keep the first n_ctx tokens but preserve the FINAL token of the
             # full sequence: with add_special=True on the BERT-family models
             # this embedder serves (bge/nomic), that is the [SEP] the pooled
@@ -717,9 +775,25 @@ class GGUFEmbedder:
                 "embedder: input of %d tokens truncated to the %d-token window",
                 n2, self.n_ctx)
         if n <= 0:
+            return []
+        return list(buf[:n])
+
+    def _decode_single(self, tokens: List[int]) -> List[float]:
+        """One sequence via ``llama_batch_get_one`` - the pre-existing,
+        proven-fast path for a lone text. Deliberately kept as its OWN path
+        rather than folded into the multi-sequence one below (a "batch of
+        one"): measured, a real multi-sequence batch is SLOWER for a single
+        sequence (0.60x on GPU - the batch-allocation/seq-id-array setup
+        costs more than it saves when there is only one sequence to pack),
+        and a lone embed (a chat memory query, most /v1/embeddings calls in
+        practice) is the common case that must not regress."""
+        api = self._api
+        if self._mem is not None:
+            api.llama_memory_clear(self._mem, True)
+        if not tokens:
             return [0.0] * self.dim
-        arr = (self._llama_token * n)(*buf[:n])
-        batch = api.llama_batch_get_one(arr, n)
+        arr = (self._llama_token * len(tokens))(*tokens)
+        batch = api.llama_batch_get_one(arr, len(tokens))
         ret = api.llama_decode(self._ctx, batch)
         if ret != 0:
             raise RuntimeError(f"embedding decode failed (code {ret})")
@@ -730,12 +804,140 @@ class GGUFEmbedder:
         norm = math.sqrt(sum(x * x for x in v))
         return [x / norm for x in v] if norm else v
 
+    def _decode_batch(self, token_lists: List[List[int]]) -> List[List[float]]:
+        """Decode 2+ texts in ONE native ``llama_decode`` call, each as its
+        own sequence (`self._n_seq_max` computed at load time - see
+        ``_choose_n_seq_max``). Proven correct against the pre-existing
+        serial path (cosine similarity 0.9999-1.0, measurement unit
+        2026-08-05) before ever being trusted for its timing.
+
+        FAILURE GRANULARITY (AGENTS.md rule 5 - never let a partial failure
+        report as success): a nonzero decode return, OR a null/non-finite
+        readout for ANY ONE sequence in the group, raises and discards the
+        WHOLE group's result - never a partial list, and never a fabricated
+        placeholder vector for the sequence that failed. This does not
+        change embed()'s external contract: the pre-existing serial loop
+        ALREADY had all-or-nothing semantics (one _embed_one raising
+        propagated out of the whole call, per Python's ordinary list-
+        comprehension exception behavior - no caller anywhere in this
+        codebase ever received or handled a partial result). Batching moves
+        the failure UNIT from "one text" to "one group"; it does not
+        introduce a new way for a caller to see wrong data as success."""
+        api = self._api
+        if self._mem is not None:
+            api.llama_memory_clear(self._mem, True)
+        n_seq = len(token_lists)
+        total_tokens = sum(len(t) for t in token_lists)
+        batch = api.llama_batch_init(total_tokens, 0, n_seq)
+        try:
+            token_arr = ctypes.cast(batch.token, ctypes.POINTER(self._llama_token))
+            pos_arr = ctypes.cast(batch.pos, ctypes.POINTER(self._llama_pos))
+            n_seq_id_arr = ctypes.cast(batch.n_seq_id, ctypes.POINTER(ctypes.c_int32))
+            seq_id_arr = ctypes.cast(
+                batch.seq_id, ctypes.POINTER(ctypes.POINTER(self._llama_seq_id)))
+            logits_arr = ctypes.cast(batch.logits, ctypes.POINTER(ctypes.c_int8))
+            idx = 0
+            for seq, toks in enumerate(token_lists):
+                for pos, tok in enumerate(toks):
+                    token_arr[idx] = tok
+                    pos_arr[idx] = pos
+                    n_seq_id_arr[idx] = 1
+                    seq_id_arr[idx][0] = seq
+                    # Pooled/non-causal embedding needs output for every
+                    # token in the sequence, not just the last one (unlike
+                    # causal next-token generation) - matches llama.cpp's own
+                    # embedding.cpp example's batch-building convention.
+                    logits_arr[idx] = 1
+                    idx += 1
+            batch.n_tokens = total_tokens
+
+            ret = api.llama_decode(self._ctx, batch)
+            if ret != 0:
+                raise RuntimeError(f"batched embedding decode failed (code {ret})")
+
+            out = []
+            for seq in range(n_seq):
+                ptr = api.llama_get_embeddings_seq(self._ctx, seq)
+                if not ptr:
+                    raise RuntimeError(
+                        f"null embedding for sequence {seq} of {n_seq} in a "
+                        "batched decode (pooling produced no output)")
+                v = [float(ptr[i]) for i in range(self.dim)]
+                norm = math.sqrt(sum(x * x for x in v))
+                if not math.isfinite(norm):
+                    raise RuntimeError(
+                        f"non-finite embedding for sequence {seq} of {n_seq} "
+                        "in a batched decode")
+                out.append([x / norm for x in v] if norm else v)
+            return out
+        finally:
+            api.llama_batch_free(batch)
+
+    def _pack_groups(self, token_lists: List[List[int]]) -> List[List[int]]:
+        """Group token-list INDICES for one embed() call into batches of up
+        to ``self._n_seq_max`` texts, never letting a group's SUMMED token
+        count exceed ``self.n_ctx`` (== n_ubatch here) - llama.cpp's own hard
+        constraint for this non-causal 'encoder' architecture ("encoder
+        requires n_ubatch >= n_tokens": unlike causal generation, it cannot
+        split one micro-batch across multiple internal passes). A single
+        text is already truncated to fit n_ctx by _tokenize, so it always
+        fits alone; only MULTIPLE texts sharing a group can overflow, and
+        this shrinks the group automatically for longer texts rather than
+        ever submitting a batch that would violate the constraint."""
+        groups: List[List[int]] = []
+        current: List[int] = []
+        current_tokens = 0
+        for i, toks in enumerate(token_lists):
+            n = len(toks)
+            if current and (len(current) >= self._n_seq_max
+                            or current_tokens + n > self.n_ctx):
+                groups.append(current)
+                current = []
+                current_tokens = 0
+            current.append(i)
+            current_tokens += n
+        if current:
+            groups.append(current)
+        return groups
+
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """L2-normalised embedding per text (aligned 1:1 with *texts*)."""
+        """L2-normalised embedding per text (aligned 1:1 with *texts*).
+
+        Multiple texts sharing one call are packed into groups of up to
+        ``self._n_seq_max`` and decoded with ONE native ``llama_decode`` per
+        group (measured: a real, growing speedup on GPU - 1.6x/2.4x/4.5x at
+        N=2/4/8, still climbing at the largest N tested; ~1.0x, no
+        regression, on CPU - see dev-notes/FINDING-embedder-serial-batching-
+        2026-08-04.md). A lone text still uses the cheaper single-sequence
+        path (measured slower when routed through the batched machinery for
+        just one sequence)."""
         with self._lock:
             if self._ctx is None:
                 raise RuntimeError("embedder is closed")
-            return [self._embed_one(t) for t in texts]
+            if not texts:
+                return []
+            token_lists = [self._tokenize(t) for t in texts]
+            out: List[Optional[List[float]]] = [None] * len(texts)
+            # A text that failed to tokenize at all (see _tokenize's own
+            # docstring) needs no native call - short-circuit it exactly
+            # like the pre-existing single-item path did, and keep it OUT of
+            # the packing math below (it has no tokens to pack).
+            pending_idx: List[int] = []
+            pending_toks: List[List[int]] = []
+            for i, toks in enumerate(token_lists):
+                if toks:
+                    pending_idx.append(i)
+                    pending_toks.append(toks)
+                else:
+                    out[i] = [0.0] * self.dim
+            for group in self._pack_groups(pending_toks):
+                group_idx = [pending_idx[j] for j in group]
+                group_toks = [pending_toks[j] for j in group]
+                vecs = ([self._decode_single(group_toks[0])] if len(group_toks) == 1
+                        else self._decode_batch(group_toks))
+                for gi, v in zip(group_idx, vecs):
+                    out[gi] = v
+            return out
 
     def close(self) -> None:
         with self._lock:
