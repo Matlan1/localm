@@ -849,6 +849,47 @@ def test_release_manifest_gate_reports_a_warning_when_check_manifest_not_importa
     assert len(warnings) == 1
     assert "check_manifest.py" in warnings[0]
     assert "SKIPPED" in warnings[0]
+    # The comment above says "forces ImportError", and it does - but specifically a
+    # ModuleNotFoundError, which is what a None entry in sys.modules raises. That is
+    # the ABSENT state, and it is why this test still belongs on the SKIPPED branch.
+
+
+def test_release_manifest_gate_does_not_claim_absent_when_the_checker_is_broken(
+        monkeypatch):
+    """A PRESENT but unimportable checker must not be reported as absent.
+
+    A bare `except ImportError` folded both states into one message that reads
+    "scripts/check_manifest.py is not present in this checkout" - a FALSE reason for
+    a real failure, about a file sitting right there. The two states need opposite
+    responses: absent is the expected, benign, gitignored case, while present-and-
+    broken means the gate CANNOT RUN on the one machine that actually has the
+    checker, so the manifest classification is unchecked and nobody is told.
+
+    A plain ImportError (not ModuleNotFoundError) is the realistic shape here: a
+    broken internal import inside an otherwise-present check_manifest.py.
+    """
+    import importlib.abc
+
+    ch = _load_check_hygiene()
+
+    class _BrokenOnImport(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "check_manifest":
+                raise ImportError("cannot import name 'nope' from 'os'")
+            return None
+
+    monkeypatch.delitem(ch.sys.modules, "check_manifest", raising=False)
+    monkeypatch.setattr(ch.sys, "meta_path", [_BrokenOnImport(), *ch.sys.meta_path])
+
+    failures, warnings = ch._release_manifest_gate()
+
+    assert failures == []
+    assert len(warnings) == 1
+    assert "COULD NOT RUN" in warnings[0], warnings[0]
+    assert "failed to import" in warnings[0], warnings[0]
+    # The whole point: it must NOT repeat the absent-file claim about a file that
+    # is present. This is the assertion that fails on the pre-fix code.
+    assert "is not present in this checkout" not in warnings[0], warnings[0]
 
 
 def test_release_manifest_gate_runs_the_real_checker_when_importable():
