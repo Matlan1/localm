@@ -122,6 +122,7 @@ from .pull import (
     _pull_url,
     _snapshot_progress,
     _stem_from_url,
+    _verify_digest,
     pull_model,
 )
 
@@ -158,7 +159,8 @@ __all__ = [
     "_store_into_models_dir", "_store_loose_gguf_dir",
     # pull
     "_emit_progress", "_progress_file_info", "_download_progress",
-    "_snapshot_progress", "pull_model", "_stem_from_url", "_check_disk_space",
+    "_snapshot_progress", "_verify_digest", "pull_model", "_stem_from_url",
+    "_check_disk_space",
     "_hf_file_sha256", "_pull_gguf_file", "_pull_hf_snapshot", "_pull_url",
     "_hf_repo_mmproj_filename", "_maybe_fetch_repo_mmproj",
     "_fetch_explicit_mmproj", "_mmproj_for_registration",

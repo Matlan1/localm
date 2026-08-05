@@ -35,11 +35,24 @@ import pytest
 from localm import model_manager as mm
 
 
-def _events(capsys):
-    """Every progress payload emitted so far, in order."""
+def _events(capsys, phase=None):
+    """Every progress payload emitted so far, in order.
+
+    *phase* filters to one stage. It exists because the channel carries more
+    than one: since ADR-0009 P9/P10 the pull path also emits a ``verify`` stage
+    while it hashes the finished file. A test about what the DOWNLOAD knows must
+    therefore say so, or it reads the verifier's events as the downloader's -
+    and those are legitimately different, since a file on disk has a size even
+    when the transfer that produced it never advertised one.
+
+    Catalogue item 20: a harness that identifies its subject by a property
+    several producers share cannot tell them apart. Here the shared property was
+    "is a progress event", and it stopped being discriminating the moment a
+    second phase existed."""
     out = capsys.readouterr().out
-    return [json.loads(line.split(mm.PROGRESS_SENTINEL, 1)[1])
-            for line in out.splitlines() if mm.PROGRESS_SENTINEL in line]
+    evs = [json.loads(line.split(mm.PROGRESS_SENTINEL, 1)[1])
+           for line in out.splitlines() if mm.PROGRESS_SENTINEL in line]
+    return [e for e in evs if e.get("phase") == phase] if phase else evs
 
 
 @pytest.fixture()
@@ -303,8 +316,8 @@ class TestAResumeOffsetIsNotATotal:
 
         mm._pull_url("http://example.com/model.gguf", "mymodel")
 
-        evs = _events(capsys)
-        assert evs, "GUI mode emitted no progress at all"
+        evs = _events(capsys, phase="download")
+        assert evs, "GUI mode emitted no download progress at all"
         lying = [e for e in evs if e["pct"] is not None]
         assert not lying, (
             "claimed a definite percentage for a download of unknown size "
@@ -320,6 +333,11 @@ class TestAResumeOffsetIsNotATotal:
 
         mm._pull_url("http://example.com/model.gguf", "mymodel")
 
-        totals = {e["total"] for e in _events(capsys)}
+        # Scoped to the download stage on purpose. The finished file is also 10
+        # bytes, so the verify stage reports total=10 too - meaning an unscoped
+        # assertion would be satisfied by the VERIFIER even if the downloader
+        # had lost its total entirely. It passed for that reason before this
+        # filter existed, which is worse than failing.
+        totals = {e["total"] for e in _events(capsys, phase="download")}
         assert 10 in totals, (
             f"lost a real total on a resumed download: {totals}")
