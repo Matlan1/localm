@@ -2918,8 +2918,26 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         if "pytest" not in sys.modules:
             try:
                 from localm.inference._executor_health import start_executor_saturation_watch
+                # anyio's default thread pool (what fastapi.concurrency.
+                # run_in_threadpool always uses - see _executor_health.py's
+                # module docstring for the full "third pool" rationale) can
+                # only be resolved from INSIDE a running event loop - we are
+                # one here, so capture it ONCE and hand the reference to the
+                # plain background thread below, which cannot fetch it
+                # itself. A capture failure degrades to "anyio pool
+                # unobservable" (logged, never silently claimed healthy),
+                # same as any other best-effort startup step here.
+                anyio_limiter = None
+                try:
+                    import anyio.to_thread
+                    anyio_limiter = anyio.to_thread.current_default_thread_limiter()
+                except Exception as e:
+                    from localm.debuglog import logger as _dbg
+                    _dbg.debug("could not capture anyio's default thread "
+                              "limiter (continuing, its pool will report as "
+                              "unobservable): %s", e)
                 sat_stop, sat_thread = start_executor_saturation_watch(
-                    asyncio.get_running_loop())
+                    asyncio.get_running_loop(), anyio_limiter=anyio_limiter)
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("executor saturation watch startup failed "
@@ -3201,9 +3219,15 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # release-gate.md, Q2's "make exhaustion detectable" half) - live
         # here too, not just in the periodic warning log, so a diagnosis in
         # progress does not have to wait for the threshold to trip a line.
+        # This handler IS async with a running loop, so unlike the background
+        # saturation watch it can fetch anyio's default thread limiter fresh
+        # on every call - no captured reference needed for THIS consumer.
         try:
             from localm.inference._executor_health import executors_snapshot
-            executors = executors_snapshot(asyncio.get_running_loop())
+            import anyio.to_thread
+            executors = executors_snapshot(
+                asyncio.get_running_loop(),
+                anyio_limiter=anyio.to_thread.current_default_thread_limiter())
         except Exception:
             executors = {}
         return {"pid": os.getpid(),
