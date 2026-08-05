@@ -270,7 +270,29 @@ def test_newest_first(app):
 
 
 def test_an_idle_server_reports_an_empty_list_not_an_error(app):
+    """An empty list is a real answer - "I looked, nothing is running" - and
+    must be distinguishable by the client from "I have not asked yet" and from
+    "I asked and could not reach the server". The server's part of that is
+    answering 200 with an explicit empty list rather than erroring."""
     with TestClient(app) as c:
         r = c.get("/api/activity")
     assert r.status_code == 200
-    assert r.json() == {"operations": []}
+    assert r.json()["operations"] == []
+
+
+def test_the_reply_carries_the_server_clock(app):
+    """A client must not compute an operation's age against its OWN clock.
+
+    created_at exists so a user can tell a six-second operation from a
+    six-hour one, so durations get rendered - and a client subtracting a
+    server epoch from its local Date.now() is wrong by however much the two
+    clocks disagree, which on a phone is not small. Shipping the reference
+    clock alongside makes the honest computation the easy one.
+    """
+    job = _inject(app)
+    job.created_at = time.time() - 120
+    with TestClient(app) as c:
+        body = c.get("/api/activity").json()
+    assert "now" in body, "the client needs a reference clock, not its own"
+    age = body["now"] - body["operations"][0]["created_at"]
+    assert 110 < age < 130, f"age computed from the server clock was {age}"

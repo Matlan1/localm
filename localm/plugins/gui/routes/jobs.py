@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import StreamingResponse
@@ -80,9 +81,20 @@ def register(app: FastAPI, jobs) -> None:
         and it is NOT a filter failure, but it does mean this list is
         per-principal only on a KEYED server. Nothing downstream may assume
         otherwise.
+
+        ``now`` is this SERVER's clock at the moment of the reply, and it is
+        here so a client can render an age without inventing one. created_at
+        and finished_at are server epoch seconds; a client that computed
+        "running for 12 minutes" from its OWN clock would be wrong by whatever
+        the two clocks disagree by, and a phone or a drifted box disagrees by
+        real amounts. Since created_at exists precisely so a user can tell a
+        six-second operation from a six-hour one, durations WILL be rendered,
+        so the reference clock has to travel with them. Compute ages as
+        ``now - created_at``, never against a local clock.
         """
-        return {"operations": jobs.snapshot(
-            visible=lambda owner: job_owner_ok(request, owner))}
+        return {"now": time.time(),
+                "operations": jobs.snapshot(
+                    visible=lambda owner: job_owner_ok(request, owner))}
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
     async def job_events(job=Depends(owned_job)):
