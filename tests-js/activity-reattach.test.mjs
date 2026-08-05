@@ -292,3 +292,216 @@ test("showActivityDetails: a finished operation's age reads '<duration> ago', no
   assert.match(modalBody.textContent, /1m 00s ago/);
   assert.doesNotMatch(modalBody.textContent, /running 1m 00s/);
 });
+
+test("showActivityDetails: a finished operation's age is computed from finished_at, not created_at (#1078 post-merge review)", async () => {
+  // created_at=940 (started 60s before "now"), finished_at=990 (actually
+  // finished only 10s before "now") - a two-hour pull that finished 10s ago
+  // must read "10s ago", not "1m 00s ago". The fixture in the test above
+  // this one OMITTED finished_at entirely, which is why the created_at bug
+  // was not caught the first time - see the fallback test right below this
+  // one for that omitted-field case, now covered deliberately.
+  const { fetchImpl } = makeActivityFetch([
+    { ops: [{ id: "j1", kind: "pull", label: "Model pull", status: "done",
+              created_at: 940, finished_at: 990 }], now: 1000 },
+  ]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /10s ago/);
+  assert.doesNotMatch(modalBody.textContent, /1m 00s ago/,
+    "must use finished_at's age, not created_at's, once finished_at is present");
+});
+
+test("showActivityDetails: a finished operation with no finished_at falls back to created_at's age", async () => {
+  // Legacy/partial data shape (an older server, or a job snapshot taken
+  // before mark_finished() ran) - still renders something instead of
+  // nothing, using the pre-fix behaviour as the degrade path.
+  const { fetchImpl } = makeActivityFetch([
+    { ops: [{ id: "j1", kind: "pull", label: "Model pull", status: "done", created_at: 940 }], now: 1000 },
+  ]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /1m 00s ago/);
+});
+
+// --------------------------------------------------------------------------- //
+//  #1078 post-merge review: the details modal must not be a frozen snapshot   //
+// --------------------------------------------------------------------------- //
+
+test("showActivityDetails: an open modal re-renders on the next poll, not a frozen snapshot", async () => {
+  // A count/index-driven fixture (like makeActivityFetch's array form) is
+  // fragile here: boot fires TWO independent /api/activity reads of its own
+  // (init.js's startHwStats() -> pollActivity() AND reattachActivity()'s own
+  // read), so exactly how many array slots boot eats before any test code
+  // runs is an implementation detail this test should not have to track.
+  // Instead: every call succeeds: pct=10 until `advanced` flips to true.
+  let advanced = false;
+  const fetchImpl = async (url) => {
+    if (String(url) !== "/api/activity")
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    return {
+      ok: true, status: 200,
+      json: async () => ({ operations: [
+        { id: "j1", kind: "pull", label: "Model pull", status: "running", pct: advanced ? 55 : 10 },
+      ] }),
+    };
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();   // let boot's own automatic reads resolve
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  // pct renders as a bar WIDTH in the modal, never as "N%" text (that literal
+  // text only appears in the pill) - matching the wrong representation here
+  // would silently pass regardless of which poll's data was actually shown.
+  const barWidth = () => modalBody.querySelector(".dl-fill").style.width;
+  assert.equal(barWidth(), "10%", "precondition: modal shows the current (pre-advance) read");
+
+  advanced = true;
+  await win.pollActivity();   // simulates the next 2500ms tick while the modal stays open
+  assert.equal(barWidth(), "55%",
+    "the open modal must reflect the latest poll, not what was open at open time");
+});
+
+test("showActivityDetails: a DIFFERENT open modal is never overwritten by an activity poll", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 10 }],
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 90 }],
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await win.pollActivity();
+  win.openModal("Something else", (body) => { body.textContent = "unrelated content"; });
+
+  await win.pollActivity();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.equal(modalBody.textContent, "unrelated content",
+    "a modal the activity feature does not own must never be rewritten out from under it");
+});
+
+test("showActivityDetails: a CLOSED activity modal is not silently reopened by a later poll", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 10 }],
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 90 }],
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await win.pollActivity();
+  win.showActivityDetails();
+  win.document.getElementById("modal").style.display = "none";   // user closed it
+
+  await win.pollActivity();
+  assert.equal(win.document.getElementById("modal").style.display, "none",
+    "a background poll must never reopen a modal the user closed");
+});
+
+// --------------------------------------------------------------------------- //
+//  #1078 post-merge review (AC4): repeated failed reads must surface, not     //
+//  silently keep (or silently drop) a claim nobody has confirmed lately.      //
+// --------------------------------------------------------------------------- //
+
+test("renderActivityPill: a single failed poll does not flap the pill (routine at a 2.5s tick)", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 10 }],
+    "fail",
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();   // boot's own auto pollActivity() consumes index0
+  await win.pollActivity();   // index1 (the array's last entry repeats): one failure
+
+  const pill = win.document.getElementById("activity-pill");
+  assert.match(pill.textContent, /Model pull/);
+  assert.doesNotMatch(pill.textContent, /unknown/i, "one dropped poll must not yet claim the state is unknown");
+});
+
+test("renderActivityPill: reads failing 3 times in a row marks a running op's pill as unknown", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 10 }],
+    "fail", "fail", "fail",
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();   // boot's own auto pollActivity() consumes index0
+  await win.pollActivity();   // index1 (fail 1)
+  await win.pollActivity();   // index2 (fail 2)
+  await win.pollActivity();   // index3 (fail 3 -> stale)
+
+  const pill = win.document.getElementById("activity-pill");
+  assert.notEqual(pill.style.display, "none", "must not hide - that would falsely claim nothing running");
+  assert.match(pill.textContent, /status unknown/i);
+  assert.match(pill.className, /st-unknown/);
+});
+
+test("renderActivityPill: reads failing 3 times in a row surfaces 'status unknown' even with nothing previously running", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    { ops: [], now: 1000 },
+    "fail", "fail", "fail",
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();   // boot's own auto pollActivity() consumes index0
+  const pill = win.document.getElementById("activity-pill");
+  assert.equal(pill.style.display, "none", "precondition: a confirmed-empty read hides the pill as usual");
+
+  await win.pollActivity();   // index1 (fail 1)
+  await win.pollActivity();   // index2 (fail 2)
+  await win.pollActivity();   // index3 (fail 3 -> stale)
+  assert.notEqual(pill.style.display, "none",
+    "once a known 'nothing running' has gone stale, hiding it silently repeats the fabrication R1 forbids");
+  assert.match(pill.textContent, /status unknown/i);
+});
+
+test("renderActivityPill: a successful read after failures immediately clears the unknown state", async () => {
+  // Same reasoning as the modal test above: a fixed-index fixture cannot
+  // account for boot's own two independent /api/activity reads without
+  // hand-counting them, so this drives the mock from state instead of a
+  // position - only the very first call ever succeeds (establishing known
+  // state), every call after that fails until `recovered` flips.
+  let firstCallDone = false;
+  let recovered = false;
+  const fetchImpl = async (url) => {
+    if (String(url) !== "/api/activity")
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    if (!firstCallDone || recovered) {
+      firstCallDone = true;
+      return {
+        ok: true, status: 200,
+        json: async () => ({ operations: [
+          { id: "j1", kind: "pull", label: "Model pull", status: "running", pct: recovered ? 77 : 10 },
+        ] }),
+      };
+    }
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();   // boot's first read succeeds, its second (and on) fail
+  const pill = win.document.getElementById("activity-pill");
+
+  await win.pollActivity();
+  await win.pollActivity();
+  await win.pollActivity();   // several more failed polls - well past the 3-in-a-row threshold
+  assert.match(pill.className, /st-unknown/, "marked unknown after enough consecutive failures");
+
+  recovered = true;
+  await win.pollActivity();
+  assert.doesNotMatch(pill.className, /st-unknown/);
+  assert.match(pill.textContent, /77%/);
+  assert.doesNotMatch(pill.textContent, /unknown/i);
+});
+
+test("showActivityDetails: the modal notes staleness once reads have failed 3 times in a row", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "pull", label: "Model pull", status: "running", pct: 10 }],
+    "fail", "fail", "fail",
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();   // boot's own auto pollActivity() consumes index0
+  win.showActivityDetails();
+  await win.pollActivity();   // index1 (fail 1)
+  await win.pollActivity();   // index2 (fail 2)
+  await win.pollActivity();   // index3 (fail 3 -> stale)
+
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /[Cc]ould not reach the server/);
+  assert.match(modalBody.textContent, /Model pull/, "the last known op list is still shown below the notice");
+});

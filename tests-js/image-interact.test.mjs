@@ -99,3 +99,29 @@ test("VIS-2: copy on a text message still copies the text", async () => {
   await tick();
   assert.deepEqual(writes, ["hello world"], "plain text copy is unchanged");
 });
+
+// #1078 post-merge review bug 4: navigator.clipboard.writeText() was fired
+// without await/catch, so a real rejection (permission denied, insecure
+// context) left the button claiming "copied" anyway - reporting a step
+// succeeded when it did not (AGENTS.md rule 5). The image-copy branch just
+// above already awaits + checks + toasts on failure; this is the same fix
+// applied to the plain-text branch.
+test("copy on a text message toasts instead of claiming success when the clipboard write fails", async () => {
+  const { window } = loadApp({ fetchImpl: okFetch });
+  await tick();
+  const doc = window.document;
+  Object.defineProperty(window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: () => Promise.reject(new window.DOMException("denied", "NotAllowedError")) },
+  });
+  const container = doc.createElement("div");
+  doc.body.appendChild(container);
+  window.addMessageRow(container, "assistant", "hello world", {});
+  const btn = container.querySelector(".copy-btn");
+  btn.click();
+  await tick();
+  assert.equal(btn.textContent, "copy",
+    "a failed clipboard write must not leave the button reading 'copied'");
+  const toastEl = doc.getElementById("toast");
+  assert.match(toastEl.textContent, /[Cc]ould not copy/);
+});

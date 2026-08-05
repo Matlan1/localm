@@ -1096,6 +1096,13 @@ class Collection:
             "vector_degrade_reason": self.vector_degrade_reason,
             "corrupt": self.corrupt,
             "fingerprint": self._file_fingerprint(),
+            # Cheap to include (already in memory - see vector_dim()) and lets
+            # a listing-time caller compare against the currently active
+            # embedding model WITHOUT loading anything (rag_collections()
+            # does this against embedder.loaded_dim()) - closing the gap
+            # named in that route's own docstring for the common case where
+            # an embedder happens to already be resident.
+            "vector_dim": self._vec_dim,
         }
 
     def _vector_index_complete(self) -> bool:
@@ -2265,6 +2272,7 @@ class Collection:
             # Why semantic search fell back to BM25 (None when vectors are used or
             # legitimately absent); surfaced instead of silently swallowed.
             "vector_degrade_reason": self.vector_degrade_reason,
+            "vector_dim": self._vec_dim,
         }
 
     def vector_dim(self) -> Optional[int]:
@@ -2392,6 +2400,11 @@ class Collection:
             "has_vectors": bool(cache.get("has_vectors")),
             "corrupt": bool(cache.get("corrupt")),
             "vector_degrade_reason": cache.get("vector_degrade_reason"),
+            # Absent on a cache written before this field existed - the
+            # collection falls back to the cold load-and-backfill path below
+            # exactly once (same graceful-degrade this whole cache design
+            # already relies on for any newly added field), not a migration.
+            "vector_dim": cache.get("vector_dim"),
         }
 
     @classmethod

@@ -72,7 +72,15 @@ export async function refreshKnowledgePage() {
     // (there is nothing to have vectors for), which is not the same situation as
     // "was indexed without embeddings" - a freshly created, never-indexed
     // collection has nothing to re-embed and must not show the badge.
-    const needsReembed = c.n_chunks > 0 && !c.has_vectors && embedReady;
+    // A collection can ALSO look fine (has_vectors=true, "hybrid" shown) while
+    // its stored vectors no longer match the currently active embedding model
+    // - the badge below never used to say so, and only an actual QUERY would
+    // discover it, dropping silently to BM25 (#1078 post-merge review). This
+    // server-computed comparison is best-effort (null, never a false "fine",
+    // whenever it cannot tell - see rag_collections()'s own docstring), so it
+    // only ever ADDS this badge when confident, never suppresses the paths above.
+    const staleVectors = c.dim_mismatch === true;
+    const needsReembed = (c.n_chunks > 0 && !c.has_vectors && embedReady) || staleVectors;
 
     // Drag-and-drop upload directly onto the collection row
     tr.addEventListener("dragover", (e) => {
@@ -100,10 +108,14 @@ export async function refreshKnowledgePage() {
     const retrievalTd = el("td", "mono", c.has_vectors ? "hybrid" : "BM25");
     if (needsReembed) {
       const badge = el("span", "retrieval-badge", "re-embed needed");
-      badge.title = "The embedding model is ready, but this collection was "
-        + "indexed before that (or its vector index went stale), so it is "
-        + "BM25/lexical-only until you click 're-embed'."
-        + (c.vector_degrade_reason ? " (" + c.vector_degrade_reason + ")" : "");
+      badge.title = staleVectors
+        ? "This collection's stored vectors were built under a different "
+          + "embedding model than the one currently active, so a query here "
+          + "silently falls back to BM25 until you click 're-embed'."
+        : "The embedding model is ready, but this collection was "
+          + "indexed before that (or its vector index went stale), so it is "
+          + "BM25/lexical-only until you click 're-embed'."
+          + (c.vector_degrade_reason ? " (" + c.vector_degrade_reason + ")" : "");
       retrievalTd.appendChild(badge);
     }
     tr.appendChild(retrievalTd);
@@ -631,6 +643,18 @@ export async function kbInfoModal(name) {
     if (data.vector_degrade_reason) {
       const warn = el("div", "sub",
         "⚠ Semantic search fell back to BM25: " + data.vector_degrade_reason);
+      warn.style.color = "var(--yellow)";
+      body.appendChild(warn);
+    }
+    // Same best-effort signal as the collections table's "re-embed needed"
+    // badge (#1078 post-merge review) - a collection can report has_vectors
+    // and still silently drop to BM25 at query time if its stored vectors
+    // were built under a different embedding model than the one active now.
+    if (data.dim_mismatch === true) {
+      const warn = el("div", "sub",
+        "⚠ Stored vectors were built under a different embedding model than "
+        + "the one currently active - queries here fall back to BM25 until "
+        + "you click 're-embed'.");
       warn.style.color = "var(--yellow)";
       body.appendChild(warn);
     }
