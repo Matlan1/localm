@@ -545,11 +545,15 @@ def _looks_like_vision_gguf_name(repo_id: str, filename: str) -> bool:
 def vision_capable_models() -> List[str]:
     """Registered model names that can accept image INPUT on THIS install.
 
-    Only HuggingFace-format directories with vision metadata qualify here. GGUF
-    entries are not auto-listed: a GGUF gains vision only when a matching mmproj
-    (vision projector) is loaded with it at run time (the built-in mtmd path),
-    which the on-disk registry metadata cannot confirm. Used to ROUTE an image to
-    a model already known to be vision-capable instead of dead-ending."""
+    Two independent ways a model qualifies: a HuggingFace-format directory with
+    vision metadata, or a GGUF chat model carrying a mmproj (vision projector)
+    that get_model_mmproj() resolves - the SAME lookup the actual load path
+    uses (an explicitly recorded mmproj, or one auto-detected sitting next to
+    the model file). A name listed here is one the loader can genuinely put an
+    image through, not a guess from static metadata alone; a standalone mmproj
+    or embedding entry is not itself a model to switch to and is excluded via
+    the model_type gate. Used to ROUTE an image to a model already known to be
+    vision-capable instead of dead-ending."""
     out: List[str] = []
     for name, info in _mm.load_registry().items():
         epath = _entry_path(info)   # skip malformed entries (a str entry's .get
@@ -559,7 +563,10 @@ def vision_capable_models() -> List[str]:
             p = Path(epath)
         except (TypeError, ValueError):
             continue
-        if p.is_dir() and _hf_is_vision(p):
+        if p.is_dir():
+            if _hf_is_vision(p):
+                out.append(name)
+        elif _entry_path(info, "model_type") == "llm" and get_model_mmproj(name):
             out.append(name)
     return sorted(out)
 
@@ -641,8 +648,9 @@ def vision_input_guidance(mmproj_failed: bool = False,
         return (f"{head} No vision model is registered yet - pull a vision-capable "
                 f"HuggingFace model such as a Gemma 3 vision or Qwen2.5-VL "
                 f"checkpoint (`localm pull <repo>`), then run it with --image.")
-    return (f"{head} GGUF vision works too (the built-in mtmd path) - pull a "
-            f"vision-capable GGUF model with its projector, e.g. "
+    return (f"{head} No vision-capable model could be confirmed in your "
+            f"library. GGUF vision works too (the built-in mtmd path) - pull "
+            f"a vision-capable GGUF model with its projector, e.g. "
             f"`localm pull <repo> --mmproj <repo>:<file>`. Or install the "
             f"HuggingFace stack (`pip install \"localm[gpu]\"`) and load a "
             f"vision-capable model (Gemma 3 vision / Qwen2.5-VL) instead.")

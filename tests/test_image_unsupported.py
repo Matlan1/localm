@@ -7,6 +7,7 @@ received. The contract now: raise UnsupportedInputError at the backend, and
 return a clean 400 at the HTTP route.
 """
 
+import importlib.util
 import json
 import unittest
 from unittest.mock import MagicMock
@@ -240,6 +241,65 @@ class TestVisionGuidance:
         monkeypatch.setattr(mm, "load_registry",
                             lambda: {"vlm2": {"path": str(d), "source": "local"}})
         assert "vlm2" in mm.vision_capable_models()
+
+    def test_gguf_with_recorded_mmproj_is_vision(self, tmp_path, monkeypatch):
+        # ADR-0008 U9 / Theme 3(c): a GGUF chat model with a recorded, resolvable
+        # mmproj is a genuinely working vision model - get_model_mmproj() is the
+        # SAME lookup the real load path uses. vision_capable_models() must not
+        # be blind to it just because it is a file, not an HF directory.
+        import localm.model_manager as mm
+        model_f = tmp_path / "vision-model.gguf"
+        model_f.write_bytes(b"GGUF")
+        mmproj_f = tmp_path / "vision-model-mmproj.gguf"
+        mmproj_f.write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry", lambda: {
+            "vision-model": {
+                "path": str(model_f), "source": "local", "model_type": "llm",
+                "mmproj": str(mmproj_f),
+            },
+        })
+        assert "vision-model" in mm.vision_capable_models()
+        msg = mm.vision_input_guidance()
+        assert "vision-model" in msg and "localm run" in msg
+        assert "No vision model is registered yet" not in msg
+
+    def test_gguf_mmproj_entry_itself_is_not_a_vision_model(self, tmp_path, monkeypatch):
+        # A standalone mmproj (projector) registry entry is not something a
+        # user can switch to - it must never be listed even though it is a
+        # GGUF file, and even in the pathological case where it happens to sit
+        # beside another mmproj file get_model_mmproj's sibling scan could match.
+        import localm.model_manager as mm
+        proj_f = tmp_path / "some-mmproj.gguf"
+        proj_f.write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry", lambda: {
+            "some-mmproj": {"path": str(proj_f), "source": "local",
+                             "model_type": "mmproj"},
+        })
+        assert mm.vision_capable_models() == []
+
+    def test_transformers_absent_does_not_claim_gguf_is_text_only(self, monkeypatch):
+        # ADR-0008 U9 / Theme 3(c), third branch: when no vision model is
+        # registered at all and transformers is absent, the message must not
+        # claim "the built-in GGUF backend is text-only" - that contradicts
+        # the mmproj_failed branch of this same function, which already treats
+        # GGUF vision (the built-in mtmd path) as real and transformers-independent.
+        import localm.model_manager as mm
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        real_find_spec = importlib.util.find_spec
+
+        def _no_transformers(name, *args, **kwargs):
+            if name == "transformers":
+                return None
+            return real_find_spec(name, *args, **kwargs)
+
+        monkeypatch.setattr(importlib.util, "find_spec", _no_transformers)
+        msg = mm.vision_input_guidance()
+        # "this model ... is text-only" (the head, about the model that just
+        # rejected the image) is a separate, true claim and stays. The bug was
+        # the backend-wide claim - assert that exact false sentence is gone.
+        assert "GGUF backend is text-only" not in msg
+        assert "localm pull" in msg
+        assert "mtmd" in msg
 
 
 # --------------------------------------------------------------------------- #
