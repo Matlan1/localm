@@ -400,10 +400,19 @@ def register(app: FastAPI, ctx) -> None:
         # importing it raised ImportError -> 500 on EVERY call) (NEW-COMFY-STATUS-IMPORT).
         from localm.image_gen.comfy import _comfy_alive, default_api_url
         from localm.media.comfy_client import mark_comfy_alive, mark_comfy_dead, spawned_pid
-        url = default_api_url()
-        alive = _comfy_alive(url, timeout=1.0)
-        (mark_comfy_alive if alive else mark_comfy_dead)(url)
-        return {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
+
+        # Off the event loop (same reason as update_config above, REG-638's
+        # shape): _comfy_alive is a blocking urlopen with a 1.0s timeout, hit on
+        # the GUI's own poll timer. Called inline this froze the WHOLE server -
+        # every concurrent chat stream, SSE, and request - for up to 1s on every
+        # poll whenever ComfyUI is not reachable, the common case.
+        def _check() -> dict:
+            url = default_api_url()
+            alive = _comfy_alive(url, timeout=1.0)
+            (mark_comfy_alive if alive else mark_comfy_dead)(url)
+            return {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
+
+        return await run_in_threadpool(_check)
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_stop():

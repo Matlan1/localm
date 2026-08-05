@@ -87,15 +87,28 @@ def _keyless_app(tmp_path, monkeypatch):
 
 
 def test_status_reports_launched_by_localm(tmp_path, monkeypatch):
-    from localm.media import comfy_client as cc
-    monkeypatch.setattr(cc, "_comfy_alive", lambda url, timeout=1.0: True)
+    # get_comfy_status resolves _comfy_alive via `from localm.image_gen.comfy
+    # import _comfy_alive` (a fresh local import each call) - image_gen.comfy
+    # imports it as its OWN module-level name (`from localm.media.comfy_client
+    # import _comfy_alive`), a SEPARATE binding from comfy_client's own
+    # attribute. Patching comfy_client._comfy_alive does not reach the route:
+    # confirmed live (route sees the ORIGINAL function object, not the patch),
+    # and the assertion below used to only check key presence, so a real
+    # unmocked network call could pass silently on a box with a real ComfyUI
+    # listening on the default port (the exact shape fixed in test_gui.py's
+    # comfy-model-picker test).
+    from localm.image_gen import comfy as ic
+    monkeypatch.setattr(ic, "_comfy_alive", lambda url, timeout=1.0: True)
     app = _keyless_app(tmp_path, monkeypatch)
     client = TestClient(app)
     tok = {"Authorization": f"Bearer {app.state.shell_token}"}
     r = client.get("/v1/comfy/status", headers=tok)
     assert r.status_code == 200
     body = r.json()
-    assert "alive" in body and "launched_by_localm" in body
+    assert body["alive"] is True, (
+        f"expected the patched _comfy_alive's True to reach the response, got "
+        f"{body!r} - the patch may not be intercepting the real call")
+    assert "launched_by_localm" in body
 
 
 def test_stop_route_calls_stop_comfy(tmp_path, monkeypatch):
