@@ -3303,6 +3303,68 @@ class TestFreeScopeColdBudget:
         assert 8.0 < (seen["deadline_at"] - before) <= 9.5
 
 
+def test_no_production_caller_passes_a_short_gpu_probe_deadline():
+    """Pins the premise http_server.py's free-VRAM-admission-gate comment relies
+    on (verified 2026-08-05, not assumed): a joined probe reading is only
+    PROCESS-scoped (TestFreeScopeColdBudget.test_cold_source_is_skipped_when_the_
+    budget_is_thin above) when its caller's deadline is too thin to absorb the
+    ~750ms cold device-global open. #725 (2026-07-17) retired the old 4.0s
+    _GPU_PROBE_DEADLINE default in favour of a single 15.0s value used
+    everywhere, so a "thinner" budget can now only exist if some production
+    caller explicitly passes one - if a future change adds such a caller, THIS
+    is the gap the comment describes reopening, silently, for that caller.
+
+    An AST scan of every tracked production .py file (not a grep, which would
+    also match the string inside a comment or docstring explaining this very
+    property) for every call to list_gpus/vram_info/vram_capacity/
+    _list_gpus_kw that passes an explicit `deadline=`, asserting each one
+    resolves to _GPU_PROBE_DEADLINE/_GPU_PROBE_CLI_DEADLINE (now the same
+    value) or is a plain pass-through of the caller's own `deadline` parameter
+    - never a shorter literal or an unrelated expression this scan cannot
+    account for."""
+    import ast
+    from pathlib import Path
+
+    root = Path(discover.__file__).resolve().parent
+    target_funcs = {"list_gpus", "vram_info", "vram_capacity", "_list_gpus_kw"}
+    safe_names = {"_GPU_PROBE_DEADLINE", "_GPU_PROBE_CLI_DEADLINE", "deadline"}
+    offenders = []
+
+    def _call_target(node: ast.Call):
+        f = node.func
+        if isinstance(f, ast.Name):
+            return f.id
+        if isinstance(f, ast.Attribute):
+            return f.attr
+        return None
+
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _call_target(node) not in target_funcs:
+                continue
+            for kw in node.keywords:
+                if kw.arg != "deadline":
+                    continue
+                v = kw.value
+                if isinstance(v, ast.Name) and v.id in safe_names:
+                    continue
+                if isinstance(v, ast.Attribute) and v.attr in safe_names:
+                    continue
+                if isinstance(v, ast.Constant) and v.value == discover._GPU_PROBE_DEADLINE:
+                    continue
+                offenders.append(
+                    f"{path.relative_to(root.parent)}:{node.lineno}: "
+                    f"deadline={ast.unparse(v)}")
+
+    assert not offenders, (
+        "a production call site now passes a deadline this scan cannot prove "
+        "is >= _GPU_PROBE_DEADLINE - this reopens the process-scoped-permit "
+        "gap http_server.py's free-VRAM-admission-gate comment (near "
+        "get_comfy_status) describes as currently closed; update that comment "
+        "if this is deliberate:\n" + "\n".join(offenders))
+
+
 class TestGpuUsageSourceRobustness:
     """gpu_usage.py source-selection and warmth, post-#697 review.
 
