@@ -124,6 +124,11 @@ class TestTheNumbersAreHonest:
     def test_progress_is_monotonic(self, gui, many_blocks, big_file, capsys):
         mm._verify_digest(big_file)
         counts = [e["downloaded"] for e in _events(capsys)]
+        # Non-emptiness first: `[] == sorted([])` is true, so without this the
+        # assertion below is satisfied by emitting nothing at all. Measured -
+        # this test stayed green under the fires-control that removed verify
+        # reporting entirely, which is the whole "could not have failed" class.
+        assert counts, "emitted no verify progress to be monotonic about"
         assert counts == sorted(counts), f"verify progress went backwards: {counts}"
 
 
@@ -138,6 +143,8 @@ class TestTheEmitRateIsThrottled:
         cost multiplied by somebody else's timer."""
         mm._verify_digest(big_file)              # 4096 / 64 = 64 blocks
         evs = _events(capsys)
+        # `0 < 64` too, so emitting nothing would "pass" a bare upper bound.
+        assert evs, "emitted nothing at all, which is not what throttling means"
         assert len(evs) < 64, (
             f"emitted {len(evs)} events for 64 blocks: the throttle is not working")
 
