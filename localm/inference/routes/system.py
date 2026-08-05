@@ -27,13 +27,27 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/health")
     async def health():
-        if _hs._engine is None:
-            raise HTTPException(503, "No engine initialised")
-        return {
-            "status": "ok",
-            "model":  _hs._engine.display_name,
-            "loaded": _hs._engine.loaded,
-        }
+        if _hs._engine is not None:
+            return {
+                "status": "ok",
+                "model":  _hs._engine.display_name,
+                "loaded": _hs._engine.loaded,
+            }
+        # No engine is warm right now, but that is not the same question as
+        # "is there nothing here": an eviction (unload_all_models, e.g. the
+        # embedder freeing VRAM for a chat model) deliberately keeps the
+        # Engine in _engines for a lazy reload, and get_engine's own
+        # unnamed-request resolution (PR #1139) already recovers it on the
+        # very next chat turn. Reporting a bare 503 here during exactly that
+        # window told a GUI health check "no model" while chat itself would
+        # have reloaded one on the spot - a plausible reason a user reaches
+        # for a manual load instead of just sending a turn. Mirror the SAME
+        # resolution chat uses, so /health cannot disagree with it, and only
+        # 503 when there truly is nothing to recover.
+        name = _hs._resolve_unnamed_model_name()
+        if name and name in _hs._engines:
+            return {"status": "ok", "model": name, "loaded": False}
+        raise HTTPException(503, "No engine initialised")
 
     # ---------------------------------------------------------------- #
     #  Instance identity (H6 server-rework, phase 3)                    #
