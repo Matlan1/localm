@@ -161,10 +161,12 @@ def _reset_layout_cache(monkeypatch):
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
+    _abi._last_verdict = None
     yield
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
+    _abi._last_verdict = None
 
 
 # --------------------------------------------------------------------------- #
@@ -751,3 +753,62 @@ def test_unparseable_ggml_version_is_unknown_not_guessed():
         assert got in (0, 4, 5), got
         # Specifically: nothing unparseable may be read as >= 0.18.1.
         assert got != 5, f"ggml_version={bogus!r} must not be taken as 5-arg"
+
+
+# --------------------------------------------------------------------------- #
+#  abi_report must report what HAPPENED, not re-derive a fresh verdict
+# --------------------------------------------------------------------------- #
+
+def test_abi_report_preserves_a_skipped_verdict(monkeypatch):
+    """`localm doctor` must not claim a bypassed check succeeded.
+
+    abi_report used to throw away verify_abi's verdict and re-run evaluate(),
+    which can only return ok/mismatch. So with LOCALM_SKIP_ABI_CHECK set, doctor
+    printed "native ABI: struct layout matches this build" - an affirmative claim
+    that the layout was VERIFIED - for a check that never ran, and its own
+    "check skipped" branch was unreachable. Reporting success for a step that did
+    not happen is exactly what AGENTS.md rule 5 forbids."""
+    from localm.inference.backends.llamacpp import _loader
+
+    lib = _FakeLib(good_model_v2(), good_ctx())
+    monkeypatch.setattr(_loader, "load_lib", lambda: lib)
+    monkeypatch.setenv(_abi.SKIP_ENV, "1")
+
+    verify_abi(lib)                      # populates the stored verdict
+    v = _abi.abi_report()
+    assert v.status == "skipped", (
+        f"a bypassed check must not be reported as {v.status!r}")
+    assert _abi.SKIP_ENV in v.detail
+    assert v.layout == MODEL_PARAMS_V2, "the layout is still known and worth showing"
+
+
+def test_abi_report_still_reports_ok_when_the_check_actually_ran(monkeypatch):
+    """The complement: preserving the verdict must not turn every report into
+    'skipped'. A real check still reports ok, with its layout attached."""
+    from localm.inference.backends.llamacpp import _loader
+
+    lib = _FakeLib(good_model_v1(), good_ctx())
+    monkeypatch.setattr(_loader, "load_lib", lambda: lib)
+    monkeypatch.delenv(_abi.SKIP_ENV, raising=False)
+
+    verify_abi(lib)
+    v = _abi.abi_report()
+    assert v.status == "ok"
+    assert v.layout == MODEL_PARAMS_V1
+
+
+def test_abi_report_carries_the_probe_notes_a_re_derivation_would_drop():
+    """The stored verdict is strictly more informative than a re-derived one:
+    it keeps the layout-probe notes, which evaluate() never sees."""
+    # TWO of the three v2 fingerprint checks must break to reach "inconclusive":
+    # the fingerprint is SCORED, so one drifted default still leaves a 2-0
+    # winner. That is the point of the scoring, and it is why breaking a single
+    # field here does NOT produce the note this test is about.
+    mp = good_model_v2()
+    mp.load_mode = 3                # breaks the load_mode@24 check
+    mp.use_extra_bufts = False      # and the use_extra_bufts@66 check
+    lib = _FakeLib(mp, good_ctx())
+    v = verify_abi(lib)
+    assert v.status == "ok"
+    assert any("symbol probe alone" in d for d in v.diagnostics), v.diagnostics
+    assert _abi._last_verdict is v
