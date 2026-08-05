@@ -155,18 +155,27 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
 # a /health check read loop_lag=13.50s, and a later request in that same
 # still-cold-started run read 71.11s - see dev-notes/restart-loop-lag-
 # investigation-2026-08-04.md for the full trace.
+#
+# ADR-0008 U6: the fix above landed 0.0 as the cold-start reading, which
+# closed the growing-number defect but reopened a narrower version of the
+# SAME shape one level up - 0.0 is also exactly what a healthy loop reports,
+# so a reader still could not tell "no reading yet" from "measured and
+# fine". _loop_lag_seconds() now returns None for cold start; every caller
+# must render that explicitly (see the debug-log and /debug/stacks tests
+# below), never reuse the 0.0 float path for a state that has no reading.
 # --------------------------------------------------------------------------- #
 
-def test_loop_lag_seconds_is_zero_before_the_first_heartbeat_tick(monkeypatch):
+def test_loop_lag_seconds_is_none_before_the_first_heartbeat_tick(monkeypatch):
     from localm.inference import http_server as hs
 
     monkeypatch.setattr(hs, "_hb_monotonic", None)
     # Even with a lot of wall-clock time notionally "elapsed" (no seed to
-    # measure against), the cold-start reading must stay 0.0 - never a
-    # number that grows just because time.monotonic() advances.
+    # measure against), the cold-start reading must stay None - never a
+    # number that grows just because time.monotonic() advances, and never
+    # the SAME 0.0 a healthy loop would report.
     for now in (0.0, 1_000_000.0, 1_000_071.11):
         monkeypatch.setattr(hs.time, "monotonic", lambda now=now: now)
-        assert hs._loop_lag_seconds() == 0.0
+        assert hs._loop_lag_seconds() is None
 
 
 def test_watchdog_skips_the_check_before_the_first_heartbeat_tick(tmp_path, monkeypatch):
@@ -213,14 +222,14 @@ async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monk
     """End-to-end with the REAL heartbeat coroutine (not a manually-set
     value): force a genuinely cold _hb_monotonic (simulating a fresh module
     import, since the module-level global otherwise persists real values
-    across earlier tests in this same process), confirm loop_lag reads 0.0
+    across earlier tests in this same process), confirm loop_lag reads None
     while cold, then confirm it goes back to reporting real scheduling delay
     once the coroutine's first tick lands - the cold-start handling must not
     leak into or replace the steady-state behavior #955/#950 already fixed."""
     from localm.inference import http_server as hs
 
     monkeypatch.setattr(hs, "_hb_monotonic", None)
-    assert hs._loop_lag_seconds() == 0.0, "must read 0.0 while genuinely cold"
+    assert hs._loop_lag_seconds() is None, "must read None while genuinely cold"
 
     hb = asyncio.create_task(hs._hang_heartbeat_loop())
     try:
@@ -447,6 +456,90 @@ async def test_loop_lag_seconds_is_clearly_positive_after_a_real_stall():
             await hb
         except asyncio.CancelledError:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0008 U6: _loop_lag_seconds() now returns None (not 0.0) for "no reading
+# yet" - these prove the two real consumers render that explicitly rather
+# than crashing on a format spec that expects a float, or silently reusing
+# the "0.00s" healthy string. The hang watchdog thread is a THIRD reader of
+# the cold-start state but never calls _loop_lag_seconds() (it reads
+# _hb_monotonic directly - see test_watchdog_skips_the_check_before_the_
+# first_heartbeat_tick above), so it is unaffected by this change and is
+# deliberately not touched or re-tested here.
+# --------------------------------------------------------------------------- #
+
+def test_debug_request_log_renders_cold_start_as_na_not_zero(caplog, monkeypatch):
+    """Before this fix, a request served before the heartbeat's first tick
+    logged "loop_lag=0.00s" - identical to a genuinely healthy reading,
+    because the producer hid "no reading yet" behind the same float a
+    healthy loop reports. Now renders "n/a", and the old numeric format for
+    this exact case is asserted ABSENT, not just the new one present."""
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    from localm.inference import http_server as hs
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    app = create_app(None, api_landing=True)
+    with caplog.at_level("DEBUG", logger="localm"):
+        with TestClient(app) as c:
+            r = c.get("/health")
+    # create_app(None, ...) has no engine, so /health itself legitimately
+    # 503s ("No engine initialised") - the logging middleware wraps every
+    # response regardless of status, so the log line is captured either way;
+    # this assertion is about that route's own unrelated contract, not this
+    # fix, so pin it explicitly rather than assume 200.
+    assert r.status_code == 503
+    lines = [rec.getMessage() for rec in caplog.records if "loop_lag=" in rec.getMessage()]
+    assert lines, "no request log line carrying loop_lag was captured"
+    assert any("loop_lag=n/a" in ln for ln in lines), lines
+    assert not any("loop_lag=0.00s" in ln for ln in lines), lines
+
+
+def test_debug_request_log_renders_a_real_reading_as_before(caplog, monkeypatch):
+    """The other half: once there IS a real reading, the log format is
+    unchanged from before this fix (%.2fs), never "n/a"."""
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    from localm.inference import http_server as hs
+    monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())   # "just ticked"
+    app = create_app(None, api_landing=True)
+    with caplog.at_level("DEBUG", logger="localm"):
+        with TestClient(app) as c:
+            r = c.get("/health")
+    assert r.status_code == 503   # no engine loaded - see the sibling test above
+    lines = [rec.getMessage() for rec in caplog.records if "loop_lag=" in rec.getMessage()]
+    assert lines, "no request log line carrying loop_lag was captured"
+    assert any("loop_lag=0.00s" in ln for ln in lines), lines
+    assert not any("loop_lag=n/a" in ln for ln in lines), lines
+
+
+def test_debug_stacks_renders_cold_start_as_json_null_not_zero(app, monkeypatch):
+    """/debug/stacks' loop_lag_s field must be JSON null for a cold-start
+    reading, never 0.0 - the same "no reading yet" vs "healthy" collision
+    ADR-0008 U6 fixes at the debug-log site, checked here for the OTHER
+    consumer so a fix to one call site cannot leave the other one wrong.
+    Uses the `app` fixture defined below - pytest resolves fixtures by name
+    across the whole module, so the physical order here does not matter."""
+    from localm.inference import http_server as hs
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    app.state.bind_host = "127.0.0.1"
+    with TestClient(app) as c:
+        r = c.get("/debug/stacks",
+                  headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loop_lag_s"] is None, body
+
+
+def test_debug_stacks_renders_a_real_reading_as_before(app, monkeypatch):
+    from localm.inference import http_server as hs
+    monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
+    app.state.bind_host = "127.0.0.1"
+    with TestClient(app) as c:
+        r = c.get("/debug/stacks",
+                  headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body["loop_lag_s"], float), body
+    assert body["loop_lag_s"] == pytest.approx(0.0, abs=0.5)
 
 
 @pytest.fixture
