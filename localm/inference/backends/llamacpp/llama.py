@@ -573,19 +573,54 @@ def _build_sampler(
     return chain
 
 
+# The exact, user-facing text for each way _apply_cpu_moe can decline to
+# apply the override - a SINGLE source of truth read by both the (debug-log)
+# caller inside the isolated child and the PARENT, which is the only process
+# allowed to render it (see _apply_cpu_moe's own docstring for why this
+# moved out of the function entirely). Keyed by the same short reason string
+# _apply_cpu_moe returns, so the parent-side renderer cannot drift from the
+# child-side log line describing the identical fact.
+MOE_SKIP_MESSAGES = {
+    "no_experts": (
+        "[yellow]  n_cpu_moe:[/yellow] this model has no experts (it is not a "
+        "Mixture-of-Experts model), so the setting does nothing here. Loading "
+        "normally."),
+    "buffer_unresolved": (
+        "[yellow]  n_cpu_moe:[/yellow] the CPU buffer type could not be "
+        "resolved from this llama runtime, so MoE experts were NOT moved to "
+        "system RAM. Loading normally instead."),
+}
+
+
 def _apply_cpu_moe(mp, n_layers: int, model_path: str):
     """Keep the first *n_layers* layers' EXPERT weights in system RAM.
 
     Points ``mp.tensor_buft_overrides`` at a NULL-terminated override array and
-    returns the objects that must stay alive across
-    ``llama_load_model_from_file`` (the array AND the pattern bytes it points
-    into - ctypes does not own those strings). Returns None, leaving *mp*
-    untouched, when the CPU buffer type cannot be resolved.
+    returns ``(keepalive, skip_reason)``: *keepalive* is the ``(array,
+    patterns)`` pair that must stay alive across
+    ``llama_load_model_from_file`` (ctypes does not own those strings), or
+    ``None`` if the override could not be applied; *skip_reason* is ``None``
+    on success, or a key into ``MOE_SKIP_MESSAGES`` naming why not.
 
-    That None path is deliberately LOUD rather than silent: the user asked for a
-    specific placement, and quietly loading with a DIFFERENT one would report
-    success for something that did not happen (AGENTS.md rule 5). The load still
-    proceeds, because a normal load is a working load - it just says so."""
+    Runs inside the ISOLATED WORKER CHILD (this whole class is loaded only
+    there - see the module docstring / PR #606's containment). A child must
+    never ``console.print`` (its stdout is not the server's own console -
+    see ``isolated-child-must-not-console-print`` and ``_hf_worker.py``'s
+    identical note): a call here was garbling the parent's Rich spinner
+    output mid-line (confirmed live, issues/MoE model issues.txt). *This
+    function only reports the FACT* - via ``skip_reason``, carried out
+    through ``LlamaCpp.moe_skip_reason`` and ``GgufWorker.load()``'s
+    returned metadata, the exact channel this same feature already uses for
+    the placement report (see ``GgufBackend._load_native()``, which renders
+    ``MOE_SKIP_MESSAGES[skip_reason]`` from the PARENT). It still logs
+    locally (``_dbg.info``/``.warning``) for the debug log, unchanged.
+
+    A skip is deliberately LOUD, never silent: the user asked for a specific
+    placement, and quietly loading with a DIFFERENT one would report success
+    for something that did not happen (AGENTS.md rule 5). The load still
+    proceeds, because a normal load is a working load - the user just has to
+    be TOLD it happened, and only the parent can tell them without garbling
+    its own output."""
     from ._loader import cpu_buffer_type
     from localm.debuglog import logger as _dbg
     # The FUSED per-layer expert weights, as llama.cpp's converters name them:
@@ -608,25 +643,15 @@ def _apply_cpu_moe(mp, n_layers: int, model_path: str):
         _MOE_TENSOR_PREFIX, _MOE_TENSOR_SUFFIX, gguf_expert_count)
     from pathlib import Path as _Path
     if gguf_expert_count(_Path(model_path)) == 0:
-        from localm.console import console
-        console.print(
-            "[yellow]  n_cpu_moe:[/yellow] this model has no experts (it is not a "
-            "Mixture-of-Experts model), so the setting does nothing here. Loading "
-            "normally.")
         _dbg.info("n_cpu_moe=%d ignored: %s reports no experts",
                   n_layers, model_path)
-        return None
+        return None, "no_experts"
 
     buft = cpu_buffer_type()
     if not buft:
-        from localm.console import console
-        console.print(
-            "[yellow]  n_cpu_moe:[/yellow] the CPU buffer type could not be "
-            "resolved from this llama runtime, so MoE experts were NOT moved to "
-            "system RAM. Loading normally instead.")
         _dbg.warning("n_cpu_moe=%d requested but cpu_buffer_type() returned None; "
                      "loading without a tensor placement override", n_layers)
-        return None
+        return None, "buffer_unresolved"
 
     patterns = [(_MOE_TENSOR_PREFIX + str(i) + _MOE_TENSOR_SUFFIX).encode("ascii")
                 for i in range(n_layers)]
@@ -640,7 +665,7 @@ def _apply_cpu_moe(mp, n_layers: int, model_path: str):
     mp.tensor_buft_overrides = ctypes.cast(array, ctypes.c_void_p)
     _dbg.info("n_cpu_moe=%d: expert weights of layers 0-%d pinned to system RAM",
               n_layers, n_layers - 1)
-    return (array, patterns)
+    return (array, patterns), None
 
 
 class LlamaCpp:
@@ -756,8 +781,14 @@ class LlamaCpp:
         # at load time, exactly like tensor_split above - and every `pattern` bytes
         # object with it, hence keeping the list, not just the array.
         self._moe_override_keepalive = None
+        # Why the override did not apply (a key into MOE_SKIP_MESSAGES), or
+        # None on success / when n_cpu_moe was never requested - carried out
+        # to the parent (GgufWorker.load()'s returned metadata), which is the
+        # only process allowed to render it. See _apply_cpu_moe's own
+        # docstring for why this cannot be a console.print here.
+        self.moe_skip_reason: Optional[str] = None
         if n_cpu_moe > 0:
-            self._moe_override_keepalive = _apply_cpu_moe(
+            self._moe_override_keepalive, self.moe_skip_reason = _apply_cpu_moe(
                 mp, n_cpu_moe, model_path)
 
         # Preemptive model switching: wire llama.cpp's native load-progress

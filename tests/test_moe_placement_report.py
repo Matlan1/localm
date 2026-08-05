@@ -236,13 +236,14 @@ def _backend(tmp_path, *, n_cpu_moe=0):
     return GgufBackend(str(f), n_ctx=512, n_cpu_moe=n_cpu_moe)
 
 
-def _load(backend, *, weight_placement):
+def _load(backend, *, weight_placement, moe_skip_reason=None):
     with patch("localm.discover.list_gpus", return_value=([], "ok")), \
          patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                "spawn_and_load",
                return_value={"n_layers": 8, "kv_bytes_per_token": 0,
                              "supports_images": False,
-                             "weight_placement": weight_placement}):
+                             "weight_placement": weight_placement,
+                             "moe_skip_reason": moe_skip_reason}):
         backend._load_native()
 
 
@@ -278,6 +279,59 @@ class TestPlacementSummaryPrint:
         out = capsys.readouterr().out
         assert "moe placement" in out
         assert "not reported" in out
+
+
+class TestMoeSkipReasonPrint:
+    """The message _apply_cpu_moe used to print directly from the ISOLATED
+    CHILD (garbling the parent's spinner - issues/MoE model issues.txt) now
+    renders from the PARENT, from the moe_skip_reason fact carried through
+    GgufWorker.load()'s metadata (see test_gguf_worker.py's
+    test_load_passes_through_moe_skip_reason_from_llamacpp for that leg, and
+    test_moe_cpu_placement.py's test_skip_reasons_never_console_print_from_
+    this_function for proof the child itself stays silent). This class
+    closes the loop: given the fact arrives, does the PARENT actually print
+    the right message."""
+
+    def test_no_experts_reason_prints_the_exact_message(self, tmp_path, capsys):
+        b = _backend(tmp_path, n_cpu_moe=2)
+        _load(b, weight_placement=[], moe_skip_reason="no_experts")
+        out = capsys.readouterr().out
+        assert "this model has no experts" in out
+        assert "the setting does nothing here" in out
+
+    def test_buffer_unresolved_reason_prints_the_exact_message(self, tmp_path, capsys):
+        b = _backend(tmp_path, n_cpu_moe=2)
+        _load(b, weight_placement=[], moe_skip_reason="buffer_unresolved")
+        out = capsys.readouterr().out
+        assert "the CPU buffer type could not be resolved" in out
+        assert "experts were NOT moved" in out
+
+    def test_no_skip_reason_prints_neither_message(self, tmp_path, capsys):
+        """The success path (override applied) must not ALSO print a skip
+        message - the two are mutually exclusive facts about the same load."""
+        b = _backend(tmp_path, n_cpu_moe=2)
+        _load(b, weight_placement=[
+            {"backend": "ROCm0", "mib": 800.0, "is_ram": False},
+        ], moe_skip_reason=None)
+        out = capsys.readouterr().out
+        assert "has no experts" not in out
+        assert "could not be resolved" not in out
+
+    def test_skip_reason_uses_the_shared_message_table(self, tmp_path, monkeypatch,
+                                                        capsys):
+        """Regression lock for message drift: the parent must render from
+        llama.MOE_SKIP_MESSAGES, the SAME table the child-side test
+        (test_every_skip_reason_has_a_rendered_message) checks is complete -
+        not a second, independently-typed copy of the strings that could
+        silently diverge from it."""
+        from localm.inference.backends.llamacpp import llama as llama_mod
+        monkeypatch.setitem(llama_mod.MOE_SKIP_MESSAGES, "no_experts",
+                            "[yellow]  n_cpu_moe:[/yellow] CANARY-MESSAGE")
+        b = _backend(tmp_path, n_cpu_moe=2)
+        _load(b, weight_placement=[], moe_skip_reason="no_experts")
+        out = capsys.readouterr().out
+        assert "CANARY-MESSAGE" in out, (
+            "the parent did not read from the shared MOE_SKIP_MESSAGES table")
 
 
 # --------------------------------------------------------------------------- #

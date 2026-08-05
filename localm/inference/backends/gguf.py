@@ -421,6 +421,20 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # confirmation cannot otherwise tell "it worked but there is nothing to
         # show" from "it silently did nothing" (AGENTS.md rule 5).
         if self.n_cpu_moe > 0:
+            # Why the override did NOT apply (no experts on this model, or the
+            # CPU buffer type could not be resolved) - rendered HERE, in the
+            # parent, from the fact _apply_cpu_moe recorded and carried out of
+            # the isolated child via this same metadata dict. That function
+            # runs inside the child and must never console.print directly (its
+            # stdout is not this process's own console - see
+            # isolated-child-must-not-console-print); this is the one place
+            # allowed to.
+            skip_reason = meta.get("moe_skip_reason")
+            if skip_reason is not None:
+                from .llamacpp.llama import MOE_SKIP_MESSAGES
+                console.print(MOE_SKIP_MESSAGES.get(
+                    skip_reason,
+                    f"[yellow]  n_cpu_moe:[/yellow] did not apply ({skip_reason})."))
             placement = meta.get("weight_placement") or []
             if placement:
                 ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
