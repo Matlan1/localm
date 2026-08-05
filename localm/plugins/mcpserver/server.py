@@ -586,6 +586,74 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         text = "".join(engine.chat_stream(messages, **gen))
         return _text_result(text)
 
+    def server_activity(args: dict) -> dict:
+        """What any running localm server on this machine is doing.
+
+        This MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
+        shares no memory with it, so the only way to answer is to find the
+        running instances on disk and ask each one over HTTP. That is why this
+        tool exists at all: a pull started from the browser is invisible here
+        otherwise, and an agent that cannot see it will happily start a second.
+
+        The states are kept apart deliberately. "No server is running" is not
+        "nothing is running" - there is nothing to ask. "Could not reach it" is
+        not "it is idle". Only a server that actually answered can report an
+        empty list, and only that case says nothing is running.
+        """
+        from localm import instances
+        from localm.config import home_dir
+        from localm.selfclient import read_activity
+
+        rows = instances.snapshot(home_dir())
+        if not rows:
+            return _text_result(
+                "No localm server is running on this machine, so there is "
+                "nothing to ask. This is not the same as a server reporting "
+                "that it is idle.")
+        lines = []
+        for e in rows:
+            where = f"{e.get('scheme', 'http')}://127.0.0.1:{e.get('port')}"
+            if not e.get("alive"):
+                lines.append(f"{where}: registered but not responding; "
+                             f"its activity is unknown.")
+                continue
+            state, payload = read_activity(e.get("scheme", "http"), e.get("port"))
+            if state == "unreachable":
+                lines.append(f"{where}: could not be reached ({payload}); "
+                             f"its activity is unknown.")
+            elif state == "unauthorized":
+                lines.append(f"{where}: needs an API key this process does not "
+                             f"have; its activity is unknown.")
+            elif state == "unsupported":
+                lines.append(f"{where}: does not report activity (older "
+                             f"localm); its activity is unknown.")
+            elif state != "ok":
+                lines.append(f"{where}: could not be read (HTTP {payload}); "
+                             f"its activity is unknown.")
+                continue
+            else:
+                ops = (payload or {}).get("operations") or []
+                now = (payload or {}).get("now")
+                if not ops:
+                    lines.append(f"{where}: idle, nothing running.")
+                    continue
+                lines.append(f"{where}: {len(ops)} operation(s)")
+                for op in ops:
+                    label = op.get("label") or op.get("kind") or "operation"
+                    bits = [op.get("status") or "?"]
+                    pct = op.get("pct")
+                    # Absent, not zero: an operation that has reported no
+                    # progress is at an unknown percentage.
+                    if isinstance(pct, (int, float)):
+                        bits.append(f"{pct:.0f}%")
+                    created = op.get("created_at")
+                    # Age against the SERVER's clock; this process may not
+                    # share it, and a wrong duration is worse than none.
+                    if isinstance(now, (int, float)) and isinstance(created, (int, float)):
+                        bits.append(f"{int(max(0, now - created))}s elapsed")
+                    lines.append(f"  - {label} [{', '.join(bits)}]")
+        return _text_result("\n".join(lines))
+
     def list_models(args: dict) -> dict:
         from localm.config import load_registry
         from localm.model_manager import _entry_path
@@ -1122,6 +1190,21 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "required": ["prompt"],
             },
             "handler": chat,
+        },
+        "server_activity": {
+            "description": (
+                "What any running localm server on this machine is currently "
+                "doing: model downloads, indexing, media generation. Check this "
+                "BEFORE starting a long operation - a pull started from the "
+                "browser or another client is otherwise invisible here, and "
+                "starting a second one wastes bandwidth and disk. Distinguishes "
+                "'no server is running' and 'could not reach it' from 'the "
+                "server says it is idle'; only the last one means nothing is "
+                "happening."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "title": "Server activity"},
+            "handler": server_activity,
         },
         "list_models": {
             "description": "List locally registered models with size and source.",

@@ -201,7 +201,8 @@ class TestProtocol:
             "chat", "list_models", "system_stats", "search_models",
             "list_model_files", "pull_model", "embed", "generate_image",
             "setup_embeddings", "remove_model", "run_doctor", "list_plugins",
-            "install_plugin", "enable_plugin", "disable_plugin", "uninstall_plugin"
+            "install_plugin", "enable_plugin", "disable_plugin", "uninstall_plugin",
+            "server_activity"
         }
         assert names == expected
 
@@ -810,7 +811,8 @@ class TestClientServerIntegration:
                 "chat", "list_models", "system_stats", "search_models",
                 "list_model_files", "pull_model", "embed",
                 "setup_embeddings", "remove_model", "run_doctor", "list_plugins",
-                "install_plugin", "enable_plugin", "disable_plugin", "uninstall_plugin"
+                "install_plugin", "enable_plugin", "disable_plugin",
+                "uninstall_plugin", "server_activity",
             }
             assert {t["name"] for t in client.tools} == expected
             res = client.call_tool("chat", {"prompt": "ping"})

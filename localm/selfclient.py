@@ -21,6 +21,59 @@ from typing import Optional
 import requests
 
 
+def read_activity(scheme: str, port) -> tuple:
+    """Ask a running localm server what it is doing. Returns ``(state, payload)``.
+
+    *state* is one of:
+      ``"ok"``           - payload is the parsed body (may hold an empty list)
+      ``"unauthorized"`` - the server wants a key this client does not have
+      ``"unsupported"``  - the server has no activity route (an older localm)
+      ``"http"``         - some other HTTP status; payload is the code
+      ``"unreachable"``  - could not connect; payload is a short reason
+
+    Every non-ok state exists so a caller can say WHICH of them happened.
+    Folding them together, or folding any of them into an empty operation list,
+    would report "nothing is running" on the evidence of never having found
+    out - the failure ADR-0008 exists to remove. An empty list is a real answer
+    and is only ever returned under ``"ok"``.
+
+    Lives here rather than in the CLI because there are now two surfaces that
+    must answer this question identically (``localm status`` and the MCP
+    activity tool), and a second copy of a state machine whose entire value is
+    telling five outcomes apart is exactly the kind of thing that drifts into
+    telling four of them apart.
+    """
+    from localm import tls as _tls
+    from localm.auth import get_api_key
+
+    url = f"{scheme}://127.0.0.1:{port}/api/activity"
+    headers = {}
+    # env var, else the persisted <home>/auth.key. Reading the env ONLY is the
+    # bug `localm unload` and `localm stop` still carry: a `localm key generate`
+    # or launcher-keyed server keeps its key in auth.key, so an env-only client
+    # 401s against exactly the servers a user is most likely to be running.
+    key = get_api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        r = requests.get(url, headers=headers, timeout=5,
+                         verify=_tls.requests_verify(url))
+    except requests.exceptions.RequestException as e:
+        return "unreachable", type(e).__name__
+    if r.status_code in (401, 403):
+        return "unauthorized", r.status_code
+    if r.status_code == 404:
+        return "unsupported", r.status_code
+    if not r.ok:
+        return "http", r.status_code
+    try:
+        return "ok", r.json()
+    except ValueError:
+        # A 200 whose body is not JSON is not an empty activity list; it means
+        # something other than localm answered, or answered wrongly.
+        return "http", r.status_code
+
+
 def resolve_self_url(app) -> Optional[str]:
     """This server's own ``/v1`` base URL, or None if it cannot be determined.
 
