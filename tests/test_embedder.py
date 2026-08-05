@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import types
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +70,26 @@ def test_resolve_unknown_records_last_error(monkeypatch):
     assert emb.resolve_embedding_model_path() is None
     err = emb.last_error() or ""
     assert "not-a-real-model-xyz" in err
+
+
+def test_resolve_bad_path_spec_does_not_leak_the_account_name(tmp_path, monkeypatch):
+    """Regression (2026-08-04): the 'not a path, a registered model, or a known
+    key' message used to build the spec into last_error() with {spec!r}. repr()
+    doubles backslashes in a Windows path, so pathscrub's literal-prefix match
+    (and its regex backstop, which requires exactly one separator right after
+    the drive letter) never recognised the escaped form - the account name
+    survived scrubbing untouched. A spec that IS an absolute path under the
+    user's home, but resolves to nothing, must not leak that account name."""
+    fake_home = tmp_path / "home" / "someaccount"
+    fake_home.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    bad_spec = str(fake_home / "models" / "nonexistent-embedding-model.bin")
+    _cfg(monkeypatch, embedding_model=bad_spec)
+
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "someaccount" not in err, (
+        f"account name leaked through last_error(): {err!r}")
 
 
 def test_resolve_registered_directory_is_reported_as_hf_not_gguf(tmp_path, monkeypatch):
