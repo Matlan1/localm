@@ -96,6 +96,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with a message blaming the missing web interface. They all work now, the same
   way they do in the browser. See the Changed section for the response-shape
   break this creates for anyone scripting the first two.
+- **Setting up localm's own ComfyUI by copying your existing install now reports
+  each custom node as it copies it**, instead of going silent for the whole
+  step - previously the only output during that step was a start line and a
+  final count, so copying a large custom-nodes folder could sit with nothing on
+  screen for as long as the copy took.
 
 ### Security
 - **A model or vision projector pulled from an untrusted repo could resolve to
