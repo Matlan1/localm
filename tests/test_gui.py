@@ -2248,6 +2248,9 @@ class TestConversationStore:
         "a b",              # whitespace
         "x" * 65,           # too long
         "sp%C3%A4t",        # non-ASCII
+        "nul",              # Windows reserved device name: nul.json targets
+        "NUL",              # the NUL device, not a real file - case-insensitive
+        "com1",             # matches regardless of extension
     ])
     def test_invalid_ids_rejected(self, persist_app, monkeypatch, bad_id):
         monkeypatch.setenv("LOCALM_MODE", "log")

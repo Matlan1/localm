@@ -65,6 +65,18 @@ class PromptUpsert(BaseModel):
 _CONV_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _CONV_MAX_BYTES = 16 * 1024 * 1024   # data-URI images make these large
 
+# Windows reserved device names: matched regardless of extension, so a
+# conversation id of "nul" would target <home>/chats/nul.json -> the NUL
+# device on Windows, not a real file (writes silently discard; reads fail) -
+# not a path escape (_CONV_ID's charset already confines this to a flat
+# basename inside "chats"), but a genuine data-loss trap. Mirrors
+# rag/store.py's _RESERVED_NAMES (same enumeration, kept local rather than
+# imported - pathsafe.py is the lower-level module other code depends on,
+# never the reverse; see its own WINDOWS_RESERVED_NAME_CHARS docstring).
+_RESERVED_NAMES = {"con", "prn", "aux", "nul",
+                   *(f"com{i}" for i in range(1, 10)),
+                   *(f"lpt{i}" for i in range(1, 10))}
+
 
 def _home() -> Path:
     from localm.config import home_dir
@@ -84,7 +96,7 @@ def _persist_enabled() -> bool:
 # reloads, profile wipes, and other devices on the LAN.
 
 def _conv_path(conv_id: str) -> Path:
-    if not _CONV_ID.match(conv_id):
+    if not _CONV_ID.match(conv_id) or conv_id.lower() in _RESERVED_NAMES:
         raise HTTPException(400, "Invalid conversation id")
     return _home() / "chats" / f"{conv_id}.json"
 
