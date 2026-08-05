@@ -466,6 +466,10 @@ def _mismatch_error(verdict: AbiVerdict, lib_path: str = "") -> AbiMismatch:
     )
 
 
+# The verdict verify_abi actually reached, kept so `localm doctor` can report
+# what HAPPENED rather than re-deriving a fresh one - see abi_report().
+_last_verdict: "Optional[AbiVerdict]" = None
+
 _detected_layout: Optional[str] = None
 # True when _detected_layout is a FALLBACK rather than a determination. Kept
 # separate from the layout itself because "v1" alone cannot express the
@@ -590,6 +594,16 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
     return _detected_arity
 
 
+def _remember(verdict: AbiVerdict) -> AbiVerdict:
+    """Store *verdict* as this process's authoritative ABI result and return it.
+
+    Called on EVERY verify_abi outcome, including the one that then raises: a
+    mismatch is exactly what a bug report most needs to carry."""
+    global _last_verdict
+    _last_verdict = verdict
+    return verdict
+
+
 def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     """Verify *lib*'s struct layout matches this build. Raise on proven drift.
 
@@ -625,15 +639,15 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
         _log(f"{SKIP_ENV} is set - skipping the llama ABI self-check. A mismatched "
              "layout can corrupt memory; unset it once the runtime is known good.",
              warn=True)
-        return AbiVerdict(
+        return _remember(AbiVerdict(
             status="skipped", layout=layout,
             diagnostics=notes + ([contradiction] if contradiction else []),
-            detail=f"skipped via {SKIP_ENV}")
+            detail=f"skipped via {SKIP_ENV}"))
 
     if contradiction:
-        verdict = AbiVerdict(
+        verdict = _remember(AbiVerdict(
             status="mismatch", failures=[contradiction], diagnostics=notes,
-            layout=layout, detail="model_params layout probes disagree")
+            layout=layout, detail="model_params layout probes disagree"))
         raise _mismatch_error(verdict, lib_path)
 
     try:
@@ -641,10 +655,10 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     except Exception as e:  # noqa: BLE001 - any mechanism failure must fail open
         _log(f"llama ABI self-check could not run ({e}); continuing unverified.",
              warn=True)
-        return AbiVerdict(status="unchecked", layout=layout,
-                          detail=f"mechanism error: {e}")
+        return _remember(AbiVerdict(status="unchecked", layout=layout,
+                                    detail=f"mechanism error: {e}"))
 
-    verdict = evaluate(mp, cp)
+    verdict = _remember(evaluate(mp, cp))
     verdict.diagnostics = notes + verdict.diagnostics
     if verdict.status == "mismatch":
         _log("llama ABI mismatch: " + "; ".join(verdict.failures), warn=True)
@@ -672,7 +686,22 @@ def abi_report() -> AbiVerdict:
                           detail="struct layout mismatch")
     except Exception as e:  # noqa: BLE001 - not provisioned / not loadable
         return AbiVerdict(status="unchecked", detail=f"runtime not loadable: {e}")
-    # load_lib already verified; re-evaluate for a detailed verdict (lib cached).
+    # Prefer the verdict verify_abi actually reached over re-deriving one.
+    #
+    # Re-deriving loses the two statuses that are not conclusions about the
+    # LIBRARY but about the CHECK: "skipped" (the user set LOCALM_SKIP_ABI_CHECK)
+    # and "unchecked" (the probe itself errored). evaluate() can only return
+    # ok/mismatch, so a bypassed check was being reported to `localm doctor` as
+    # "native ABI: struct layout matches this build" - an affirmative claim that
+    # the layout was VERIFIED, for a check that never ran. That is reporting
+    # success for a step which did not happen (AGENTS.md rule 5), and it made
+    # doctor's own "check skipped" branch unreachable.
+    #
+    # The stored verdict is also strictly more informative: verify_abi's carries
+    # the layout, the probe notes and any contradiction, all of which the
+    # re-derivation drops.
+    if _last_verdict is not None:
+        return _last_verdict
     try:
         layout = model_params_layout(lib)
         mp, cp = _read_default_params(lib, layout)

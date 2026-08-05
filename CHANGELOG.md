@@ -322,6 +322,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **`localm doctor` no longer claims the native ABI check passed when it was
+  switched off.** With `LOCALM_SKIP_ABI_CHECK` set, doctor reported "native ABI:
+  struct layout matches this build" - stating the layout had been verified for a
+  check that never ran, and making its own "check skipped" line unreachable. It
+  now says the check was skipped, and reports which struct layout the runtime
+  uses either way.
 - **A newer llama.cpp runtime could silently apply the wrong model settings.**
   Upstream rearranged the fields inside one of the structures localm passes to
   the native library, without changing its size, so nothing detected the
