@@ -123,6 +123,16 @@ let _activityServerNow = null;
 // just in the app shell: an unasked question must never read as a "no".
 let _activityKnown = false;
 
+// Consecutive FAILED /api/activity reads since the last success. A single
+// dropped poll is routine at a 2.5s tick and must not flap the pill; once
+// reads have failed this many times in a row the last-known state has had
+// time to go stale, so every surface must say so (#1078 post-merge review,
+// AC4) instead of silently keeping (or silently dropping) a claim nobody
+// has actually confirmed lately.
+const _ACTIVITY_STALE_AFTER_READS = 3;
+let _activityStaleReads = 0;
+const _ACTIVITY_MODAL_TITLE = "Activity";
+
 export function isActivityBusy() {
   return _activityOps.some((op) => op.status === "running");
 }
@@ -137,7 +147,16 @@ function activityLabel(op) {
 // live that a prefix there reads as "runningrunning 21s" (#1078 follow-up).
 function activityAge(op) {
   if (_activityServerNow == null || typeof op.created_at !== "number") return "";
-  const d = fmtDuration(_activityServerNow - op.created_at);
+  // A finished op's age is "how long since it finished", not "how long since
+  // it was created" - the two can differ by hours for a long pull. Use
+  // finished_at (server epoch seconds, jobs.py Job.summary()) when the op is
+  // no longer running and actually has one; fall back to created_at only if
+  // it does not, which still renders SOMETHING rather than nothing (#1078
+  // post-merge review: this previously always used created_at for both
+  // states, so a two-hour pull that finished 5s ago read as "2h 00m ago").
+  const stamp = op.status !== "running" && typeof op.finished_at === "number"
+    ? op.finished_at : op.created_at;
+  const d = fmtDuration(_activityServerNow - stamp);
   if (!d) return "";
   return op.status === "running" ? d : `${d} ago`;
 }
@@ -145,12 +164,34 @@ function activityAge(op) {
 export function renderActivityPill(ops) {
   const pill = $("activity-pill");
   if (!pill) return;
+  const stale = _activityKnown && _activityStaleReads >= _ACTIVITY_STALE_AFTER_READS;
   const running = ops.filter((op) => op.status === "running");
-  if (!running.length) {
+  if (!running.length && !stale) {
     pill.style.display = "none";
+    pill.classList.remove("st-unknown");
+    pill.classList.add("st-running");
     return;
   }
   pill.style.display = "";
+  if (stale) {
+    // The last several reads have failed. Showing nothing here (or silently
+    // leaving a running-op pill up forever) repeats the fabricated-answer
+    // mistake this feature exists to remove, just staged behind staleness
+    // instead of a first-ever failure (#1078 post-merge review, AC4: "when
+    // the state cannot be read, every surface says so"). Reuses the existing
+    // st-unknown pill styling (already used for "type could not be
+    // determined") rather than inventing new CSS for the same meaning.
+    pill.classList.add("st-unknown");
+    pill.classList.remove("st-running");
+    pill.title = "Could not reach the server for an activity update - showing the last known state.";
+    const label = running.length === 1 ? activityLabel(running[0])
+      : running.length > 1 ? `${running.length} running` : null;
+    pill.textContent = label ? `${label} - status unknown` : "Status unknown";
+    return;
+  }
+  pill.classList.remove("st-unknown");
+  pill.classList.add("st-running");
+  pill.title = "Click for details";
   if (running.length === 1) {
     const op = running[0];
     const pct = typeof op.pct === "number" ? ` ${Math.round(op.pct)}%` : "";
@@ -160,47 +201,75 @@ export function renderActivityPill(ops) {
   }
 }
 
+// Shared with the live-refresh path below so the modal never diverges from
+// what openModal() rendered at open time.
+function _buildActivityBody(body) {
+  if (!_activityKnown) {
+    // Never render "Nothing running." for a question that was never
+    // successfully asked (R1) - this only shows before the very first
+    // poll/reattach resolves, or if every attempt so far has failed.
+    body.appendChild(el("p", "sub", "Checking…"));
+    return;
+  }
+  if (_activityStaleReads >= _ACTIVITY_STALE_AFTER_READS) {
+    body.appendChild(el("p", "sub",
+      "Could not reach the server for an update - showing the last known state below."));
+  }
+  if (!_activityOps.length) {
+    body.appendChild(el("p", "sub", "Nothing running."));
+    return;
+  }
+  for (const op of _activityOps) {
+    const row = el("div", "job-row");
+    const head = el("div", "job-head");
+    head.appendChild(el("span", "job-name", activityLabel(op)));
+    head.appendChild(el("span", "job-state st-" + op.status, op.status));
+    const age = activityAge(op);
+    if (age) head.appendChild(el("span", "sub", age));
+    row.appendChild(head);
+    if (typeof op.pct === "number") {
+      const dl = el("div", "dl-progress");
+      const bar = el("div", "dl-bar");
+      const fill = el("div", "dl-fill");
+      fill.style.width = Math.max(0, Math.min(100, op.pct)) + "%";
+      bar.appendChild(fill);
+      dl.appendChild(bar);
+      row.appendChild(dl);
+    }
+    const entry = _activityLogs.get(op.id);
+    if (entry && entry.lines.length) {
+      const log = el("pre", "job-log");
+      log.textContent = entry.lines.join("\n");
+      row.appendChild(log);
+    }
+    body.appendChild(row);
+  }
+}
+
 export function showActivityDetails() {
-  openModal("Activity", (body) => {
-    if (!_activityKnown) {
-      // Never render "Nothing running." for a question that was never
-      // successfully asked (R1) - this only shows before the very first
-      // poll/reattach resolves, or if every attempt so far has failed.
-      body.appendChild(el("p", "sub", "Checking…"));
-      return;
-    }
-    if (!_activityOps.length) {
-      body.appendChild(el("p", "sub", "Nothing running."));
-      return;
-    }
-    for (const op of _activityOps) {
-      const row = el("div", "job-row");
-      const head = el("div", "job-head");
-      head.appendChild(el("span", "job-name", activityLabel(op)));
-      head.appendChild(el("span", "job-state st-" + op.status, op.status));
-      const age = activityAge(op);
-      if (age) head.appendChild(el("span", "sub", age));
-      row.appendChild(head);
-      if (typeof op.pct === "number") {
-        const dl = el("div", "dl-progress");
-        const bar = el("div", "dl-bar");
-        const fill = el("div", "dl-fill");
-        fill.style.width = Math.max(0, Math.min(100, op.pct)) + "%";
-        bar.appendChild(fill);
-        dl.appendChild(bar);
-        row.appendChild(dl);
-      }
-      const entry = _activityLogs.get(op.id);
-      if (entry && entry.lines.length) {
-        const log = el("pre", "job-log");
-        log.textContent = entry.lines.join("\n");
-        row.appendChild(log);
-      }
-      body.appendChild(row);
-    }
-  });
+  openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);
 }
 if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
+
+// openModal() calls its bodyBuilder exactly ONCE, at open time (helpers.js) -
+// without this, a poll that changes op state while the modal is open left it
+// showing a frozen snapshot that silently disagreed with the pill, which is
+// worse than either alone (#1078 post-merge review). Keyed on the modal's
+// title text since openModal has no per-modal-kind tracking to hook into;
+// a false match is not possible for any modal opened elsewhere in the app
+// (rename/confirm/etc. all use their own distinct titles), and if a DIFFERENT
+// modal is opened on top the title changes, so this naturally becomes a
+// no-op instead of writing into a modal something else now owns.
+function _refreshActivityModalIfOpen() {
+  const modal = $("modal");
+  const title = $("modal-title");
+  if (!modal || modal.style.display !== "flex") return;
+  if (!title || title.textContent !== _ACTIVITY_MODAL_TITLE) return;
+  const body = $("modal-body");
+  if (!body) return;
+  body.textContent = "";
+  _buildActivityBody(body);
+}
 
 // Shared read: GET /api/activity, update the module's known state + pill,
 // and return the parsed operations list - or null on an unreadable response
@@ -211,17 +280,35 @@ if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
 async function _readActivity() {
   try {
     const r = await fetch("/api/activity", { headers: authHeaders() });
-    if (!r.ok) return null;
+    if (!r.ok) return _activityReadFailed();
     const data = await r.json();
     const ops = Array.isArray(data.operations) ? data.operations : [];
     _activityOps = ops;
     _activityServerNow = typeof data.now === "number" ? data.now : null;
     _activityKnown = true;
+    _activityStaleReads = 0;
     renderActivityPill(ops);
+    _refreshActivityModalIfOpen();
     return ops;
   } catch (e) {
-    return null;
+    return _activityReadFailed();
   }
+}
+
+// A failed read never overwrites _activityOps/_activityKnown (R1 - the last
+// known state, once genuinely known, is never discarded just because one
+// poll could not confirm it), but DOES count toward surfacing that the state
+// may now be stale (AC4 - a caller must be TOLD reads stopped working, not
+// just left staring at an answer that quietly stopped being current). Always
+// returns null so call sites can `return _activityReadFailed();` in place of
+// `return null;`.
+function _activityReadFailed() {
+  _activityStaleReads += 1;
+  if (_activityKnown) {
+    renderActivityPill(_activityOps);
+    _refreshActivityModalIfOpen();
+  }
+  return null;
 }
 
 export async function pollActivity() {
@@ -246,11 +333,13 @@ export async function reattachActivity() {
       streamJob(op.id, (line) => {
         const entry = _activityLogs.get(op.id);
         if (entry) entry.lines.push(line);
+        _refreshActivityModalIfOpen();
       }, (ev) => {
         const idx = _activityOps.findIndex((o) => o.id === op.id);
         if (idx !== -1 && typeof ev.pct === "number") {
           _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct };
           renderActivityPill(_activityOps);
+          _refreshActivityModalIfOpen();
         }
       }).then((end) => {
         // "disconnected" is a CLIENT-only concept (streamJob gave up
@@ -262,6 +351,7 @@ export async function reattachActivity() {
         if (idx !== -1) {
           _activityOps[idx] = { ..._activityOps[idx], status: end.status };
           renderActivityPill(_activityOps);
+          _refreshActivityModalIfOpen();
         }
       });
     }

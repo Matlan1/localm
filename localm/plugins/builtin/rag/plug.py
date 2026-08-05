@@ -261,6 +261,24 @@ def _get_collection(name: str):
     return coll
 
 
+def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
+    """Best-effort: does *stats* (a ``stats()``-shaped dict) disagree with
+    *active_dim* (the currently RESIDENT embedder's dimension, from
+    ``embedder.loaded_dim()`` - or None when nothing is loaded)?
+
+    None whenever an honest comparison cannot be made - no vectors to compare,
+    this collection's own dimension is unknown, or no embedder happens to be
+    loaded right now - never folded into a false "matches" (AGENTS rule 5).
+    Mirrors ``_collection_dim_report``'s own three-way split, just answered
+    from whatever is already resident instead of loading the target model,
+    which is what makes this cheap enough to run on every listing/detail
+    request instead of only at switch time."""
+    dim = stats.get("vector_dim")
+    if not stats.get("has_vectors") or dim is None or active_dim is None:
+        return None
+    return dim != active_dim
+
+
 def _collection_dim_report(target_dim: int) -> dict:
     """Compare every existing collection's currently stored vector dimension
     against *target_dim* (a newly selected embedding model's own dimension),
@@ -495,16 +513,36 @@ async def rag_collections():
     after, which is what makes the backfilled values provably consistent
     with disk rather than a snapshot that could have been overtaken by a
     concurrent real write."""
+    from localm.inference.embedder import loaded_dim
     from localm.rag import Collection, collection_names
+    loop = asyncio.get_running_loop()
     names = collection_names()
     peeked = {n: Collection.peek_stats(n) for n in names}
     cold = [n for n, s in peeked.items() if s is None]
     if cold:
-        loop = asyncio.get_running_loop()
         fresh = await loop.run_in_executor(
             get_plugin_executor(),
             lambda: {n: Collection.load_and_maybe_backfill(n).stats() for n in cold})
         peeked.update(fresh)
+    # Best-effort, NEVER a load: loaded_dim() answers from whatever embedder
+    # already happens to be resident (the common case for anyone actively
+    # using RAG) and is documented as safe for exactly this - a cheap status
+    # probe with no side effect. Still executor-offloaded, not called directly
+    # on this coroutine: it blocks on the SAME embedder lock a concurrent
+    # model load can hold for its full duration (see http_server.py's own
+    # loaded_dim() call site), so a synchronous call here could freeze this
+    # whole event loop for that long, not just this one request. When nothing
+    # is loaded this is None and every collection's dim_mismatch below is
+    # correctly None too - "cannot tell" rendered honestly, never folded into
+    # a false "matches". This does NOT replace _collection_dim_report (the
+    # switch-time report, which loads and test-embeds the NEW model
+    # deliberately, on the one occasion that is worth the cost) - it closes
+    # the gap that report's own docstring names: a collection visited well
+    # after that one-shot job log has scrolled by still showed a bare
+    # "hybrid" with no hint the active model had moved on.
+    active_dim = await loop.run_in_executor(get_plugin_executor(), loaded_dim)
+    for n in names:
+        peeked[n]["dim_mismatch"] = _dim_mismatch(peeked[n], active_dim)
     return {"collections": [peeked[n] for n in names]}
 
 
@@ -533,22 +571,24 @@ async def rag_detail(name: str):
     fallback). ``docs()`` was already meta.json-only and cheap; it was
     ``stats()``'s eager ``Collection(name)`` construction that paid the
     full-corpus read just for this page."""
+    from localm.inference.embedder import loaded_dim
     from localm.rag import Collection
-    peeked = Collection.peek_detail(name)
-    if peeked is not None:
-        return peeked
-
-    def load():
-        try:
-            coll = Collection.load_and_maybe_backfill(name)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        if not coll.exists():
-            raise HTTPException(404, f"No such collection: {name}")
-        return {**coll.stats(), "docs": coll.docs()}
-
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(get_plugin_executor(), load)
+    peeked = Collection.peek_detail(name)
+    if peeked is None:
+        def load():
+            try:
+                coll = Collection.load_and_maybe_backfill(name)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            if not coll.exists():
+                raise HTTPException(404, f"No such collection: {name}")
+            return {**coll.stats(), "docs": coll.docs()}
+        peeked = await loop.run_in_executor(get_plugin_executor(), load)
+    # See rag_collections()'s own comment: best-effort, never a load.
+    active_dim = await loop.run_in_executor(get_plugin_executor(), loaded_dim)
+    peeked["dim_mismatch"] = _dim_mismatch(peeked, active_dim)
+    return peeked
 
 
 @_router.delete("/api/rag/collections/{name}")

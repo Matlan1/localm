@@ -282,3 +282,119 @@ class TestEmbeddingSwitchRouteEndToEnd:
 
         assert "Ready: new-model (384-dim)" in text
         assert "will fall back to BM25" not in text
+
+
+# --------------------------------------------------------------------------- #
+#  #1078 post-merge review: the ONE-SHOT job-log warning above (deliberately  #
+#  cheap - it loads and test-embeds the NEW model, which is only worth it     #
+#  once, at switch time) never touched the PERSISTENT list/detail badge,      #
+#  which is the gap this file's own module docstring names but only the      #
+#  switch-time report closed. A collection revisited well after that job's   #
+#  log has scrolled by still showed a bare "hybrid" with no hint the active   #
+#  model had moved on. dim_mismatch is the best-effort (never a load, never   #
+#  a false "matches") fix: compare each collection's own vector_dim (already  #
+#  cached, free) against embedder.loaded_dim() (whatever happens to already   #
+#  be resident - also free, and documented as safe for exactly this).        #
+# --------------------------------------------------------------------------- #
+
+def _dim_mismatch(stats, active_dim):
+    from localm.plugins.builtin.rag.plug import _dim_mismatch as fn
+    return fn(stats, active_dim)
+
+
+class TestDimMismatchHelper:
+    def test_none_when_no_embedder_is_resident(self):
+        assert _dim_mismatch({"has_vectors": True, "vector_dim": 768}, None) is None
+
+    def test_none_when_the_collection_has_no_vectors(self):
+        assert _dim_mismatch({"has_vectors": False, "vector_dim": None}, 384) is None
+
+    def test_none_when_the_collections_own_dim_is_unknown(self):
+        assert _dim_mismatch({"has_vectors": True, "vector_dim": None}, 384) is None
+
+    def test_true_when_dims_disagree(self):
+        assert _dim_mismatch({"has_vectors": True, "vector_dim": 768}, 384) is True
+
+    def test_false_when_dims_agree(self):
+        assert _dim_mismatch({"has_vectors": True, "vector_dim": 384}, 384) is False
+
+
+@pytest.fixture
+def dim_badge_app(rag_home):
+    from fastapi import FastAPI
+
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.gui.web import attach_gui
+
+    app = FastAPI()
+    PluginManager(app, external_root=rag_home.parent / "noplugins").install("rag")
+
+    async def switch_model(name):
+        pass
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "model-a")
+    return app
+
+
+class TestListDetailRoutesSurfaceDimMismatch:
+    def test_list_route_flags_a_collection_whose_vectors_predate_the_resident_model(
+            self, dim_badge_app, rag_home, monkeypatch):
+        _collection(rag_home, "docs", ["a", "b"], dim=768)
+        monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: 384)
+
+        from fastapi.testclient import TestClient
+        with TestClient(dim_badge_app) as c:
+            r = c.get("/api/rag/collections")
+        assert r.status_code == 200
+        row = next(x for x in r.json()["collections"] if x["name"] == "docs")
+        assert row["has_vectors"] is True, "still reports hybrid - the vectors are real, just stale"
+        assert row["dim_mismatch"] is True
+
+    def test_list_route_does_not_flag_a_collection_matching_the_resident_model(
+            self, dim_badge_app, rag_home, monkeypatch):
+        _collection(rag_home, "docs", ["a", "b"], dim=384)
+        monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: 384)
+
+        from fastapi.testclient import TestClient
+        with TestClient(dim_badge_app) as c:
+            r = c.get("/api/rag/collections")
+        row = next(x for x in r.json()["collections"] if x["name"] == "docs")
+        assert row["dim_mismatch"] is False
+
+    def test_list_route_reports_unknown_rather_than_a_false_match_when_no_embedder_is_loaded(
+            self, dim_badge_app, rag_home, monkeypatch):
+        """The common cold-start case: nothing loaded yet. Must read as 'cannot
+        tell' (None), never silently as 'matches' (False) - a false False here
+        would be indistinguishable from a genuine match and hide exactly the
+        collections a user most needs to be warned about."""
+        _collection(rag_home, "docs", ["a", "b"], dim=768)
+        monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: None)
+
+        from fastapi.testclient import TestClient
+        with TestClient(dim_badge_app) as c:
+            r = c.get("/api/rag/collections")
+        row = next(x for x in r.json()["collections"] if x["name"] == "docs")
+        assert row["dim_mismatch"] is None
+
+    def test_list_route_never_flags_a_bm25_only_collection(
+            self, dim_badge_app, rag_home, monkeypatch):
+        _collection(rag_home, "notes", ["a"], dim=None)
+        monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: 384)
+
+        from fastapi.testclient import TestClient
+        with TestClient(dim_badge_app) as c:
+            r = c.get("/api/rag/collections")
+        row = next(x for x in r.json()["collections"] if x["name"] == "notes")
+        assert row["dim_mismatch"] is None, "nothing to compare - it was BM25-only before this too"
+
+    def test_detail_route_flags_the_same_way_as_the_list_route(
+            self, dim_badge_app, rag_home, monkeypatch):
+        _collection(rag_home, "docs", ["a", "b"], dim=768)
+        monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: 384)
+
+        from fastapi.testclient import TestClient
+        with TestClient(dim_badge_app) as c:
+            r = c.get("/api/rag/collections/docs")
+        assert r.status_code == 200
+        assert r.json()["dim_mismatch"] is True

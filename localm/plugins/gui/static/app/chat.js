@@ -844,9 +844,16 @@ export function addMessageRow(container, role, text, opts = {}) {
       else setTimeout(() => (copy.textContent = "copy"), 1200);
       return;
     }
-    navigator.clipboard.writeText(plain);
-    copy.textContent = "copied";
-    setTimeout(() => (copy.textContent = "copy"), 1200);
+    try {
+      await navigator.clipboard.writeText(plain);
+      copy.textContent = "copied";
+      setTimeout(() => (copy.textContent = "copy"), 1200);
+    } catch (e) {
+      // Matches the image branch above: a real failure (permission denied,
+      // insecure context) must never be reported as "copied" - that is
+      // claiming a step happened that did not (AGENTS.md rule 5).
+      toast("Could not copy - your browser blocked clipboard access", true);
+    }
   };
   meta.appendChild(copy);
   if (opts.variant) {

@@ -528,7 +528,13 @@ export async function refreshVoiceStatus() {
     voice.model = data.model || "";
     const btn = $("chat-mic");
     btn.classList.toggle("unavailable", !data.available);
-    if (!data.available) btn.title = data.reason;
+    // Reset the tooltip on the success path too - not just set it in the
+    // unavailable branches. Without this, a mic that starts unavailable and
+    // later becomes available (extra installed, model cached) keeps claiming
+    // it needs the extra forever, since nothing ever wrote over the stale text.
+    btn.title = data.available
+      ? "Hold a thought, speak it - click to record, click again to transcribe"
+      : data.reason;
   } catch (e) { /* server unreachable - status refreshes on next load */ }
 }
 

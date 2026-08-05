@@ -341,7 +341,11 @@ class TestBackfillThroughRoutes:
             r = client.get("/api/rag/collections")
             assert r.status_code == 200
             listed = {c["name"]: c for c in r.json()["collections"]}
-            assert listed["kb"] == eager
+            # dim_mismatch is added by the ROUTE (a best-effort comparison
+            # against whatever embedder happens to be resident - see
+            # test_rag_dim_switch_warning.py), never written to the cache
+            # itself - None here since this app never loads an embedder.
+            assert listed["kb"] == {**eager, "dim_mismatch": None}
 
             assert Collection.peek_stats("kb", base=rbase) == eager, (
                 "the LIST route must have written a real backfill to the "
@@ -360,7 +364,9 @@ class TestBackfillThroughRoutes:
 
             r = client.get("/api/rag/collections/kb")
             assert r.status_code == 200
-            assert r.json() == {**eager_stats, "docs": eager_docs}
+            # See the list-route test above: dim_mismatch is route-added, None
+            # here since this app never loads an embedder.
+            assert r.json() == {**eager_stats, "docs": eager_docs, "dim_mismatch": None}
 
             assert Collection.peek_stats("kb", base=rbase) == eager_stats, (
                 "the DETAIL route must have written a real backfill too - it "
