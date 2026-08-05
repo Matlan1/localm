@@ -9,6 +9,7 @@ the loop stops ticking, so a freeze that would otherwise be lost is captured.
 """
 
 import asyncio
+import sys
 import time
 
 import pytest
@@ -235,6 +236,99 @@ async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monk
             await hb
         except asyncio.CancelledError:
             pass
+
+
+# --------------------------------------------------------------------------- #
+# loop_lag privacy/watchdog-off facade: the heartbeat TASK that feeds
+# _loop_lag_seconds() used to be started behind the SAME combined gate as the
+# watchdog THREAD's own privacy/env check ((_hw_active() and (_hw_verbose() or
+# _diagnostics_allowed()))). The debug request log and GET /debug/stacks are
+# reachable under a DIFFERENT, unrelated gate (debug_enabled() / a loopback +
+# token check), so whenever the watchdog gate was closed but one of those was
+# open, _hb_monotonic stayed None for the whole process and
+# _loop_lag_seconds() reported a permanent, healthy-looking 0.00 - verified
+# live against a real, measured 2.0s event-loop stall in both configs below.
+# A privacy-conscious user's bug report is exactly the config most likely to
+# hit this (GitHub #958: reports carrying no useful data - this made it worse,
+# confidently WRONG data). The fix decouples the heartbeat's own startup from
+# the watchdog thread's gate, leaving only "pytest" not in sys.modules.
+# --------------------------------------------------------------------------- #
+
+def _heartbeat_starts_with_watchdog_thread_disabled(tmp_path, monkeypatch, *, config_json):
+    """Shared drive for both configs below: builds a real app in a throwaway
+    LOCALM_HOME, temporarily lifts the "pytest" not in sys.modules guard for
+    exactly this one lifespan run (restored by monkeypatch on teardown - see
+    the module-level comment above _hb_monotonic for why this guard exists
+    and why bypassing it here is safe: no production code imports pytest, and
+    TestClient's own shutdown path already cancels hb_task / stops the
+    watchdog thread on context exit), and returns
+    (hb_monotonic_after_startup, watchdog_thread_start_call_count)."""
+    from localm.inference import http_server as hs
+
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    if config_json is not None:
+        (home / "config.json").write_text(config_json, encoding="utf-8")
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    watchdog_calls = []
+    real_start = hs._start_hang_watchdog
+
+    def _spy(*a, **kw):
+        watchdog_calls.append((a, kw))
+        return real_start(*a, **kw)
+
+    monkeypatch.setattr(hs, "_start_hang_watchdog", _spy)
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+
+    app = create_app(None)
+    with TestClient(app):
+        deadline = time.monotonic() + 3.0
+        while hs._hb_monotonic is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        hb_after = hs._hb_monotonic
+    return hb_after, len(watchdog_calls)
+
+
+def test_heartbeat_starts_when_watchdog_env_disabled(tmp_path, monkeypatch):
+    """Config A: LOCALM_HANG_WATCHDOG=0. The watchdog THREAD must stay off (an
+    explicit opt-out is honored), but the heartbeat TASK - which the debug
+    request log's loop_lag depends on, unconditionally on debug_enabled() -
+    must still start."""
+    monkeypatch.setenv("LOCALM_HANG_WATCHDOG", "0")
+    hb_after, watchdog_calls = _heartbeat_starts_with_watchdog_thread_disabled(
+        tmp_path, monkeypatch, config_json=None)
+    assert hb_after is not None, (
+        "the heartbeat task never started even though the ONLY thing "
+        "disabled is the watchdog thread's own env gate - loop_lag would "
+        "silently read a permanent, fabricated 0.00")
+    assert watchdog_calls == 0, "the watchdog thread must stay off (explicit opt-out)"
+
+
+def test_heartbeat_starts_in_privacy_mode_on_default_config(tmp_path, monkeypatch):
+    """Config B: privacy mode, keep_diagnostics left at its default (False) -
+    the documented, supported "privacy mode, debug log on" combination
+    (debuglog.py's debug_content_enabled docstring: operational lines stay on
+    debug_enabled() even in privacy mode). The watchdog THREAD must stay off
+    (no automatic disk trace in privacy mode), but the heartbeat TASK must
+    still start so the debug log's loop_lag is real, not fabricated."""
+    monkeypatch.delenv("LOCALM_HANG_WATCHDOG", raising=False)
+    hb_after, watchdog_calls = _heartbeat_starts_with_watchdog_thread_disabled(
+        tmp_path, monkeypatch, config_json='{"mode": "privacy"}')
+    assert hb_after is not None, (
+        "the heartbeat task never started in privacy mode on default config "
+        "- loop_lag would silently read a permanent, fabricated 0.00 in "
+        "exactly the config a privacy-conscious bug reporter is most likely "
+        "to be running (GitHub #958)")
+    assert watchdog_calls == 0, (
+        "the watchdog thread must stay off in privacy mode without an "
+        "explicit keep_diagnostics opt-in - it writes an automatic disk trace")
 
 
 # --------------------------------------------------------------------------- #

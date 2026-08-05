@@ -115,11 +115,24 @@ _gpu_coord: Optional[dict] = None
 
 # Hang watchdog: a monotonic heartbeat bumped every _HEARTBEAT_INTERVAL_S by
 # _hang_heartbeat_loop (an async task ON the loop) and read by the off-loop
-# watchdog thread + the debug request log. A growing (now - _hb_monotonic)
-# means the single event loop has stopped making progress, i.e. something is
-# blocking it (the diagnosed hang) - the off-loop watchdog thread compares
-# this raw gap against its own multi-second threshold (hang_watchdog_
-# threshold(), 10s by default) and is unaffected by the note below.
+# watchdog thread + the debug request log + GET /debug/stacks. A growing (now
+# - _hb_monotonic) means the single event loop has stopped making progress,
+# i.e. something is blocking it (the diagnosed hang) - the off-loop watchdog
+# thread compares this raw gap against its own multi-second threshold
+# (hang_watchdog_threshold(), 10s by default) and is unaffected by the note
+# below.
+#
+# The heartbeat TASK's own startup (lifespan, below) is gated only on
+# "pytest" not in sys.modules - NOT on the watchdog thread's privacy/env gate.
+# It is pure in-memory bookkeeping (no I/O, nothing persisted or observable
+# outside this process), so it carries none of the privacy considerations
+# that gate the stack-dump-to-disk thread, and every reader below needs it
+# regardless of which of them is actually active. The two used to share one
+# combined gate, which left _hb_monotonic permanently None (and every reader
+# permanently, indistinguishably "healthy") whenever the log/stacks readers
+# were reachable but the watchdog-thread gate was not (LOCALM_HANG_WATCHDOG=0,
+# or privacy mode on default config) - verified live: a genuine 2.0s
+# event-loop stall still read loop_lag=0.00 in both configs.
 #
 # _loop_lag_seconds() (below) answers a DIFFERENT question and must be used
 # for anything reported to a human. Raw (now - _hb_monotonic) saws between 0
@@ -2834,17 +2847,41 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # outlives the app.
         idle_task = asyncio.create_task(_idle_unload_loop())
 
-        # Hang-capture watchdog: a 1s async heartbeat + an OFF-loop daemon thread
-        # that dumps all stacks to a file when the loop stops ticking - the only
-        # in-process way to see what a fully-wedged loop is stuck in. On by default
-        # in the log/full session modes (the trace file is lazy, created only on a
-        # real stall), so an intermittent freeze is captured with zero setup. In
-        # PRIVACY mode it stays OFF (no automatic trace) UNLESS the user opted into
-        # keeping diagnostics (_diagnostics_allowed) or explicitly forced it on
-        # (LOCALM_HANG_WATCHDOG=1). LOCALM_HANG_WATCHDOG=0 opts out entirely. Skipped
-        # under pytest so no thread lingers. Best-effort: a startup failure must
-        # never block serving.
+        # Heartbeat (_hb_monotonic) vs. the watchdog's disk-writing stall dump:
+        # deliberately DECOUPLED, on two different gates. The heartbeat is pure
+        # in-memory bookkeeping (_hang_heartbeat_loop writes nothing to disk,
+        # logs nothing, sends nothing - see its docstring), so it carries none
+        # of the privacy considerations that gate the stack-dump file below and
+        # runs whenever "pytest" not in sys.modules, independent of mode. THREE
+        # independent readers depend on it: the debug request log
+        # (debug_enabled(), below), GET /debug/stacks (its own unconditional
+        # reachability gate), and the watchdog thread's own stall check.
+        #
+        # Previously this task was started INSIDE the watchdog's privacy/env
+        # gate, so whenever debug_enabled() was true but that gate was not
+        # (LOCALM_HANG_WATCHDOG=0, or privacy mode on default config -
+        # keep_diagnostics defaults False), _hb_monotonic stayed None for the
+        # ENTIRE process lifetime and _loop_lag_seconds() silently reported a
+        # permanent 0.00 indistinguishable from "healthy" - verified live: a
+        # genuine, measured 2.0s event-loop stall still read loop_lag=0.00 in
+        # both configs. A privacy-conscious user's bug report is exactly the
+        # case most likely to hit this (issue #958). Best-effort: a startup
+        # failure must never block serving.
         hb_task = None
+        if "pytest" not in sys.modules:
+            try:
+                hb_task = asyncio.create_task(_hang_heartbeat_loop())
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("heartbeat task startup failed (continuing): %s", e)
+
+        # The stack-dump-on-stall THREAD keeps its own, unchanged privacy gate:
+        # on by default in the log/full session modes (the trace file is lazy,
+        # created only on a real stall); in PRIVACY mode it stays OFF (no
+        # automatic trace written to disk) UNLESS the user opted into keeping
+        # diagnostics (_diagnostics_allowed) or explicitly forced it on
+        # (LOCALM_HANG_WATCHDOG=1). LOCALM_HANG_WATCHDOG=0 opts out entirely.
+        # Skipped under pytest so no thread lingers.
         hang_stop = hang_thread = None
         from localm.debuglog import (
             hang_watchdog_active as _hw_active,
@@ -2855,7 +2892,6 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         if (_hw_active() and (_hw_verbose() or _diagnostics_allowed())
                 and "pytest" not in sys.modules):
             try:
-                hb_task = asyncio.create_task(_hang_heartbeat_loop())
                 hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), _hw_path())
                 if _hw_verbose():
                     # Explicit opt-in extras: asyncio debug logs any single callback
