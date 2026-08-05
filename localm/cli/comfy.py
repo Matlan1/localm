@@ -114,9 +114,12 @@ def comfy_setup(copy_custom_nodes) -> None:
     """
     import sys
 
+    from rich.markup import escape
+
     from ..config import load_config
     from ..media import managed_comfy_fresh as fresh
     from ..media import managed_comfy_provision as prov
+    from ..model_manager import _emit_outcome
 
     cfg = load_config()
     # Heads-up before a potentially multi-GB operation: which path will run.
@@ -136,10 +139,17 @@ def comfy_setup(copy_custom_nodes) -> None:
         on_progress=lambda line: console.print(line, style="dim", markup=False))
 
     if not result.ok:
-        console.print(f"[red]{result.message}[/red]")
+        _emit_outcome("failed")
+        console.print(f"[red]{escape(result.message)}[/red]")
         raise SystemExit(1)
 
-    console.print(f"[green]{result.message}[/green]")
+    # Emitted BEFORE any of the prints below: real work (clone/install/venv/
+    # marker) is already done by this point, so a crash in one of these purely
+    # cosmetic status lines - the exact class of bug pull.py's _report_success
+    # exists to guard against - must not un-say a completed install to the GUI
+    # job runner, which otherwise infers status from the exit code alone.
+    _emit_outcome("done")
+    console.print(f"[green]{escape(result.message)}[/green]")
     if result.status == "copied":
         console.print(f"  Packages replicated    : {result.installed_packages}")
         console.print(f"  Custom nodes copied    : {result.custom_nodes_copied}")
@@ -174,11 +184,14 @@ def comfy_update(reinstall_requirements: bool, commit) -> None:
     failure it rolls the managed ComfyUI back to its previous version. Your own
     ComfyUI is never touched.
     """
+    from rich.markup import escape
+
     from ..config import load_config
     from ..media import managed_comfy as mc
     from ..media import managed_comfy_update as upd
     from ..media.managed_comfy_fresh import (COMFYUI_PINNED_COMMIT,
                                              COMFYUI_PINNED_VERSION)
+    from ..model_manager import _emit_outcome
 
     cfg = load_config()
     if not mc.is_managed_comfy_installed():
@@ -199,6 +212,11 @@ def comfy_update(reinstall_requirements: bool, commit) -> None:
         on_progress=lambda line: console.print(line, style="dim", markup=False))
 
     if not result.ok:
-        console.print(f"[red]{result.message}[/red]")
+        _emit_outcome("failed")
+        console.print(f"[red]{escape(result.message)}[/red]")
         raise SystemExit(1)
-    console.print(f"[green]{result.message}[/green]")
+    # See comfy_setup's identical comment: real work (checkout/patches/rollback)
+    # is already done here, so this signal must land before the cosmetic print
+    # that follows it, not after.
+    _emit_outcome("done")
+    console.print(f"[green]{escape(result.message)}[/green]")

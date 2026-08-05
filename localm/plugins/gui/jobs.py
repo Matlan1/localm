@@ -365,6 +365,13 @@ class JobManager:
             announcer = _HostAnnouncer(host_label) if host_label else None
             if announcer:
                 announcer.announce_start()
+            # An explicit {"type": "outcome"} sentinel frame (_shared._emit_outcome)
+            # overrides the exit-code guess below. None means no such frame arrived
+            # - an older CLI build, a job kind that never emits one, or a crash
+            # before it could be sent - and the exit-code rule is then EXACTLY
+            # today's behavior: this can only ever correct a misleading exit code,
+            # never invent a "done" out of silence.
+            reported_outcome = None
             try:
                 env = None
                 if extra_env:
@@ -396,6 +403,20 @@ class JobManager:
                             data = json.loads(payload)
                         except ValueError:
                             continue
+                        # popped, not merely read: **data below must never carry
+                        # its own "type" key, or a dict literal's later-key-wins
+                        # rule would let a payload override the "progress" label
+                        # this reader assigns everything else on this channel.
+                        etype = data.pop("type", "progress")
+                        if etype == "outcome":
+                            # An internal producer -> job-runner signal (see
+                            # _shared._emit_outcome), never forwarded to
+                            # subscribers - it exists solely to correct the
+                            # status decision below, not to be rendered.
+                            status = data.get("status")
+                            if status in ("done", "failed"):
+                                reported_outcome = status
+                            continue
                         job.push({"type": "progress", **data})
                         if announcer:
                             announcer.emit({"type": "progress", **data})
@@ -406,7 +427,10 @@ class JobManager:
                 job._proc.wait()
                 job.returncode = job._proc.returncode
                 if job.status != "cancelled":
-                    job.status = "done" if job.returncode == 0 else "failed"
+                    if reported_outcome is not None:
+                        job.status = reported_outcome
+                    else:
+                        job.status = "done" if job.returncode == 0 else "failed"
             except Exception as e:
                 job.status = "failed"
                 job.push({"type": "line", "text": f"job error: {e}"})
