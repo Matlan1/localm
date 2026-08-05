@@ -79,6 +79,13 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "Model parameter is required and cannot be empty")
 
         engine = await _hs.get_engine(req.model)
+        # Report the model that ACTUALLY answered when the request named none.
+        # model_id is echoed straight into the response envelope, so an unnamed
+        # request used to come back as `"model": ""` - an empty field in an
+        # OpenAI-shaped reply, and a caller with no way to learn which model
+        # served it. (A request that says "localm" still echoes "localm"; that
+        # is the pre-existing sentinel behaviour and is not changed here.)
+        reported_model = req.model or engine.display_name
         # Pin the engine the instant we own it - SYNCHRONOUSLY, before the inlet
         # or any other await - so a concurrent model load cannot evict it out from
         # under this in-flight request (AUDIT-CRIT-1). Released in the finally
@@ -232,7 +239,7 @@ def register(app: FastAPI, ctx) -> None:
                 # when the stream ends - do NOT unpin in the finally below.
                 streaming_handoff = True
                 return StreamingResponse(
-                    _pin_engine(engine, _stream_sse(engine, messages, req.model, sem,
+                    _pin_engine(engine, _stream_sse(engine, messages, reported_model, sem,
                                 audit=_audit, transcript=_transcript,
                                 pipeline=pipeline, ctx=ctx, **gen_kwargs)),
                     media_type="text/event-stream",
@@ -245,7 +252,7 @@ def register(app: FastAPI, ctx) -> None:
                         **_memory_used_header(ctx),
                     },
                 )
-            resp = await _complete(engine, messages, req.model, sem,
+            resp = await _complete(engine, messages, reported_model, sem,
                                    audit=_audit, transcript=_transcript,
                                    pipeline=pipeline, ctx=ctx,
                                    request=request, **gen_kwargs)
@@ -411,6 +418,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "Model parameter is required and cannot be empty")
 
         engine = await _hs.get_engine(req.model)
+        # Report the model that actually answered, same as the chat route above.
+        reported_model = req.model or engine.display_name
         # Pin synchronously the instant we own the engine (AUDIT-CRIT-1); released
         # in the finally below, or by _pin_engine at stream end for a streaming
         # response.
@@ -497,7 +506,7 @@ def register(app: FastAPI, ctx) -> None:
             if req.stream:
                 streaming_handoff = True
                 return StreamingResponse(
-                    _pin_engine(engine, _stream_sse_completion(engine, messages, req.model, sem,
+                    _pin_engine(engine, _stream_sse_completion(engine, messages, reported_model, sem,
                                            audit=_audit, transcript=_transcript,
                                            pipeline=pipeline, ctx=ctx, **gen_kwargs)),
                     media_type="text/event-stream",
@@ -534,7 +543,7 @@ def register(app: FastAPI, ctx) -> None:
                 "id": cid,
                 "object": "text_completion",
                 "created": ts,
-                "model": req.model,
+                "model": reported_model,
                 "choices": [{"text": text, "index": 0, "finish_reason": "stop"}],
                 "usage": {
                     "prompt_tokens": prompt_tokens,

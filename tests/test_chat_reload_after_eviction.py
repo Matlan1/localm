@@ -150,6 +150,12 @@ def test_unnamed_turn_reloads_the_evicted_model(server):
         f"an unnamed turn did not recover the evicted model: "
         f"{r.status_code} {r.text[:200]}")
     assert engines["model-a"].loaded, "the evicted model was never reloaded"
+    # The reply must name the model that answered. model_id is echoed straight
+    # into the response envelope, so letting an unnamed request through without
+    # resolving this field first would return `"model": ""` - an empty field in
+    # an OpenAI-shaped reply, and no way for a caller to know what served it.
+    assert r.json()["model"] == "model-a", (
+        f'unnamed turn reported model {r.json()["model"]!r}')
 
 
 def test_named_turn_still_reloads_the_evicted_model(server):
@@ -176,6 +182,8 @@ def test_completions_route_recovers_too(server):
 
     assert r.status_code == 200, r.text
     assert engines["model-a"].loaded
+    assert r.json()["model"] == "model-a", (
+        f'unnamed completion reported model {r.json()["model"]!r}')
 
 
 def test_empty_model_is_still_400_when_nothing_can_be_resolved(monkeypatch):
