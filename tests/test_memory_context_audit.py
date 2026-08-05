@@ -78,6 +78,13 @@ def test_hf_backend_count_messages_tokens_with_tokenizer():
     # boundary, not the code being tested).
     from localm.inference.backends._hf_worker import HFWorker
 
+    # Safe today ONLY because count_messages_tokens's body has zero torch/
+    # transformers imports. _hf_worker.py's other methods (load/embed/
+    # chat_stream) do function-local torch/transformers imports with no
+    # native_lib_loaded() guard - production code relies entirely on process
+    # isolation (HFWorker only ever runs in a spawned child) for safety, not a
+    # runtime check. If this test starts calling one of THOSE methods, it needs
+    # the same guard as test_hf_prompt_tokenization.py/test_hf_runner_isolation.py.
     backend = HFWorker.__new__(HFWorker)
     mock_tokenizer = MagicMock()
     mock_tokenizer.apply_chat_template.return_value = "hello world"

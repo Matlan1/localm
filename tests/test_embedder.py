@@ -387,6 +387,14 @@ def test_engine_embed_chat_decoder_without_embedder_raises(monkeypatch):
 
 def _hf_backend(model=None):
     from localm.inference.backends._hf_worker import HFWorker
+    # Safe today ONLY because __init__ and can_embed have zero torch/
+    # transformers imports (checked here, not just assumed - see
+    # _hf_worker.py). _hf_worker.py's load/embed/chat_stream methods DO have
+    # unguarded function-local torch/transformers imports - production code
+    # relies entirely on process isolation (HFWorker only ever runs in a
+    # spawned child) for safety, not a runtime check. If this helper starts
+    # calling one of THOSE methods, it needs the same native_lib_loaded()
+    # guard as test_hf_prompt_tokenization.py/test_hf_runner_isolation.py.
     be = HFWorker("does-not-need-to-exist")
     be._model = model
     return be
