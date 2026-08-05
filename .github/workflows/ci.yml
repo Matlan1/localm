@@ -59,17 +59,6 @@ on:
   # against a branch when a change is one the three axes above could bite - a
   # platform-specific path, anything touching dependency resolution - and WSL
   # (Ubuntu, python 3.12) reproduces two of the three for free.
-  # ==================== RELEASE PR ONLY - REMOVE AGAIN ====================
-  # RELEASE.md sanctions exactly ONE use of this trigger per release: the final
-  # release PR gets the two-platform matrix as its gate, and then the trigger
-  # COMES BACK OUT, before or immediately after the release lands.
-  #
-  # Leaving it in silently re-enables a ~7-minute two-platform run in front of
-  # every PR that follows, which is exactly how it got turned back on the last
-  # two times. If you are reading this on master, it was left in by mistake:
-  # delete this block and the pull_request key below.
-  pull_request:
-  # =======================================================================
   workflow_dispatch:
     inputs:
       run_abi:
