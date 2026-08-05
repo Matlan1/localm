@@ -110,6 +110,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   screen for as long as the copy took.
 
 ### Security
+- **Another website open in your browser could obtain the local management
+  credential from a keyless install.** On an install running without an API
+  key, the page that boots the web interface embeds the token that authorizes
+  management actions, and it decided whether to include that token from the
+  address the server had been bound to alone, never from who was asking. A
+  different site you had open could therefore read the token out of that page
+  and act against your instance. The token is now included only for a
+  same-origin request (an ordinary navigation or reload of the interface
+  itself) and withheld from every cross-origin one, whatever `cors_origins` is
+  set to - that setting governs who may read a response, which is a different
+  question from whether the credential was safe to put in one. Using the
+  interface normally on your own machine is unchanged. An install that has an
+  API key set was never affected.
 - **A model or vision projector pulled from an untrusted repo could resolve to
   something other than the plain file it appeared to be.** The filename
   confinement check for a model download (used by `localm pull`, the same-repo
