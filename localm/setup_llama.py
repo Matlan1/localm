@@ -242,27 +242,67 @@ def _lib_name() -> str:
 _BACKEND_MARKER = ".localm-backend"
 
 
-def _record_provisioned_backend(target: Path, backend: str) -> None:
-    """Record *backend* as the one now provisioned in *target*. Best-effort: the
-    marker only optimises the guard, so a write failure is non-fatal (the guard
-    then conservatively re-provisions an explicit pick rather than skipping it).
-    Written AFTER provisioning because _clear_target wipes the dir's files."""
+def _record_provisioned_backend(target: Path, backend: str,
+                                build: "Optional[str]" = None) -> None:
+    """Record *backend* as the one now provisioned in *target*, optionally with
+    the *build* tag it came from. Best-effort: the marker only optimises the
+    guard, so a write failure is non-fatal (the guard then conservatively
+    re-provisions an explicit pick rather than skipping it). Written AFTER
+    provisioning because _clear_target wipes the dir's files.
+
+    Format is ``<backend>`` or ``<backend> <build>``, whitespace-separated. The
+    second token is OPTIONAL by design and is omitted whenever the tag is not
+    known for free - see the call sites. A marker with no build reads back
+    identically for the guard's purposes (see _provisioned_backend), so adding
+    the tag needs no migration and no version detection."""
+    line = (backend or "").strip()
+    if build:
+        line = f"{line} {str(build).strip()}"
     try:
-        (target / _BACKEND_MARKER).write_text((backend or "").strip() + "\n",
-                                              encoding="utf-8")
+        (target / _BACKEND_MARKER).write_text(line + "\n", encoding="utf-8")
     except OSError:
         pass
+
+
+def _read_marker(target: Path) -> "Optional[list]":
+    """The marker's whitespace-separated tokens, or None when there is no
+    readable marker. One reader for both accessors below, so the two can never
+    disagree about how the file is split."""
+    try:
+        raw = (target / _BACKEND_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return raw.split() or None
 
 
 def _provisioned_backend(target: Path) -> "Optional[str]":
     """The backend last provisioned into *target*, or None if unknown (no marker
     - e.g. an install predating the marker, or a hand-placed build). 'Unknown'
-    is treated conservatively by the guard: an explicit pick is re-provisioned."""
-    try:
-        val = (target / _BACKEND_MARKER).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return val or None
+    is treated conservatively by the guard: an explicit pick is re-provisioned.
+
+    THE FIRST WHITESPACE TOKEN, never the whole file. That is what makes the
+    optional build tag safe to add: "amd-rocm" and "amd-rocm b1307" both answer
+    "amd-rocm", so the provision guard's ``have == want`` comparison is byte for
+    byte the decision it always made. A bare .strip() of the whole file would
+    have returned "amd-rocm b1307", matched no backend name, and re-provisioned
+    on EVERY invocation - which on a shared box is precisely the destructive
+    path the runtime-in-use refusal exists to stop. Backward and forward
+    compatible by construction rather than by a version check, which is what a
+    file written by releases you cannot revise needs."""
+    parts = _read_marker(target)
+    return parts[0] if parts else None
+
+
+def _provisioned_build(target: Path) -> "Optional[str]":
+    """The build tag recorded alongside the backend, or None when the marker
+    predates the two-token format or the tag was not knowable at provision time.
+
+    ABSENCE IS NORMAL, never corruption: _record_provisioned_backend is
+    best-effort and omits the tag whenever it is not free to obtain, so every
+    reader must treat None as "not recorded" and say something honest rather
+    than guess a version."""
+    parts = _read_marker(target)
+    return parts[1] if parts and len(parts) > 1 else None
 
 
 def _is_wanted(f: Path) -> bool:
@@ -1897,18 +1937,29 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             console.print(f"[yellow]Replacing {have} build with the "
                           f"auto-detected backend.[/yellow]")
         elif have == want:
-            # Name the build being fetched. "Re-downloading" alone still reads as
-            # a no-op, and the case this came from was a real b1288 -> b1307
-            # upgrade. We cannot name the OLD one: the marker records the backend
-            # only, never a version, so localm genuinely does not know what is
-            # installed. Naming the target is the honest maximum here.
+            # Three genuinely different events that all used to print as
+            # "Re-downloading", which reads as a no-op even when it is an
+            # upgrade. The marker now carries the installed build tag when it is
+            # known (see _provisioned_build), so a real b1288 -> b1307 upgrade
+            # can finally say so.
             #
-            # Only for amd-rocm, whose tag is a pinned constant we already have.
-            # The upstream backends resolve theirs through _latest_tag(), which is
-            # a NETWORK CALL - and a message does not get to make one just to
-            # decorate itself (a call made "just to check" is still a call).
-            tag = f" ({_ROCM_TAG})" if want == "amd-rocm" else ""
-            console.print(f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
+            # Still amd-rocm only: the upstream backends resolve their tag with
+            # _latest_tag(), a NETWORK CALL, and a message does not get to make
+            # one just to decorate itself. For them - and for any marker written
+            # before the tag was recorded - have_build is None and the wording
+            # falls back to naming the target alone, which stays honest about
+            # not knowing what is installed rather than guessing.
+            have_build = _provisioned_build(target) if want == "amd-rocm" else None
+            if have_build and have_build != _ROCM_TAG:
+                console.print(f"[yellow]Upgrading the {have} build: "
+                              f"{have_build} -> {_ROCM_TAG}.[/yellow]")
+            elif have_build:
+                console.print(f"[yellow]Re-downloading the {have} build "
+                              f"({have_build}).[/yellow]")
+            else:
+                tag = f" ({_ROCM_TAG})" if want == "amd-rocm" else ""
+                console.print(
+                    f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
         else:
             console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
 
@@ -1997,7 +2048,14 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             chosen, with_cudart = _cuda_setup_dialogue(info, assume_yes, det)
         result = _provision_with_fallback(chosen, target, sha256, with_cudart,
                                           assume_yes, cuda_line)
-        _record_provisioned_backend(target, result)
+        # Record the build tag ONLY for amd-rocm, whose tag is a pinned constant
+        # already in hand. The upstream backends resolve theirs through
+        # _latest_tag(), a NETWORK CALL, and recording a version is not worth
+        # making one - a call made "just to check" is still a call. Those keep
+        # writing a one-token marker, which _provisioned_build reads back as None
+        # and every reader is required to handle.
+        _record_provisioned_backend(
+            target, result, build=_ROCM_TAG if result == "amd-rocm" else None)
 
     _verify()
 
