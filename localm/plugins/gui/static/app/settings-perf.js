@@ -1540,15 +1540,44 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     document.querySelectorAll(".message-actions button").forEach(b => b.disabled = false);
   }
 
-  // User pressed Stop: leave the partial text on screen but do NOT persist it,
-  // read it aloud, or fire the web loop / recurse on a partial reply (BUG-13).
-  // U-STOP: make the stop unmistakable - mark the partial as stopped and halt any
-  // speech already playing - so a stopped reply is never silently treated as live.
+  // User pressed Stop (BUG-13 / U-STOP). BUG-13's original bug was that the
+  // AbortError catch only suppressed the error toast and then fell straight
+  // into the normal completion tail: it persisted the partial as an ordinary
+  // reply, spoke it aloud, and (with web access on) fed it to parseWebCall
+  // and recursed - a half-formed tool call treated as a real one. The fix
+  // was this early return, which still stands: a stopped reply must never
+  // reach TTS or the web-loop/recursion tail below.
+  //
+  // Persistence itself was reconsidered and is NO LONGER part of that
+  // exemption (this was previously "do NOT persist it" too - re-litigated
+  // after a census flagged the reload data-loss, and BUG-13's own test file
+  // confirms the original bug was never about persistence in isolation, only
+  // about a partial being mistaken for a finished, continuable reply). A
+  // stopped partial is now saved as its own terminal message, built directly
+  // here rather than by falling into the shared reply/persist code below -
+  // that is what keeps TTS and recursion unreachable; deleting this early
+  // return instead and relying on callers to behave is how BUG-13 would
+  // silently come back. `stopped: true` mirrors the existing `truncated`
+  // flag: inert metadata, content stays the raw text (the "*[stopped]*"
+  // marker is added at render time only, in chat.js, so the model never sees
+  // that literal marker in its own prior turn on the next request).
   if (aborted) {
     renderMarkdown(liveBody,
       (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
       (full || reasoning ? "\n\n" : "") + "*[stopped]*");
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* no TTS */ }
+    if (full.trim() || reasoning.trim()) {
+      const reply = {
+        role: "assistant",
+        content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+        model: modelName || undefined,
+        stopped: true,
+      };
+      if (memUsed && memUsed.n > 0) reply.memory = memUsed;
+      conv.messages.push(reply);
+      saveConversations(conv);
+      renderChat();
+    }
     return;
   }
 
@@ -1594,26 +1623,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // F11: record which remembered facts steered this reply so the transcript can
   // show a "used N memories" chip (survives reload; opens the memory modal).
   if (memUsed && memUsed.n > 0) reply.memory = memUsed;
+  // Save usage on the reply itself, not just the DOM, so tok/s and the context
+  // gauge survive a reload instead of only ever having existed on screen for
+  // the session that generated them. renderChat() below reads it back off the
+  // last message via updateUsageDisplay().
+  if (usage) reply.usage = usage;
   conv.messages.push(reply);
   saveConversations(conv);
-  if (usage) {
-    const bits = [`${usage.total_tokens} tok`];
-    if (usage.ttft_ms != null) bits.push(`TTFT ${usage.ttft_ms} ms`);
-    if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
-    $("chat-usage").textContent = bits.join(" · ");
-    
-    // Update context gauge
-    const gaugeContainer = $("context-gauge-container");
-    const gaugeBar = $("context-gauge-bar");
-    if (gaugeContainer && gaugeBar && usage.context_capacity) {
-      const pct = Math.min(100, Math.max(0, (usage.total_tokens / usage.context_capacity) * 100));
-      gaugeBar.style.width = pct + "%";
-      gaugeBar.className = "context-gauge-bar" + (pct > 90 ? " danger" : (pct > 75 ? " warning" : ""));
-      gaugeContainer.classList.add("visible");
-    } else if (gaugeContainer) {
-      gaugeContainer.classList.remove("visible");
-    }
-  }
   renderChat();
 
   // Web-access loop: when the model requested a search/page and the toggle

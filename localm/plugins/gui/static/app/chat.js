@@ -873,6 +873,34 @@ export function buildEmptyHint() {
   return div;
 }
 
+// Render (or clear) the tok/s line and context gauge for *usage* - the same
+// shape the server sends on a completed turn's final SSE chunk. Shared by the
+// live-completion path (settings-perf.js) and renderChat() below, so a
+// reloaded or switched-to conversation shows the same figures a live
+// generation would have, instead of the last conversation's stats lingering
+// on screen or reload wiping them entirely.
+export function updateUsageDisplay(usage) {
+  const gaugeContainer = $("context-gauge-container");
+  const gaugeBar = $("context-gauge-bar");
+  if (!usage) {
+    $("chat-usage").textContent = "";
+    if (gaugeContainer) gaugeContainer.classList.remove("visible");
+    return;
+  }
+  const bits = [`${usage.total_tokens} tok`];
+  if (usage.ttft_ms != null) bits.push(`TTFT ${usage.ttft_ms} ms`);
+  if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
+  $("chat-usage").textContent = bits.join(" · ");
+  if (gaugeContainer && gaugeBar && usage.context_capacity) {
+    const pct = Math.min(100, Math.max(0, (usage.total_tokens / usage.context_capacity) * 100));
+    gaugeBar.style.width = pct + "%";
+    gaugeBar.className = "context-gauge-bar" + (pct > 90 ? " danger" : (pct > 75 ? " warning" : ""));
+    gaugeContainer.classList.add("visible");
+  } else if (gaugeContainer) {
+    gaugeContainer.classList.remove("visible");
+  }
+}
+
 export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
@@ -890,6 +918,7 @@ export function renderChat() {
   }
   if (!conv || conv.messages.length === 0) {
     box.appendChild(buildEmptyHint());
+    updateUsageDisplay(null);
     return;
   }
   const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
@@ -930,6 +959,8 @@ export function renderChat() {
     }
     const noteSuffix = m.truncated
       ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in ⚙ parameters, or reply “continue”]*"
+      : m.stopped
+      ? "\n\n*[stopped]*"
       : "";
     addMessageRow(box, m.role, msgText(m) + noteSuffix, {
       images: msgImages(m),
@@ -950,6 +981,12 @@ export function renderChat() {
   // runs on every re-render (incl mid-stream web/finalize), so an unconditional
   // scroll here used to yank a reader back down while a reply was still streaming.
   if (chat.stick) box.scrollTop = box.scrollHeight;
+  // Reflect the last turn's usage (or clear it) so the figures shown match
+  // whatever conversation is actually on screen - a reload or a switch to a
+  // different conversation must not leave a previous turn's stats lingering,
+  // and a completed turn's stats must survive a reload instead of vanishing.
+  const lastMsg = conv.messages[conv.messages.length - 1];
+  updateUsageDisplay(lastMsg && lastMsg.role === "assistant" ? lastMsg.usage : null);
 }
 
 /* ---- message branching ----
