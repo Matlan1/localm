@@ -519,11 +519,121 @@ def ps_cmd():
 
 
 
+def _fmt_age(seconds) -> str:
+    """A coarse human age. Coarse deliberately: this is "how long has this been
+    going", not a stopwatch, and a precise-looking figure invites the reader to
+    trust a precision the poll interval does not have."""
+    if seconds is None or seconds < 0:
+        return ""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def read_activity(scheme: str, port) -> tuple:
+    """Ask a running server what it is doing. Returns ``(state, payload)``.
+
+    *state* is one of:
+      ``"ok"``           - payload is the parsed body (may hold an empty list)
+      ``"unauthorized"`` - the server wants a key this client does not have
+      ``"unsupported"``  - the server has no activity route (an older localm)
+      ``"http"``         - some other HTTP status; payload is the code
+      ``"unreachable"``  - could not connect; payload is a short reason
+
+    Every non-ok state exists so a caller can say WHICH of them happened.
+    Folding them together, or folding any of them into an empty operation list,
+    would report "nothing is running" on the evidence of never having found
+    out - which is the failure this whole design exists to remove. An empty
+    list is a real answer and is only ever returned under ``"ok"``.
+    """
+    import requests
+
+    from localm import tls as _tls
+    from localm.auth import get_api_key
+
+    url = f"{scheme}://127.0.0.1:{port}/api/activity"
+    headers = {}
+    # env var, else the persisted <home>/auth.key. Reading the env ONLY is the
+    # bug `localm unload` and `localm stop` still carry: a `localm key generate`
+    # or launcher-keyed server keeps its key in auth.key, so an env-only client
+    # 401s against exactly the servers a user is most likely to be running.
+    key = get_api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        r = requests.get(url, headers=headers, timeout=5,
+                         verify=_tls.requests_verify(url))
+    except requests.exceptions.RequestException as e:
+        return "unreachable", type(e).__name__
+    if r.status_code in (401, 403):
+        return "unauthorized", r.status_code
+    if r.status_code == 404:
+        return "unsupported", r.status_code
+    if not r.ok:
+        return "http", r.status_code
+    try:
+        return "ok", r.json()
+    except ValueError:
+        # A 200 whose body is not JSON is not an empty activity list; it means
+        # something other than localm answered, or answered wrongly.
+        return "http", r.status_code
+
+
+def _print_activity(scheme: str, port) -> None:
+    """Render what the server is doing, or why that could not be determined."""
+    state, payload = read_activity(scheme, port)
+    console.print()
+    if state == "unreachable":
+        console.print("[yellow]![/yellow]  Could not ask this server what it is "
+                      f"doing ({payload}). It may have just stopped.")
+        return
+    if state == "unauthorized":
+        console.print("[yellow]![/yellow]  This server needs an API key this "
+                      "client does not have, so its activity is unknown.")
+        console.print("[dim]Set LOCALM_API_KEY, or run from the install whose "
+                      "auth.key it uses.[/dim]")
+        return
+    if state == "unsupported":
+        console.print("[dim]This server does not report activity (it predates "
+                      "this feature).[/dim]")
+        return
+    if state == "http":
+        console.print(f"[yellow]![/yellow]  Could not read activity (HTTP {payload}).")
+        return
+
+    ops = (payload or {}).get("operations") or []
+    if not ops:
+        console.print("[dim]Nothing running right now.[/dim]")
+        return
+    now = (payload or {}).get("now")
+    console.print("[bold]activity[/bold]")
+    for op in ops:
+        label = op.get("label") or op.get("kind") or "operation"
+        pct = op.get("pct")
+        # Absent, not zero: an operation that has not reported progress is at an
+        # UNKNOWN percentage, so print nothing rather than a confident 0%.
+        pct_s = f"  {pct:.0f}%" if isinstance(pct, (int, float)) else ""
+        # Age against the SERVER's clock, never this machine's: the two can
+        # disagree, and a wrong duration is exactly the kind of confident
+        # falsehood this command exists to avoid.
+        age = ""
+        if isinstance(now, (int, float)) and isinstance(op.get("created_at"), (int, float)):
+            age = _fmt_age(now - op["created_at"])
+        age_s = f"  [dim]{age}[/dim]" if age else ""
+        status = op.get("status") or "?"
+        colour = {"running": "cyan", "done": "green",
+                  "failed": "red", "cancelled": "yellow"}.get(status, "white")
+        console.print(f"  [{colour}]{status:<9}[/{colour}] {label}{pct_s}{age_s}")
+
+
 @main.command("status")
 @click.option("--project", default=None, type=click.Path(file_okay=False),
               help="Check this directory instead of the current one.")
 def status_cmd(project):
-    """Show the localm server serving this directory, if any."""
+    """Show the localm server serving this directory, and what it is doing."""
     from localm import instances
     from localm.config import home_dir
     root = instances.resolve_root_dir(override=project)
@@ -540,6 +650,13 @@ def status_cmd(project):
     console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
     console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
     console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
+    # The one place a terminal can learn what a running server is actually
+    # doing. Everything above is read from the on-disk instance registry and is
+    # fixed at process start; none of it can tell you a model pull is halfway
+    # through. Printed last so the identity block still renders when the server
+    # cannot be reached.
+    _print_activity(scheme, entry.get("port"))
+    console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 
 
