@@ -240,6 +240,14 @@ def register(app: FastAPI, ctx) -> None:
                 # action on ANY loaded model, not just the active one.
                 "loaded": loaded,
                 "model_type": mtype,
+                # F8-PERSIST-ARCH-AND-EXPERT-COUNT: entry.get(...) with no
+                # default, NOT entry.get(..., 0)/get(..., "") - a model
+                # registered before this existed has neither key at all, and
+                # that must reach the client as None (unknown), never as a
+                # false "0 experts"/"no architecture" that would badge a real
+                # MoE model as confirmed-dense the moment something trusted it.
+                "architecture": entry.get("architecture"),
+                "expert_count": entry.get("expert_count"),
             })
         out = {"models": models, "active": current}
         # The multi-GPU split distribution the ACTIVE model's load actually

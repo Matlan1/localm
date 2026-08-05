@@ -724,6 +724,12 @@ def _pull_gguf_file(
                 return False
         if register:
             reg_type = model_type
+            # F8-PERSIST-ARCH-AND-EXPERT-COUNT: one shared header probe backs the
+            # mmproj/embedding refinement below AND the persisted architecture/
+            # expert_count, the same sharing _detect_local_model_type does -
+            # capturing it regardless of type_is_auto, since it is a fact about
+            # the file, not about which type label this call ends up choosing.
+            gguf_meta = _mm.gguf_registry_metadata(dest)
             if type_is_auto and reg_type == "llm":
                 if _mm.gguf_is_mmproj(dest):
                     console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
@@ -735,7 +741,8 @@ def _pull_gguf_file(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  digest=verify_digest, model_type=reg_type,
-                                 mmproj=mmproj_path)
+                                 mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
+                                 expert_count=gguf_meta.get("expert_count"))
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
@@ -821,6 +828,9 @@ def _pull_gguf_file(
 
     if register:
         reg_type = model_type
+        # F8-PERSIST-ARCH-AND-EXPERT-COUNT: see the "already downloaded" branch
+        # above - same shared-probe reasoning, freshly-downloaded case.
+        gguf_meta = _mm.gguf_registry_metadata(base_dir / filename)
         if type_is_auto and reg_type == "llm":
             if _mm.gguf_is_mmproj(base_dir / filename):
                 console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
@@ -831,7 +841,9 @@ def _pull_gguf_file(
         mmproj_path = _mmproj_for_registration(
             reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
-                  sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path)
+                  sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
+                  architecture=gguf_meta.get("architecture"),
+                  expert_count=gguf_meta.get("expert_count"))
         console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
     else:
         console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
@@ -919,7 +931,7 @@ def _resolve_snapshot_type(dest: Path, model_type: str) -> str:
     """
     if model_type != "unknown":
         return model_type
-    detected = _detect_local_model_type(dest, is_gguf=False, is_hf=True)
+    detected, _gmeta = _detect_local_model_type(dest, is_gguf=False, is_hf=True)
     logger.info("Snapshot %s typed %r from its downloaded config.json (the HF "
                 "pipeline_tag probe could not resolve it)", dest.name, detected)
     if detected != "unknown":

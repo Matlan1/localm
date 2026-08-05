@@ -714,3 +714,178 @@ def test_setup_embeddings_registers_once_not_twice(isolated_home, monkeypatch):
     reg2 = mm.load_registry()
     assert len(reg2) == len(reg1)
     assert set(reg2) == set(reg1)
+
+
+# --------------- F8-PERSIST-ARCH-AND-EXPERT-COUNT-ON-REGISTRY --------------- #
+# A local model's registry entry now carries its own header's architecture and
+# MoE expert_count, captured once at registration - the same real signal the
+# HuggingFace search page already shows for a remote repo (#990/#1001), now
+# available for an already-registered model too instead of only ever being a
+# name guess. expert_count=0 is a real, CONFIRMED fact (the header was read and
+# genuinely has no experts) and must stay written and distinct from an entry
+# that was never checked at all (the key absent entirely) - collapsing the two
+# would show a real MoE model as confirmed-dense the moment a caller defaulted
+# a missing field to 0. See gguf.gguf_registry_metadata's own docstring for the
+# measured cost (a real 6.6 GB model: ~205ms for the one read this needs).
+
+def _build_gguf_bytes_with_expert_count(architecture: str, expert_count: int) -> bytes:
+    """Like _build_gguf_bytes, but writes a REAL uint32 '<architecture>.expert_count'
+    key (GGUF type 4) instead of a placeholder string - gguf_expert_count's own
+    reader (_gguf_read_scalar) only accepts a fixed-width numeric type, so a
+    string-typed placeholder (as the base helper writes for every OTHER key)
+    would silently fail to parse and always read back as 0/unknown, hiding a
+    real bug in this exact test."""
+    def _kv_string(key: str, value: str) -> bytes:
+        kb = key.encode("utf-8")
+        vb = value.encode("utf-8")
+        return (struct.pack("<Q", len(kb)) + kb + struct.pack("<I", 8)
+                + struct.pack("<Q", len(vb)) + vb)
+
+    def _kv_uint32(key: str, value: int) -> bytes:
+        kb = key.encode("utf-8")
+        return struct.pack("<Q", len(kb)) + kb + struct.pack("<I", 4) + struct.pack("<I", value)
+
+    buf = bytearray()
+    buf += b"GGUF"
+    buf += struct.pack("<I", 3)
+    buf += struct.pack("<Q", 0)
+    buf += struct.pack("<Q", 2)   # kv_count: architecture + expert_count
+    buf += _kv_string("general.architecture", architecture)
+    buf += _kv_uint32(f"{architecture}.expert_count", expert_count)
+
+    floor = _gguf_mod._GGUF_MIN_BYTES
+    if len(buf) < floor:
+        buf += b"\x00" * (floor - len(buf))
+    return bytes(buf)
+
+
+class TestGgufRegistryMetadata:
+    def test_confirmed_moe_persists_architecture_and_expert_count(self, tmp_path):
+        f = tmp_path / "moe.gguf"
+        f.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 8))
+        assert _gguf_mod.gguf_registry_metadata(f) == {"architecture": "qwen3moe", "expert_count": 8}
+
+    def test_confirmed_dense_persists_a_real_zero_not_none(self, tmp_path):
+        f = tmp_path / "dense.gguf"
+        f.write_bytes(_build_gguf_bytes("llama"))   # no expert_count key at all
+        result = _gguf_mod.gguf_registry_metadata(f)
+        assert result["architecture"] == "llama"
+        assert result["expert_count"] == 0, "a confirmed-read dense model must store 0, not None"
+
+    def test_unreadable_file_reports_unknown_not_a_false_zero(self, tmp_path):
+        f = tmp_path / "corrupt.gguf"
+        f.write_bytes(b"NOT A REAL GGUF HEADER AT ALL" + b"\x00" * 1024)
+        result = _gguf_mod.gguf_registry_metadata(f)
+        assert result == {"architecture": None, "expert_count": None}, \
+            "an unparseable file must report unknown (None), never a false 0/confirmed-dense"
+
+    def test_meta_param_avoids_a_second_probe_read(self, tmp_path, monkeypatch):
+        f = tmp_path / "moe.gguf"
+        f.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 4))
+        calls = []
+        real_probe = _gguf_mod._gguf_metadata_probe
+        monkeypatch.setattr(_gguf_mod, "_gguf_metadata_probe",
+                            lambda p: (calls.append(1), real_probe(p))[1])
+        meta = _gguf_mod._gguf_metadata_probe(f)
+        calls.clear()
+        _gguf_mod.gguf_registry_metadata(f, meta=meta)
+        assert calls == [], "passing a pre-computed meta must not trigger a second probe read"
+
+
+class TestAddLocalPersistsArchAndExpertCount:
+    def test_add_local_persists_moe_metadata(self, tmp_path, isolated_home):
+        f = tmp_path / "big-moe.gguf"
+        f.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 8))
+        assert mm.add_local(str(f)) is True
+        entry = mm.load_registry()["big-moe"]
+        assert entry["architecture"] == "qwen3moe"
+        assert entry["expert_count"] == 8
+
+    def test_add_local_persists_confirmed_dense_as_zero(self, tmp_path, isolated_home):
+        f = tmp_path / "plain-llama.gguf"
+        f.write_bytes(_build_gguf_bytes("llama"))
+        assert mm.add_local(str(f)) is True
+        entry = mm.load_registry()["plain-llama"]
+        assert entry["architecture"] == "llama"
+        assert entry["expert_count"] == 0
+
+    def test_add_local_with_explicit_type_override_still_captures_metadata(self, tmp_path, isolated_home):
+        # An explicit --type must not skip reading the file's own header - the
+        # type LABEL and the architecture/expert_count FACTS are orthogonal.
+        f = tmp_path / "forced.gguf"
+        f.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 8))
+        assert mm.add_local(str(f), model_type="embedding") is True
+        entry = mm.load_registry()["forced"]
+        assert entry["model_type"] == "embedding"
+        assert entry["architecture"] == "qwen3moe"
+        assert entry["expert_count"] == 8
+
+    def test_hf_dir_entry_has_no_gguf_metadata(self, tmp_path, isolated_home):
+        d = _hf_dir(tmp_path, "an-hf-model", architectures=["LlamaForCausalLM"])
+        assert mm.add_local(str(d)) is True
+        entry = mm.load_registry()["an-hf-model"]
+        assert "architecture" not in entry, "an HF dir has no GGUF header to read"
+        assert "expert_count" not in entry
+
+
+class TestSyncModelsDirBackfillsArchAndExpertCount:
+    def test_sync_backfills_a_pre_existing_entry_missing_the_fields(self, isolated_home):
+        # Simulates an entry registered before this feature existed: written
+        # directly via _register with no architecture/expert_count kwargs.
+        dest = isolated_home / "models" / "legacy-moe.gguf"
+        dest.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 8))
+        mm._register("legacy-moe", dest, "local", model_type="llm")
+        before = mm.load_registry()["legacy-moe"]
+        assert "architecture" not in before and "expert_count" not in before
+
+        result = mm.sync_models_dir()
+        assert result.backfilled == 1
+        assert result.changed is True
+
+        after = mm.load_registry()["legacy-moe"]
+        assert after["architecture"] == "qwen3moe"
+        assert after["expert_count"] == 8
+
+    def test_sync_never_overwrites_an_already_resolved_entry(self, isolated_home):
+        # Even a stored 0/falsy value must never be re-read or clobbered - the
+        # presence of the KEY (not its truthiness) is what "already resolved"
+        # means throughout this feature.
+        dest = isolated_home / "models" / "already-known.gguf"
+        dest.write_bytes(_build_gguf_bytes_with_expert_count("qwen3moe", 99))
+        mm._register("already-known", dest, "local", model_type="llm",
+                     architecture="something-else", expert_count=0)
+
+        result = mm.sync_models_dir()
+        assert result.backfilled == 0
+
+        after = mm.load_registry()["already-known"]
+        assert after["architecture"] == "something-else", "an existing value must never be re-read"
+        assert after["expert_count"] == 0
+
+    def test_sync_backfill_is_capped_per_call(self, isolated_home):
+        # _BACKFILL_CAP = 5: a user with many pre-existing models must not pay
+        # for reading every one of them on a single sync call.
+        for i in range(8):
+            dest = isolated_home / "models" / f"legacy-{i}.gguf"
+            dest.write_bytes(_build_gguf_bytes("llama"))
+            mm._register(f"legacy-{i}", dest, "local", model_type="llm")
+
+        result = mm.sync_models_dir()
+        assert result.backfilled == 5, "the cap must actually bound the work done in one call"
+
+        reg = mm.load_registry()
+        backfilled_now = sum(1 for n in reg if "architecture" in reg[n])
+        assert backfilled_now == 5
+
+        # A second call makes further progress on the remaining entries.
+        result2 = mm.sync_models_dir()
+        assert result2.backfilled == 3
+        reg2 = mm.load_registry()
+        assert all("architecture" in reg2[n] for n in reg2)
+
+    def test_sync_does_not_backfill_a_non_gguf_entry(self, isolated_home):
+        d = _hf_dir(isolated_home, "an-hf-model", architectures=["LlamaForCausalLM"])
+        mm._register("an-hf-model", d, "local", model_type="llm")
+        result = mm.sync_models_dir()
+        assert result.backfilled == 0
+        assert "architecture" not in mm.load_registry()["an-hf-model"]

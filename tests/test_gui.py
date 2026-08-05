@@ -1187,6 +1187,35 @@ class TestModelEndpoints:
         assert proj_r.status_code == 200
         assert [m["name"] for m in proj_r.json()["models"]] == ["vision-proj"]
 
+    def test_models_exposes_architecture_and_expert_count(self, gui_app):
+        """F8-PERSIST-ARCH-AND-EXPERT-COUNT: entry.get(...) with no default -
+        a confirmed-MoE entry, a confirmed-dense entry (expert_count: 0, a real
+        fact, must survive as 0, not be coerced away), and a legacy entry with
+        NEITHER key must each reach the client distinctly - the legacy row as
+        None/None, never a false 0/"" that would misreport an unchecked model
+        as confirmed dense."""
+        registry = {
+            "moe-model": {"path": "Z:/nonexistent/moe.gguf", "source": "local",
+                          "model_type": "llm", "architecture": "qwen3moe", "expert_count": 8},
+            "dense-model": {"path": "Z:/nonexistent/dense.gguf", "source": "local",
+                            "model_type": "llm", "architecture": "llama", "expert_count": 0},
+            "legacy-model": {"path": "Z:/nonexistent/legacy.gguf", "source": "local",
+                             "model_type": "llm"},
+        }
+        app, _ = gui_app
+        with patch("localm.config.load_registry", return_value=registry):
+            with TestClient(app) as client:
+                data = client.get("/api/models").json()
+        by_name = {m["name"]: m for m in data["models"]}
+        assert by_name["moe-model"]["architecture"] == "qwen3moe"
+        assert by_name["moe-model"]["expert_count"] == 8
+        assert by_name["dense-model"]["architecture"] == "llama"
+        assert by_name["dense-model"]["expert_count"] == 0, \
+            "a confirmed dense model's real 0 must survive the API, not vanish"
+        assert by_name["legacy-model"]["architecture"] is None
+        assert by_name["legacy-model"]["expert_count"] is None, \
+            "a legacy entry with no key at all must report None (unknown), never a false 0"
+
     def test_load_unknown_model_404(self, gui_app):
         app, _ = gui_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
