@@ -181,20 +181,31 @@ class TestMessageMarkupIsEscaped:
         success_lines = [c for c in calls if isinstance(c, str) and "[green]" in c]
         assert success_lines and "\\[str, int]" in success_lines[0]
 
-    def test_an_unmatched_bracket_does_not_crash_the_command(self, cli_runner, monkeypatch):
-        """The sharper case: an UNMATCHED '[' (a truncated traceback line, a
-        Windows path fragment) is a rich markup SYNTAX error, not merely an
-        unrecognized style name. _warn_if_repo_ships_code's own docstring
-        (pull.py) documents this exact rich version raising MarkupError on
-        unescaped unmatched brackets. Confirms the fix prevents a real crash,
-        not merely that some escaping call was made."""
+    def test_an_unmatched_close_tag_does_not_crash_the_command(self, cli_runner, monkeypatch):
+        """The sharper case, EMPIRICALLY VERIFIED against this exact rich
+        version before writing this test (an ordinary stray '[' with no
+        close-tag shape, e.g. a bare Windows path fragment, does NOT raise -
+        it is merely silently swallowed, which the escaped-content assertions
+        above already cover). A bracket pair shaped like a CLOSE tag with no
+        matching open ('[/b]', matching _warn_if_repo_ships_code's own
+        documented crash in pull.py) is a genuine rich markup SYNTAX error:
+
+            >>> Console().print("[green]done [/b]evil[/green]")
+            rich.errors.MarkupError: closing tag '[/b]' at position 12
+            doesn't match any open tag
+
+        A subprocess tail() a Python traceback easily produces this shape
+        (e.g. a raised exception whose message itself contains bracketed
+        text). Confirms the fix prevents a REAL crash, not merely that some
+        escaping call was made against a pattern that was never going to
+        raise regardless."""
         monkeypatch.setattr(prov_mod, "discover_user_comfy", lambda cfg: None)
         monkeypatch.setattr(
             fresh_mod, "setup_managed_comfy",
-            lambda *a, **k: _ok_result(message="done, wrote C:\\out[final"))
+            lambda *a, **k: _ok_result(message="done, wrote [/b]evil"))
 
         result = cli_runner.invoke(comfy_cli.comfy_setup, ["--no-custom-nodes"])
 
         assert result.exit_code == 0, (
-            f"an unmatched bracket in the message must not crash the "
-            f"command: {result.exception}\n{result.output}")
+            f"an unmatched close-tag-shaped fragment in the message must not "
+            f"crash the command: {result.exception}\n{result.output}")
