@@ -12,6 +12,22 @@ sustained window, plus the live numbers on ``GET /debug/stacks`` - without
 inventing a hard gate that could reject legitimate load: this is an
 observability signal, not a new failure mode.
 
+**THIS MODULE BUYS OBSERVABILITY, NOT RECOVERY - state this explicitly so it
+is never assumed.** A wedged worker in any of the three pools below still
+hangs FOREVER after this module reports it: nothing here cancels the stuck
+call, nothing frees the token/slot it holds, and the one HTTP request
+depending on it never returns. Confirmed for the anyio pool specifically: no
+call site wraps its ``run_in_threadpool`` call in a timeout, uvicorn is
+started with no ``timeout_keep_alive``/request-level timeout at all, and the
+hang watchdog is scoped by design to a STALLED EVENT LOOP - a genuinely
+different failure mode, since a hung anyio worker does NOT stall the loop
+(every other request keeps being served normally; only the one relying on
+that worker hangs). So for anyio's pool, this module is not one signal among
+several - it is the only one, and "anyio pool monitored" must never be read
+as "anyio pool protected". A timeout/cancellation mechanism is a genuinely
+separate design question (per-site or global, what happens to a
+half-finished write) and is deliberately NOT this module's job.
+
 THREE pools are watched, symmetrically, for the same blast-radius reason
 ``localm/executor.py``'s own docstring already gives for splitting the first
 two: the asyncio loop's TRUE default executor (every ``run_in_executor(None,
