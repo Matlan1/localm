@@ -106,6 +106,32 @@ def test_clear_target_or_refuse_flags_the_probe_to_unlink_race_as_partial(tmp_pa
     assert ei.value.partial is True, "a half-cleared dir must not report as intact"
 
 
+def test_exit_runtime_in_use_exits_non_zero(capsys):
+    """The self-updater runs `setup-llama` as a post-swap command and ROLLS THE
+    WHOLE UPDATE BACK on a non-zero exit (updater.py `_rollback_or_raise`). That
+    is the wanted behaviour here and it is why this contract is pinned: a runtime
+    that could not be re-provisioned beside freshly swapped code is exactly the
+    ABI mismatch the isolation exists to avoid, so completing the update would be
+    worse than undoing it. Before this change the same situation could silently
+    fall back to a different backend and report success."""
+    with pytest.raises(SystemExit) as ei:
+        setup_llama._exit_runtime_in_use(
+            setup_llama.RuntimeInUseError([Path("llama.dll")], partial=False))
+    assert ei.value.code == 1
+    out = capsys.readouterr().out
+    assert "in use" in out
+    assert "left untouched" in out, "an intact install must say so"
+
+
+def test_exit_runtime_in_use_does_not_claim_intact_after_a_partial_clear(capsys):
+    with pytest.raises(SystemExit):
+        setup_llama._exit_runtime_in_use(
+            setup_llama.RuntimeInUseError([Path("llama.dll")], partial=True))
+    out = capsys.readouterr().out
+    assert "left untouched" not in out, "it was NOT untouched; saying so would be a lie"
+    assert "incomplete" in out
+
+
 def test_clear_target_or_refuse_is_a_no_op_signal_on_a_clean_dir(tmp_path):
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     setup_llama._clear_target_or_refuse(tmp_path)          # must not raise
