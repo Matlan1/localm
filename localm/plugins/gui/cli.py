@@ -556,12 +556,24 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         if m_info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = m_info
-        # VIS-1: an explicit --mmproj always wins; otherwise fall back to the
-        # model's own recorded/sibling projector (get_model_mmproj), or the
-        # common case - a pulled vision GGUF, no --mmproj flag given -
-        # silently loses image support on every load AND every switch this
-        # factory serves (#957).
-        mmproj_path = mmproj or get_model_mmproj(name, allow_direct_path=allow_direct_path)
+        # VIS-1: an explicit --mmproj always wins for the model it was given
+        # for; otherwise fall back to the model's own recorded/sibling
+        # projector (get_model_mmproj), or the common case - a pulled vision
+        # GGUF, no --mmproj flag given - silently loses image support on every
+        # load AND every switch this factory serves (#957).
+        #
+        # VIS-3: --mmproj is scoped to `model` (the STARTUP model this server
+        # was launched with), never to the process. This factory is reused by
+        # every later switch_engine call for ANY model name, so an unscoped
+        # `mmproj or ...` silently applied the startup model's projector to
+        # whatever model was switched to next - including overriding a
+        # DIFFERENT model's own, correctly-recorded projector with one that
+        # was never meant for it (found 2026-08-05, see
+        # dev-notes/FINDING-gui-mmproj-closure-bleed-2026-08-05.md). Every name
+        # other than the startup model falls through to its own registry
+        # lookup, exactly as if --mmproj had never been given.
+        mmproj_path = (mmproj if name == model else None) or get_model_mmproj(
+            name, allow_direct_path=allow_direct_path)
         return Engine(
             str(m_path),
             n_ctx=ctx,
