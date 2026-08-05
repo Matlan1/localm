@@ -759,7 +759,7 @@ def unload_cmd(model):
     import requests
 
     from .. import instances, tls
-    from ..auth import get_api_key
+    from ..auth import resolve_bearer_headers
 
     url = os.environ.get("LOCALM_URL", "").rstrip("/")
     entry = None
@@ -774,24 +774,13 @@ def unload_cmd(model):
         scheme = entry.get("scheme", "http")
         url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
 
-    headers = {}
-    # env var, else the persisted <home>/auth.key - os.environ-only missed a
-    # `localm key generate` / launcher-keyed server (the key lives in
-    # auth.key, not the env), the same bug #1094/#1114 fixed for
-    # read_activity/self_request in this same auth-plumbing area.
-    key = get_api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    elif entry is not None and entry.get("token"):
-        # Open (keyless) mode: the discovered instance's own attach token
-        # (0600 per-instance registry file, never reachable by a browser) is
-        # what _origin_guard's open-mode management gate accepts in place of
-        # a key - same credential, same fallback shape as #1114's
-        # self_request fix and #953's read_activity. Only available when the
-        # server was found via discovery (find_attachable, above); an
-        # explicit LOCALM_URL override has no registry entry to read a token
-        # from.
-        headers["Authorization"] = f"Bearer {entry['token']}"
+    # Owner key (env, else persisted auth.key) wins; else the discovered
+    # instance's own attach token (0600 per-instance registry file) - what
+    # _origin_guard's open-mode management gate accepts in place of a key.
+    # Only available when the server was found via discovery (find_attachable,
+    # above); an explicit LOCALM_URL override has no registry entry to read a
+    # token from.
+    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
 
     try:
         resp = requests.post(f"{url}/v1/models/unload", headers=headers,
@@ -863,7 +852,7 @@ def stop_cmd(instance_id, stop_all, timeout):
     import requests
 
     from .. import instances, tls
-    from ..auth import get_api_key
+    from ..auth import resolve_bearer_headers
     from ..config import home_dir
 
     if instance_id and stop_all:
@@ -902,10 +891,6 @@ def stop_cmd(instance_id, stop_all, timeout):
             sys.exit(1)
         targets = [entry]
 
-    # env var, else the persisted <home>/auth.key - same fix as unload_cmd,
-    # #1094/#1114 (read_activity/self_request).
-    key = get_api_key()
-
     any_failed = False
     for entry in targets:
         iid = str(entry.get("instance_id", ""))[:8]
@@ -915,14 +900,10 @@ def stop_cmd(instance_id, stop_all, timeout):
         url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
 
         # Per-target: --all / an id prefix can span several instances, each
-        # with its OWN attach token, so the open-mode fallback must be built
-        # inside the loop (the owner key, if any, is process-wide and stays
-        # outside it).
-        headers = {}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        elif entry.get("token"):
-            headers["Authorization"] = f"Bearer {entry['token']}"
+        # with its OWN attach token, so the open-mode fallback must be
+        # resolved inside the loop (the owner key, if any, is process-wide
+        # and resolve_bearer_headers re-reads it identically each time).
+        headers = resolve_bearer_headers(entry.get("token"))
 
         stopped = False
         graceful_denied = False

@@ -112,6 +112,30 @@ class TestGenerateVideo:
                 "a red fox running", tmp_path / "out.mp4", **kwargs)
         return ok, msg, captured
 
+    def test_instance_token_reaches_localm_unload(self, tmp_path):
+        """The video route's instance_token (its own attach token, for
+        keyless-mode auth on the localm_url unload call) must reach
+        _localm_unload, not be silently dropped somewhere between the
+        plug.py route and comfy.py's call site - the fifth site of the
+        credential-precedence class fixed alongside cli/models.py (#1121)
+        and self_request (#1114): generate_video did not even accept an
+        instance_token parameter before this fix."""
+        captured = {}
+        fake = _fake_comfy(captured)
+        unload_spy = MagicMock(return_value=None)
+        comfy_out = tmp_path / "comfy_out"
+        with patch.object(comfy, "ensure_comfy",
+                          return_value=(True, "ComfyUI is running.")), \
+             patch.object(comfy, "_localm_unload", unload_spy), \
+             patch.object(comfy.urllib.request, "urlopen", fake), \
+             patch.object(comfy.time, "sleep"), \
+             patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
+            ok, msg = comfy.generate_video(
+                "a red fox running", tmp_path / "out.mp4",
+                localm_url="http://127.0.0.1:9/v1", instance_token="tok-abc")
+        assert ok, msg
+        unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
+
     def test_happy_path_saves_clip_and_sidecar(self, tmp_path):
         ok, msg, captured = self._run(tmp_path, seconds=5.0, fps=24, seed=42)
         assert ok, msg

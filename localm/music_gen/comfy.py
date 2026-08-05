@@ -163,6 +163,7 @@ def generate_music(
     ckpt_name: Optional[str] = None,
     model_overrides: Optional[dict] = None,
     localm_url: Optional[str] = None,
+    instance_token: Optional[str] = None,
     max_poll_seconds: int = 1800,
     on_progress=None,
     write_sidecar: bool = True,
@@ -209,6 +210,11 @@ def generate_music(
         the same field still wins if both are given.
     localm_url
         localm server /v1 URL to unload before generation (VRAM handoff).
+    instance_token
+        This server's own attach token, forwarded to the ``localm_url``
+        unload call so it authenticates on a keyless (open-mode) server too -
+        see ``selfclient.self_request``'s docstring. Only used as a fallback
+        when no owner API key is configured.
     max_poll_seconds
         Timeout waiting for ComfyUI (default 30 minutes - long tracks are slow).
     on_progress
@@ -274,7 +280,7 @@ def generate_music(
 
     # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
     if swap:
-        _localm_unload(localm_url)
+        _localm_unload(localm_url, instance_token)
 
     # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
     # nodes per the plan resolve_media_placement() decided. A component whose loader is
