@@ -8,17 +8,20 @@ zero-length render as success (an empty prompt instead of the ChatML
 fallback). A correct runtime never hits either, but a genuinely bad decode or
 template must surface or fall back, not silently produce garbage (rule 5)."""
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from localm.inference.backends.llamacpp.llama import (
+    LlamaCpp,
     _Tokenizer,
     _apply_model_template,
     _format_chatml,
 )
 
 _LLAMA_API = "localm.inference.backends.llamacpp.llama.api"
+_APPLY_TEMPLATE = "localm.inference.backends.llamacpp.llama._apply_model_template"
 
 
 def _tokenizer():
@@ -181,3 +184,62 @@ class TestApplyTemplateFallbackIsSurfaced:
         assert out == "RENDERED PROMPT"
         assert reason is None
         assert not any("chat template not recognized" in r.message for r in caplog.records)
+
+
+class TestFallbackReasonReachesTheInstance:
+    """create_chat_completion (and _generate_image, identical two-line shape)
+    must actually RECORD the reason _apply_model_template returns onto
+    self.chat_template_fallback_reason - that attribute is the only thing
+    GgufWorker's chatml_fallback_reason property reads, so a broken link here
+    would silently defeat the whole visibility fix despite every other test
+    in this file and in test_chatml_fallback_visibility.py passing (neither
+    of those exercises this exact link: the return-guard tests call
+    _apply_model_template directly, and the visibility tests fake the runner
+    below the LlamaCpp layer entirely)."""
+
+    _FAKES: list = []
+
+    def _bare_llama(self) -> LlamaCpp:
+        llm = LlamaCpp.__new__(LlamaCpp)
+        llm._n_ctx = 4096
+        llm._n_ctx_max = None
+        llm._n_ctx_grow = 4096
+        llm._seed = 1234
+        llm._verbose = False
+        llm._model_ptr = 111
+        llm._ctx_ptr = 222
+        llm._tokenizer = MagicMock()
+        llm._cached_tokens = []
+        llm._ctx_capacity = 4096
+        llm._kv_supported = None
+        llm._gen_lock = threading.RLock()
+        llm._inference_lock = threading.Lock()
+        llm._stop = threading.Event()
+        llm.chat_template_fallback_reason = None
+        self._FAKES.append(llm)
+        return llm
+
+    @pytest.fixture(autouse=True)
+    def _null_fake_pointers(self):
+        yield
+        for llm in self._FAKES:
+            llm._model_ptr = None
+            llm._ctx_ptr = None
+        self._FAKES.clear()
+
+    def test_create_chat_completion_records_the_fallback_reason(self):
+        llm = self._bare_llama()
+        with patch(_APPLY_TEMPLATE,
+                   return_value=("hi", "model has no embedded chat template")), \
+             patch.object(llm, "_generate", return_value=iter([])):
+            llm.create_chat_completion(
+                [{"role": "user", "content": "x"}], stream=False)
+        assert llm.chat_template_fallback_reason == "model has no embedded chat template"
+
+    def test_create_chat_completion_leaves_it_none_when_template_is_fine(self):
+        llm = self._bare_llama()
+        with patch(_APPLY_TEMPLATE, return_value=("hi", None)), \
+             patch.object(llm, "_generate", return_value=iter([])):
+            llm.create_chat_completion(
+                [{"role": "user", "content": "x"}], stream=False)
+        assert llm.chat_template_fallback_reason is None
