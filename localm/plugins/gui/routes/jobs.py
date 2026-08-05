@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from localm.inference.http_server import _require_auth, require_owner
+from localm.inference.http_server import _require_auth, job_owner_ok, require_owner
 
 
 def register(app: FastAPI, jobs) -> None:
@@ -38,6 +38,40 @@ def register(app: FastAPI, jobs) -> None:
     # Same 404 whether the job is missing or belongs to someone else, so a
     # non-owner cannot even confirm the (unguessable) id exists (KEY-SCOPE-2).
     owned_job = require_owner(_resolve_job)
+
+    @app.get("/api/activity", dependencies=[Depends(_require_auth)])
+    async def activity(request: Request):
+        """What this server is doing right now, plus what it recently finished.
+
+        THE POINT (ADR-0008): every other way to reach a job needs an id the
+        caller already holds, and that id is handed out exactly once, in the
+        body of the POST that started the job. So a second browser tab, a
+        second device, or the same tab after a reload could not discover that a
+        model pull was running even though the server knew - the state was
+        recorded and simply unreachable. This is the one route that answers
+        "what is happening" without being told what to look for.
+
+        NOT under /api/jobs. That prefix already belongs to the scheduled-jobs
+        plugin, whose jobs are recurring TASK DEFINITIONS in a persisted store,
+        a different concept in a different id space under a different gate
+        (require_scope("jobs")). Adding an in-flight listing there would put two
+        meanings on one prefix.
+
+        No capability scope, deliberately: this returns a strict subset of what
+        the caller may already stream by id, so gating it more tightly than
+        /api/jobs/{id}/events would be theatre. Ownership is enforced with the
+        same job_owner_ok the events and cancel routes use.
+
+        MIND THE DEFAULT CONFIGURATION. With no owner key and no keystore -
+        which is how localm runs out of the box - principal_id() returns None,
+        so every job is unowned and job_owner_ok admits any authenticated
+        caller. That is the correct behaviour for a single-owner local server
+        and it is NOT a filter failure, but it does mean this list is
+        per-principal only on a KEYED server. Nothing downstream may assume
+        otherwise.
+        """
+        return {"operations": jobs.snapshot(
+            visible=lambda owner: job_owner_ok(request, owner))}
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
     async def job_events(job=Depends(owned_job)):

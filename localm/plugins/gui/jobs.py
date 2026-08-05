@@ -412,8 +412,14 @@ class JobManager:
         threading.Thread(target=_run, daemon=True).start()
         return job
 
-    def snapshot(self) -> list:
+    def snapshot(self, visible=None) -> list:
         """Every tracked job as a listing row, newest first.
+
+        *visible*, when given, is called with each job's ``owner`` and decides
+        whether that job appears. It takes a PREDICATE rather than a principal
+        id so the owner never has to leave this class: the caller supplies the
+        policy (``job_owner_ok`` needs the request to evaluate it), the manager
+        keeps the identity, and ``summary()`` still never carries it.
 
         This is the ONLY way to learn a job exists without already holding its
         id. Until it existed, a job id was handed out exactly once - in the body
@@ -429,6 +435,8 @@ class JobManager:
         """
         with self._lock:
             jobs = list(self._jobs.values())
+        if visible is not None:
+            jobs = [j for j in jobs if visible(j.owner)]
         return sorted((j.summary() for j in jobs),
                       key=lambda s: s["created_at"], reverse=True)
 
