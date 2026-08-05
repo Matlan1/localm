@@ -82,6 +82,57 @@ def test_upload_report_posts_and_returns_issue_url():
     assert not any("github" in k.lower() for k in seen["headers"])
 
 
+def test_upload_report_strips_edit_disclaimer_from_body():
+    """LM-DA-PUBTEXT: build_report()'s "you can edit anything above before
+    sending" disclaimer (and the maintainer's email it names) is TRUE for a
+    human reading the saved file or a downloaded copy - it stops being true,
+    and re-publishes the email, the instant the SAME text is what actually
+    got uploaded into a PUBLIC GitHub issue. Stripping at this exact choke
+    point, the one every caller (report_failure, inference/routes/admin.py)
+    flows through, mirrors the existing title-scrub test above and covers
+    every current and future caller the same way."""
+    from localm import bugreport as br
+
+    real_report = br.build_report("image gen froze", context={"operation": "run"})
+    assert br.MAINTAINER_EMAIL in real_report          # sanity: it really is there
+    assert "You can edit anything above" in real_report
+
+    seen = {}
+
+    def opener(url, data, headers, timeout):
+        import json
+        seen["payload"] = json.loads(data.decode("utf-8"))
+        return 201, '{"url": "https://github.com/x/localm/issues/2"}'
+
+    bugreport.upload_report(
+        "image gen froze", real_report,
+        url="https://proxy.example/file", token="tok", opener=opener)
+
+    sent_body = seen["payload"]["body"]
+    assert bugreport.MAINTAINER_EMAIL not in sent_body
+    assert "You can edit anything above" not in sent_body
+    # The real diagnostic content is untouched - only the trailing footer is gone.
+    assert "image gen froze" in sent_body
+    assert "## App state" in sent_body
+
+
+def test_upload_report_body_without_footer_is_unaffected():
+    """A body that never carried the disclaimer (e.g. a hand-typed test body,
+    or a user who deleted the footer themselves) uploads byte-for-byte, so
+    the strip can never be mistaken for a content-mangling step."""
+    seen = {}
+
+    def opener(url, data, headers, timeout):
+        import json
+        seen["payload"] = json.loads(data.decode("utf-8"))
+        return 201, '{"url": "https://github.com/x/localm/issues/3"}'
+
+    bugreport.upload_report(
+        "t", "## report\nno footer in this body at all",
+        url="https://proxy.example/file", token="tok", opener=opener)
+    assert seen["payload"]["body"] == "## report\nno footer in this body at all"
+
+
 def test_upload_report_scrubs_home_path_in_title():
     """HON-03/HON-15: the title becomes a PUBLIC GitHub issue title. Scrubbing at
     the upload choke point means a home path (username) in ANY caller's title is
