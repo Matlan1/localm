@@ -206,7 +206,16 @@ class TestVisionGuidance:
         assert "mmproj" in msg
         assert "failed to load" in msg
         assert "not implemented" not in msg               # the old stale claim is gone
-        # The default (text-only) message must NOT mention mmproj.
+        # The default (text-only) message must NOT mention mmproj - but ONLY on the
+        # branch where the HuggingFace stack IS installed. With transformers absent,
+        # vision_input_guidance deliberately points at the GGUF route and names
+        # --mmproj, which the sibling test above asserts is correct. Unpinned, this
+        # assertion silently depended on whether the runner happened to have
+        # transformers: it passed in a dev venv and failed in CI's `.[dev,rag]`,
+        # which has none - so it could never pass on the only environment that gates
+        # a merge.
+        import importlib.util
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
         assert "mmproj" not in mm.vision_input_guidance()
 
     def test_registered_vlm_is_named_and_routed(self, tmp_path, monkeypatch):
