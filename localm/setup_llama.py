@@ -1897,7 +1897,18 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             console.print(f"[yellow]Replacing {have} build with the "
                           f"auto-detected backend.[/yellow]")
         elif have == want:
-            console.print(f"[yellow]Re-downloading the {have} build.[/yellow]")
+            # Name the build being fetched. "Re-downloading" alone still reads as
+            # a no-op, and the case this came from was a real b1288 -> b1307
+            # upgrade. We cannot name the OLD one: the marker records the backend
+            # only, never a version, so localm genuinely does not know what is
+            # installed. Naming the target is the honest maximum here.
+            #
+            # Only for amd-rocm, whose tag is a pinned constant we already have.
+            # The upstream backends resolve theirs through _latest_tag(), which is
+            # a NETWORK CALL - and a message does not get to make one just to
+            # decorate itself (a call made "just to check" is still a call).
+            tag = f" ({_ROCM_TAG})" if want == "amd-rocm" else ""
+            console.print(f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
         else:
             console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
 

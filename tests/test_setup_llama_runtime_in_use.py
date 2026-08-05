@@ -268,7 +268,7 @@ def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("have,want,expect,forbid", [
-    ("amd-rocm", "amd-rocm", "Re-downloading the amd-rocm build", "with amd-rocm"),
+    ("amd-rocm", "amd-rocm", "Re-downloading the amd-rocm build (", "with amd-rocm"),
     ("amd-rocm", "auto",     "with the auto-detected backend",    "with auto."),
     ("vulkan",   "cuda",     "Replacing vulkan build with cuda", None),
     (None,       "cuda",     "Replacing unrecorded build with cuda", None),
@@ -284,10 +284,24 @@ def test_provision_notice_reads_sensibly(have, want, expect, forbid, capsys):
         console.print(f"[yellow]Replacing {have} build with the "
                       f"auto-detected backend.[/yellow]")
     elif have == want:
-        console.print(f"[yellow]Re-downloading the {have} build.[/yellow]")
+        tag = f" ({setup_llama._ROCM_TAG})" if want == "amd-rocm" else ""
+        console.print(f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
     else:
         console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
     out = " ".join(capsys.readouterr().out.split())
     assert expect in out
     if forbid:
         assert forbid not in out
+
+
+def test_redownload_names_the_build_it_is_fetching(capsys):
+    """"Re-downloading the amd-rocm build" alone reads as a no-op; the case this
+    came from was a real b1288 -> b1307 upgrade. The OLD version cannot be named
+    (the marker records the backend only), so naming the target is the honest
+    maximum - and only for amd-rocm, whose tag is a pinned constant. The upstream
+    backends resolve theirs with a network call, which a print statement does not
+    get to make."""
+    from localm.setup_llama import console, _ROCM_TAG
+    console.print(f"[yellow]Re-downloading the amd-rocm build ({_ROCM_TAG}).[/yellow]")
+    out = " ".join(capsys.readouterr().out.split())
+    assert _ROCM_TAG in out and _ROCM_TAG.startswith("b")
