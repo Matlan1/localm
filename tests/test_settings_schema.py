@@ -302,7 +302,12 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
         | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS
         | {"hf_trust_remote_code"}
-        | {"net_allow_private", "cors_origins"})
+        | {"net_allow_private", "cors_origins"}
+        # update_allow_prerelease decides WHICH BUILDS the updater suggests
+        # installing - same trust-widening class as OUTBOUND_OWNER_KEYS right
+        # above it, but not itself an outbound endpoint, so kept on its own line
+        # (see UPDATER-VERSION-RECOGNITION / prerelease-channel unit).
+        | {"update_allow_prerelease"})
 
 
 def test_outbound_endpoint_keys_are_owner_only():
