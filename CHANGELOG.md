@@ -11,6 +11,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **A low-VRAM warning could blame the running server for holding its own
+  VRAM.** When possible, the warning names a concrete instance holding the
+  memory, but the lookup never excluded the process printing the warning
+  itself, so it could report "another localm instance (port N) is running
+  ... - POST /v1/models/unload on port N to free it" about its own,
+  just-loaded model - telling you to unload the model you were about to
+  use. It now excludes itself from that lookup, and when the VRAM really is
+  held by one of its own other resident models, says so plainly instead of
+  blaming a nonexistent sibling.
+
 ## [0.1.4] - 2026-08-05
 
 ### Added
