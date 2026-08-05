@@ -16,14 +16,28 @@ is therefore harmless.
 
 A mid-struct REORDER is NOT harmless, and upstream did one:
 
+TWO TAG NAMESPACES, AND THEY COLLIDE - READ THIS BEFORE RESOLVING ANY TAG BELOW
+-------------------------------------------------------------------------------
+``b1288`` / ``b1307`` are **lemonade-sdk/llamacpp-rocm** tags: the bundled AMD
+build. ``b9xxx`` / ``b10xxx`` are **ggml-org/llama.cpp** tags: upstream itself.
+They are different numbering schemes and they OVERLAP on a real string -
+``b1288`` also exists upstream, published 2023-09-28, as an unrelated
+three-year-old release. So resolving a lemonade tag against upstream does not
+give you a 404, it gives you a plausible WRONG ARTIFACT with no signal that
+anything is off. Every tag below therefore names its repository.
+
 TWO llama_model_params LAYOUTS EXIST, BOTH 72 BYTES
 ---------------------------------------------------
 ``llama_model_params`` was reordered in place between llama.cpp `7c158fbb4aec`
-(lemonade b1288, ggml 0.13.1) and `07132750825a` (lemonade b1307, ggml 0.18.1),
-landing somewhere in upstream b10090..b10180. ``sizeof`` is 72 on BOTH sides, so
-nothing about the size trips - the fields simply moved:
+(lemonade b1288, ggml 0.13.1) and `07132750825a` (lemonade b1307, ggml 0.18.1).
+The change is PINNED, not bracketed: it landed in upstream release **b10105**
+(commit `e6dd0e29a675`, ggml-org/llama.cpp#20834, "args: refactor
+mlock/mmap/directio into load-mode", published 2026-07-24). Upstream b10103 is
+the last release with the old layout; b10104 was never tagged. ``sizeof`` is 72
+on BOTH sides, so nothing about the size trips - the fields simply moved:
 
-    offset   V1 (b1288, upstream <= ~b10090)   V2 (b1307, upstream >= ~b10180)
+    offset   V1 (lemonade b1288,       V2 (lemonade b1307,
+             upstream <= b10103)        upstream >= b10105)
     [16]     n_gpu_layers                      n_gpu_layers
     [20]     split_mode                        split_mode
     [24]     main_gpu                          load_mode      <-- INSERTED
@@ -57,7 +71,8 @@ The ONE field with no V2 counterpart is ``use_mmap``; use :func:`set_use_mmap`.
 
 Verified NATIVE sizes:
     llama_model_params   = 72 bytes (V1 and V2 alike)
-    llama_context_params = 152 bytes on b1288; 160 bytes on b9682+ / b1307
+    llama_context_params = 152 bytes on lemonade b1288; 160 bytes on
+                           upstream b9682+ / lemonade b1307
                            (adds a trailing ``ctx_other`` pointer). Trailing
                            append only - no mid-struct movement, re-diffed
                            7c158fbb4aec -> 07132750825a on 2026-08-05.
@@ -80,7 +95,7 @@ llama_pos     = ctypes.c_int32   # position in sequence
 llama_seq_id  = ctypes.c_int32   # sequence id
 
 
-# enum llama_load_mode  (V2 builds only - b1307 / upstream >= ~b10180)
+# enum llama_load_mode  (V2 builds only - lemonade b1307 / upstream >= b10105)
 #
 # Replaces V1's separate use_mmap / use_mlock / use_direct_io booleans with a
 # single enum. Values read from llama.h at 07132750825a.
@@ -101,9 +116,9 @@ _VALID_LOAD_MODES = (
 
 # llama_model_params V1  (72 bytes)
 #
-# llama.cpp <= 7c158fbb4aec (lemonade b1288, upstream tag b9870 and older).
+# llama.cpp <= 7c158fbb4aec (lemonade b1288; upstream b10103 and older).
 # Native defaults from llama_model_default_params(), probed live on the shipped
-# amd-rocm b1288 build 2026-08-05 (ggml_commit() == "7c158fb"):
+# amd-rocm lemonade b1288 build 2026-08-05 (ggml_commit() == "7c158fb"):
 #   - [0-7]   ptr  devices                = NULL
 #   - [8-15]  ptr  tensor_buft_overrides  = NULL
 #   - [16]    i32  n_gpu_layers           = -1 (default: all layers)
@@ -180,7 +195,7 @@ class LlamaModelParamsV1(ctypes.Structure):
 # llama_model_params V2  (72 bytes)
 #
 # llama.cpp >= the load_mode reorder (lemonade b1307 / 07132750825a, upstream
-# >= ~b10180). Native defaults read from llama_model_default_params() in
+# >= b10105). Native defaults read from llama_model_default_params() in
 # src/llama-model.cpp at 07132750825a:
 #   - [16]    i32  n_gpu_layers    = -1
 #   - [20]    i32  split_mode      = 1 (LLAMA_SPLIT_MODE_LAYER)
@@ -337,7 +352,7 @@ class LlamaContextParams(ctypes.Structure):
         # --- sampler chain hooks ---
         ("samplers",    ctypes.c_void_p),         # [136]
         ("n_samplers",  ctypes.c_uint64),         # [144]
-        # ctx_other was appended upstream after the b1288 build localm's layout
+        # ctx_other was appended upstream after the lemonade b1288 build localm's layout
         # was first probed (present b9682+; absent on older builds, which simply
         # ignore this trailing field). Naming it keeps the round-trip through
         # llama_context_default_params() correct on newer builds.

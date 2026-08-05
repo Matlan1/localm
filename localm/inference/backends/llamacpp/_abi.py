@@ -34,8 +34,11 @@ The fingerprint was validated byte-for-byte against the cpu, vulkan, and
 amd-rocm prebuilts localm provisions; offsets for these POD fields are
 commit-determined, not OS-determined (natural alignment is identical on MS-x64 /
 SysV-x64 / arm64), so a given build matches on every OS. Live probes of the
-shipped amd-rocm builds, 2026-08-05: b1288 reports ``ggml_commit() == "7c158fb"``
-/ ggml 0.13.1 and the V1 layout; b1307 reports ``0713275`` / ggml 0.18.1 and V2.
+shipped amd-rocm builds, 2026-08-05: lemonade b1288 reports
+``ggml_commit() == "7c158fb"`` / ggml 0.13.1 and the V1 layout; lemonade b1307
+reports ``0713275`` / ggml 0.18.1 and V2. (Tag namespaces: b1xxx are
+lemonade-sdk/llamacpp-rocm, b10xxx are ggml-org/llama.cpp, and they collide -
+see _structs' docstring.)
 
 Because upstream reordered ``llama_model_params`` IN PLACE at an unchanged
 72-byte size, this module also DECIDES WHICH LAYOUT to bind
@@ -73,11 +76,15 @@ MODEL_PARAMS_V1 = "v1"   # <= 7c158fbb4aec: use_mmap/use_direct_io/use_mlock, ma
 MODEL_PARAMS_V2 = "v2"   # >= the load_mode reorder: load_mode@24, main_gpu@28, load_mtp
 
 # Symbols that appear in llama.h in the same change as the V2 reorder. Probed at
-# 8 upstream tags spanning the flip (b9870, b10000, b10050, b10080, b10090,
-# b10180, b10200, b10276): the struct field and BOTH of these are always all
-# present or all absent. This is the STRUCTURAL half of the layout decision; the
-# value fingerprint below is an independent second opinion, so the decision does
-# not rest on this correlation alone.
+# 8 upstream ggml-org tags spanning the flip (b9870, b10000, b10050, b10080,
+# b10090, b10180, b10200, b10276): the struct field and BOTH of these are always
+# all present or all absent. The flip itself is PINNED to upstream b10105
+# (commit e6dd0e29a675, ggml-org/llama.cpp#20834); b10103 is the last release
+# without it, and b10104 was never tagged.
+#
+# This is the STRUCTURAL half of the layout decision; the value fingerprint below
+# is an independent second opinion, so the decision does not rest on this
+# correlation alone.
 _V2_MARKER_SYMBOLS = ("llama_load_mode_from_str", "llama_load_mode_name")
 
 # Byte offsets/values that llama_model_default_params() must produce for each
@@ -534,7 +541,7 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
 
     * A DETERMINED V1 model_params implies 4 args. The layout reorder landed
       STRICTLY BEFORE the penalties change (measured by bisecting upstream tags:
-      b10180 and b10240 are already V1->V2 flipped while still 4-arg), so no
+      upstream b10105 onward is already V1->V2 flipped while still 4-arg), so no
       build can be V1 and 5-arg. "Determined" is load-bearing: when neither
       layout probe was conclusive, ``detect_model_params_layout`` FALLS BACK to
       V1, and inferring 4-arg from that fallback would be reasoning from an
