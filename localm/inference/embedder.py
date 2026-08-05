@@ -1329,10 +1329,26 @@ def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
     user is actively talking to does not.
 
     An explicit user choice (see _explicit_embedder_gpu_layers) is honored
-    verbatim, tight VRAM or not. Unmeasurable free VRAM or an unreadable
-    model file keep the historical full-offload attempt - the load preflight
-    still warns there, so nothing is hidden, and a guess of CPU on a healthy
-    box would silently slow every embed for no reason."""
+    verbatim, tight VRAM or not. Unmeasurable free VRAM (including a probe
+    that did not complete fresh this call - see the freshness note below) or
+    an unreadable model file keep the historical full-offload attempt - the
+    load preflight still warns there, so nothing is hidden, and a guess of
+    CPU on a healthy box would silently slow every embed for no reason.
+
+    Freshness, not scope, is what read_free()'s default checks (AGENTS.md
+    rule 5): a GPU_PROBE_TIMEOUT/BUSY reading is a frozen last-known-good
+    value, not this call's own measurement, so it is treated the same as
+    "unmeasurable" above. Deliberately does NOT gate on free_scope: a
+    PROCESS-scoped reading over-states free the same way
+    discover.gpu_split_shortfall's own docstring explains, so the ONLY
+    place that matters here is the branch below that already fires when
+    the (possibly inflated) free reads as INSUFFICIENT - if even an
+    over-stated free comes up short, the real free is shorter still, so
+    that verdict only ever under-states the problem, never invents one.
+    Gating this on scope instead would make free read as permanently
+    unmeasurable on every Windows + AMD ROCm/HIP box, silently reverting to
+    the risky full-GPU-offload default this function exists to avoid on
+    exactly that platform."""
     explicit = _explicit_embedder_gpu_layers(cfg)
     if explicit is not None:
         return explicit, None
@@ -1344,8 +1360,9 @@ def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
         return 99, None
     if read_free is None:
         def read_free() -> Optional[int]:
-            from localm.discover import vram_capacity
-            return vram_capacity().get("free")
+            from localm.discover import GPU_PROBE_OK, vram_capacity
+            info, status = vram_capacity(return_status=True)
+            return info.get("free") if status == GPU_PROBE_OK else None
     try:
         free = read_free()
     except Exception:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the VRAM pre-flight warning in GgufBackend.load()."""
 
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -121,6 +122,37 @@ class TestVramPreflight:
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=0):
             b._check_vram()
         assert capsys.readouterr().out == ""
+
+    def test_low_vram_warning_notes_a_possibly_blind_reading(self, tmp_path, capsys):
+        """AGENTS.md rule 5: this warning fires only when even a possibly
+        over-stated free already reads as insufficient (sound - see
+        discover.gpu_split_shortfall's docstring for the same asymmetry), but
+        the quoted GB figure itself can be the raw, cross-process-blind
+        reading when the device-global correction (_device_global_free_bytes)
+        silently declined. On a platform gpu_usage says is known
+        process-scoped-blind, the warning must say so."""
+        b = _backend(tmp_path, size_bytes=80_000_000)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=40_000_000), \
+             patch.object(GgufBackend, "_total_vram_bytes", return_value=16_000_000_000), \
+             patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=True):
+            b._check_vram()
+        out = capsys.readouterr().out
+        assert "Low VRAM" in out
+        assert "may not see other processes" in out
+
+    def test_low_vram_warning_omits_the_blind_note_on_a_trusted_platform(
+        self, tmp_path, capsys
+    ):
+        """The complement: a platform gpu_usage does NOT flag as blind gets no
+        caveat - the figure stands as reported, exactly as before this fix."""
+        b = _backend(tmp_path, size_bytes=80_000_000)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=40_000_000), \
+             patch.object(GgufBackend, "_total_vram_bytes", return_value=16_000_000_000), \
+             patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=False):
+            b._check_vram()
+        out = capsys.readouterr().out
+        assert "Low VRAM" in out
+        assert "may not see other processes" not in out
 
     def test_model_bytes_sums_split_parts(self, tmp_path):
         for i in (1, 2):
@@ -272,6 +304,32 @@ class TestCheckContextFit:
         b = _backend(tmp_path, size_bytes=80_000_000, n_gpu_layers=0)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=0):
             assert b._check_context_fit(2_000_000) is None   # CPU-only -> KV already in RAM
+
+    def test_ram_kv_hint_notes_a_possibly_blind_reading(self, tmp_path, caplog):
+        """Same rule-5 caveat as _check_vram's warning: the KV-to-RAM hint
+        fires only when even a possibly-inflated free already reads as
+        insufficient (sound), but the quoted GB figure can still be the raw,
+        cross-process-blind reading when the device-global correction
+        silently declined - say so on a platform gpu_usage says is known
+        process-scoped-blind."""
+        b = _backend(tmp_path, size_bytes=80_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=50_000_000), \
+             patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=True), \
+             caplog.at_level(logging.WARNING, logger="localm"):
+            assert b._check_context_fit(2_000_000, current_ctx=4096) is False
+        assert any("may not see other processes" in r.getMessage()
+                  for r in caplog.records)
+
+    def test_ram_kv_hint_omits_the_blind_note_on_a_trusted_platform(
+        self, tmp_path, caplog
+    ):
+        b = _backend(tmp_path, size_bytes=80_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=50_000_000), \
+             patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=False), \
+             caplog.at_level(logging.WARNING, logger="localm"):
+            assert b._check_context_fit(2_000_000, current_ctx=4096) is False
+        assert not any("may not see other processes" in r.getMessage()
+                      for r in caplog.records)
 
     # test_load_native_wires_check_context_fit_into_llamacpp moved to
     # tests/test_gguf_worker.py (TestLoad.test_load_wires_check_context_fit_and_returns_metadata):

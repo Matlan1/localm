@@ -167,8 +167,26 @@ def media_single_device_shortfall(settings: dict, *,
     Returns None (nothing to check) when the policy is not 'auto' (an explicit
     always/never is the user's choice and is not second-guessed), when no split is
     configured (the combined reading already IS the single card's), when the estimate
-    is unknown ('auto' already swaps on unknown), or when per-device free is
-    unmeasurable (cannot check; do not block a load that might work).
+    is unknown ('auto' already swaps on unknown), when the live per-device reading did
+    not complete fresh this call (see the freshness note below), or when per-device
+    free is unmeasurable (cannot check; do not block a load that might work).
+
+    Freshness, NOT scope, is what this checks (AGENTS.md rule 5). A non-fresh
+    (GPU_PROBE_TIMEOUT/BUSY) reading is a frozen last-known-good value from an
+    earlier probe - like ``gpu_split_shortfall``, this does not compute a shortfall
+    from one. Deliberately does NOT gate on ``free_scope`` the way a reading
+    PRESENTED to a user as current fact must (see ``sysstats._vram_reading_trusted``):
+    a PROCESS-scoped reading OVER-states free the same way ``gpu_split_shortfall``'s
+    own docstring explains, and this function's ONLY use of the number is to trigger
+    the SAME protective action an under-detection would risk skipping - the extra
+    chat-model swap this repo's REG-532 note added specifically because the
+    (scope-blind) aggregate ``decide_media_swap`` check cannot see per-device
+    placement. Gating this on scope would make the check silently no-op on every
+    Windows + AMD ROCm/HIP box (permanently untrusted there), which is exactly the
+    platform the per-device gap this function exists to catch is real on - trading a
+    real safety net for a theoretical precision gain. See ``gpu_split_shortfall``'s
+    docstring for the full reasoning this mirrors; PR #710 tried the opposite
+    direction (omitting a tagged device) and was reverted for the same reason.
     """
     if settings.get("swap_policy", "auto") != "auto":
         return None
@@ -176,8 +194,8 @@ def media_single_device_shortfall(settings: dict, *,
     if not isinstance(need, int) or need <= 0:
         return None
     from localm.config import load_config
-    from localm.discover import (applied_split_device_count, list_gpus,
-                                 resolve_preferred_device)
+    from localm.discover import (GPU_PROBE_OK, applied_split_device_count,
+                                 list_gpus, resolve_preferred_device)
     cfg = config if config is not None else load_config()
     # applied_split_device_count (loader truth), NOT split_device_count: whether a
     # split is ACTIVE for chat/embeddings is a load-time fact, and on vulkan the
@@ -187,7 +205,9 @@ def media_single_device_shortfall(settings: dict, *,
     # where media actually runs.
     if applied_split_device_count(cfg) < 2:
         return None
-    gpus = list_gpus()
+    gpus, status = list_gpus(return_status=True)
+    if status != GPU_PROBE_OK:
+        return None
     idx = resolve_preferred_device(cfg, gpus=gpus)
     if idx is None:
         return None
@@ -430,16 +450,23 @@ def _live_free_vram_bytes():
     should MEAN for a decision gate is a real design question, and it is not
     answered here.
 
-    Known gaps that ARE this same defect and are recorded rather than quietly
-    half-fixed - each one QUOTES a free figure that can come from a timed-out
-    probe, so each needs that design answer first:
-      - http_server.switch_engine's 503 refusals ("Not enough VRAM to load 'x'
-        (need ~N MB, M MB free)", and the split-shortfall variant beside it);
-      - sysstats.vram_capacity() -> GET /api/stats -> the GUI status bar;
-      - gui/routes/models.py's /api/vram-estimate -> the Settings free-VRAM line.
-    None of these is self-correcting: once a probe overruns,
-    discover._gpu_probe_inflight stays True until the abandoned thread returns,
-    so every later call keeps serving the same frozen value."""
+    Corrected - this list previously named sysstats.vram_capacity() -> GET
+    /api/stats and gui/routes/models.py's /api/vram-estimate as open gaps
+    quoting a free figure with no freshness check; both now gate on
+    sysstats._vram_reading_trusted() (fresh AND device-global) before showing
+    `used`/`free` at all, same as this file's own CLI/GUI VRAM-display fixes.
+    http_server.switch_engine's 503 refusals (via discover.gpu_split_shortfall)
+    were never actually this defect: that function DOES require a fresh
+    GPU_PROBE_OK reading before emitting a shortfall (see its own docstring) -
+    it deliberately does not gate on free_scope, for a documented, sound
+    reason specific to a refuse-only decision (an over-stated free only makes
+    the refusal more conservative), not an oversight. Kept here as a pointer
+    for the next VRAM-surface sweep: once a probe overruns,
+    discover._gpu_probe_inflight stays True until the abandoned thread
+    returns, so every later call keeps serving the same frozen value - any
+    NEW caller that quotes a free figure as current fact needs the same
+    freshness (and, unless it is refuse-only like gpu_split_shortfall,
+    scope) check before trusting it."""
     free, fresh, _scope = _vram_free_reading()
     return free if fresh else None
 

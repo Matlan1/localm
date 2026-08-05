@@ -424,6 +424,41 @@ class TestChooseEmbedderGpuLayers:
             read_free=lambda: 1000)
         assert (ngl, reason) == (99, None)
 
+    def test_default_read_free_ignores_a_stale_probe(self, tmp_path, monkeypatch):
+        """The DEFAULT read_free (used whenever a caller does not inject its
+        own, i.e. every real load) must not trust a served last-known-good
+        reading: a fresh GPU_PROBE_OK reading of 1000 bytes would send this
+        load to CPU (see test_auto_does_not_fit_goes_cpu_with_reason above),
+        but the SAME reading under GPU_PROBE_TIMEOUT/BUSY is not a current
+        measurement, so it must fall back to "unmeasurable" and keep the
+        historical full-GPU-offload attempt - exactly like an unreadable file
+        or a None reading above. This is the freshness gap the fix closed:
+        the default previously called vram_capacity() bare (no
+        return_status), so a stale reading was used exactly like a fresh one."""
+        import localm.discover as disc
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        monkeypatch.setattr(
+            disc, "vram_capacity",
+            lambda *a, **kw: ({"free": 1000}, disc.GPU_PROBE_TIMEOUT)
+            if kw.get("return_status") else {"free": 1000})
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 99})
+        assert (ngl, reason) == (99, None)
+
+    def test_default_read_free_uses_a_fresh_probe(self, tmp_path, monkeypatch):
+        """The complement: a FRESH (GPU_PROBE_OK) reading through the default
+        closure is used exactly as the injected-read_free tests above expect."""
+        import localm.discover as disc
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        monkeypatch.setattr(
+            disc, "vram_capacity",
+            lambda *a, **kw: ({"free": 1000}, disc.GPU_PROBE_OK)
+            if kw.get("return_status") else {"free": 1000})
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), {"n_gpu_layers": 99})
+        assert ngl == 0
+        assert reason is not None and "VRAM" in reason
+
 
 class _FakeEmbedder:
     """Stands in for IsolatedEmbedder in wiring tests: records construction

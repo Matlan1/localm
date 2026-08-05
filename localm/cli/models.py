@@ -618,19 +618,37 @@ def gpus_cmd():
             markers.append("[cyan](split)[/cyan]")
         marker = "  " + " ".join(markers) if markers else ""
         free = g.get("free")
-        free_s = f"{free / 1024**3:.1f} GB free / " if isinstance(free, int) else ""
-        # Same "is this reading trustworthy" check as doctor.py's torch VRAM probe:
-        # a PROCESS-tagged reading, or an untagged one on a platform known to be
-        # blind to other processes' VRAM (Windows + AMD ROCm/HIP), must say so
-        # rather than print a number that looks like the whole board's free space
-        # when it is really "free minus every other app" (AGENTS.md rule 5). Gated
-        # on `free` actually being shown - no figure printed means nothing to caveat.
-        blind = isinstance(free, int) and (
-            g.get("free_scope") == discover.FREE_SCOPE_PROCESS
+        # Trustworthy only when THIS reading is both fresh and device-global -
+        # the same two-part definition sysstats._vram_reading_trusted() already
+        # applies for the GUI/MCP stats surface:
+        #   * fresh - status == GPU_PROBE_OK. list_gpus() can return a non-empty
+        #     `gpus` that is really a served LAST-KNOWN-GOOD value from an
+        #     EARLIER successful probe when THIS call timed out / was busy /
+        #     inconclusive (see its own docstring) - a stale reading is not a
+        #     current measurement even when it looks like one.
+        #   * device-global - not PROCESS-scoped, and not an untagged reading on
+        #     a platform known to be blind to other processes' VRAM (Windows +
+        #     AMD ROCm/HIP): a process-scoped free counts only this process's
+        #     own allocations and overstates what is actually available.
+        untrusted = isinstance(free, int) and (
+            status != discover.GPU_PROBE_OK
+            or g.get("free_scope") == discover.FREE_SCOPE_PROCESS
             or (g.get("free_scope") != discover.FREE_SCOPE_DEVICE
                 and gpu_usage.raw_reading_is_process_scoped()))
-        note = ("  [dim](free counts only this process; other apps' VRAM "
-                "is not visible on this driver)[/dim]" if blind else "")
+        # AGENTS.md rule 5: a caveat beside a wrong number is not a correction.
+        # This used to print the untrusted free figure anyway, with only a DIM
+        # parenthetical beside it - easy to miss, and still a wrong number
+        # presented as fact (e.g. "15.9 GB free" on a card that is nearly
+        # full). Show total-only instead, exactly like sysstats._vram() already
+        # does for the GUI/MCP surface: omitting a number this cannot stand
+        # behind is not a loss of information, printing a wrong one is.
+        if isinstance(free, int) and not untrusted:
+            free_s = f"{free / 1024**3:.1f} GB free / "
+            note = ""
+        else:
+            free_s = ""
+            note = ("  [yellow](free VRAM reading unavailable on this "
+                    "platform)[/yellow]" if untrusted else "")
         console.print(
             f"  [cyan]{g['index']}[/cyan]  {g.get('name') or '?':<30} "
             f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}{note}")

@@ -295,14 +295,24 @@ def _check_vram_torch() -> bool:
             # never regress to a thin deadline if the default ever changes (same
             # reason cli/models.py pins it). Never raises; [] just means no
             # correction is available and the raw readings below stand.
+            #
+            # return_status=True is load-bearing, not optional: list_gpus()'s
+            # bare form (return_status=False) can STILL silently return a
+            # served last-known-good list from an earlier probe when THIS call
+            # times out / is busy / inconclusive (see its own docstring) - a
+            # stale reading with valid free/free_scope fields, indistinguishable
+            # from a fresh one without the status. Discarding it here would
+            # reopen the exact "trust an untrustworthy free figure" gap this
+            # function exists to close (AGENTS.md rule 5).
             try:
-                _gpus_corrected = discover.list_gpus(
-                    deadline=discover._GPU_PROBE_CLI_DEADLINE)
+                _gpus_corrected, _corrected_status = discover.list_gpus(
+                    deadline=discover._GPU_PROBE_CLI_DEADLINE, return_status=True)
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("doctor: device-global VRAM correction probe failed "
                            "(%s); showing the raw torch readings", type(e).__name__)
                 _gpus_corrected = []
+                _corrected_status = discover.GPU_PROBE_INCONCLUSIVE
             for i in range(torch.cuda.device_count()):
                 props = torch.cuda.get_device_properties(i)
                 # Driver-level free/total, CORRECTED for cross-process blindness.
@@ -320,27 +330,46 @@ def _check_vram_torch() -> bool:
                 # not correct. See dev-notes/vram-cross-process-blindness.md.
                 free_b, total_b = torch.cuda.mem_get_info(i)
                 scope = None
+                corrected = False
                 for g in _gpus_corrected:
                     if g.get("index") == i and g.get("free") is not None:
                         free_b, scope = g["free"], g.get("free_scope")
+                        corrected = True
                         break
-                # Say so rather than quietly present a figure we know counts only our
-                # own allocations. This fires for a PROCESS-tagged reading AND for an
-                # untagged one (scope=None) on a known-blind platform - the latter is
-                # the GPU_PROBE_TIMEOUT / registry-fallback case, where no corrected
-                # entry exists so free_b is the raw, blind mem_get_info value and must
-                # not be printed as fact (rule 5). On a device-global platform
-                # (Linux / NVIDIA) raw_reading_is_process_scoped() is False, so an
-                # uncorrected reading there prints without a spurious caveat.
+                # Trustworthy depends on which reading `free_b` actually is:
+                #   * corrected (a device-global entry was substituted in) - only
+                #     trustworthy if THAT correction was fresh (status ==
+                #     GPU_PROBE_OK; a served last-known-good list from an
+                #     earlier probe is not a current measurement even though it
+                #     carries a valid free_scope) and device-global, not
+                #     PROCESS-scoped.
+                #   * uncorrected (still the raw, synchronously-fresh
+                #     torch.cuda.mem_get_info() value - staleness does not apply
+                #     to a call made this instant) - trustworthy unless this
+                #     platform is known to be blind to other processes' VRAM
+                #     (Windows + AMD ROCm/HIP), in which case the raw reading is
+                #     ALWAYS process-scoped by construction.
                 from localm import gpu_usage
-                blind = (scope == discover.FREE_SCOPE_PROCESS
-                         or (scope != discover.FREE_SCOPE_DEVICE
-                             and gpu_usage.raw_reading_is_process_scoped()))
-                note = ("  [dim](free counts only this process; other apps' VRAM "
-                        "is not visible on this driver)[/dim]" if blind else "")
+                untrusted = (
+                    (corrected and (
+                        _corrected_status != discover.GPU_PROBE_OK
+                        or scope != discover.FREE_SCOPE_DEVICE))
+                    or (not corrected and gpu_usage.raw_reading_is_process_scoped())
+                )
+                # AGENTS.md rule 5: a caveat beside a wrong number is not a
+                # correction. This used to print the untrusted free figure
+                # anyway, with only a dim parenthetical beside it. Show
+                # total-only instead, exactly like sysstats._vram() already does
+                # for the GUI/MCP surface.
+                if not untrusted:
+                    free_s = f"{free_b / 1024**3:.1f} GB free / "
+                    note = ""
+                else:
+                    free_s = ""
+                    note = "  [yellow](free VRAM reading unavailable on this platform)[/yellow]"
                 console.print(
                     f"  {_OK_SYM}  GPU {i}: {props.name}  "
-                    f"{free_b / 1024**3:.1f} GB free / {total_b / 1024**3:.1f} GB total"
+                    f"{free_s}{total_b / 1024**3:.1f} GB total"
                     f"{note}"
                 )
                 torch_gpu_found = True

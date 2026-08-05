@@ -300,6 +300,31 @@ class VramSizingMixin:
                        "uncorrected free reading for sizing", type(e).__name__)
             return None
 
+    @staticmethod
+    def _free_reading_may_be_blind() -> bool:
+        """Whether the free-VRAM figure a caller is about to PRINT could still be
+        the raw, cross-process-blind reading rather than _device_global_free_bytes's
+        correction of it.
+
+        _free_vram_bytes() already tries that correction and silently falls back
+        to the raw value when it fails or declines (an unmappable adapter, a
+        multi-adapter box - see that method's docstring) - the right call for a
+        SIZING DECISION, where an over-stated free only ever makes the "does this
+        fit" check MORE conservative (same asymmetry discover.gpu_split_shortfall's
+        docstring works through: a decision that still comes up short despite a
+        possibly-inflated free is sound, only ever under-stating the problem).
+        But the WARNING TEXT that names a specific GB figure as fact is a
+        different question from whether the decision it explains was sound, and
+        the silent fallback has no signal a caller can check to know which value
+        it got back this time (rule 5: a message should not assert a number it
+        cannot stand behind). This re-checks the same platform heuristic
+        _device_global_free_bytes gates its own correction attempt on, cheaply and
+        without another probe - true here can mean the correction actually
+        succeeded, so this errs toward an occasional unneeded caveat rather than
+        ever omitting a needed one."""
+        from localm.gpu_usage import raw_reading_is_process_scoped
+        return raw_reading_is_process_scoped()
+
     @classmethod
     def _total_vram_bytes(cls) -> Optional[int]:
         """Total VRAM in bytes on the configured main GPU device, or None when
@@ -696,10 +721,18 @@ class VramSizingMixin:
             return
         where = (f" across the {split_devices} GPUs in the configured split"
                  if split_devices >= 2 else "")
+        # AGENTS.md rule 5: this fires only when even a possibly-inflated free
+        # already reads as insufficient (sound - see gpu_split_shortfall's
+        # docstring for the same asymmetry), but the quoted GB figure itself
+        # can still be the raw, cross-process-blind reading when the
+        # device-global correction silently declined - say so rather than
+        # state an unverifiable number as fact.
+        blind_note = ("  [yellow](this reading may not see other processes' "
+                      "VRAM use)[/yellow]" if self._free_reading_may_be_blind() else "")
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
             f"[bold]{need / 1024**3:.1f} GB[/bold] ({ctx_hint}) but only "
-            f"[bold]{free / 1024**3:.1f} GB[/bold] is free{where}.\n"
+            f"[bold]{free / 1024**3:.1f} GB[/bold] is free{where}.{blind_note}\n"
             f"  [dim]Likely cause: {self._vram_holder_hint()}[/dim]\n"
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
@@ -807,11 +840,19 @@ class VramSizingMixin:
         if not self._ram_kv_hint_shown:
             self._ram_kv_hint_shown = True
             from localm.debuglog import logger as _dbg
+            # Same rule-5 caveat as _check_vram's warning: this fires only when
+            # even a possibly-inflated free already reads as insufficient (sound
+            # - see gpu_split_shortfall's docstring), but the quoted GB figure
+            # can still be the raw, cross-process-blind reading when the
+            # device-global correction silently declined.
+            blind_note = (" (this reading may not see other processes' VRAM use)"
+                          if self._free_reading_may_be_blind() else "")
             _dbg.warning(
                 "large context (%s tokens): the KV cache does not fit free VRAM "
-                "(need %.2f GB > %.2f GB free), so it is kept in system RAM and generation "
-                "will be slower. Free VRAM or lower n_ctx_max for full-speed GPU KV cache.",
-                f"{n_ctx:,}", charge / 1024**3, free / 1024**3)
+                "(need %.2f GB > %.2f GB free)%s, so it is kept in system RAM and "
+                "generation will be slower. Free VRAM or lower n_ctx_max for "
+                "full-speed GPU KV cache.",
+                f"{n_ctx:,}", charge / 1024**3, free / 1024**3, blind_note)
         return False
 
     # Bounds for VRAM-derived context ceilings

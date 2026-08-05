@@ -204,6 +204,117 @@ def test_doctor_cpu_only_warning_when_torch_missing(cli_runner, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  VRAM-1 - the torch VRAM probe must OMIT an untrusted free reading, not      #
+#  print it with a caveat beside it (AGENTS.md rule 5). Covers both           #
+#  dimensions: free_scope (was already checked) and probe freshness (a gap    #
+#  this fix closed - list_gpus() without return_status=True can still         #
+#  silently serve a stale last-known-good list).                              #
+# --------------------------------------------------------------------------- #
+
+def _corrected_gpus(monkeypatch, gpus, status):
+    """Control discover.list_gpus(deadline=..., return_status=True), the
+    device-global correction call _check_vram_torch makes."""
+    from localm import discover
+    monkeypatch.setattr(
+        discover, "list_gpus",
+        lambda *, deadline=None, return_status=False: (
+            (list(gpus), status) if return_status else list(gpus)))
+
+
+class TestDoctorVramReadingHonesty:
+    def test_process_scoped_correction_is_omitted_not_caveated(
+        self, cli_runner, monkeypatch
+    ):
+        from localm import discover
+        monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
+        _no_smi(monkeypatch)
+        _install_torch(monkeypatch, ["RTX 4090"])
+        _corrected_gpus(monkeypatch, [
+            {"index": 0, "total": 16 * 1024**3, "free": 15 * 1024**3,
+             "free_scope": discover.FREE_SCOPE_PROCESS}
+        ], discover.GPU_PROBE_OK)
+
+        out = cli_runner.invoke(cli.doctor, []).output
+        assert "GB free" not in out
+        assert "16.0 GB total" in out
+        assert "free VRAM reading unavailable on this platform" in " ".join(out.split())
+
+    def test_device_scoped_fresh_correction_is_shown(self, cli_runner, monkeypatch):
+        from localm import discover
+        monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
+        _no_smi(monkeypatch)
+        _install_torch(monkeypatch, ["RTX 4090"])
+        _corrected_gpus(monkeypatch, [
+            {"index": 0, "total": 16 * 1024**3, "free": 15 * 1024**3,
+             "free_scope": discover.FREE_SCOPE_DEVICE}
+        ], discover.GPU_PROBE_OK)
+
+        out = cli_runner.invoke(cli.doctor, []).output
+        assert "15.0 GB free" in out
+        assert "free VRAM reading unavailable" not in " ".join(out.split())
+
+    def test_stale_correction_is_omitted_even_with_device_scope(
+        self, cli_runner, monkeypatch
+    ):
+        """A served last-known-good list (TIMEOUT/BUSY/INCONCLUSIVE) is not a
+        current measurement even when it carries a FREE_SCOPE_DEVICE tag from
+        the earlier successful probe that produced it - this is the gap that
+        was open before this fix: list_gpus() was called without
+        return_status=True, so a stale-but-tagged-device correction was
+        substituted in and printed as fact."""
+        from localm import discover
+        monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
+        _no_smi(monkeypatch)
+        _install_torch(monkeypatch, ["RTX 4090"])
+        _corrected_gpus(monkeypatch, [
+            {"index": 0, "total": 16 * 1024**3, "free": 15 * 1024**3,
+             "free_scope": discover.FREE_SCOPE_DEVICE}
+        ], discover.GPU_PROBE_TIMEOUT)
+
+        out = cli_runner.invoke(cli.doctor, []).output
+        assert "GB free" not in out
+        assert "16.0 GB total" in out
+        assert "free VRAM reading unavailable on this platform" in " ".join(out.split())
+
+    def test_uncorrected_raw_reading_on_blind_platform_is_omitted(
+        self, cli_runner, monkeypatch
+    ):
+        """No corrected entry exists (list_gpus returns nothing for this index -
+        the cold-probe/registry-fallback case) so the raw torch.cuda.mem_get_info
+        value stands; on a platform gpu_usage says is known process-scoped-blind,
+        that raw figure must be omitted too, exactly like the corrected case."""
+        from localm import discover
+        monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
+        _no_smi(monkeypatch)
+        _install_torch(monkeypatch, ["RTX 4090"])   # mem_get_info -> 8/16 GB
+        _corrected_gpus(monkeypatch, [], discover.GPU_PROBE_OK)
+        monkeypatch.setattr(
+            "localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
+
+        out = cli_runner.invoke(cli.doctor, []).output
+        assert "GB free" not in out
+        assert "16.0 GB total" in out
+        assert "free VRAM reading unavailable on this platform" in " ".join(out.split())
+
+    def test_uncorrected_raw_reading_on_device_global_platform_is_shown(
+        self, cli_runner, monkeypatch
+    ):
+        """The complement: no corrected entry, but this platform is NOT known
+        blind (Linux/NVIDIA) - the raw torch reading stands unqualified."""
+        from localm import discover
+        monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
+        _no_smi(monkeypatch)
+        _install_torch(monkeypatch, ["RTX 4090"])   # mem_get_info -> 8/16 GB
+        _corrected_gpus(monkeypatch, [], discover.GPU_PROBE_OK)
+        monkeypatch.setattr(
+            "localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
+
+        out = cli_runner.invoke(cli.doctor, []).output
+        assert "8.0 GB free" in out
+        assert "free VRAM reading unavailable" not in " ".join(out.split())
+
+
+# --------------------------------------------------------------------------- #
 #  FAC-4 - rich version via importlib.metadata                                 #
 # --------------------------------------------------------------------------- #
 

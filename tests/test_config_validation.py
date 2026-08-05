@@ -14,7 +14,8 @@ import pytest
 
 from localm import settings_schema as ss
 from localm.config import DEFAULT_CONFIG
-from localm.discover import FREE_SCOPE_DEVICE, FREE_SCOPE_PROCESS, GPU_PROBE_OK
+from localm.discover import (FREE_SCOPE_DEVICE, FREE_SCOPE_PROCESS, GPU_PROBE_OK,
+                             GPU_PROBE_TIMEOUT)
 
 
 # --------------------------------------------------------------------------- #
@@ -434,29 +435,49 @@ class TestGpusCli:
     @staticmethod
     def _flat(output):
         # Rich's console wraps long lines to the render width, which can split
-        # "free counts only this process" across a line break in captured
+        # "free VRAM reading unavailable" across a line break in captured
         # output; collapsing all whitespace makes the substring check robust
         # to wherever that wrap lands.
         return " ".join(output.split())
 
-    # Same "free counts only this process" caveat as cli/doctor.py's torch VRAM
-    # check; these cover cli/models.py's `gpus` command, which previously
-    # printed `free` with no free_scope check at all.
-    def test_process_scoped_free_gets_caveat(self, cli_runner):
+    # cli/models.py's `gpus` command used to print an untrusted `free` figure
+    # anyway, with only a dim caveat beside it (AGENTS.md rule 5: a caveat
+    # beside a wrong number is not a correction). It must now OMIT the free
+    # figure entirely and say so plainly - these cover both dimensions
+    # (device/process free_scope, and fresh/stale probe status).
+    def test_process_scoped_free_is_omitted(self, cli_runner):
         from localm.cli import main
         gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_PROCESS}]
         with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
-        assert "free counts only this process" in self._flat(r.output)
+        assert "GB free" not in r.output
+        assert "24.0 GB total" in r.output
+        assert "free VRAM reading unavailable on this platform" in self._flat(r.output)
 
-    def test_device_scoped_free_has_no_caveat(self, cli_runner):
+    def test_device_scoped_fresh_free_is_shown(self, cli_runner):
         from localm.cli import main
         gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_DEVICE}]
         with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
-        assert "free counts only this process" not in self._flat(r.output)
+        assert "20.0 GB free" in r.output
+        assert "free VRAM reading unavailable" not in self._flat(r.output)
+
+    def test_stale_probe_status_omits_free_even_with_device_scope(self, cli_runner):
+        """A served last-known-good list (TIMEOUT/BUSY/INCONCLUSIVE) is not a
+        current measurement even when it carries a FREE_SCOPE_DEVICE tag from
+        the earlier successful probe that produced it - list_gpus()'s own
+        docstring documents exactly this. Freshness AND scope must both hold."""
+        from localm.cli import main
+        gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_DEVICE}]
+        with patch("localm.discover.list_gpus",
+                   return_value=(gpus, GPU_PROBE_TIMEOUT)):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "GB free" not in r.output
+        assert "24.0 GB total" in r.output
+        assert "free VRAM reading unavailable on this platform" in self._flat(r.output)
 
     def test_untagged_free_scope_defers_to_raw_reading_check(self, cli_runner):
         """No free_scope key at all (never happens from the real discover.list_gpus,
@@ -469,13 +490,15 @@ class TestGpusCli:
              patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=True):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
-        assert "free counts only this process" in self._flat(r.output)
+        assert "GB free" not in r.output
+        assert "free VRAM reading unavailable on this platform" in self._flat(r.output)
 
         with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)), \
              patch("localm.gpu_usage.raw_reading_is_process_scoped", return_value=False):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
-        assert "free counts only this process" not in self._flat(r.output)
+        assert "20.0 GB free" in r.output
+        assert "free VRAM reading unavailable" not in self._flat(r.output)
 
     def test_no_free_reading_has_no_caveat(self, cli_runner):
         """free itself is None (no reading at all) - nothing to caveat, even when
@@ -486,7 +509,7 @@ class TestGpusCli:
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
         assert "GB free" not in r.output
-        assert "free counts only this process" not in self._flat(r.output)
+        assert "free VRAM reading unavailable" not in self._flat(r.output)
 
 
 # --------------------------------------------------------------------------- #
