@@ -344,6 +344,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **A self-update could silently swap your GPU runtime to a slower one.** When an
+  update needed to re-provision the native binaries, it picked the backend from
+  an older detection value that only ever recommends the universal Vulkan build
+  or CPU, never the faster vendor-specific one. On a Windows AMD RX 6000 GPU,
+  that meant a runtime update could quietly replace an installed ROCm build with
+  Vulkan, with no notice. It now uses the same detection the installer and
+  first-time setup already use, so an update reprovisions the backend you
+  actually have.
 - **A chatty GPU log line no longer floods the console and the activity view.**
   On some workloads the native runtime prints a "CUDA Graph id N reused" line
   many times per second, with the number cycling through a set of values. The
