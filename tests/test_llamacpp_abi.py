@@ -800,10 +800,15 @@ def test_abi_report_still_reports_ok_when_the_check_actually_ran(monkeypatch):
 def test_abi_report_carries_the_probe_notes_a_re_derivation_would_drop():
     """The stored verdict is strictly more informative than a re-derived one:
     it keeps the layout-probe notes, which evaluate() never sees."""
-    # TWO of the three v2 fingerprint checks must break to reach "inconclusive":
-    # the fingerprint is SCORED, so one drifted default still leaves a 2-0
-    # winner. That is the point of the scoring, and it is why breaking a single
-    # field here does NOT produce the note this test is about.
+    # TWO of the three v2 fingerprint checks must break to reach "inconclusive".
+    # This looks arbitrary and is not - do NOT "simplify" it back to one.
+    #
+    # The fingerprint is SCORED, not all-or-nothing, so a single drifted default
+    # still leaves a 2-0 winner and resolves conclusively. That is exactly what
+    # the scoring is for. Found the hard way: the first version of this test
+    # drifted ONE field and failed, because the fingerprint kept working. The
+    # test was wrong and the code was right - an unplanned confirmation that the
+    # scoring change does what it claims.
     mp = good_model_v2()
     mp.load_mode = 3                # breaks the load_mode@24 check
     mp.use_extra_bufts = False      # and the use_extra_bufts@66 check

@@ -119,10 +119,21 @@ _FINGERPRINT = {
 #     b10276  ggml 0.18.1  layout v2  5-arg
 # Sampled builds with ggml < 0.18.0 that were 5-arg: ZERO.
 #
-# Only ggml == 0.18.0 genuinely straddles the change (b10192..~b10264), and that
-# window alone is reported UNKNOWN. Without the lower bound the ~87 V2 releases
-# b10105..b10191 would also be called unknown, needlessly costing those users
-# their repetition penalty even though their 4-arg form is provable.
+# Only ggml == 0.18.0 straddles the change, and that window alone is reported
+# UNKNOWN. Its exact extent, measured release by release: b10192 (first 0.18.0)
+# through b10262 (last 0.18.0 that was actually tagged - b10263 and b10264 never
+# were; b10265 is the first 0.18.1).
+#
+# Within that window the signature itself flips at b10258, the merge of
+# ggml-org/llama.cpp#26520 - so b10192..b10257 really are 4-arg and
+# b10258..b10262 really are 5-arg. localm reports UNKNOWN for BOTH halves,
+# because ggml 0.18.0 does not distinguish them and nothing else in the binary
+# does either. That is conservative by roughly five releases at the top end: it
+# costs them the repetition-penalty sampler rather than risk a mis-marshalled
+# call, which is the intended trade.
+#
+# Without the LOWER bound, the ~87 V2 releases b10105..b10191 would ALSO be
+# called unknown, needlessly - their 4-arg form is provable.
 _PENALTIES_5ARG_GGML = (0, 18, 1)
 _PENALTIES_4ARG_GGML_BELOW = (0, 18, 0)
 
@@ -559,8 +570,10 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
       keeps the ~87 post-reorder releases b10105..b10191 decidable instead of
       costing those users their repetition penalty for no reason.
 
-    The only genuinely undecidable window is ggml == 0.18.0 (upstream
-    b10192..~b10264), which straddles the change. That reports 0.
+    The only undecidable window is ggml == 0.18.0 - upstream b10192 through
+    b10262 (b10263/b10264 were never tagged; b10265 is the first 0.18.1). The
+    signature flips inside it, at b10258, but no property of the BINARY reveals
+    that, so both halves report 0. See the constants for the measurements.
 
     Cached per process like the layout: this is called from ``_build_sampler``,
     i.e. once per GENERATION REQUEST, and re-reading ``ggml_version()`` (which
