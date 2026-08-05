@@ -68,8 +68,41 @@ def test_setup_llama_is_wanted_windows(monkeypatch, tmp_path):
     from localm import setup_llama
     monkeypatch.setattr(sys, "platform", "win32")
     assert setup_llama._is_wanted(tmp_path / "llama.dll")
-    assert setup_llama._is_wanted(tmp_path / "llama-server.exe")
+    assert setup_llama._is_wanted(tmp_path / "ggml-hip.dll")
     assert not setup_llama._is_wanted(tmp_path / "libllama.so")
+
+
+@pytest.mark.parametrize("name", [
+    "llama-server.exe", "llama-cli.exe", "llama-bench.exe",
+    "ggml-rpc-server.exe", "llama.exe",
+])
+def test_setup_llama_never_ships_an_executable(monkeypatch, tmp_path, name):
+    """localm loads the runtime in-process via ctypes and never shells out to a
+    bundled binary, so the upstream archives' ~49 command-line tools were dead
+    weight in every Windows install (3.2 MB, including an RPC server daemon).
+
+    The deciding evidence is the platform asymmetry asserted below: darwin and
+    Linux have ALWAYS matched libraries only, so those installs never carried a
+    single bundled executable and demonstrably work. Windows was the outlier."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert not setup_llama_mod()._is_wanted(tmp_path / name)
+
+
+def setup_llama_mod():
+    from localm import setup_llama
+    return setup_llama
+
+
+@pytest.mark.parametrize("plat,exe", [
+    ("linux", "llama-cli"), ("darwin", "llama-cli"), ("win32", "llama-cli.exe"),
+])
+def test_no_platform_ships_executables(monkeypatch, tmp_path, plat, exe):
+    """The invariant itself, stated once for all three platforms: whatever the
+    naming convention, an EXECUTABLE is never copied into the runtime. Linux and
+    darwin already satisfied this by construction; this pins it so a future
+    'just add .exe back' cannot pass unnoticed."""
+    monkeypatch.setattr(sys, "platform", plat)
+    assert not setup_llama_mod()._is_wanted(tmp_path / exe)
 
 
 def test_find_binary_dir_detects_linux_so(monkeypatch, tmp_path):

@@ -267,10 +267,45 @@ def _provisioned_backend(target: Path) -> "Optional[str]":
 
 def _is_wanted(f: Path) -> bool:
     """Whether to copy *f*: the loadable library, its ggml deps, and the runtime
-    libraries - matched by platform-appropriate naming (incl. versioned .so.N)."""
+    libraries - matched by platform-appropriate naming (incl. versioned .so.N).
+
+    LIBRARIES ONLY, NEVER EXECUTABLES. localm loads the native runtime in-process
+    through ctypes and never shells out to a bundled binary, so the upstream
+    archives' ~49 command-line tools (llama-cli, llama-server, llama-bench,
+    ggml-rpc-server, ...) were dead weight in every Windows install.
+
+    Verified before removing them, rather than inferred from their names:
+      * no subprocess call anywhere in localm reaches the runtime binary dir -
+        the only executables it ever runs are nvidia-smi, sys.executable and
+        uv/pip;
+      * no documented workflow in docs/ or README tells a user to run one;
+      * nothing in setup-llama or doctor invokes one (both isolate via a plain
+        python subprocess).
+
+    THE DECIDING EVIDENCE IS THE PLATFORM ASYMMETRY: the darwin and Linux
+    branches below have ALWAYS matched libraries only (.dylib / .so), so those
+    archives' extensionless `llama-cli` and friends were never copied and those
+    installs have never carried a single bundled executable. Windows was the
+    lone outlier. Dropping .exe makes it agree with the platforms that already
+    demonstrate the product does not need them.
+
+    Libraries are kept WHOLESALE and deliberately - a .dll may be an OS-resolved
+    link dependency of ggml-hip/llama rather than something localm opens by name
+    (amd_comgr, rocblas, hipblaslt, rocsolver, origami, rocm_kpack all are), so
+    proving one unused would need a link-graph walk. Unproven means keep: a
+    retained stray file costs disk, a removed dependency costs a broken install
+    on hardware nobody here can test.
+
+    Incidentally removes ggml-rpc-server.exe, which carries a critical
+    unauthenticated-RCE advisory in its own component (CVE-2026-34159, fixed in
+    the build we ship). localm never ran it, so this is not a vulnerability fix -
+    but an unnecessary network daemon has no business in the install directory of
+    an offline-first app. See dev-notes/SECURITY-llamacpp-parser-memory-safety-
+    2026-08-05.md.
+    """
     n = f.name.lower()
     if sys.platform == "win32":
-        return n.endswith(".dll") or n.endswith(".exe")
+        return n.endswith(".dll")
     if sys.platform == "darwin":
         return n.endswith(".dylib")
     return ".so" in n          # libfoo.so and libfoo.so.1
