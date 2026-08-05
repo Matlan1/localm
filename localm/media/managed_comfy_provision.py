@@ -46,9 +46,41 @@ from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 
-# Progress sink: one human-readable line at a time (a subprocess line, or a note).
+
+class ProgressEvent(str):
+    """A best-effort provisioning progress update.
+
+    IS the human-readable line every existing sink already treats it as (isinstance,
+    equality, formatting, and a markup-off ``rich`` render all just work - verified
+    live) - so widening this never breaks a caller that only ever wanted the text.
+    When an update corresponds to a discrete, countable step it ALSO carries the
+    structured facts that line was built from: ``phase`` (a short machine key, e.g.
+    "clone", "custom_nodes"), and, for a counted step, ``done``/``total``/``unit``. A
+    consumer that wants state reads these directly - it must never regex them back out
+    of the text (the second-derivation trap: a display string and a hand-rolled parse
+    of it diverge in exactly the case the formatting existed for).
+
+    ``pct`` is deliberately NOT carried here: it is a derived value, and computing it
+    in a second place is the same divergence risk one layer down. A future consumer
+    that wants a percentage derives it itself (e.g. via ``Job.progress``, which already
+    owns that arithmetic) from ``done``/``total``, once, in one place.
+    """
+
+    def __new__(cls, line: str, *, phase: Optional[str] = None,
+               done: Optional[int] = None, total: Optional[int] = None,
+               unit: Optional[str] = None) -> "ProgressEvent":
+        self = super().__new__(cls, line)
+        self.phase = phase
+        self.done = done
+        self.total = total
+        self.unit = unit
+        return self
+
+
+# Progress sink: one ProgressEvent at a time (a subprocess line, or a narrated step -
+# see ProgressEvent above for the structured facts a step carries alongside its text).
 # Best-effort - a raising sink never aborts a provision.
-ProgressCb = Optional[Callable[[str], None]]
+ProgressCb = Optional[Callable[[ProgressEvent], None]]
 
 # Provenance marker localm drops in the managed dir recording what was replicated.
 # ALSO load-bearing for is_managed_comfy_installed() (checked there IN ADDITION to
@@ -100,11 +132,18 @@ class ProvisionResult:
 #  Small process / output helpers                                             #
 # --------------------------------------------------------------------------- #
 
-def _emit(cb: ProgressCb, line: str) -> None:
+def _emit(cb: ProgressCb, event: str | ProgressEvent) -> None:
+    """Hand *event* to *cb*. *event* may be a plain ``str`` (a raw subprocess line, or
+    any other caller with no structured facts to add - it becomes a bare
+    ``ProgressEvent`` with phase/done/total/unit all None) or an already-built
+    ``ProgressEvent``. Best-effort per the module contract above: a raising sink must
+    never abort the provision it is merely reporting on."""
     if cb is None:
         return
+    if not isinstance(event, ProgressEvent):
+        event = ProgressEvent(event)
     try:
-        cb(line)
+        cb(event)
     except Exception:  # a broken progress sink must never abort a provision
         logger.debug("progress sink raised (ignored)", exc_info=True)
 
@@ -410,31 +449,45 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
     return _run(cmd, on_progress=on_progress, timeout=3600)
 
 
-def _copy_custom_nodes(user_workdir: Path, managed_root: Path) -> tuple[int, list]:
+def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
+                       on_progress: ProgressCb = None) -> tuple[int, list]:
     """Copy the user's custom_nodes into the managed ComfyUI, returning (copied_count,
     warnings). Only when the user opted in. Skips __pycache__ / compiled files and
     *.example. A node that fails to copy is not silently dropped: its warning is RETURNED
     so the caller routes it through the run log (ProvisionResult.log), not only the live
-    progress stream (rule 5: a surfaced problem must survive into the result)."""
+    progress stream (rule 5: a surfaced problem must survive into the result).
+
+    Emits one structured progress event per node, before its own copy attempt
+    (phase="custom_nodes", done/total/unit) - this loop has no total, no timeout and no
+    output at all otherwise (ADR-0009 P13), so a multi-minute copy of a large node
+    collection would be indistinguishable from a hang without a per-item signal."""
     src = user_workdir / "custom_nodes"
     if not src.is_dir():
         return 0, []
     dst = managed_root / "custom_nodes"
     dst.mkdir(parents=True, exist_ok=True)
+    # Same predicate as the inline skip below: a real custom node is a dir or a bare
+    # .py file, never __pycache__/*.example - matches count_user_custom_nodes() so the
+    # progress total agrees with what the caller already told the user to expect.
+    entries = [e for e in sorted(src.iterdir())
+              if e.name != "__pycache__" and not e.name.endswith(".example")
+              and (e.is_dir() or (e.is_file() and e.name.endswith(".py")))]
+    total = len(entries)
     count = 0
     warnings: list = []
-    for entry in sorted(src.iterdir()):
+    for i, entry in enumerate(entries, start=1):
         name = entry.name
-        if name == "__pycache__" or name.endswith(".example"):
-            continue
         target = dst / name
+        _emit(on_progress, ProgressEvent(
+            f"Copying custom node {name} ({i}/{total}) ...",
+            phase="custom_nodes", done=i, total=total, unit="nodes"))
         try:
             if entry.is_dir():
                 shutil.copytree(str(entry), str(target),
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
                                 dirs_exist_ok=True)
                 count += 1
-            elif entry.is_file() and name.endswith(".py"):
+            elif entry.is_file():
                 shutil.copy2(str(entry), str(target))
                 count += 1
         except Exception as e:
@@ -477,9 +530,9 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
     root = paths.root
     log: list = []
 
-    def _say(line: str) -> None:
+    def _say(line: str, *, phase: Optional[str] = None) -> None:
         log.append(line)
-        _emit(on_progress, line)
+        _emit(on_progress, ProgressEvent(line, phase=phase))
 
     def _fail(status: str, message: str) -> ProvisionResult:
         """Roll back a PARTIAL install before returning a failure. Once the source is
@@ -492,7 +545,8 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         if root.exists():
             try:
                 mc.rmtree_robust(root)
-                _emit(on_progress, f"Rolled back the partial install at {root}.")
+                _emit(on_progress, ProgressEvent(
+                    f"Rolled back the partial install at {root}.", phase="rollback"))
             except OSError as e:
                 note = (f" A partial install remains at {root} and could not be "
                         f"removed automatically ({e}); remove it before retrying.")
@@ -510,16 +564,18 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
     try:
         # 1) Source at the same commit.
         if stack.commit:
-            _say(f"Cloning your ComfyUI ({stack.commit[:12]}) into {root} ...")
+            _say(f"Cloning your ComfyUI ({stack.commit[:12]}) into {root} ...",
+                phase="clone")
             ok, out = _clone_source(stack.workdir, root, stack.commit, on_progress)
         else:
-            _say(f"Copying your ComfyUI source ({stack.version_marker}) into {root} ...")
+            _say(f"Copying your ComfyUI source ({stack.version_marker}) into {root} ...",
+                phase="clone")
             ok, out = _copytree_source(stack.workdir, root, on_progress)
         if not ok:
             return _fail("error", f"Could not replicate the ComfyUI source: {_tail(out)}")
 
         # 2) Fresh localm venv (matches the user's Python version; not a byte-copy).
-        _say("Creating a fresh localm venv ...")
+        _say("Creating a fresh localm venv ...", phase="venv")
         ok, out = _create_managed_venv(stack.venv_python, root / "venv", on_progress)
         if not ok or not paths.venv_python.is_file():
             return _fail("error", f"Could not create the managed venv: {_tail(out)}")
@@ -535,7 +591,8 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         if freeze:
             index_url = torch_index_url_from_freeze(freeze)
             _say(f"Replicating {len(freeze)} packages into the localm venv"
-                 + (f" (torch index {index_url})" if index_url else "") + " ...")
+                 + (f" (torch index {index_url})" if index_url else "") + " ...",
+                phase="install")
             ok, out = _install_freeze(paths.venv_python, freeze, index_url, root,
                                       on_progress)
             if not ok:
@@ -543,7 +600,8 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
                              f"Installing the replicated packages failed: {_tail(out)}")
             n_pkgs = len(freeze)
         else:
-            _say("Your ComfyUI venv reported no packages - replicating it empty.")
+            _say("Your ComfyUI venv reported no packages - replicating it empty.",
+                phase="install")
 
         # 4) Custom nodes - only if the user opted in (decision 3). A per-node copy
         #    failure is non-fatal but is routed through _say so it lands in the run log
@@ -551,12 +609,15 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         n_nodes = 0
         node_warnings: list = []
         if copy_custom_nodes:
-            n_nodes, node_warnings = _copy_custom_nodes(stack.workdir, root)
-            _say(f"Copied {n_nodes} custom node(s) from your ComfyUI.")
+            n_nodes, node_warnings = _copy_custom_nodes(stack.workdir, root,
+                                                         on_progress=on_progress)
+            _say(f"Copied {n_nodes} custom node(s) from your ComfyUI.",
+                phase="custom_nodes")
             for w in node_warnings:
-                _say(f"WARNING: {w}")
+                _say(f"WARNING: {w}", phase="custom_nodes")
         else:
-            _say("Starting with a clean custom_nodes (your nodes were not copied).")
+            _say("Starting with a clean custom_nodes (your nodes were not copied).",
+                phase="custom_nodes")
 
         # 4b) Apply localm's own patch set to the managed core (S4, decision 7). This
         #     patches localm's OWNED copy, never the user's ComfyUI. A failed compat
@@ -564,14 +625,15 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         patch_outcomes = _apply_localm_patches(root)
         for o in patch_outcomes:
             if o.ok:
-                _say(f"localm patch {o.name}: {o.status}")
+                _say(f"localm patch {o.name}: {o.status}", phase="patches")
             else:
-                _say(f"WARNING: localm patch {o.name} failed: {o.detail}")
+                _say(f"WARNING: localm patch {o.name} failed: {o.detail}", phase="patches")
 
         # 5) Models via S1's extra_model_paths.yaml (decision 9): the user's models
         #    dir + localm's managed models dir, ComfyUI-native, no copy.
         mc.write_extra_model_paths(cfg)
-        _say("Wrote extra_model_paths.yaml (your models + localm's managed models).")
+        _say("Wrote extra_model_paths.yaml (your models + localm's managed models).",
+            phase="models")
 
         # 6) Provenance marker (documentation for S4 AND now load-bearing for
         #    step 7 below - is_managed_comfy_installed() requires this file too).
