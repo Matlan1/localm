@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Image generation now sends a "Rendering… (Ns elapsed)" heartbeat every
+  15 seconds while ComfyUI is working**, matching the existing music and video
+  generation feed. Previously an image job stayed completely silent on the job
+  stream from submission until it finished - up to 10 minutes by default - so
+  a slow render and a wedged one looked identical on the Images page; the
+  local terminal spinner already showed elapsed time, but only when running
+  from the CLI, never in the GUI.
 - **The Models page now shows a registered model's real architecture and
   MoE-ness, not just a name guess.** The same header read the HuggingFace
   search page already uses to badge a remote repo is now captured once, at

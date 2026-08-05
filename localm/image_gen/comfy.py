@@ -742,11 +742,18 @@ def generate_image(
         return False, f"Error queuing prompt in ComfyUI: {value}"
     prompt_id = value
 
-    # 10. Poll /history with a visible progress spinner
+    # 10. Poll /history with a visible progress spinner (CLI console only) AND a
+    # heartbeat on the job stream throttled to once every 15s, matching
+    # generate_music/generate_video's _tick (ADR-0009 P8). Without the second
+    # half, the spinner below only ever reaches this function's own local
+    # Console - never a caller's on_progress/job feed - so a GUI-triggered
+    # render was silent on the wire for up to max_poll_seconds even though the
+    # CLI looked alive the whole time.
     start_time = time.time()
     filename = None
     subfolder = ""
     img_type = "output"
+    last_said = [0.0]
 
     with Progress(
         SpinnerColumn(),
@@ -760,6 +767,12 @@ def generate_image(
         def _tick(elapsed: float) -> None:
             progress.update(task_id,
                             description=f"Generating image… ({int(elapsed)}s)")
+            if on_progress and elapsed - last_said[0] >= 15:
+                last_said[0] = elapsed
+                try:
+                    on_progress(f"Rendering… ({int(elapsed)}s elapsed)")
+                except Exception:
+                    pass
 
         status, payload = comfy_poll_until_done(
             api_url, prompt_id,
