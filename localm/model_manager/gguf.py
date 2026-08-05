@@ -374,14 +374,21 @@ _HASH_PROGRESS_MIN_BYTES = 512 * 1024 * 1024
 
 
 
-def _hash_with_progress(path: Path) -> Optional[str]:
+def _hash_with_progress(path: Path,
+                        *, purpose: str = "for duplicate detection") -> Optional[str]:
     """SHA256 a model file, showing live progress for large files.
 
     For files larger than ``_HASH_PROGRESS_MIN_BYTES`` the hash runs in a
     background worker thread so the main thread stays responsive and can render a
     progress bar (a one-time cost stored in the registry for duplicate
     detection); smaller files hash inline without any UI. Returns None for
-    directories (HF models are identified by path only)."""
+    directories (HF models are identified by path only).
+
+    *purpose* completes the bar's label ("Hashing <file> <purpose>"). It exists
+    because the same wait happens for two unrelated reasons and telling the user
+    the wrong one is its own small dishonesty: duplicate detection is bookkeeping
+    the user did not ask for, while verifying a download against --sha256 is the
+    thing they are waiting on. The default preserves the original label."""
     if not path.is_file():
         return None
     try:
@@ -404,7 +411,9 @@ def _hash_with_progress(path: Path) -> Optional[str]:
 
     with Progress(
         SpinnerColumn(),
-        TextColumn("[dim]Hashing {task.description} for duplicate detection[/dim]"),
+        # {task.description} is rich's own placeholder and must survive the
+        # f-string, hence the doubled braces; only *purpose* is interpolated.
+        TextColumn(f"[dim]Hashing {{task.description}} {purpose}[/dim]"),
         BarColumn(),
         DownloadColumn(),
         TimeRemainingColumn(),

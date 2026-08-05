@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -249,6 +250,72 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
 
 
 
+# How often the verify phase may emit. Matches _download_progress's 0.7s poll so
+# both phases tick at the same visible rate, and so a large file cannot turn one
+# emit per 4 MiB block into hundreds of events a second: _sha256_file calls back
+# after EVERY block, at a rate set by the hasher's throughput rather than by
+# anything a user could perceive.
+_VERIFY_EMIT_INTERVAL_S = 0.7
+
+
+def _verify_digest(path: Path, *, purpose: str = "to verify the download") -> str:
+    """SHA256 *path*, reporting a ``verify`` phase while it runs.
+
+    Every caller hashes a file the user has just watched download, AFTER the
+    download's own terminal event has already announced 100%. Hashing many GB
+    then takes minutes with no output at all, so the honest reading of the old
+    behaviour is not "says less than it could" but "says the download is
+    finished, then keeps working" - and ``phase`` is what tells those apart.
+    Before this, ``phase`` only ever held its "download" default at every call
+    site, so no consumer could distinguish the two stages even in principle.
+
+    In GUI mode (LOCALM_PROGRESS_JSON=1) this streams progress events on the
+    existing sentinel channel; otherwise the CLI's own bar renders it. Both are
+    driven by the same ``_sha256_file`` callback, so neither surface is a
+    reimplementation of the other and they cannot drift.
+
+    The 100% reported here is a claim about the HASHING reaching the end of the
+    file, NEVER about the digest matching. A mismatch is the caller's to report,
+    and it is reported as an error rather than as a percentage.
+    """
+    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+        # CLI: _hash_with_progress already owns the size threshold and the bar.
+        # It returns None only for a directory, which no caller here passes; the
+        # fallback keeps the return type honest rather than propagating a None.
+        return _mm._hash_with_progress(path, purpose=purpose) or _mm._sha256_file(path)
+
+    last = 0.0
+    seen = (0, 0)                      # (done, total) as last seen from the hasher
+
+    def _report(done: int, total: int) -> None:
+        nonlocal last, seen
+        seen = (done, total)
+        now = time.monotonic()
+        if now - last < _VERIFY_EMIT_INTERVAL_S:
+            return
+        last = now
+        _emit_progress(done, total, phase="verify")
+
+    digest = _mm._sha256_file(path, progress=_report)
+    # Terminal event, unconditionally and OUTSIDE the throttle, mirroring what
+    # the download context managers do from `finally`.
+    #
+    # An earlier version tried to exempt the final callback inside _report by
+    # testing `done < total`. That is unrecognisable when total is 0 (the size
+    # could not be stat'd), so every tick including the last one was throttled
+    # away and a fast hash reported a stale count that never advanced to the
+    # end. Worst possible case to lose: with no denominator there is no
+    # percentage, so the byte count is the ONLY honest signal left.
+    #
+    # It may repeat a tick that just got through. That is deliberate and matches
+    # the download path: progress is latched, so a duplicate is free, whereas a
+    # missing terminal event strands every consumer short of the end.
+    _emit_progress(*seen, phase="verify")
+    return digest
+
+
+
+
 def pull_model(
     model_spec: str,
     name: Optional[str] = None,
@@ -308,7 +375,7 @@ def pull_model(
                     "verify. Drop --sha256, or point at a single .gguf file.")
                 return False
             want = expected_sha256.strip().lower()
-            actual = _mm._sha256_file(local).lower()
+            actual = _verify_digest(local).lower()
             if actual != want:
                 console.print(
                     f"[red]SHA256 mismatch![/red] {local} is {actual[:16]}…, not "
@@ -865,7 +932,7 @@ def _pull_gguf_file(
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
         if want:
-            on_disk = _mm._sha256_file(dest)
+            on_disk = _verify_digest(dest, purpose="to check the file already here")
             if on_disk.lower() != want:
                 console.print(
                     f"[red]SHA256 mismatch![/red] The file already at {filename} "
@@ -968,7 +1035,7 @@ def _pull_gguf_file(
     # (HF metadata is already trusted; we only need to confirm a user assertion
     # against the real bytes.) On mismatch, delete the part(s) and fail.
     if want:
-        actual = _mm._sha256_file(dest).lower()
+        actual = _verify_digest(dest).lower()
         if actual != want:
             console.print(
                 f"[red]SHA256 mismatch![/red] Expected {want[:16]}…, got "
@@ -1417,7 +1484,7 @@ def _pull_url(
         # bytes - never alias a new name onto unrelated existing bytes
         # (GAP-CLI-2).
         if expected_sha256:
-            on_disk = _mm._sha256_file(dest)
+            on_disk = _verify_digest(dest, purpose="to check the file already here")
             if on_disk.lower() != expected_sha256.lower():
                 console.print(
                     f"[red]SHA256 mismatch![/red] A different file already "
@@ -1569,7 +1636,7 @@ def _pull_url(
     part_file.rename(dest)
 
     # SHA256 verification
-    actual = _mm._sha256_file(dest)
+    actual = _verify_digest(dest)
     if expected_sha256:
         if actual.lower() == expected_sha256.lower():
             console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
