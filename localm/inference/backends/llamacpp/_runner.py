@@ -56,6 +56,32 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              (e.g. "InvalidGrammarError")
     ("chunk", text)                       - one streamed token (chat_stream only)
     ("done", {finish_reason, grammar_unsupported})  - end of one chat_stream
+    ("progress", payload)                 - NON-TERMINAL: the load is still
+                                             running. See below.
+
+TERMINAL vs NON-TERMINAL envelopes. Every kind above except ``progress`` ENDS
+the wait that received it. ``chat_stream`` has always had this distinction
+(``chunk`` is non-terminal, ``done`` ends the stream); the LOAD wait did not,
+so a load could report nothing at all between "started" and "finished or
+failed" - ``spawn_and_load`` returned or raised on the FIRST envelope it saw,
+whatever it was, and an unrecognised kind was an outright error.
+
+``progress`` closes that gap for the load path. Its payload is deliberately
+UNINTERPRETED here: this module only guarantees delivery, so whatever decides
+what is worth reporting during a load owns the payload's shape, and this
+protocol does not have to change again when that is settled. NOTHING EMITS IT
+YET - the consumer learns it first, on purpose, because a producer cannot be
+added until the parent can receive a load envelope without treating it as the
+end of the load.
+
+Two properties this must NOT weaken, both covered by tests:
+- An UNKNOWN kind is still a loud error, never ignored. Tolerating unknown
+  kinds would turn a protocol mismatch into a silent hang, which is the whole
+  reason the strict check exists.
+- ``progress`` does NOT extend the load deadline. A child that emitted it in a
+  tight loop would otherwise keep a hung load alive forever, and the deadline
+  is the only thing standing between a wedged native call and a stuck server.
+  The timeout therefore still bounds the WHOLE load, exactly as before.
 
 A native abort, an unrecoverable fault deliberately left uncaught by
 ``GgufWorker.chat_stream``, or a genuine hang produces NO envelope - the
@@ -321,6 +347,30 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 # interval, not the load's own deadline (see LOAD_TIMEOUT_DEFAULT below).
 _LOAD_POLL_INTERVAL = 0.2
 
+# Envelope kinds the LOAD wait treats as NON-TERMINAL: they say "still working"
+# and must never end the wait. Everything NOT in here ends it - which is what
+# keeps an unknown kind a loud error (see spawn_and_load's tail) instead of a
+# silent hang. A frozenset rather than an `== "progress"` test so adding a second
+# non-terminal kind later is a one-line change that cannot miss a call site.
+_LOAD_NON_TERMINAL_KINDS = frozenset({"progress"})
+
+
+def _emit_load_progress(sink, payload) -> None:
+    """Hand one non-terminal load envelope to *sink*, never letting it break the
+    load. A raising progress callback must not fail a load that is going fine:
+    the sink is a reporting concern and the load is the actual work, so this
+    mirrors embedder._emit_stage rather than the load's own error handling.
+    Swallowing is correct here and is NOT an AGENTS.md rule-5 violation - the
+    failure is logged at debug with its traceback, and it says nothing about
+    whether the model loaded."""
+    if sink is None:
+        return
+    try:
+        sink(payload)
+    except Exception:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("load progress sink raised (ignored)", exc_info=True)
+
 # Default model-load timeout. Unlike the VRAM-probe daemon's short bounded
 # wait (which has a safe "unmeasurable, skip" fallback), a model load has NO
 # safe default when it stalls - it must raise a clear, actionable error, never
@@ -399,7 +449,8 @@ class ModelRunner:
         self._proc.start()
 
     def spawn_and_load(self, params: dict, cancel_event=None,
-                        timeout: float = LOAD_TIMEOUT_DEFAULT) -> dict:
+                        timeout: float = LOAD_TIMEOUT_DEFAULT,
+                        on_progress=None) -> dict:
         """Spawn the child and load the model. Returns the metadata dict
         (``n_layers``/``kv_bytes_per_token``/``supports_images``) on success.
 
@@ -408,7 +459,14 @@ class ModelRunner:
         crash (native abort - detected via ``is_alive()``, never an
         exception this process had to catch), or a timeout (the child is
         killed; a load has no safe "unmeasurable" fallback, so this always
-        raises rather than silently reporting not-loaded)."""
+        raises rather than silently reporting not-loaded).
+
+        *on_progress*, if given, receives the payload of each NON-TERMINAL
+        ``progress`` envelope (see this module's protocol notes). Purely
+        additive: no caller passes it today and nothing emits the envelope yet,
+        so every existing load behaves exactly as before. A raising sink is
+        swallowed (``_emit_load_progress``) - a reporting callback must never
+        fail a load that is otherwise fine."""
         self._spawn()
         self._req_q.put(("load", params))
         deadline = time.monotonic() + timeout
@@ -429,15 +487,38 @@ class ModelRunner:
                         "debug log for the native stack trace. Retry the load, "
                         "or repair the runtime with 'localm setup-llama'."
                     )
-                if time.monotonic() > deadline:
-                    self.shutdown(grace=0)
-                    raise RuntimeError(
-                        f"Model load timed out after {timeout:.0f}s - the "
-                        "worker process may be hung (see the debug log). The "
-                        "server stayed up and the load was aborted; retry, or "
-                        "raise gguf_load_timeout_s if this model genuinely "
-                        "needs longer to load."
-                    )
+            else:
+                # A NON-TERMINAL envelope reports that the load is still running,
+                # so clear it and keep waiting. The isinstance guard sends a
+                # NON-TUPLE down the TERMINAL path instead, where it fails loudly
+                # (the tail's unexpected-response error, or a TypeError on
+                # something not even subscriptable) - it must not be quietly
+                # re-read as progress, which would convert a broken protocol into
+                # an unbounded wait.
+                # A payload-less ("progress",) is treated as progress carrying
+                # None, NOT as malformed: the payload is advisory, so a producer
+                # bug in it must not be able to kill a load that is otherwise
+                # fine. The deadline below still bounds the wait either way.
+                if (isinstance(result, tuple) and result
+                        and result[0] in _LOAD_NON_TERMINAL_KINDS):
+                    _emit_load_progress(on_progress, result[1] if len(result) > 1
+                                        else None)
+                    result = None
+            # Deliberately OUTSIDE the `except _queue.Empty` branch it used to
+            # live in. A progress envelope keeps `get()` returning, so an
+            # Empty-only deadline check would never be reached again once a child
+            # started emitting them - a load could then run forever and the one
+            # guard against a wedged native call would be gone. The deadline is
+            # NOT extended by progress: it still bounds the whole load.
+            if result is None and time.monotonic() > deadline:
+                self.shutdown(grace=0)
+                raise RuntimeError(
+                    f"Model load timed out after {timeout:.0f}s - the "
+                    "worker process may be hung (see the debug log). The "
+                    "server stayed up and the load was aborted; retry, or "
+                    "raise gguf_load_timeout_s if this model genuinely "
+                    "needs longer to load."
+                )
         kind = result[0]
         if kind == "ok":
             return result[1]
