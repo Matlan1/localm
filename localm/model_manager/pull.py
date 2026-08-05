@@ -156,7 +156,8 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
             if dl != last:
                 last = dl
                 fn, fi, fc = _progress_file_info(target_parts)
-                _emit_progress(dl, total_size, name=fn, index=fi, count=fc)
+                _emit_progress(dl, total_size, name=fn, index=fi, count=fc,
+                               zero_is_unknown=True)
             stop.wait(0.7)
 
     t = threading.Thread(target=_poll, daemon=True)
@@ -165,7 +166,10 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
     # Seed from the MEASUREMENT, not from a literal 0. They agree on a fresh
     # pull and disagree on every resume, where parts already on disk make a
     # hardcoded 0 a false statement the next poll immediately contradicts.
-    _emit_progress(_downloaded_bytes(), total_size, name=fn0, index=fi0, count=fc0)
+    # zero_is_unknown covers what that left: on a fresh pull the measurement IS
+    # 0, so the seed was still claiming a confident 0% before any byte moved.
+    _emit_progress(_downloaded_bytes(), total_size, name=fn0, index=fi0, count=fc0,
+                   zero_is_unknown=True)
     try:
         yield outcome
     finally:
@@ -207,15 +211,16 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
             dl = _measured()
             if dl != last:
                 last = dl
-                _emit_progress(dl, total_size)
+                _emit_progress(dl, total_size, zero_is_unknown=True)
             stop.wait(0.7)
 
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
     # Seed from the measurement (see _download_progress): a resumed snapshot or
     # a resumed .part file already has bytes on disk, and a hardcoded 0 claims
-    # otherwise.
-    _emit_progress(_measured(), total_size)
+    # otherwise. zero_is_unknown then covers the fresh case, where the
+    # measurement is 0 and a rendered "0%" cannot be told from a stall.
+    _emit_progress(_measured(), total_size, zero_is_unknown=True)
     try:
         yield outcome
     finally:

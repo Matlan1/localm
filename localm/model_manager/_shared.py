@@ -35,8 +35,35 @@ PROGRESS_SENTINEL = "\x1flocalm-progress\x1f"
 
 
 def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
-                   name: "str | None" = None, index: int = 0, count: int = 0) -> None:
+                   name: "str | None" = None, index: int = 0, count: int = 0,
+                   zero_is_unknown: bool = False) -> None:
+    """Write one progress frame on the sentinel channel.
+
+    *zero_is_unknown* suppresses the percentage while NOTHING has landed yet, and
+    belongs on every IN-FLIGHT emitter (the opening seed and the poll loop). Set
+    it there, never on a terminal event.
+
+    WHY, because "0%" looks harmless: a percentage is a CLAIM about progress, and
+    before the first byte arrives "0%" is indistinguishable from a download that
+    has stalled. A fresh pull spends real seconds in DNS, TLS and the first HTTP
+    round trip, and for that whole window the GUI rendered a confident
+    "0% . 0 B / 1.04 GB". Truthful, and still the wrong thing to say - which is
+    the distinction ADR-0009 turns on. The honest report is that we do not know
+    yet, and the GUI already renders exactly that: a busy bar plus a running byte
+    count (pages/models.js, the `ev.pct != null && ev.total` branch's else).
+
+    It is scoped to `downloaded == 0` rather than applied to the seed wholesale
+    because a RESUME seed carries a real measurement - 429MB of 4.68GB is a true
+    9.2% before any new byte moves, and #1098 exists to report it. Suppressing
+    that would trade this defect for its mirror image.
+
+    The terminal event keeps exact semantics on purpose: a failed pull that
+    landed nothing genuinely IS at zero, and "unknown" there would be the
+    opposite lie.
+    """
     pct = round(downloaded * 100 / total, 1) if total else None
+    if zero_is_unknown and not downloaded:
+        pct = None
     payload = {"phase": phase, "downloaded": downloaded, "total": total, "pct": pct}
     # R06: for a multi-file download (a split GGUF), tell the GUI which file is in
     # flight so it can show "file 2 of 3: <name>". Omitted for a single file so the
