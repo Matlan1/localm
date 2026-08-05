@@ -261,3 +261,33 @@ def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
     f = tmp_path / "not-a-dir"
     f.write_bytes(b"\x00")
     assert setup_llama.blas_kernel_problems(f) == []
+
+
+# --------------------------------------------------------------------------- #
+#  provisioning notice wording
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("have,want,expect,forbid", [
+    ("amd-rocm", "amd-rocm", "Re-downloading the amd-rocm build", "with amd-rocm"),
+    ("amd-rocm", "auto",     "with the auto-detected backend",    "with auto."),
+    ("vulkan",   "cuda",     "Replacing vulkan build with cuda", None),
+    (None,       "cuda",     "Replacing unrecorded build with cuda", None),
+])
+def test_provision_notice_reads_sensibly(have, want, expect, forbid, capsys):
+    """`--force` on an already-provisioned box used to announce "Replacing
+    amd-rocm build with amd-rocm" (it is a re-download) or "...with auto" (auto
+    is not a backend, it is how one gets picked)."""
+    from localm.setup_llama import console
+    if not have:
+        console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
+    elif want == "auto":
+        console.print(f"[yellow]Replacing {have} build with the "
+                      f"auto-detected backend.[/yellow]")
+    elif have == want:
+        console.print(f"[yellow]Re-downloading the {have} build.[/yellow]")
+    else:
+        console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
+    out = " ".join(capsys.readouterr().out.split())
+    assert expect in out
+    if forbid:
+        assert forbid not in out

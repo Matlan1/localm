@@ -1884,10 +1884,22 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             else:
                 _ensure_importable()
                 return
-        if have:
-            console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
-        else:
+        # Four distinct situations, and the two that reach here via the confirm
+        # above used to read as nonsense: "Replacing amd-rocm build with
+        # amd-rocm" (a re-download, not a replacement) and "Replacing amd-rocm
+        # build with auto" (auto is not a backend, it is how one gets chosen).
+        # The two genuinely-wrong cases are fixed; the other two keep their exact
+        # existing wording, which is already correct and is asserted elsewhere.
+        # Restyling a correct message would only churn the tests that pin it.
+        if not have:
             console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
+        elif want == "auto":
+            console.print(f"[yellow]Replacing {have} build with the "
+                          f"auto-detected backend.[/yellow]")
+        elif have == want:
+            console.print(f"[yellow]Re-downloading the {have} build.[/yellow]")
+        else:
+            console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
 
     if from_dir:
         src = Path(from_dir)
