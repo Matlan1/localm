@@ -321,7 +321,7 @@ from localm.vram import VRAM_OVERHEAD_BYTES as _VRAM_OVERHEAD_BYTES
 
 def estimate_vram(model_bytes: int, n_ctx: int,
                   n_gpu_layers: int = 99, n_layers: int | None = None,
-                  kv_bytes_per_token: int = 0) -> dict:
+                  kv_bytes_per_token: int = 0, moe_pinned_bytes: int = 0) -> dict:
     """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with
     *n_gpu_layers* offloaded. Returns a breakdown {weights, kv_cache, overhead,
     needed} so the UI can show where the memory goes. A model/ctx of 0 yields 0
@@ -336,9 +336,25 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     then falls back to the size-class heuristic, kept as the LAST resort by
     calling GgufBackend._bytes_per_token rather than reimplementing it, so
     there is exactly one size-class formula in the codebase - the same one
-    VramSizingMixin._kv_bytes_per_token falls back to post-load."""
+    VramSizingMixin._kv_bytes_per_token falls back to post-load.
+
+    *moe_pinned_bytes*, when > 0, is the caller's own read of
+    gguf_moe_pinned_expert_bytes(path, n_cpu_moe) - the exact byte count of
+    routed-expert tensors an n_cpu_moe load pins to system RAM instead of
+    VRAM (see llamacpp/_sizing.py's VramSizingMixin._effective_model_bytes_for_vram,
+    which applies the identical discount to the preflight that decides whether
+    a load is even attempted). Without this, this estimate double-counted
+    exactly what that preflight fix corrected: a Mixture-of-Experts model
+    with its experts pinned to system RAM would still show the WHOLE file as
+    VRAM-needed here, overstating the readout even after the load itself
+    would have succeeded. Same "0 means no signal, do nothing" contract as
+    kv_bytes_per_token - this function cannot read a header itself."""
     model_bytes = max(0, int(model_bytes or 0))
     n_ctx = max(0, int(n_ctx or 0))
+    # The MoE-pinned share never touches VRAM regardless of n_gpu_layers - it
+    # is subtracted from the file's total BEFORE the GPU-offload fraction
+    # below is applied, mirroring _effective_model_bytes_for_vram's ordering.
+    model_bytes = max(0, model_bytes - max(0, int(moe_pinned_bytes or 0)))
     # Fraction of the weights placed on the GPU. Without the model's true layer
     # count, treat >= 99 (the "all" sentinel) as full; otherwise scale linearly.
     if n_gpu_layers is None or n_gpu_layers < 0:

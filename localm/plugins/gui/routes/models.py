@@ -400,22 +400,41 @@ def register(app: FastAPI, ctx) -> None:
         """Approximate VRAM needed to load *model* (defaults to the active one)
         at the given context + GPU-offload, vs free/total VRAM. Powers the live
         readout under the Settings performance sliders. Always 'approximate'."""
-        from localm.config import load_registry
+        from localm.config import load_config, load_registry
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
         from localm.model_manager import _entry_path
-        from localm.model_manager.gguf import gguf_kv_bytes_per_token
+        from localm.model_manager.gguf import (
+            gguf_kv_bytes_per_token, gguf_moe_pinned_expert_bytes)
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
         n_layers = None
         kv_bytes_per_token = 0
+        moe_pinned_bytes = 0
+        # n_cpu_moe has no GUI slider of its own (unlike n_ctx/n_gpu_layers,
+        # which the caller always sends as the sliders' live, possibly-unsaved
+        # positions) - it is read from the SAVED config, the only place a
+        # value for it exists right now.
+        n_cpu_moe = int(load_config().get("n_cpu_moe") or 0)
         # _entry_path returns None for a malformed / corrupt entry (non-dict, or a
         # null / non-string / empty path). The route's own guard below is
         # except OSError, which would NOT catch the AttributeError / TypeError such
         # an entry raises; routing through _entry_path keeps a corrupt entry from
         # 500ing the VRAM readout (model_bytes stays 0 -> still a valid estimate).
-        epath = _entry_path(load_registry().get(name))
+        entry = load_registry().get(name)
+        epath = _entry_path(entry)
+        # F8-PERSIST-ARCH-AND-EXPERT-COUNT persists expert_count on the entry at
+        # registration time. expert_count == 0 is a CONFIRMED fact (the header
+        # was read and resolved to a known-dense architecture - see
+        # gguf_registry_metadata's own docstring), so a dense model with
+        # n_cpu_moe left over from an earlier MoE model can skip the ~200ms
+        # tensor-info re-parse below entirely: _apply_cpu_moe's own dense-model
+        # guard means it would find nothing anyway. None (not yet backfilled,
+        # or the header could not be read) and any non-zero count both still
+        # need the real read: a count alone is not the BYTE size this estimate
+        # needs, only whether it is worth asking for one at all.
+        known_dense = isinstance(entry, dict) and entry.get("expert_count") == 0
         if epath is not None:
             # Off the event loop, for the same reason as /api/models and
             # /v1/models/{id}: the path comes out of registry.json, not from this
@@ -441,15 +460,29 @@ def register(app: FastAPI, ctx) -> None:
                                 "gguf KV-shape probe failed (%s) for %s; the VRAM "
                                 "estimate falls back to the size-class heuristic",
                                 type(exc).__name__, ep)
-                        return p.stat().st_size, cached_n_layers(str(p)), kv_bpt
+                        moe_pinned = 0
+                        if n_cpu_moe > 0 and not known_dense:
+                            try:
+                                moe_pinned = int(gguf_moe_pinned_expert_bytes(
+                                    p, n_cpu_moe) or 0)
+                            except Exception as exc:  # contracted not to raise - surface if it does
+                                logger.debug(
+                                    "gguf MoE expert-byte probe failed (%s) for "
+                                    "%s; the VRAM estimate charges the whole "
+                                    "file (today's behavior)",
+                                    type(exc).__name__, ep)
+                        return (p.stat().st_size, cached_n_layers(str(p)), kv_bpt,
+                                moe_pinned)
                 except (OSError, ValueError):
                     pass
-                return model_bytes, n_layers, kv_bytes_per_token
+                return model_bytes, n_layers, kv_bytes_per_token, moe_pinned_bytes
 
-            model_bytes, n_layers, kv_bytes_per_token = await asyncio.get_running_loop().run_in_executor(
+            (model_bytes, n_layers, kv_bytes_per_token,
+             moe_pinned_bytes) = await asyncio.get_running_loop().run_in_executor(
                 get_plugin_executor(), _measure, epath)
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers,
-                            kv_bytes_per_token=kv_bytes_per_token)
+                            kv_bytes_per_token=kv_bytes_per_token,
+                            moe_pinned_bytes=moe_pinned_bytes)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it OFF the
         # event loop (it is safe-by-construction but still may take up to its
         # deadline on a wedged driver) so a stats read never stalls the WebUI.
