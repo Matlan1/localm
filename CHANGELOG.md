@@ -344,6 +344,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **A model download could show a confident percentage it had no basis for.**
+  Five related problems in the pull progress bar: a failed download announced
+  100% before reporting failure; resuming an interrupted direct-URL download
+  whose server sends no length could sit at a stuck 100% for the entire real
+  transfer; resuming any download briefly claimed 0 bytes when it already had
+  some on disk; a download whose size could not be determined went completely
+  silent instead of showing a running byte count; and the in-flight byte count
+  could include a different download running at the same time, or watch the
+  wrong folder entirely when pulling into a custom destination. Progress now
+  comes from what is actually on disk, and says "unknown" rather than guessing.
 - **A self-update could silently swap your GPU runtime to a slower one.** When an
   update needed to re-provision the native binaries, it picked the backend from
   an older detection value that only ever recommends the universal Vulkan build

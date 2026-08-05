@@ -64,20 +64,80 @@ def _progress_file_info(target_parts: List[Path]) -> "tuple[str | None, int, int
 
 
 
-@contextlib.contextmanager
-def _download_progress(target_parts: List[Path], total_size: int):
-    """Stream JSON download progress while files land under MODELS_DIR.
+class _ProgressOutcome:
+    """Explicit success signal for the progress context managers.
 
-    Active only in GUI mode (LOCALM_PROGRESS_JSON=1) with a known total - a
-    no-op otherwise, so the CLI keeps huggingface_hub's tqdm bars. Progress is
-    measured from bytes on disk (completed parts + the growing ``.incomplete``
-    temp file), which is robust across huggingface_hub versions.
+    A context manager cannot infer success from the absence of an exception:
+    ``_pull_gguf_file`` reports a failed part with ``return False`` from INSIDE
+    its ``with`` block, which unwinds perfectly cleanly. Detecting only
+    exceptions would still announce 100% for that download. So the body has to
+    SAY it finished, and silence means it did not.
     """
-    if os.environ.get("LOCALM_PROGRESS_JSON") != "1" or not total_size:
-        yield
+
+    __slots__ = ("succeeded",)
+
+    def __init__(self) -> None:
+        self.succeeded = False
+
+    def ok(self) -> None:
+        self.succeeded = True
+
+
+def _incomplete_prefixes(base_dir: Path, rel_parts: List[str]) -> "set[str] | None":
+    """Filename prefixes of the ``.incomplete`` temp files for *rel_parts*.
+
+    huggingface_hub names a local-dir temp file
+    ``<short_hash(<name>.metadata)>.<etag>.incomplete`` under
+    ``<local_dir>/.cache/huggingface/download/<subpath>/`` (verified against
+    huggingface_hub 1.23.0). The etag is not knowable in advance, but the hash
+    prefix is, and it is what separates OUR parts from a concurrent pull's.
+
+    Returns None when the layout cannot be computed - this reaches into
+    huggingface_hub internals, so a version that moves them must degrade rather
+    than break. The caller then falls back to an unfiltered scan of this
+    destination, which is coarser but never counts another DESTINATION's bytes.
+    """
+    try:
+        from huggingface_hub._local_folder import _short_hash
+        from huggingface_hub._local_folder import get_local_download_paths
+        out = set()
+        for rel in rel_parts:
+            paths = get_local_download_paths(Path(base_dir), rel)
+            out.add(_short_hash(paths.metadata_path.name))
+        return out or None
+    except Exception as e:
+        # Not fatal and not silenced: progress simply gets coarser. Surfaced at
+        # debug so a huggingface_hub layout change is discoverable rather than
+        # showing up as mysteriously chunky download bars.
+        logger.debug("cannot compute .incomplete prefixes (progress will be "
+                     "coarser, not wrong): %s", e)
+        return None
+
+
+@contextlib.contextmanager
+def _download_progress(target_parts: List[Path], total_size: int, *,
+                       base_dir: "Path | None" = None,
+                       rel_parts: "List[str] | None" = None):
+    """Stream JSON download progress while files land under *base_dir*.
+
+    Active in GUI mode (LOCALM_PROGRESS_JSON=1). A total of 0 means "we could
+    not size this": progress still streams with ``pct: null`` so the GUI shows a
+    busy bar with a running byte count, matching _snapshot_progress. Emitting
+    NOTHING in that case (the old behaviour) turned a single failed HEAD into a
+    completely silent multi-GB download.
+
+    Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
+    event reports the measured partial instead of 100%.
+    """
+    outcome = _ProgressOutcome()
+    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+        yield outcome
         return
 
     stop = threading.Event()
+    cache_root = (Path(base_dir) if base_dir is not None else _mm.MODELS_DIR) / ".cache"
+    prefixes = _incomplete_prefixes(Path(base_dir), rel_parts) \
+        if base_dir is not None and rel_parts else None
 
     def _downloaded_bytes() -> int:
         done = 0
@@ -87,17 +147,25 @@ def _download_progress(target_parts: List[Path], total_size: int):
             except OSError:
                 pass  # not finished yet
         active = 0
-        cache = _mm.MODELS_DIR / ".cache"
-        if cache.is_dir():
+        if cache_root.is_dir():
             try:
-                for f in cache.rglob("*.incomplete"):
+                for f in cache_root.rglob("*.incomplete"):
+                    # Scoped to THIS job. The scan used to be a hardcoded
+                    # MODELS_DIR walk with no filter, so a --comfy-dest-dir pull
+                    # looked in the wrong tree entirely, and any concurrent pull's
+                    # temp file was added to this job's numerator.
+                    if prefixes is not None and f.name.split(".")[0] not in prefixes:
+                        continue
                     try:
                         active += f.stat().st_size
                     except OSError:
                         pass
             except OSError:
                 pass
-        return min(done + active, total_size)
+        total_now = done + active
+        # Only clamp against a total we actually have. min(x, 0) is 0, which
+        # would pin an indeterminate download's byte count at zero forever.
+        return min(total_now, total_size) if total_size else total_now
 
     def _poll() -> None:
         last = -1
@@ -112,14 +180,20 @@ def _download_progress(target_parts: List[Path], total_size: int):
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
     fn0, fi0, fc0 = _progress_file_info(target_parts)
-    _emit_progress(0, total_size, name=fn0, index=fi0, count=fc0)
+    # Seed from the MEASUREMENT, not from a literal 0. They agree on a fresh
+    # pull and disagree on every resume, where parts already on disk make a
+    # hardcoded 0 a false statement the next poll immediately contradicts.
+    _emit_progress(_downloaded_bytes(), total_size, name=fn0, index=fi0, count=fc0)
     try:
-        yield
+        yield outcome
     finally:
         stop.set()
         t.join(timeout=2)
         fn1, fi1, fc1 = _progress_file_info(target_parts)
-        _emit_progress(total_size, total_size, name=fn1, index=fi1, count=fc1)
+        # 100% is a claim about the outcome, so only the success path may make
+        # it. Otherwise report what is actually on disk.
+        final = total_size if (outcome.succeeded and total_size) else _downloaded_bytes()
+        _emit_progress(final, total_size, name=fn1, index=fi1, count=fc1)
 
 
 
@@ -129,19 +203,26 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
     """Like _download_progress but for snapshot_download (many files): byte
     count comes from a caller-supplied directory-size function. Indeterminate
     (total_size == 0) still streams a 'downloading' phase so the GUI can show
-    a busy bar; no-op outside GUI mode."""
+    a busy bar; no-op outside GUI mode.
+
+    Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
+    event reports the measured partial instead of 100%.
+    """
+    outcome = _ProgressOutcome()
     if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
-        yield
+        yield outcome
         return
 
     stop = threading.Event()
 
+    def _measured() -> int:
+        dl = disk_bytes_fn()
+        return min(dl, total_size) if total_size else dl
+
     def _poll() -> None:
         last = -1
         while not stop.is_set():
-            dl = disk_bytes_fn()
-            if total_size:
-                dl = min(dl, total_size)
+            dl = _measured()
             if dl != last:
                 last = dl
                 _emit_progress(dl, total_size)
@@ -149,14 +230,21 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
 
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
-    _emit_progress(0, total_size)
+    # Seed from the measurement (see _download_progress): a resumed snapshot or
+    # a resumed .part file already has bytes on disk, and a hardcoded 0 claims
+    # otherwise.
+    _emit_progress(_measured(), total_size)
     try:
-        yield
+        yield outcome
     finally:
         stop.set()
         t.join(timeout=2)
-        if total_size:
+        # Only a successful run may claim the total. A failure reports what
+        # actually landed.
+        if outcome.succeeded and total_size:
             _emit_progress(total_size, total_size)
+        else:
+            _emit_progress(_measured(), total_size)
 
 
 
@@ -856,7 +944,8 @@ def _pull_gguf_file(
     else:
         console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
 
-    with _download_progress([base_dir / p for p in missing], total_size):
+    with _download_progress([base_dir / p for p in missing], total_size,
+                            base_dir=base_dir, rel_parts=list(missing)) as _prog:
         for part in missing:
             try:
                 local = hf_hub_download(
@@ -869,7 +958,11 @@ def _pull_gguf_file(
                     shutil.move(local, final)
             except Exception as e:
                 console.print(f"[red]Download failed[/red] ({part}): {e}")
+                # Deliberately WITHOUT _prog.ok(): this return unwinds the
+                # context manager cleanly, so silence is the only thing that
+                # stops it announcing 100% for a download that just failed.
                 return False
+        _prog.ok()
 
     # FAC-5: verify the downloaded first part against the user's --sha256.
     # (HF metadata is already trusted; we only need to confirm a user assertion
@@ -1205,11 +1298,12 @@ def _pull_hf_snapshot(
     console.print("[dim]This may take a while for large models...[/dim]")
 
     try:
-        with _snapshot_progress(_disk_bytes, total_size):
+        with _snapshot_progress(_disk_bytes, total_size) as _prog:
             snapshot_download(
                 repo_id=repo_id,
                 local_dir=str(dest),
             )
+            _prog.ok()
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {e}")
         return False
@@ -1426,7 +1520,15 @@ def _pull_url(
         already_have = 0
 
     content_length = int(r.headers.get("content-length", 0))
-    total_display  = (already_have + content_length) or None
+    # No content-length means we do not know the size, and that stays unknown
+    # even when bytes are already on disk. The old `(already_have +
+    # content_length) or None` made the TOTAL equal to already_have on a
+    # resumed chunked download: the first poll then read already_have of
+    # already_have, i.e. a confident 100%, and the change-gate suppressed every
+    # later event, so the whole real transfer ran at a stuck 100%. A fresh
+    # download collapsed to None correctly, so this only ever bit the resume
+    # path - the one the .part machinery exists for.
+    total_display = (already_have + content_length) if content_length else None
 
     def _write_chunks(on_chunk=None):
         mode = "ab" if already_have else "wb"
@@ -1448,8 +1550,9 @@ def _pull_url(
                 return part_file.stat().st_size
             except OSError:
                 return 0
-        with _snapshot_progress(_part_bytes, total_display or 0):
+        with _snapshot_progress(_part_bytes, total_display or 0) as _prog:
             _write_chunks()
+            _prog.ok()
     else:
         with Progress(
             TextColumn("[bold blue]{task.description}"),
