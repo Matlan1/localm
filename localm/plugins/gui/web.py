@@ -83,11 +83,41 @@ def _index_html_with_shell_token(token: str) -> str:
     return snippet + html
 
 
+def _host_header_hostname(host: str) -> str:
+    """The bare hostname portion of a ``Host`` header value, with any
+    ``:port`` suffix and IPv6 brackets stripped: ``"127.0.0.1:8642"`` ->
+    ``"127.0.0.1"``, ``"[::1]:8642"`` -> ``"::1"``, ``"localhost"`` unchanged.
+    A malformed value that this cannot parse cleanly is returned as-is, which
+    fails SAFE: ``is_loopback_host`` rejects anything that is not a literal
+    loopback string, so a garbled Host is treated as non-loopback, never as
+    loopback by accident."""
+    host = host.strip()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end != -1 else host
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
 def _is_same_origin_document_request(request: Request) -> bool:
-    """True when *request* carries no ``Origin`` header (an ordinary top-level
-    browser navigation/reload never sends one - the legitimate loopback GUI
-    shell case) or an ``Origin`` whose authority matches ``Host`` (a same-
-    origin fetch/reload). False for any cross-origin fetch()/XHR.
+    """True when *request* is same-origin with the loopback GUI shell.
+
+    An ``Origin`` header, when present, must match ``Host`` (a same-origin
+    fetch/reload); a mismatch is refused outright. When ``Origin`` is
+    ABSENT - an ordinary top-level browser navigation/reload never sends
+    one, which is the legitimate loopback GUI shell case - the ``Host``
+    header itself must ALSO be a loopback literal (127.0.0.1/localhost/::1).
+    This is not redundant with the ``loopback`` check the caller already did
+    on ``app.state.bind_host``: a DNS-rebinding attack (attacker registers a
+    domain, serves an initial page from their own IP, then repoints that
+    domain's DNS to this machine's loopback address) makes a follow-up
+    navigation that the BROWSER considers same-origin with the attacker's
+    opener page - Same-Origin Policy is computed from the URL STRING the
+    browser navigated to, never the resolved IP - so it carries no Origin
+    header at all, while its Host header is still the ATTACKER'S domain
+    string, never a literal ``127.0.0.1``/``localhost`` regardless of what
+    it resolves to. Requiring Host to be loopback-shaped in the no-Origin
+    case closes that gap without needing to know the server's own bind
+    address here.
 
     Checked WITHOUT regard to the server's CORS config (``cors_origins``,
     including ``"*"``): CORS decides whether a cross-origin caller may READ a
@@ -97,9 +127,9 @@ def _is_same_origin_document_request(request: Request) -> bool:
     on a response reachable from another origin, independent of what that
     origin is later permitted to read."""
     origin = request.headers.get("origin")
-    if not origin:
-        return True
     host = request.headers.get("host", "")
+    if not origin:
+        return _is_loopback_host(_host_header_hostname(host))
     return origin.split("://", 1)[-1] == host
 
 
