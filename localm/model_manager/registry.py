@@ -645,9 +645,10 @@ def vision_input_guidance(mmproj_failed: bool = False,
                 f"`localm run {vlms[0]}`, or pick it in the GUI) and attach the "
                 f"image again.")
     if importlib.util.find_spec("transformers") is not None:
-        return (f"{head} No vision model is registered yet - pull a vision-capable "
-                f"HuggingFace model such as a Gemma 3 vision or Qwen2.5-VL "
-                f"checkpoint (`localm pull <repo>`), then run it with --image.")
+        return (f"{head} No vision-capable model could be confirmed in your "
+                f"library - pull a vision-capable HuggingFace model such as "
+                f"a Gemma 3 vision or Qwen2.5-VL checkpoint "
+                f"(`localm pull <repo>`), then run it with --image.")
     return (f"{head} No vision-capable model could be confirmed in your "
             f"library. GGUF vision works too (the built-in mtmd path) - pull "
             f"a vision-capable GGUF model with its projector, e.g. "

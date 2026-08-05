@@ -261,7 +261,7 @@ class TestVisionGuidance:
         assert "vision-model" in mm.vision_capable_models()
         msg = mm.vision_input_guidance()
         assert "vision-model" in msg and "localm run" in msg
-        assert "No vision model is registered yet" not in msg
+        assert "could be confirmed" not in msg
 
     def test_gguf_mmproj_entry_itself_is_not_a_vision_model(self, tmp_path, monkeypatch):
         # A standalone mmproj (projector) registry entry is not something a
@@ -300,6 +300,21 @@ class TestVisionGuidance:
         assert "GGUF backend is text-only" not in msg
         assert "localm pull" in msg
         assert "mtmd" in msg
+
+    def test_no_vlms_message_reports_the_search_not_absolute_absence(self, monkeypatch):
+        # ADR-0008 R3: vision_capable_models() is a best-effort CONFIRMATION
+        # check, not an exhaustive one - a genuinely vision-capable GGUF whose
+        # mmproj is neither recorded nor a detectable sibling (e.g. supplied
+        # only via the CLI --mmproj flag at run time, never written back to
+        # the registry) is a real, unclosable blind spot. The message built on
+        # an empty vlms list must report what was checked, not assert the user
+        # has no vision model at all - or it launders a non-exhaustive check
+        # into an absolute claim.
+        import localm.model_manager as mm
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        msg = mm.vision_input_guidance()
+        assert "is registered yet" not in msg
+        assert "could be confirmed" in msg
 
 
 # --------------------------------------------------------------------------- #
