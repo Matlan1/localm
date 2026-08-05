@@ -316,6 +316,24 @@ def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Opt
         dest = (base_dir / name).resolve()
         if dest.parent != base_dir.resolve():
             return None
+        if dest.exists() and dest.name.lower() != name.lower():
+            # An OS-level alias (an NTFS 8.3 short name is the live-confirmed
+            # case: on a volume with short-name generation enabled, a crafted
+            # candidate like "LONGMO~1.GGU" passes every check above yet
+            # resolves to a pre-existing, differently-named file) - same
+            # filename-confusion class as the ':' ADS hazard above: this
+            # write stays confined to base_dir, so it is not a directory
+            # escape, but "download the file named X" would silently act on
+            # an unrelated file Y instead. A production caller's own
+            # `dest.exists()` "already downloaded" convention (pull.py) then
+            # treats the alias as a legitimate prior download and registers
+            # the WRONG file's content under the requested name - a
+            # confused-deputy substitution, not a crash. Case-insensitive:
+            # Windows path resolution returns the ON-DISK casing regardless
+            # of the requested casing, so re-requesting an existing
+            # 'model.gguf' as 'MODEL.GGUF' must still be accepted as the
+            # same file, not rejected as a fabricated alias.
+            return None
     except (OSError, ValueError):
         # ValueError also covers a null/odd path that slipped past the check above
         # (belt and suspenders); either way, an unresolvable name is not safe.

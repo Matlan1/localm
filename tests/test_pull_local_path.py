@@ -3,6 +3,8 @@
 mis-parsing a Windows drive-colon as owner/repo:file or rejecting "Unknown spec".
 """
 
+from pathlib import Path
+
 import pytest
 
 import localm.model_manager as mm
@@ -191,6 +193,61 @@ class TestSafeFilenameRejectsWindowsHazardClass:
         base.mkdir()
         files = ["model.gguf", "somefile.exe:mmproj.gguf"]
         assert _pick_mmproj_from_listing(files, "model.gguf", base) is None
+
+    def test_alias_resolving_to_a_different_existing_file_is_rejected(
+            self, tmp_path, isolated_home, monkeypatch):
+        """An OS-level alias - an NTFS 8.3 short name is the live-confirmed
+        case (adversarial review, this session): on a volume with short-name
+        generation enabled, 'LONGMO~1.GGU' resolves to a pre-existing
+        'LongModelNameThatIsVeryLong.gguf' - passes every earlier check, but
+        names something other than what it appears to. A production caller's
+        own dest.exists() "already downloaded" convention (pull.py) would
+        then silently treat the victim's unrelated content as the requested
+        download - a confused-deputy substitution, not a crash.
+
+        8dot3 generation is volume/config-dependent (this session measured
+        it enabled on this box's C: and disabled on D:), so this simulates
+        the alias condition directly via Path.resolve rather than depending
+        on the OS having actually generated one - deterministic regardless
+        of which volume runs this test."""
+        base = tmp_path / "models"
+        base.mkdir()
+        victim = base / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_bytes(b"VICTIM-CONTENT")
+
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == "LONGMO~1.GGU":
+                # What real 8.3 resolution does: the short-name path
+                # resolves to the long-named file's real, on-disk path.
+                return victim.resolve()
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        assert mm._safe_models_filename("LONGMO~1.GGU", base) is None
+
+    def test_same_name_repull_of_existing_file_still_accepted(
+            self, tmp_path, isolated_home):
+        """The alias check must not reject the ordinary, legitimate case of
+        re-pulling a model that is already on disk under the exact name
+        requested."""
+        base = tmp_path / "models"
+        base.mkdir()
+        (base / "model.gguf").write_bytes(b"CONTENT")
+        assert mm._safe_models_filename("model.gguf", base) == "model.gguf"
+
+    def test_case_variant_of_existing_file_still_accepted(
+            self, tmp_path, isolated_home):
+        """Windows path resolution returns the ON-DISK casing regardless of
+        the requested casing (verified live: resolving 'MODEL.GGUF' against
+        an existing 'model.gguf' yields dest.name == 'model.gguf') - a
+        benign case-variant request for an already-downloaded file must not
+        be mistaken for an alias-substitution attack."""
+        base = tmp_path / "models"
+        base.mkdir()
+        (base / "model.gguf").write_bytes(b"CONTENT")
+        assert mm._safe_models_filename("MODEL.GGUF", base) == "MODEL.GGUF"
 
 
 class TestGetModelInfoPathologicalName:
