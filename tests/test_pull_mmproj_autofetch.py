@@ -486,6 +486,30 @@ class TestSyncModelsDirBackfillsExistingEntry:
         assert result.mmproj_backfilled == 0
         assert result.changed is False
 
+    def test_out_of_directory_result_is_refused_not_attached(
+            self, fake_registry, monkeypatch, tmp_path):
+        """Defense in depth: backfill_mmproj_for_entry's own result already
+        passed a traversal guard in pull.py (_safe_models_filename, several
+        call-frames away), but sync_models_dir re-verifies locally, at the
+        exact point an HF-repo-derived path is written into the registry,
+        rather than trusting a distant caller unconditionally. A result
+        outside the model's own directory (simulating a bug or a
+        compromised/unexpected return) must be refused, not attached."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        outside = tmp_path / "elsewhere" / "evil.gguf"
+        outside.parent.mkdir(parents=True)
+        outside.write_bytes(_CLIP_BYTES)
+
+        import localm.model_manager.pull as pull_mod
+        monkeypatch.setattr(pull_mod, "backfill_mmproj_for_entry",
+                            lambda entry, path: outside)
+
+        result = mm.sync_models_dir()
+
+        assert "mmproj" not in store["main"]
+        assert result.mmproj_backfilled == 0
+
     def test_non_hf_source_is_never_a_candidate(self, fake_registry, monkeypatch):
         """A locally-added model (source='local' or similar) has no repo to
         even check - must not crash or attempt a listing."""

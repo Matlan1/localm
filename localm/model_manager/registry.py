@@ -1431,13 +1431,28 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                             mmproj_attempts += 1
                             found = backfill_mmproj_for_entry(entry, path)
                             if found is not None:
-                                # Only a genuine attach counts as "backfilled" -
-                                # a repo that was checked and genuinely has no
-                                # projector (found is None) must NOT count:
-                                # nothing was written, and ModelSyncResult.changed
-                                # must not fire for a no-op reconciliation pass.
-                                entry["mmproj"] = str(found.resolve())
-                                mmproj_backfilled += 1
+                                # found's own path already passed
+                                # _safe_models_filename inside
+                                # _maybe_fetch_repo_mmproj several call-frames
+                                # away (pull.py) - re-verify locally, at the
+                                # point this HF-repo-derived path is actually
+                                # written into the registry, rather than
+                                # trusting a distant caller's guarantee. Same
+                                # resolve-then-compare idiom as
+                                # is_owned_model_path above (a raw string
+                                # prefix check would wrongly accept a sibling
+                                # directory like <dir>-evil).
+                                resolved = found.resolve()
+                                if resolved.parent == path.resolve().parent:
+                                    # Only a genuine attach counts as
+                                    # "backfilled" - a repo that was checked
+                                    # and genuinely has no projector (found is
+                                    # None) must NOT count: nothing was
+                                    # written, and ModelSyncResult.changed
+                                    # must not fire for a no-op reconciliation
+                                    # pass.
+                                    entry["mmproj"] = str(resolved)
+                                    mmproj_backfilled += 1
                 continue
 
             # File is gone.
