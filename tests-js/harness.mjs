@@ -9,6 +9,15 @@
 // touches at top level, run app.js as an injected <script> (jsdom executes it in
 // the window context) WITHOUT firing DOMContentLoaded again - parsing already
 // completed, so the network-driven init never runs - then drive functions.
+//
+// BLIND SPOT, worth knowing before trusting a green run here: jsdom parses
+// HTML and builds a DOM, but it does NOT lay out or paint. A test asserting
+// each piece of text is individually correct cannot see that two adjacent
+// elements' text reads as a duplicated word once composed on screen (#1078
+// shipped "runningrunning 21s" past 15 targeted, all-green tests this way -
+// only a real browser caught it). A large green count here is evidence of
+// logic correctness, not visual correctness - see AGENTS.md's "use the
+// feature in a browser" instruction, which this is the concrete reason for.
 
 import { JSDOM } from "jsdom";
 import { after } from "node:test";
