@@ -9,6 +9,8 @@ pin that .html is scanned and that the shipped index.html is clean.
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -818,6 +820,15 @@ def test_release_manifest_gate_warns_but_passes_by_default_and_strict_escalates(
     monkeypatch.setattr(ch, "_sw_cache_derivation_violations", lambda: [])
     monkeypatch.setattr(ch, "_import_cycle_violations", lambda: [])
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    # Isolate the RELEASE-MANIFEST gate too, not just the file scans. It reads
+    # scripts/ next to check_hygiene.py on real disk, which the REPO monkeypatch
+    # above deliberately does not redirect - so on a checkout WITHOUT the gitignored
+    # scripts/check_manifest.py (CI, every external clone) it emits a warning that
+    # --strict escalates into an extra failure, moving these exit codes and issue
+    # counts for a reason that has nothing to do with the changelog gate under test.
+    # Unstubbed, these tests passed only on a machine that happens to have a
+    # gitignored file, and could never pass on the one environment that gates a merge.
+    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     monkeypatch.setattr(ch, "_release_manifest_gate",
                         lambda: ([], ["release-manifest gate SKIPPED: ..."]))
@@ -853,7 +864,13 @@ def test_release_manifest_gate_runs_the_real_checker_when_importable():
     scripts_dir = str(REPO_ROOT / "scripts")
     if scripts_dir not in ch.sys.path:
         ch.sys.path.insert(0, scripts_dir)
-    import check_manifest as cm
+    # scripts/check_manifest.py is gitignored (AGENTS.md rule 6), so it is ABSENT
+    # from CI and from external clones by design. This test's premise is stated in
+    # its own name - "when importable" - so the honest behaviour where it is not is
+    # to skip, not to fail on an ImportError the design guarantees.
+    cm = pytest.importorskip(
+        "check_manifest",
+        reason="scripts/check_manifest.py is gitignored and absent from this checkout")
     failures, warnings = ch._release_manifest_gate()
     assert warnings == []
     # Whatever check_manifest.check_manifest() reports against the real tree right
@@ -1150,6 +1167,15 @@ def test_hygiene_main_warns_on_a_new_duplicate(tmp_path, monkeypatch, capsys):
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    # Isolate the RELEASE-MANIFEST gate too, not just the file scans. It reads
+    # scripts/ next to check_hygiene.py on real disk, which the REPO monkeypatch
+    # above deliberately does not redirect - so on a checkout WITHOUT the gitignored
+    # scripts/check_manifest.py (CI, every external clone) it emits a warning that
+    # --strict escalates into an extra failure, moving these exit codes and issue
+    # counts for a reason that has nothing to do with the changelog gate under test.
+    # Unstubbed, these tests passed only on a machine that happens to have a
+    # gitignored file, and could never pass on the one environment that gates a merge.
+    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1181,6 +1207,15 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    # Isolate the RELEASE-MANIFEST gate too, not just the file scans. It reads
+    # scripts/ next to check_hygiene.py on real disk, which the REPO monkeypatch
+    # above deliberately does not redirect - so on a checkout WITHOUT the gitignored
+    # scripts/check_manifest.py (CI, every external clone) it emits a warning that
+    # --strict escalates into an extra failure, moving these exit codes and issue
+    # counts for a reason that has nothing to do with the changelog gate under test.
+    # Unstubbed, these tests passed only on a machine that happens to have a
+    # gitignored file, and could never pass on the one environment that gates a merge.
+    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1303,6 +1338,15 @@ def test_added_note_is_report_only_and_rides_along_with_a_warning(
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    # Isolate the RELEASE-MANIFEST gate too, not just the file scans. It reads
+    # scripts/ next to check_hygiene.py on real disk, which the REPO monkeypatch
+    # above deliberately does not redirect - so on a checkout WITHOUT the gitignored
+    # scripts/check_manifest.py (CI, every external clone) it emits a warning that
+    # --strict escalates into an extra failure, moving these exit codes and issue
+    # counts for a reason that has nothing to do with the changelog gate under test.
+    # Unstubbed, these tests passed only on a machine that happens to have a
+    # gitignored file, and could never pass on the one environment that gates a merge.
+    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1339,6 +1383,15 @@ def test_added_note_does_not_inflate_the_strict_failure_count(
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    # Isolate the RELEASE-MANIFEST gate too, not just the file scans. It reads
+    # scripts/ next to check_hygiene.py on real disk, which the REPO monkeypatch
+    # above deliberately does not redirect - so on a checkout WITHOUT the gitignored
+    # scripts/check_manifest.py (CI, every external clone) it emits a warning that
+    # --strict escalates into an extra failure, moving these exit codes and issue
+    # counts for a reason that has nothing to do with the changelog gate under test.
+    # Unstubbed, these tests passed only on a machine that happens to have a
+    # gitignored file, and could never pass on the one environment that gates a merge.
+    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
