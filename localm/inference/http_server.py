@@ -70,6 +70,20 @@ _evicting_names: set[str] = set()
 _default_model_name: str | None = None
 # Active model name (most recently used/loaded)
 _active_model_name: str | None = None
+# The name _active_model_name held immediately before a full eviction
+# (unload_all_models) cleared it. That eviction deliberately KEEPS the Engine
+# in _engines "so it reloads lazily" - but without this, the only thing that
+# could still NAME it was _default_model_name, which is write-once at startup
+# (create_app) and never updated by a model switch. So after start-A,
+# switch-to-B, evict, an unnamed request silently resolved to A (the startup
+# model) instead of B (the one actually in use) - the same defect masquerading
+# as two different symptoms depending on whether a switch ever happened. Only
+# ever consulted via _resolve_unnamed_model_name, AFTER _active_model_name;
+# cleared by switch_engine on every successful activation (not just left to
+# rot) so a later eviction on a DIFFERENT path (idle-unload, a single-model
+# unload) can never resolve it to a stale name from an unrelated, long-past
+# eviction - see those functions for why they do not set it themselves.
+_last_active_model_name: str | None = None
 
 # The server's audit log, published by create_app() (see the `global _audit`
 # there). Must default to None here so _do_restart's `global _audit` guard
@@ -452,7 +466,7 @@ def _gpu_placement_fields(engine) -> dict:
 
 
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
-    global _engines, _engines_lru, _active_model_name, _engine_factory, _last_activity_per_model
+    global _engines, _engines_lru, _active_model_name, _last_active_model_name, _engine_factory, _last_activity_per_model
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
     # Preemption (a newer selection aborts an in-flight load) is SINGLE-slot and
@@ -480,6 +494,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 _engines_lru.remove(name)
             _engines_lru.append(name)
             _active_model_name = name
+            # A real active model again: any name remembered from a past
+            # eviction is no longer needed and must not outlive its purpose
+            # (see _last_active_model_name's own docstring).
+            _last_active_model_name = None
             _engine = _engines[name]
             _inference_sem = sem
             if on_active is not None:
@@ -1077,6 +1095,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         _last_activity_per_model[name] = time.monotonic()
         _engines_lru.append(name)
         _active_model_name = name
+        # See the already-active fast path above: a real active model again,
+        # so any name remembered from a past eviction is stale now.
+        _last_active_model_name = None
         _engine = new_engine
         _inference_sem = sem
         if on_active is not None:
@@ -1091,6 +1112,23 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 **_gpu_placement_fields(new_engine)}
 
 
+def _resolve_unnamed_model_name() -> str | None:
+    """The model name an unnamed (or ``"localm"``-named) request currently
+    resolves to - read-only, no loading or registry validation.
+
+    Shared by get_engine's own fallback below and by ``GET /health``, so both
+    agree on what "recoverable" means: /health must not report "no model" for
+    a state chat already knows how to fix on the next request, and it must not
+    duplicate this chain and risk the two silently drifting apart.
+    ``_last_active_model_name`` covers the gap ``_default_model_name`` alone
+    cannot: that one is write-once at startup (create_app) and never updated
+    by a model switch, so a model switched to after boot and then evicted
+    (unload_all_models keeps its Engine in _engines for lazy reload, but used
+    to lose its name) would otherwise silently resolve back to the STARTUP
+    model instead of the one actually in use."""
+    return _active_model_name or _last_active_model_name or _default_model_name
+
+
 async def get_engine(model_name: str, *, load: bool = True) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary.
 
@@ -1100,7 +1138,7 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
     caller decides whether to load. Registration/resolution (and its 404) still
     apply.
     """
-    global _engines, _engines_lru, _active_model_name, _default_model_name, _inference_sems, _engine, _inference_sem
+    global _engines, _engines_lru, _active_model_name, _default_model_name, _last_active_model_name, _inference_sems, _engine, _inference_sem
 
     # Back-compat: if a test or script set _engine directly, import it into the multi-model dicts
     if _engine is not None and _engine.display_name not in _engines:
@@ -1113,8 +1151,8 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
 
     name = (model_name or "").strip()
     if not name or name == "localm":
-        name = _active_model_name or _default_model_name
-        
+        name = _resolve_unnamed_model_name()
+
     from localm.config import load_registry
     registry = load_registry()
     
@@ -1130,18 +1168,19 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
 
     # Only enforce registration check if the registry is not empty
     if registry:
-        if name not in registry and name != _default_model_name and name != _active_model_name:
+        if (name not in registry and name != _default_model_name
+                and name != _active_model_name and name != _last_active_model_name):
             registered = sorted(registry.keys())
             msg = f"Model '{name}' is not registered."
             if registered:
                 msg += f" Registered models in your library: {', '.join(registered)}. Use 'localm pull' to add a new model."
             raise HTTPException(404, msg)
 
-    # A name that resolved to nothing (an empty/"localm" request with no active AND
-    # no default model - e.g. `gui --no-model` with a populated registry, or the
-    # transient window during an active-model eviction/unload where _active_model_name
-    # was just cleared) must be an honest 503, not fall through to switch_engine(None)
-    # -> get_model_info(None) -> Path(None) TypeError -> HTTP 500.
+    # A name that resolved to nothing (an empty/"localm" request with no active,
+    # no remembered last-active, AND no default model - e.g. `gui --no-model`
+    # with a populated registry and nothing ever loaded) must be an honest
+    # 503, not fall through to switch_engine(None) -> get_model_info(None) ->
+    # Path(None) TypeError -> HTTP 500.
     if not name:
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
@@ -1244,7 +1283,7 @@ async def unload_all_models() -> dict:
     sibling localm instance asking THIS one to free VRAM - multi-instance GPU
     coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
     original inline implementation."""
-    global _active_model_name, _engine, _inference_sem
+    global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
                              wait_for_vram_release)
@@ -1326,6 +1365,12 @@ async def unload_all_models() -> dict:
     # we deliberately left loaded (clearing it would strand the in-flight request's
     # active model).
     if _active_model_name not in skipped_in_use:
+        if _active_model_name:
+            # The Engine stays in _engines above for exactly this: a lazy
+            # reload on the next request. Keep its NAME alive too, or nothing
+            # can resolve an unnamed request back to it (see
+            # _last_active_model_name / _resolve_unnamed_model_name).
+            _last_active_model_name = _active_model_name
         _active_model_name = None
         _engine = None
         _inference_sem = None
@@ -2773,13 +2818,17 @@ def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = N
 
 
 def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAPI:
-    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _inference_sems, _last_activity_per_model, _audit
-    
+    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _last_active_model_name, _inference_sems, _last_activity_per_model, _audit
+
     _engines.clear()
     _engines_lru.clear()
     _inference_sems.clear()
     _last_activity_per_model.clear()
-    
+    # A fresh app boot must never carry over a name remembered from a
+    # previous create_app() call in the same process (test reuse, a restart) -
+    # see _last_active_model_name's own docstring for why it exists at all.
+    _last_active_model_name = None
+
     if engine is not None:
         _engines[engine.display_name] = engine
         _engines_lru.append(engine.display_name)
