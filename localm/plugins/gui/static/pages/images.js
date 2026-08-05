@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
@@ -482,7 +482,7 @@ $("img-generate").onclick = async () => {
       toast("Image generated");
       refreshImageHistory();
     } else {
-      toast("Generation " + end.status, end.status !== "cancelled");
+      toast("Generation " + jobStatusWord(end.status), end.status !== "cancelled");
     }
   } catch (e) {
     toast("Generation failed: " + e.message, true);

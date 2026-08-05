@@ -511,6 +511,20 @@ export async function streamJob(jobId, onLine, onProgress) {
   return { status: "disconnected" };
 }
 
+/** A streamJob() end status, worded for dropping into a "<Operation> " +
+ *  jobStatusWord(status) style message (images.js/music.js/video.js/
+ *  knowledge.js/slash.js all build their non-"done" message this way).
+ *  "cancelled"/"failed" already read naturally as the bare status word;
+ *  "disconnected" (streamJob gave up reconnecting, or the job was already
+ *  gone - never a job OUTCOME) does not - "Generation disconnected" reads
+ *  as jargon and invites the same "so did it fail?" question the status is
+ *  trying to avoid. "interrupted" drops into the same sentence shapes
+ *  without claiming an outcome that was never observed. */
+export function jobStatusWord(status) {
+  if (status === "disconnected") return "interrupted";
+  return status;
+}
+
 // Sizes are shown in binary units (GiB/MiB/KiB) but labelled GB/MB/KB - the
 // GPU/LLM convention: matches the VRAM printed on the card, llama.cpp's logs,
 // and HuggingFace quant tables. (The driver reports e.g. 16 GiB; showing
