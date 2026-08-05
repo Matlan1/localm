@@ -110,6 +110,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   screen for as long as the copy took.
 
 ### Security
+- **Clearing your API key could report success while that key still granted
+  access.** `localm key clear` and the web interface's clear button both
+  announced a completed clear unconditionally. When the key file could not
+  actually be deleted (a virus scanner or search indexer holding it open, a
+  permissions or profile change), the only notice went to the debug log, which
+  you never see unless you run with `--debug`. So you were shown a tick and told
+  the server was in open mode while the old key kept working. Both now report
+  exactly what could not be removed and stop claiming success; the
+  `/api/auth/key/clear` response gained a `warnings` list, and its `cleared`
+  field is now false whenever any credential survived. Browser sessions are
+  still signed out either way, so a partial clear is never worse than before.
 - **Another website open in your browser could obtain the local management
   credential from a keyless install.** On an install running without an API
   key, the page that boots the web interface embeds the token that authorizes

@@ -108,7 +108,7 @@ def register(app: FastAPI, ctx) -> None:
                 "Missing or invalid CSRF token. Send the session's csrf token "
                 "(from GET /api/session) in the X-CSRF-Token header.")
         from localm.auth import clear_api_key
-        clear_api_key()
+        failed = clear_api_key()
         # The key that minted every current session is gone; those sessions carry
         # their own ADMIN scope snapshot, so they MUST be revoked or a leftover
         # cookie would keep full access after the key was cleared (would defeat the
@@ -122,8 +122,29 @@ def register(app: FastAPI, ctx) -> None:
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True,
                                secure=secure, samesite="strict")
         from localm.debuglog import logger as _dbg
+        if failed:
+            # Rule 5: a security step that failed must never report success. The
+            # sessions ARE revoked either way (done above), but a surviving
+            # auth.key/keystore still grants access, so "cleared": true would be
+            # a lie the GUI then shows the user as open mode. Report it honestly
+            # rather than raising - the revocation half did happen, and a 500
+            # would imply nothing had.
+            #
+            # ONLY the path-free "what" labels go on the wire. clear_api_key also
+            # returns "path" (an absolute filesystem path, which carries the
+            # account name - rule 2) and "error" (raw OS exception text -
+            # py/stack-trace-exposure). Those are for the LOCAL CLI and the local
+            # log, never for an HTTP response.
+            #
+            # Nothing is logged HERE, on purpose - this is not a silenced warning.
+            # clear_api_key already warns to THIS SAME logger once per thing it
+            # could not remove (localm/auth.py, the OSError handlers), and those
+            # lines carry the path and the OS error, so they are strictly more
+            # informative than anything this route could add. A second line for
+            # the same event would only restate it with less detail.
+            return {"cleared": False, "warnings": [f["what"] for f in failed]}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
-        return {"cleared": True}
+        return {"cleared": True, "warnings": []}
 
     @app.get("/api/session", include_in_schema=False)
     async def session_state(request: Request):
