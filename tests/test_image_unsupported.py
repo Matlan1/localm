@@ -177,6 +177,23 @@ class TestVisionGuidance:
         assert "cannot accept image" in msg               # legacy phrase preserved
         assert ("localm pull" in msg) or ("pip install" in msg)  # install-specific remedy
 
+    def test_no_transformers_stack_offers_gguf_route_not_a_false_claim(
+            self, monkeypatch):
+        """The final fallback (no HF vision model registered, no transformers
+        stack installed) used to claim 'the built-in GGUF backend is
+        text-only' - flatly false: mtmd GGUF vision IS implemented (this same
+        function's own mmproj_failed docstring says so, and #957's own live
+        E2E proves it). The message must offer the GGUF+mmproj route instead
+        of denying GGUF vision exists at all."""
+        import localm.model_manager as mm
+        import importlib.util
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+        msg = mm.vision_input_guidance()
+        assert "GGUF backend is text-only" not in msg     # the retracted false claim
+        assert "mmproj" in msg
+        assert "localm pull" in msg
+
     def test_mmproj_failed_message_is_honest_about_gguf(self, monkeypatch):
         # The user loaded a GGUF model WITH an mmproj expecting vision but the
         # projector did not load. GGUF vision IS implemented (#200), so the message

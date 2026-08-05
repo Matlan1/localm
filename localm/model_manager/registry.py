@@ -641,9 +641,11 @@ def vision_input_guidance(mmproj_failed: bool = False,
         return (f"{head} No vision model is registered yet - pull a vision-capable "
                 f"HuggingFace model such as a Gemma 3 vision or Qwen2.5-VL "
                 f"checkpoint (`localm pull <repo>`), then run it with --image.")
-    return (f"{head} To read images, install the HuggingFace stack "
-            f"(`pip install \"localm[gpu]\"`) and load a vision-capable model "
-            f"(Gemma 3 vision / Qwen2.5-VL). The built-in GGUF backend is text-only.")
+    return (f"{head} GGUF vision works too (the built-in mtmd path) - pull a "
+            f"vision-capable GGUF model with its projector, e.g. "
+            f"`localm pull <repo> --mmproj <repo>:<file>`. Or install the "
+            f"HuggingFace stack (`pip install \"localm[gpu]\"`) and load a "
+            f"vision-capable model (Gemma 3 vision / Qwen2.5-VL) instead.")
 
 
 
