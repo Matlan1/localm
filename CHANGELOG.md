@@ -98,6 +98,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   break this creates for anyone scripting the first two.
 
 ### Security
+- **A model or vision projector pulled from an untrusted repo could resolve to
+  something other than the plain file it appeared to be.** The filename
+  confinement check for a model download (used by `localm pull`, the same-repo
+  vision-projector auto-attach, and the `--mmproj` flag) verified a downloaded
+  file's destination stayed inside your models folder, but did not reject
+  every Windows filename shape that can still name something other than what
+  it appears to while staying inside that folder: a repo-supplied name
+  containing a colon could open a hidden alternate data stream behind an
+  ordinary-looking, apparently empty file, and a name shaped like a short
+  8.3 alias could resolve to an unrelated file you already had, causing it to
+  be silently registered under the pulled name instead of the file actually
+  being downloaded. Both are now rejected, alongside reserved Windows device
+  names and a trailing dot or space (which Windows silently strips, so two
+  visually distinct names can refer to the same file). No effect on ordinary
+  model filenames.
 - **A bug report can no longer include your actual chat content, and asking for
   help no longer means filing three copies of the same complaint.** Attaching a
   debug log tail to a report could pull in a raw model reply, a snippet of your

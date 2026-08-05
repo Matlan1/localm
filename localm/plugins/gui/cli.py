@@ -456,7 +456,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             _bits.append(f"{_sync.restored} restored")
         if _sync.pruned:
             _bits.append(f"{_sync.pruned} pruned")
-        console.print(f"[dim]Models folder synced: {', '.join(_bits)}.[/dim]")
+        if _sync.backfilled:
+            _bits.append(f"{_sync.backfilled} metadata backfilled")
+        if _sync.mmproj_backfilled:
+            _bits.append(f"{_sync.mmproj_backfilled} vision projector backfilled")
+        if _bits:
+            console.print(f"[dim]Models folder synced: {', '.join(_bits)}.[/dim]")
     if _sync.note:
         console.print(f"[yellow]{_sync.note}[/yellow]")
 

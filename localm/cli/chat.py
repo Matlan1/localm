@@ -437,7 +437,10 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # vision model this install has, or how to get one.
         from localm.model_manager import vision_input_guidance
-        console.print(f"\n[yellow]{vision_input_guidance()}[/yellow]")
+        backend = getattr(engine, "_backend", None)
+        mmproj_failed = bool(getattr(backend, "mmproj_path", None))
+        active_model_path = getattr(backend, "model_path", None)
+        console.print(f"\n[yellow]{vision_input_guidance(mmproj_failed=mmproj_failed, active_model_path=active_model_path)}[/yellow]")
         return ""
     except RuntimeError as e:
         # An attached server returned an error (no model loaded, unreachable, ...).

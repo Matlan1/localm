@@ -177,6 +177,23 @@ class TestVisionGuidance:
         assert "cannot accept image" in msg               # legacy phrase preserved
         assert ("localm pull" in msg) or ("pip install" in msg)  # install-specific remedy
 
+    def test_no_transformers_stack_offers_gguf_route_not_a_false_claim(
+            self, monkeypatch):
+        """The final fallback (no HF vision model registered, no transformers
+        stack installed) used to claim 'the built-in GGUF backend is
+        text-only' - flatly false: mtmd GGUF vision IS implemented (this same
+        function's own mmproj_failed docstring says so, and #957's own live
+        E2E proves it). The message must offer the GGUF+mmproj route instead
+        of denying GGUF vision exists at all."""
+        import localm.model_manager as mm
+        import importlib.util
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+        msg = mm.vision_input_guidance()
+        assert "GGUF backend is text-only" not in msg     # the retracted false claim
+        assert "mmproj" in msg
+        assert "localm pull" in msg
+
     def test_mmproj_failed_message_is_honest_about_gguf(self, monkeypatch):
         # The user loaded a GGUF model WITH an mmproj expecting vision but the
         # projector did not load. GGUF vision IS implemented (#200), so the message
@@ -223,6 +240,85 @@ class TestVisionGuidance:
         monkeypatch.setattr(mm, "load_registry",
                             lambda: {"vlm2": {"path": str(d), "source": "local"}})
         assert "vlm2" in mm.vision_capable_models()
+
+
+# --------------------------------------------------------------------------- #
+#  #957: already-pulled GGUF vision model with no mmproj recorded yet          #
+# --------------------------------------------------------------------------- #
+
+class TestVisionGuidanceActiveModelBackfillPending:
+    def _entry(self, source="hf:o/repo", model_type="llm", mmproj=None):
+        return {
+            "path": self.gguf_path,
+            "source": source,
+            "model_type": model_type,
+            **({"mmproj": mmproj} if mmproj else {}),
+        }
+
+    def test_active_gguf_from_hf_with_no_mmproj_is_named(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"my-vlm": self._entry()})
+        msg = mm.vision_input_guidance(active_model_path=self.gguf_path)
+        assert "cannot accept image" in msg               # legacy phrase preserved
+        assert "my-vlm" in msg
+        assert "o/repo" in msg
+        assert "not implemented" not in msg
+        # This is the #957 case, distinct from "no vision model registered":
+        assert "no vision model is registered" not in msg.lower()
+
+    def test_entry_already_carrying_mmproj_falls_through(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(
+            mm, "load_registry",
+            lambda: {"my-vlm": self._entry(mmproj="o/repo:proj.gguf")})
+        msg = mm.vision_input_guidance(active_model_path=self.gguf_path)
+        assert "my-vlm" not in msg
+        assert "o/repo" not in msg
+
+    def test_non_hf_source_is_not_a_candidate(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"my-vlm": self._entry(source="local")})
+        msg = mm.vision_input_guidance(active_model_path=self.gguf_path)
+        assert "my-vlm" not in msg
+
+    def test_non_llm_model_type_is_not_a_candidate(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"my-vlm": self._entry(model_type="mmproj")})
+        msg = mm.vision_input_guidance(active_model_path=self.gguf_path)
+        assert "my-vlm" not in msg
+
+    def test_mmproj_failed_still_takes_priority_over_backfill_branch(
+            self, tmp_path, monkeypatch):
+        # A candidate entry is registered AND mmproj_failed=True is passed (the
+        # projector WAS resolved and attached but failed to load at runtime) -
+        # that is a more specific, more recent diagnosis than "never backfilled"
+        # and must win.
+        import localm.model_manager as mm
+        self.gguf_path = str(tmp_path / "m.gguf")
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"my-vlm": self._entry()})
+        msg = mm.vision_input_guidance(mmproj_failed=True,
+                                       active_model_path=self.gguf_path)
+        assert "failed to load" in msg
+        assert "my-vlm" not in msg
+
+    def test_unregistered_path_falls_through(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        msg = mm.vision_input_guidance(active_model_path=str(tmp_path / "ghost.gguf"))
+        assert "cannot accept image" in msg
 
 
 if __name__ == "__main__":
