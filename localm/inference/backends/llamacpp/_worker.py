@@ -87,12 +87,19 @@ class GgufWorker(VramSizingMixin):
 
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
-        ``{"n_layers", "kv_bytes_per_token", "supports_images", "weight_placement"}``.
+        ``{"n_layers", "kv_bytes_per_token", "supports_images",
+        "weight_placement", "moe_skip_reason"}``.
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
         moved anything - this worker is the only process that can see it (the
         native call that produces it runs here). ``[]`` means "not reported"
         (verbose mode, or a parse miss), never "0 bytes everywhere".
+        ``moe_skip_reason`` is a key into ``llama.MOE_SKIP_MESSAGES`` (or
+        None) naming why ``n_cpu_moe`` did not apply - carried out here
+        rather than printed by ``_apply_cpu_moe`` itself, because THIS
+        process is the isolated child: only the parent (GgufBackend) may
+        render a user-facing message, per isolated-child-must-not-console-
+        print.
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
@@ -124,6 +131,7 @@ class GgufWorker(VramSizingMixin):
             "kv_bytes_per_token": getattr(self._llm, "kv_bytes_per_token", 0),
             "supports_images": bool(self._llm.supports_images),
             "weight_placement": getattr(self._llm, "weight_placement", []),
+            "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
         }
 
     def close(self) -> None:

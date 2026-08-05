@@ -72,7 +72,8 @@ class TestLoad:
         assert kwargs.get("cancel_event") is None
         assert kwargs.get("n_gpu_layers") == 99
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,
-                         "supports_images": True, "weight_placement": []}
+                         "supports_images": True, "weight_placement": [],
+                         "moe_skip_reason": None}
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):
@@ -93,6 +94,24 @@ class TestLoad:
                         {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
             meta = w.load()
         assert meta["weight_placement"] == placement
+
+    def test_load_passes_through_moe_skip_reason_from_llamacpp(self, tmp_path):
+        """Same shape as weight_placement above, for the OTHER fact only this
+        isolated child can see: WHY n_cpu_moe did not apply (see
+        llama.py's _apply_cpu_moe / MOE_SKIP_MESSAGES). load() must forward
+        LlamaCpp.moe_skip_reason verbatim - GgufBackend._load_native() is the
+        only process allowed to render the corresponding message, and it can
+        only do that if this worker actually carries the fact out."""
+        w = _worker(str(tmp_path / "m.gguf"))
+        stub = _StubLlm()
+        stub.moe_skip_reason = "no_experts"
+        fake_llamacpp_module = MagicMock()
+        fake_llamacpp_module.LlamaCpp.return_value = stub
+        with patch("localm.inference.backends.llamacpp._loader.load_lib"), \
+             patch.dict(sys.modules,
+                        {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
+            meta = w.load()
+        assert meta["moe_skip_reason"] == "no_experts"
 
     def test_load_passes_resolved_gpu_layers_and_ctx_max_verbatim(self, tmp_path):
         """The worker never re-derives auto-sizing - it trusts whatever the

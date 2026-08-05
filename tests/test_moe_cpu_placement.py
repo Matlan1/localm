@@ -118,8 +118,9 @@ class TestApplyCpuMoe:
             "localm.inference.backends.llamacpp._loader.cpu_buffer_type",
             lambda: 0xBEEF)
         mp = LlamaModelParams()
-        keep = llama_mod._apply_cpu_moe(mp, 3, str(self._moe(tmp_path)))
+        keep, skip_reason = llama_mod._apply_cpu_moe(mp, 3, str(self._moe(tmp_path)))
         assert keep is not None, "a resolvable CPU buft must produce an override"
+        assert skip_reason is None, "a successful override has no skip reason"
         assert mp.tensor_buft_overrides, "the native field must be pointed at it"
 
         array = ctypes.cast(
@@ -142,7 +143,8 @@ class TestApplyCpuMoe:
             "localm.inference.backends.llamacpp._loader.cpu_buffer_type",
             lambda: 0xBEEF)
         mp = LlamaModelParams()
-        keep = llama_mod._apply_cpu_moe(mp, 2, str(self._moe(tmp_path)))
+        keep, skip_reason = llama_mod._apply_cpu_moe(mp, 2, str(self._moe(tmp_path)))
+        assert skip_reason is None
         array, patterns = keep
         assert len(patterns) == 2
         assert all(isinstance(p, bytes) for p in patterns)
@@ -158,7 +160,11 @@ class TestApplyCpuMoe:
             ("llama.block_count", T_UINT32, 32),
         ])
         mp = LlamaModelParams()
-        assert llama_mod._apply_cpu_moe(mp, 4, str(f)) is None
+        keep, skip_reason = llama_mod._apply_cpu_moe(mp, 4, str(f))
+        assert keep is None
+        assert skip_reason == "no_experts", (
+            "a caller (GgufWorker.load(), then the PARENT process) needs this "
+            "exact key to render the right message - see MOE_SKIP_MESSAGES")
         assert not mp.tensor_buft_overrides, (
             "a no-op setting must leave the native params alone")
 
@@ -168,8 +174,51 @@ class TestApplyCpuMoe:
             "localm.inference.backends.llamacpp._loader.cpu_buffer_type",
             lambda: None)
         mp = LlamaModelParams()
-        assert llama_mod._apply_cpu_moe(mp, 4, str(self._moe(tmp_path))) is None
+        keep, skip_reason = llama_mod._apply_cpu_moe(mp, 4, str(self._moe(tmp_path)))
+        assert keep is None
+        assert skip_reason == "buffer_unresolved"
         assert not mp.tensor_buft_overrides
+
+    def test_skip_reasons_never_console_print_from_this_function(
+            self, tmp_path, monkeypatch):
+        """_apply_cpu_moe runs INSIDE the isolated worker child (see its own
+        docstring) - it may never console.print (the child's stdout is not
+        the server's own console; see isolated-child-must-not-console-print).
+        Both refusal branches must report the fact via their return value
+        only, never by printing directly - proven by spying on the shared
+        console object itself, not by re-deriving the assertion from reading
+        the source."""
+        from localm.console import console as real_console
+        calls = []
+        monkeypatch.setattr(real_console, "print",
+                            lambda *a, **k: calls.append((a, k)))
+
+        mp = LlamaModelParams()
+        f = _gguf(tmp_path / "dense.gguf", [
+            ("general.architecture", T_STRING, "llama"),
+            ("llama.block_count", T_UINT32, 32),
+        ])
+        llama_mod._apply_cpu_moe(mp, 4, str(f))
+        assert calls == [], (
+            f"_apply_cpu_moe printed directly from the child: {calls}")
+
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.cpu_buffer_type",
+            lambda: None)
+        llama_mod._apply_cpu_moe(mp, 4, str(self._moe(tmp_path)))
+        assert calls == [], (
+            f"_apply_cpu_moe printed directly from the child: {calls}")
+
+    def test_every_skip_reason_has_a_rendered_message(self):
+        """Every key _apply_cpu_moe can return through skip_reason must have
+        a corresponding entry in MOE_SKIP_MESSAGES - the parent
+        (GgufBackend._load_native) looks it up by that exact key, and a
+        missing entry would silently fall back to a generic message instead
+        of the specific, actionable one this whole fix exists to preserve."""
+        assert set(llama_mod.MOE_SKIP_MESSAGES) == {"no_experts", "buffer_unresolved"}
+        for reason, message in llama_mod.MOE_SKIP_MESSAGES.items():
+            assert "n_cpu_moe" in message, reason
+            assert message.strip(), reason
 
 
 # --------------------------------------------------------------------------- #
