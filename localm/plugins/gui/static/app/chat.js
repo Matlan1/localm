@@ -44,6 +44,23 @@ export const chat = {
   privacyWiped: false,
 };
 
+// System-injected messages (retrieved web/kb/doc content) are pushed with
+// role:"user" so the MODEL reads them as conversation context - changing that
+// would be a model-behaviour change, not a labelling fix. noteLabel() is the
+// single source of truth for the human-facing override instead: renderChat()
+// below AND exportConversation() (settings-perf.js) both call it, so a message
+// flagged here can never render as "You:" in the live UI but slip through
+// unlabelled in an exported transcript, or the reverse. Extracted after
+// NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-RESULTS-TO-USER - the export path
+// used to check only m.role, attributing raw web-search/knowledge-base/
+// document text to the user as though they had typed it.
+const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
+
+export function noteLabel(m) {
+  const tag = m.tag || (m.web ? "web" : null);
+  return tag ? NOTE_LABELS[tag] : null;
+}
+
 // Conversation compaction mirrors localm/inference/compact.py: once the estimate
 // passes 70% of the ceiling, summarise the OLDEST turns and keep the recent ones
 // verbatim. R44: keep recent turns by token budget (not a flat last-4), feed the
@@ -921,7 +938,6 @@ export function renderChat() {
     updateUsageDisplay(null);
     return;
   }
-  const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
   // NEW-1 model-switch-indication: track the model of the previous assistant turn
   // so a small divider marks where the active model changed mid-conversation.
   let lastAssistantModel = null;
@@ -971,7 +987,7 @@ export function renderChat() {
       model: m.model,
       memory: m.memory,           // F11: "used N memories" chip (assistant turns)
       cls: tag ? "web-note" : "",
-      label: tag ? NOTE_LABELS[tag] : undefined,
+      label: noteLabel(m) || undefined,
       // A settled turn from history: let renderMarkdown surface a "(no reply
       // text)" note if this message rendered to a blank body (empty ```fence).
       final: true,

@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -1839,12 +1839,24 @@ export async function sendChat() {
   await runCompletion(conv);
 }
 
+/** The exported-transcript label for message *m*: noteLabel's override
+ *  (Web/Doc/Sources) when set, else the normal You/Model attribution by
+ *  role. Mirrors addMessageRow's `opts.label || (role === "user" ? "You" :
+ *  mName)` precedence exactly - a web-search result, retrieved knowledge-base
+ *  excerpt, or attached-document dump is pushed with role:"user" so the MODEL
+ *  reads it as context, but it was never typed by the user, so it must not
+ *  render as "You:" here either (NEW-WEBSEARCH-UX-EXPORT-ATTRIBUTES-TOOL-
+ *  RESULTS-TO-USER). */
+function exportLabel(m) {
+  return noteLabel(m) || (m.role === "user" ? "You" : (modelCache.active || "Model"));
+}
+
 export function exportConversation() {
   const conv = currentConv();
   if (!conv || !conv.messages.length) { toast("Nothing to export", true); return; }
   const lines = [`# ${conv.title}`, ""];
   for (const m of conv.messages) {
-    lines.push(`**${m.role === "user" ? "You" : (modelCache.active || "Model")}:**`, "", msgText(m), "");
+    lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
     if (msgImages(m).length) lines.push(`*[${msgImages(m).length} image(s) attached]*`, "");
   }
   // Include alternative branches that compaction summarised away and archived
@@ -1860,8 +1872,7 @@ export function exportConversation() {
     dropped.forEach((tail, i) => {
       lines.push(`### Branch ${i + 1}`, "");
       for (const m of (tail || [])) {
-        lines.push(`**${m.role === "user" ? "You" : (modelCache.active || "Model")}:**`,
-          "", msgText(m), "");
+        lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
       }
     });
   }
