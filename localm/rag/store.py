@@ -1919,12 +1919,41 @@ class Collection:
         a hash-only dedup (no fs mtime/size). Kept as a separate loop rather than
         refactoring the battle-tested path loop, so the server-disk path is
         untouched."""
-        say = on_progress or (lambda _t: None)
+        # The no-op accepts **_ because `_finished` below passes the structured
+        # keywords ProgressFn now carries. A one-positional lambda would raise
+        # TypeError on every caller that passes no callback at all, which is most
+        # of them.
+        say = on_progress or (lambda _t, **_: None)
         added = updated = skipped = 0
         failed: list = []
         embed_broken = embed_fn is None
+        # Known before the first byte is extracted: the caller handed us the whole
+        # list, already decoded, in memory.
+        n_total = len(uploads)
 
-        for up in uploads:
+        def _finished(n: int, text: str) -> None:
+            """Report one item DONE, whatever its outcome.
+
+            Called on every exit from the loop body, including the two that
+            `continue`. Progress is about how far the LOOP got, not how many
+            succeeded: a run of duplicate skips is real work being done, and a
+            bar that freezes through it is the "is it stuck?" this reports exist
+            to remove.
+
+            **This is the fragile shape and it is chosen deliberately.** A tick
+            placed after the body would need no repetition, but the body has
+            three exits, so it would simply never run for two of them. Ticking
+            BEFORE each item avoids the repetition too, but the line and the
+            structured event travel together on this channel, so that would emit
+            a "starting X" line per file on top of the outcome line. Three call
+            sites it is - and the regression test asserts the done-SEQUENCE is
+            exactly 1..n_total, which is what fails if a future branch adds a
+            fourth exit and forgets one.
+            """
+            say(text, phase="indexing uploads", done=n, total=n_total,
+                unit="files")
+
+        for n_done, up in enumerate(uploads, start=1):
             filename = (str(up.get("filename") or "").strip() or "upload")
             data = up.get("data") or b""
             key = f"upload:{filename}"
@@ -1932,12 +1961,15 @@ class Collection:
             known = self._meta["docs"].get(key)
             if not force and known and known.get("hash") == digest:
                 skipped += 1
+                # Previously silent. A skipped file was indistinguishable from
+                # one that was never seen, which is its own small dishonesty.
+                _finished(n_done, f"skip {filename} (unchanged)")
                 continue
             try:
                 text = extract_bytes(data, filename, describe_image_fn=describe_image_fn)
             except ExtractError as e:
                 failed.append({"path": key, "error": str(e)})
-                say(f"skip {filename}: {e}")
+                _finished(n_done, f"skip {filename}: {e}")
                 continue
             new_chunks = chunk_text(text)
             # Same heuristic-first labeling as add_paths (see there).
@@ -1990,7 +2022,7 @@ class Collection:
                 "size": len(data), "hash": digest,
                 "chunks": len(new_chunks), "uploaded": True,
             }
-            say(f"indexed {filename} ({len(new_chunks)} chunks)")
+            _finished(n_done, f"indexed {filename} ({len(new_chunks)} chunks)")
 
         self._save()
         return {"added": added, "updated": updated, "skipped": skipped,

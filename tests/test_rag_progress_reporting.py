@@ -232,9 +232,16 @@ class TestUploadReportsKnownTotalsAtJobStart:
         assert first["pct"] == 0.0, (
             "0 of a KNOWN total is a measured zero, not the fabricated-0 case "
             "P5/R1 forbids")
-        # It survives to the listing too, since add_uploads reports nothing
-        # further and _last_progress is never overwritten by a later event.
-        assert job.summary()["pct"] == 0.0
+        # UPDATED by ADR-0009 P7-b. This previously asserted the t=0 report
+        # SURVIVED to the listing, "since add_uploads reports nothing further" -
+        # which was true, and was the defect: a real denominator with a frozen
+        # numerator, so the bar read "0 of 2 files" for the whole run.
+        # add_uploads now ticks per item, so the listing ends at 100 and the t=0
+        # event is the FIRST of several rather than the only one. Everything
+        # above still holds and is still the point of this test: the count and
+        # the decoded byte total are known before any indexing starts.
+        assert job.summary()["pct"] == 100.0, (
+            "the listing did not advance past the t=0 report")
 
     def test_byte_total_reflects_decoded_size_not_the_base64_length(
             self, tmp_path, monkeypatch):
