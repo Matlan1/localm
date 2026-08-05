@@ -10,7 +10,7 @@ import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLim
 import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf } from "./helpers.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
-import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
+import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
 import { VIEWS, showView } from "./tabs.js";
 
@@ -350,6 +350,7 @@ if (chat.conversations.length) {
 }
 renderChat();
 reattachSessions();
+reattachActivity();   // ADR-0008 U4: cross-session/cross-tab background operations
 // Deep links + restore. Deferred a tick so pages.js has installed
 // window.onViewShown and the #pull-start handler. Skipped while the hard auth
 // gate is locked (nothing of the app should activate behind the onboarding).
