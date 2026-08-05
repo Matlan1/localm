@@ -3,6 +3,8 @@
 mis-parsing a Windows drive-colon as owner/repo:file or rejecting "Unknown spec".
 """
 
+from pathlib import Path
+
 import pytest
 
 import localm.model_manager as mm
@@ -124,6 +126,128 @@ class TestSafeFilenameFailsClosed:
     @pytest.mark.parametrize("good", ["model.gguf", "a-b_c.1.gguf"])
     def test_normal_names_still_pass(self, good, isolated_home):
         assert mm._safe_models_filename(good) == good
+
+
+class TestSafeFilenameRejectsWindowsHazardClass:
+    """A filename that passes the single-component/no-traversal checks can
+    still be a Windows filename-CONFUSION hazard rather than a directory
+    escape: it stays confined to base_dir (the CWE-22 property CodeQL's
+    py/path-injection alert checks holds), but names something other than
+    what it appears to. Live-confirmed via a real write+listdir+read on this
+    box (not merely reasoned about) before this test was written:
+
+    - 'somefile.exe:mmproj.gguf' opens an NTFS Alternate Data Stream. The
+      write succeeds, `os.listdir` shows only a 0-byte 'somefile.exe', and
+      gguf_is_mmproj's hard-verify (an ordinary open()) transparently reads
+      the hidden stream too - so a crafted CLIP-architecture payload placed
+      there passes BOTH the filename guard and the metadata hard-verify.
+    - 'evil.gguf.' / 'evil.gguf ' - Windows silently strips a trailing dot or
+      space when resolving a path, so these name the SAME file as
+      'evil.gguf': a download using one of these forms would silently
+      overwrite an existing model, with the collision invisible in any
+      directory listing (which only ever shows the stripped form).
+
+    This is the sibling to test_registry_confinement.py:435's
+    _sanitize_name colon assertion - that whitelist already excluded ':'
+    for registry KEYS; this validator, for download-destination FILENAMES,
+    never learned the same lesson until now."""
+
+    @pytest.mark.parametrize("hazard", [
+        "somefile.exe:mmproj.gguf",     # NTFS ADS - live-confirmed bypass
+        "evil.gguf:hidden",             # ADS on a plausible model name
+        "evil.gguf.",                   # trailing dot - silent collision
+        "evil.gguf ",                   # trailing space - silent collision
+        "CON",                          # bare reserved device name
+        "CON.gguf",                     # reserved device name with extension
+        "con.mmproj.gguf",              # reserved stem before the FIRST dot
+        "NUL.gguf",
+        "COM1.gguf",
+        "LPT1.gguf",
+        "evil<file.gguf",
+        "evil>file.gguf",
+        "evil|file.gguf",
+        "evil?file.gguf",
+        "evil*file.gguf",
+        'evil"file.gguf',
+    ])
+    def test_hazard_rejected(self, hazard, isolated_home):
+        assert mm._safe_models_filename(hazard) is None
+
+    @pytest.mark.parametrize("legit", [
+        "Qwen3-VL-8B-Instruct-abliterated.Q2_K.gguf",
+        "mmproj-model-f16.gguf",
+        "model-00001-of-00005.gguf",
+        "a.b.c.gguf",
+        "CONTROL.gguf",   # starts with "CON" but its stem is "CONTROL", not "CON"
+        "CONSOLE.gguf",
+    ])
+    def test_legitimate_name_still_passes(self, legit, isolated_home):
+        assert mm._safe_models_filename(legit) == legit
+
+    def test_ads_candidate_never_enters_the_real_pick_pool(self, tmp_path, isolated_home):
+        """End-to-end: a malicious HF repo listing offering an ADS-named
+        'mmproj' sibling must never be picked as a candidate by the real
+        caller, not just rejected by the validator in isolation."""
+        from localm.model_manager.pull import _pick_mmproj_from_listing
+        base = tmp_path / "models"
+        base.mkdir()
+        files = ["model.gguf", "somefile.exe:mmproj.gguf"]
+        assert _pick_mmproj_from_listing(files, "model.gguf", base) is None
+
+    def test_alias_resolving_to_a_different_existing_file_is_rejected(
+            self, tmp_path, isolated_home, monkeypatch):
+        """An OS-level alias - an NTFS 8.3 short name is the live-confirmed
+        case (adversarial review, this session): on a volume with short-name
+        generation enabled, 'LONGMO~1.GGU' resolves to a pre-existing
+        'LongModelNameThatIsVeryLong.gguf' - passes every earlier check, but
+        names something other than what it appears to. A production caller's
+        own dest.exists() "already downloaded" convention (pull.py) would
+        then silently treat the victim's unrelated content as the requested
+        download - a confused-deputy substitution, not a crash.
+
+        8dot3 generation is volume/config-dependent (this session measured
+        it enabled on this box's C: and disabled on D:), so this simulates
+        the alias condition directly via Path.resolve rather than depending
+        on the OS having actually generated one - deterministic regardless
+        of which volume runs this test."""
+        base = tmp_path / "models"
+        base.mkdir()
+        victim = base / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_bytes(b"VICTIM-CONTENT")
+
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == "LONGMO~1.GGU":
+                # What real 8.3 resolution does: the short-name path
+                # resolves to the long-named file's real, on-disk path.
+                return victim.resolve()
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        assert mm._safe_models_filename("LONGMO~1.GGU", base) is None
+
+    def test_same_name_repull_of_existing_file_still_accepted(
+            self, tmp_path, isolated_home):
+        """The alias check must not reject the ordinary, legitimate case of
+        re-pulling a model that is already on disk under the exact name
+        requested."""
+        base = tmp_path / "models"
+        base.mkdir()
+        (base / "model.gguf").write_bytes(b"CONTENT")
+        assert mm._safe_models_filename("model.gguf", base) == "model.gguf"
+
+    def test_case_variant_of_existing_file_still_accepted(
+            self, tmp_path, isolated_home):
+        """Windows path resolution returns the ON-DISK casing regardless of
+        the requested casing (verified live: resolving 'MODEL.GGUF' against
+        an existing 'model.gguf' yields dest.name == 'model.gguf') - a
+        benign case-variant request for an already-downloaded file must not
+        be mistaken for an alias-substitution attack."""
+        base = tmp_path / "models"
+        base.mkdir()
+        (base / "model.gguf").write_bytes(b"CONTENT")
+        assert mm._safe_models_filename("MODEL.GGUF", base) == "MODEL.GGUF"
 
 
 class TestGetModelInfoPathologicalName:

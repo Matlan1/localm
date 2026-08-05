@@ -5,7 +5,6 @@ safe model filenames, and SHA256 hashing. Leaf utilities, no registry/pull deps.
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import hashlib
-import os
 import queue
 import re
 import struct
@@ -239,39 +238,101 @@ def _sha256_file_bytes(data: bytes) -> str:
 
 
 
+# Every character Windows itself refuses to let a real filename contain
+# (docs.microsoft.com/windows/win32/fileio/naming-a-file - "Naming Conventions"),
+# plus the C0 control range. ':' is the one that matters most here: it does not
+# fail file creation at all - it opens an NTFS Alternate Data Stream instead, so
+# 'somefile.exe:mmproj.gguf' both passes a naive "no separators" check AND lands
+# INSIDE base_dir (the confinement check that guards against a directory escape
+# genuinely holds), while writing its content into a stream hidden from a normal
+# directory listing behind an innocuous, zero-byte 'somefile.exe'. That is not a
+# path-injection escape (CWE-22, what CodeQL's py/path-injection checks) - it is a
+# hidden-payload / filename-confusion primitive on TOP of a confined write, and
+# _sanitize_name (registry.py, the sibling chokepoint for registry KEYS) already
+# excludes every one of these characters via its 'A-Za-z0-9._-' whitelist. This
+# validator used a blacklist instead and never learned that lesson for ':'.
+_WINDOWS_RESERVED_CHARS = frozenset('<>:"/\\|?*') | frozenset(chr(c) for c in range(32))
+
+# Windows treats these as reserved DEVICE names regardless of extension - the
+# part of a filename before its FIRST '.', compared case-insensitively (so
+# "con.mmproj.gguf" is reserved, matching Windows's own rule, not just a bare
+# "CON"). Verified live on this box: a bare "CON" and "CON.gguf" both currently
+# write as ordinary files under Python's open() (modern NTFS does not extend the
+# legacy MS-DOS device reservation to this API path), so this is defense in
+# depth against other tooling/versions that DO enforce it, not a demonstrated
+# escape - unlike ':', which is a live, confirmed bypass (see above).
+_WINDOWS_RESERVED_STEMS = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
+
+
 def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Optional[str]:
     """Return a single-component filename confined to *base_dir* (``MODELS_DIR``
     by default).
 
     A model download must never write outside its destination folder.
-    ``filename`` is derived from untrusted input (a URL path or an
-    ``owner/repo:file`` spec), so a value like ``../../evil.gguf`` or
-    ``sub/dir/evil.gguf`` must be rejected rather than used as a destination.
-    Returns the bare filename when it is a single, non-traversing path
-    component, else ``None`` (GAP-CLI-2). *base_dir* lets a caller routing a
-    download to a non-default destination (e.g. a ComfyUI models subfolder)
-    validate against the REAL destination instead of always against
-    ``MODELS_DIR``.
+    ``filename`` is derived from untrusted input (a URL path, an
+    ``owner/repo:file`` spec, or a remote HF repo's own file listing), so a
+    value like ``../../evil.gguf`` or ``sub/dir/evil.gguf`` must be rejected
+    rather than used as a destination. Returns the bare filename when it is a
+    single, non-traversing, non-hazardous path component, else ``None``
+    (GAP-CLI-2). *base_dir* lets a caller routing a download to a non-default
+    destination (e.g. a ComfyUI models subfolder) validate against the REAL
+    destination instead of always against ``MODELS_DIR``.
+
+    Beyond directory-escape (the CWE-22 class this exists to close), this also
+    rejects the Windows filename-CONFUSION hazards verified against this exact
+    codebase: any reserved character (notably ':' - an NTFS Alternate Data
+    Stream name, which stays confined to *base_dir* and so is invisible to a
+    pure escape check, but hides its content behind an innocuous-looking,
+    apparently-empty sibling file - see ``_WINDOWS_RESERVED_CHARS``), a
+    reserved device stem (``_WINDOWS_RESERVED_STEMS``), and a trailing '.' or
+    ' ' (Windows silently strips these when resolving a path, so
+    ``evil.gguf.`` and ``evil.gguf`` name the SAME file - a download using the
+    former would silently overwrite an existing model the user already has,
+    with the collision invisible in any directory listing, which only ever
+    shows the stripped form).
     """
     base_dir = base_dir if base_dir is not None else _mm.MODELS_DIR
     if not filename:
         return None
-    # An embedded NUL is not a legal filename on any OS and makes Path.resolve() /
-    # os.stat raise ValueError, which would ESCAPE the OSError-only guard below and
-    # crash the caller (an uncaught traceback) instead of being rejected. Fail
-    # closed: unsafe input must return None, exactly like a '/'/'..'/drive spec.
-    if "\x00" in filename:
+    if any(c in _WINDOWS_RESERVED_CHARS for c in filename):
+        return None
+    if filename[-1] in (".", " "):
+        return None
+    stem = filename.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_STEMS:
         return None
     # Reject anything that is not a single path component (no separators, no
-    # drive/absolute prefixes, no '.'/'..').
+    # drive/absolute prefixes, no '.'/'..'). '/'/'\\' are already excluded by
+    # the reserved-character check above; this additionally catches a lone
+    # '.'/'..' and any OS-specific separator quirk Path.name normalises away.
     name = Path(filename).name
     if name != filename or name in ("", ".", ".."):
-        return None
-    if "/" in filename or "\\" in filename or os.sep in filename:
         return None
     try:
         dest = (base_dir / name).resolve()
         if dest.parent != base_dir.resolve():
+            return None
+        if dest.exists() and dest.name.lower() != name.lower():
+            # An OS-level alias (an NTFS 8.3 short name is the live-confirmed
+            # case: on a volume with short-name generation enabled, a crafted
+            # candidate like "LONGMO~1.GGU" passes every check above yet
+            # resolves to a pre-existing, differently-named file) - same
+            # filename-confusion class as the ':' ADS hazard above: this
+            # write stays confined to base_dir, so it is not a directory
+            # escape, but "download the file named X" would silently act on
+            # an unrelated file Y instead. A production caller's own
+            # `dest.exists()` "already downloaded" convention (pull.py) then
+            # treats the alias as a legitimate prior download and registers
+            # the WRONG file's content under the requested name - a
+            # confused-deputy substitution, not a crash. Case-insensitive:
+            # Windows path resolution returns the ON-DISK casing regardless
+            # of the requested casing, so re-requesting an existing
+            # 'model.gguf' as 'MODEL.GGUF' must still be accepted as the
+            # same file, not rejected as a fabricated alias.
             return None
     except (OSError, ValueError):
         # ValueError also covers a null/odd path that slipped past the check above
