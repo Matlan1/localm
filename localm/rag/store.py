@@ -234,7 +234,15 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".vscode"}
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
-ProgressFn = Callable[[str], None]
+# Called with a human-readable message as the sole positional argument. The one
+# call site with an exact numerator/denominator (reembed's batch loop)
+# additionally passes phase/done/total/unit as keywords, carrying the same
+# numbers the message was built from - so a job-aware sink can forward them to
+# Job.progress verbatim instead of re-deriving them from the string. Any sink
+# reused for reembed (currently _job_progress and the CLI's reembed callback)
+# must accept and ignore these keywords (**_); every other on_progress use
+# (add_paths, add_uploads, resync, _write_lock) never passes them.
+ProgressFn = Callable[..., None]
 
 
 def rag_dir() -> Path:
@@ -2042,7 +2050,9 @@ class Collection:
                         f"{i}-{i + len(texts[i:i + batch])} of {total}")
                 fresh.extend(part)
                 if on_progress:
-                    on_progress(f"re-embedding {min(i + batch, total)}/{total}")
+                    done = min(i + batch, total)
+                    on_progress(f"re-embedding {done}/{total}", phase="re-embedding",
+                                done=done, total=total, unit="chunks")
 
             # Validate BEFORE touching the live index. A short or ragged result is
             # the failure mode that produces a silently mis-scoring collection, so

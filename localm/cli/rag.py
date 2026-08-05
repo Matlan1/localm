@@ -328,7 +328,7 @@ def rag_reembed(collection, url, yes):
     with _refuse_if_locked(console):
         try:
             res = coll.reembed(embed_fn=_cli_rag_embed_fn(url), model_name=model,
-                               on_progress=lambda m: console.print(f"[dim]{m}[/dim]"))
+                               on_progress=lambda m, **_: console.print(f"[dim]{m}[/dim]"))
         except Exception as e:
             # The previous index is intact by construction (reembed only swaps it
             # in after the whole set is computed and validated), so say so - the
