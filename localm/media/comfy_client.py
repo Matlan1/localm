@@ -1335,6 +1335,159 @@ def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
         return None
 
 
+# ---------------------------------------------------------------------------
+#  NEW-COMFY-SILENT-PARTIAL-APPLY: surface ComfyUI's own console warnings
+# ---------------------------------------------------------------------------
+#
+#  A node whose weights only PARTLY match the model (a LoRA with incompatible
+#  key naming, a checkpoint with missing UNet/CLIP/VAE keys, ...) is not an
+#  error to ComfyUI: it logs a `logging.warning(...)` line and the run
+#  completes normally, so history_execution_error() never sees it and the
+#  caller is told the generation succeeded. This is only observable at all
+#  when localm itself launched the ComfyUI process (spawned_pid() is not
+#  None) - a remote or already-running instance has no process here to read
+#  from, and that is a real, structural gap, not a bug in this mechanism.
+#
+#  _COMFY_SILENT_PARTIAL_APPLY_PATTERNS was built by grepping a real installed
+#  ComfyUI checkout's comfy/*.py for logging.warning() calls with this exact
+#  shape (component weights partly/fully unmatched, execution continues). Not
+#  exhaustive - a fork, a newer ComfyUI release, or a custom node can log
+#  differently. Extend this table as new cases are found; do not assume it is
+#  complete.
+_COMFY_SILENT_PARTIAL_APPLY_PATTERNS = (
+    ("lora key not loaded",
+     "a LoRA patch key did not match the model and was skipped"),
+    ("WARNING SHAPE MISMATCH",
+     "a LoRA patch's tensor shape did not match; that layer's weight was not merged"),
+    ("Calculate Weight Failed",
+     "applying one of the model's weight patches failed"),
+    ("patch type not recognized",
+     "an unrecognized weight-patch type was skipped"),
+    ("clip missing:",
+     "some CLIP/text-encoder weights were not found in the checkpoint"),
+    ("Missing VAE keys",
+     "some VAE weights were not found in the checkpoint"),
+    ("No VAE weights detected, VAE not initalized",
+     "no VAE weights were found in the checkpoint at all"),
+    ("unet missing:",
+     "some UNet weights were not found in the checkpoint"),
+    ("unet unexpected:",
+     "the checkpoint has UNet weights ComfyUI's model definition does not expect"),
+    ("missing controlnet keys:",
+     "some ControlNet weights were not found in the checkpoint"),
+    ("missing clip vision:",
+     "some CLIP-vision encoder weights were not found"),
+    ("missing audio encoder:",
+     "some audio-encoder weights were not found"),
+    ("unexpected audio encoder:",
+     "the checkpoint has audio-encoder weights ComfyUI's model definition does not expect"),
+)
+
+
+def comfy_launch_log_path(api_url: str) -> Path:
+    """Where ensure_comfy redirects a self-launched ComfyUI's stdout+stderr
+    (see the launch block below), scoped to *api_url*.
+
+    MUST be per-instance, not one shared path: image/video/music each resolve
+    their OWN per-plugin comfy.api_url/workdir/launch_cmd (localm/plugins/
+    media_config.py), so two independently self-launched ComfyUI instances can
+    be alive at once. ensure_comfy() truncates this file on every fresh
+    launch (open(..., "w")) - a single shared path would let one instance's
+    launch truncate/interleave-corrupt another still-running instance's
+    console log out from under it, and let comfy_console_warnings_since()
+    silently misattribute one instance's real warning onto the other's
+    generation record. A plain deterministic path (not tied to any one
+    process handle), so a caller can locate it without having launched
+    ComfyUI itself in this call - same api_url always maps to the same path."""
+    from localm.config import home_dir
+    import hashlib
+    api_url = api_url.rstrip("/")
+    suffix = hashlib.sha256(api_url.encode("utf-8")).hexdigest()[:12]
+    return home_dir() / f"comfy-launch-{suffix}.log"
+
+
+@dataclass(frozen=True)
+class ComfyConsoleTail:
+    """Opaque token from comfy_console_tail_start, passed to
+    comfy_console_warnings_since. Carries the spawned PID alongside the byte
+    offset so the later read can verify it is still looking at the SAME
+    process's log, not a same-api_url process that died and was relaunched
+    in between (which truncates the log via ensure_comfy's "w" open and
+    re-registers a NEW pid under the same _spawned_procs[api_url] key -
+    checking liveness alone cannot tell those apart)."""
+    offset: int
+    pid: int
+
+
+def comfy_console_tail_start(api_url: str) -> Optional[ComfyConsoleTail]:
+    """Marks 'now' in the self-launched ComfyUI's console log, so a caller can
+    later read only what it printed during one generation (see
+    comfy_console_warnings_since). None when localm did not launch this
+    ComfyUI itself, or the log does not exist - there is nothing to tail, and
+    no offset would be meaningful."""
+    pid = spawned_pid(api_url)
+    if pid is None:
+        return None
+    try:
+        offset = comfy_launch_log_path(api_url).stat().st_size
+    except OSError:
+        return None
+    return ComfyConsoleTail(offset=offset, pid=pid)
+
+
+def comfy_console_warnings_since(api_url: str,
+                                 tail: Optional[ComfyConsoleTail]) -> tuple:
+    """Human-readable warnings ComfyUI printed to its own console between
+    *tail* (from comfy_console_tail_start, called before the prompt was
+    submitted) and now, matched against _COMFY_SILENT_PARTIAL_APPLY_PATTERNS.
+    Each returned string names the condition and, when it recurred, how many
+    times (e.g. "a LoRA patch key did not match the model and was skipped
+    (x152)").
+
+    Returns (checked, warnings). ``checked`` is True ONLY when localm actually
+    performed a real read of ComfyUI's console covering *tail*'s window - the
+    caller should derive any "did we actually check" signal (e.g. a sidecar's
+    comfy_console_checked field) from THIS, not from whether tail_start
+    returned non-None earlier, because the process can die or be replaced for
+    the same api_url in between the two calls. ``warnings`` is [] both when
+    checked is True and nothing matched (a genuine clean read) and whenever
+    checked is False (nothing to report). See NEW-COMFY-SILENT-PARTIAL-APPLY
+    in issues.txt: for a remote or pre-existing ComfyUI, checked is always
+    False, because there is no local process to read from at all."""
+    if tail is None:
+        return False, []
+    if spawned_pid(api_url) != tail.pid:
+        # Not merely "not alive" - not the SAME process any more. Whether it
+        # died outright or was replaced by a relaunch (which truncates the
+        # log at tail.offset and hands the api_url key to a new pid), the
+        # bytes at tail.offset in whatever now exists are not attributable to
+        # the generation being asked about.
+        return False, []
+    try:
+        with open(comfy_launch_log_path(api_url), "rb") as f:
+            f.seek(tail.offset)
+            new_bytes = f.read()
+    except OSError:
+        return False, []
+    lines = new_bytes.decode("utf-8", errors="replace").splitlines()
+    matches = []
+    for substring, label in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS:
+        # Per-line, not a whole-buffer substring count: a pattern must occur
+        # WITHIN one console line to count, so it cannot straddle two
+        # unrelated lines a byte-offset read happened to butt together.
+        # Residual, accepted risk (LOW - see NEW-COMFY-SILENT-PARTIAL-APPLY):
+        # this does not prove the matched line came from logging.warning()
+        # rather than, say, ComfyUI echoing a user-supplied filename that
+        # happens to contain one of these substrings verbatim. The label text
+        # emitted is always the fixed catalogue string, never the matched
+        # content, so a false match is a spoofed diagnostic, not an
+        # injection.
+        count = sum(line.count(substring) for line in lines)
+        if count:
+            matches.append(f"{label} (x{count})" if count > 1 else label)
+    return True, matches
+
+
 def _kill_process_tree(proc) -> None:
     """Terminate *proc* AND its children. On Windows the launcher we spawn is a
     `cmd /S /c "<bat>"` whose real ComfyUI (python) is a CHILD, so terminating the
@@ -1565,8 +1718,13 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     # discarding them, so a ComfyUI that fails to start leaves its reason on
     # disk for the user (and for --debug-discoverable). Best-effort: fall back
     # to DEVNULL if the log cannot be opened, so launching still proceeds.
-    from localm.config import home_dir
-    launch_log_path = home_dir() / "comfy-launch.log"
+    # Opening in "w" mode TRUNCATES the file on every fresh spawn, which is
+    # what lets comfy_console_warnings_since() trust that anything past a
+    # given offset belongs to the currently-running process, not a stale run.
+    # Scoped to api_url (comfy_launch_log_path) so a DIFFERENT self-launched
+    # ComfyUI instance (image/video/music can each point at their own) never
+    # shares - and truncates - this one's log.
+    launch_log_path = comfy_launch_log_path(api_url)
     try:
         launch_out = open(launch_log_path, "w", encoding="utf-8", errors="replace")
     except OSError:

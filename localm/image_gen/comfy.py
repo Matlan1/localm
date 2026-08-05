@@ -53,6 +53,8 @@ from localm.media.comfy_client import (
     _with_warning,
     apply_model_overrides,
     clear_comfy_history,
+    comfy_console_tail_start,
+    comfy_console_warnings_since,
     comfy_exec_error_message,
     comfy_fetch_output,
     comfy_http_error_detail,
@@ -104,6 +106,7 @@ __all__ = [
     "_looks_like_model_files", "_normalize_model_base", "_pick_variant",
     "_upload_image", "_venv_python", "_with_warning",
     "apply_model_overrides", "clear_comfy_history",
+    "comfy_console_tail_start", "comfy_console_warnings_since",
     "comfy_exec_error_message",
     "comfy_fetch_output", "comfy_http_error_detail", "comfy_object_info",
     "comfy_poll_until_done", "comfy_submit_prompt", "contain_comfy_artifacts",
@@ -446,12 +449,33 @@ def _write_image_sidecar(
     clip_name1: Optional[str],
     clip_name2: Optional[str],
     start_time: float,
+    comfy_console_warning: Optional[str] = None,
+    comfy_console_checked: bool = False,
 ) -> str:
     """Write the ``<output>.json`` reproducibility sidecar next to the image.
 
     A write failure is surfaced (not silent): the success message promises the
     reproducibility the sidecar provides. Returns a warning string on failure,
-    else ""."""
+    else "".
+
+    ``lora_name``/``lora_strength_model``/``lora_strength_clip`` record what
+    was REQUESTED, not confirmed applied - ComfyUI can silently skip a
+    mismatched LoRA (or checkpoint/VAE/CLIP weights) and still report success
+    (NEW-COMFY-SILENT-PARTIAL-APPLY). ``comfy_console_warning`` and
+    ``comfy_console_checked`` together avoid collapsing "checked, found
+    nothing" into the same silence as "could not check at all" - a reader
+    who only sees comfy_console_warning's absence has no way to tell those
+    apart, and would reasonably (and wrongly) read an unchecked generation as
+    confirmed-clean:
+      - checked=True,  warning present  -> localm SAW ComfyUI report a
+        mismatch during this generation.
+      - checked=True,  warning absent   -> localm read ComfyUI's console and
+        found no KNOWN silent-partial-apply pattern (not a guarantee nothing
+        was skipped - only that nothing in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS
+        matched).
+      - checked=False, warning absent   -> localm could not read the console
+        at all (a remote or already-running ComfyUI it did not launch
+        itself) - this says NOTHING about whether anything was skipped."""
     try:
         sidecar = {
             "prompt": prompt,
@@ -462,6 +486,8 @@ def _write_image_sidecar(
             "lora_name": lora_name,
             "lora_strength_model": lora_strength_model if lora_name else None,
             "lora_strength_clip": lora_strength_clip if lora_name else None,
+            "comfy_console_warning": comfy_console_warning,
+            "comfy_console_checked": comfy_console_checked,
             "input_image": str(input_image) if input_image else None,
             "denoise": (denoise if denoise is not None else 0.75)
                        if input_image else None,
@@ -672,7 +698,13 @@ def generate_image(
     if swap:
         _localm_unload(localm_url)
 
-    # 9. Queue the prompt in ComfyUI
+    # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
+    # FIRST (comfy_console_tail_start), so any silent partial-apply warning it
+    # prints while running THIS prompt (a LoRA key mismatch, missing VAE/UNet
+    # keys, ...) can be attributed to this generation and not an earlier one -
+    # see NEW-COMFY-SILENT-PARTIAL-APPLY. None when localm did not launch this
+    # ComfyUI itself; comfy_console_warnings_since() then always reports [].
+    console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:
         return False, (
@@ -734,6 +766,21 @@ def generate_image(
         return False, (f"Image generation timed out after "
                        f"{max_poll_seconds // 60} minutes{err_note}.")
 
+    # status == POLL_FINISHED means ComfyUI reported no execution_error - but a
+    # node whose weights only partly matched (a LoRA key mismatch, missing
+    # VAE/UNet keys, ...) is not an execution_error to ComfyUI, only a console
+    # warning, and the run still "succeeds" with that component silently
+    # under-applied. Check for any KNOWN warning of that shape printed while
+    # THIS prompt ran (see NEW-COMFY-SILENT-PARTIAL-APPLY). console_checked
+    # reflects whether a real read actually happened just now - NOT whether
+    # console_tail_start found a process before the prompt was even submitted
+    # - because the process can die/be replaced for the same api_url in
+    # between, which comfy_console_warnings_since detects and refuses to read
+    # past. Only console_checked, not console_tail_start's mere presence, may
+    # drive the sidecar's comfy_console_checked below.
+    console_checked, comfy_console_warnings = comfy_console_warnings_since(
+        api_url, console_tail_start)
+
     # status == POLL_FINISHED: find the first SaveImage output (presence-based,
     # matching the original loop - the first node carrying an "images" entry wins).
     for node_output in payload.get("outputs", {}).values():
@@ -776,6 +823,9 @@ def generate_image(
         # (write_sidecar=False) - the prompt then never touches disk. A write
         # failure is surfaced (not silent): the success message promises the
         # reproducibility the sidecar provides.
+        comfy_console_warning_text = ("; ".join(comfy_console_warnings)
+                                      if comfy_console_warnings else None)
+
         sidecar_warning = ""
         if write_sidecar:
             sidecar_warning = _write_image_sidecar(
@@ -793,9 +843,18 @@ def generate_image(
                 clip_name1=clip_name1,
                 clip_name2=clip_name2,
                 start_time=start_time,
+                comfy_console_warning=comfy_console_warning_text,
+                comfy_console_checked=console_checked,
             )
 
-        combined = "\n".join(w for w in (strip_warning, contain_warning,
+        comfy_warning = (
+            "WARNING: ComfyUI's own console reported: "
+            + comfy_console_warning_text
+            + ". The generation still completed, but the requested LoRA/model "
+              "weights may not have fully applied - see comfy-launch.log."
+        ) if comfy_console_warning_text else ""
+
+        combined = "\n".join(w for w in (strip_warning, contain_warning, comfy_warning,
                                          sidecar_warning) if w)
         return True, _with_warning(
             f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)",
