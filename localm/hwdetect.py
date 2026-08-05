@@ -35,9 +35,30 @@ VENDORS = ("nvidia", "amd", "intel")
 
 @dataclass
 class Detection:
-    """What was found, and the backend we'd pick by default."""
+    """What was found, and a LEGACY backend guess (see ``recommended``)."""
     vendors: list = field(default_factory=list)   # subset of VENDORS, in priority order
-    recommended: str = "cpu"                       # "vulkan" | "cpu"
+    # LEGACY. NOT the installer's answer - call recommended_install_backend().
+    #
+    # This only ever holds "vulkan" or "cpu"; it predates the CUDA/ROCm-aware
+    # policy and cannot express "cuda", "amd-rocm" or "metal". The name is the
+    # whole problem: it answers "which of the two universally-safe backends
+    # applies", while every reader has heard "the backend this machine should
+    # install". Those agree on most hardware and diverge exactly where it costs
+    # the most - the vendor-optimised paths.
+    #
+    # THREE separate sites have already reached for it and been wrong, which is
+    # why this is a warning rather than a description: bugreport.py (#833),
+    # updater.py (where it would have silently swapped a user's ROCm install to
+    # Vulkan during `localm update`), and the release-verification cold install
+    # (which was therefore verifying a backend real users do not get). All three
+    # now call recommended_install_backend(); every remaining mention of this
+    # field in the tree is a comment saying not to use it.
+    #
+    # MEASURED 2026-08-05 on a Windows AMD RX 6900 XT (gfx1030): this field reads
+    # "vulkan" while recommended_install_backend() reads "amd-rocm".
+    # test_hwdetect_recommended_is_legacy.py pins that divergence on purpose, so
+    # nobody "simplifies" the two into one and quietly reopens all three bugs.
+    recommended: str = "cpu"
     source: str = ""                               # how we decided (for messaging)
     gpu_names: str = ""                            # raw adapter name(s), lowercased
 
