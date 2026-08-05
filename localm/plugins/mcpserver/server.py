@@ -635,8 +635,14 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 lines.append(f"{where}: could not be reached ({payload}); "
                              f"its activity is unknown.")
             elif state == "unauthorized":
-                lines.append(f"{where}: needs an API key this process does not "
-                             f"have; its activity is unknown.")
+                # #953: match the "could not be X" register the other failure
+                # branches already use, not a "needs a key" requirement
+                # statement - the latter reads as an optional hardening tip
+                # rather than what this actually is: this process genuinely
+                # cannot tell what the server is doing right now.
+                lines.append(f"{where}: could not be asked (it requires an "
+                             f"API key this process does not have); its "
+                             f"activity is unknown.")
             elif state == "unsupported":
                 lines.append(f"{where}: does not report activity (older "
                              f"localm); its activity is unknown.")

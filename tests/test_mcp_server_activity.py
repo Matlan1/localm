@@ -113,6 +113,18 @@ def test_only_a_real_answer_reports_idle(tools, monkeypatch):
     assert _claims_idle(out)
 
 
+def test_unauthorized_matches_the_other_failure_branches_register(tools, monkeypatch):
+    """#953 (grader 2): the pre-fix "needs an API key this process does not
+    have" wording read like an optional hardening tip rather than the same
+    kind of failure "could not be reached"/"could not be read" already are.
+    Match their "could not be X" register instead."""
+    _patch_instances(monkeypatch, _LIVE)
+    _patch_read(monkeypatch, "unauthorized", 401)
+    out = _call(tools)
+    assert "could not be asked" in out.lower()
+    assert "needs an api key" not in out.lower()
+
+
 # ------------------------------------------------------------ the good case
 
 def test_snapshot_called_with_include_token(tools, monkeypatch):

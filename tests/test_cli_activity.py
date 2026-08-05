@@ -140,6 +140,21 @@ def test_no_instance_token_and_no_key_sends_no_auth_header(monkeypatch):
     assert "Authorization" not in captured["headers"]
 
 
+def test_unauthorized_reads_as_blindness_not_an_optional_tip(monkeypatch, capsys):
+    """#953 (grader 2): the pre-fix wording ("This server needs an API key...")
+    reads as a hardening suggestion, not what B1/B2 proved it actually is - a
+    genuine inability to answer, identical whether the server is busy or idle.
+    Must match the SAME "could not ask" framing the unreachable branch uses,
+    not lead with the requirement."""
+    _patch(monkeypatch, resp=_Resp(401, {}))
+    _print_activity("http", 1234)
+    out = _out(capsys)
+    assert "could not ask this server what it is doing" in out.lower()
+    # The old framing led with the requirement rather than the failure -
+    # pinned as absent so it cannot silently return.
+    assert "this server needs an api key" not in out.lower()
+
+
 # ------------------------------------------------------------- what prints
 
 def _out(capsys):
