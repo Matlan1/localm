@@ -910,7 +910,21 @@ class GGUFEmbedder:
         regression, on CPU - see dev-notes/FINDING-embedder-serial-batching-
         2026-08-04.md). A lone text still uses the cheaper single-sequence
         path (measured slower when routed through the batched machinery for
-        just one sequence)."""
+        just one sequence).
+
+        Every ``llama_decode`` call here, single or batched, writes native
+        lines like ``decode: cannot decode batches with this context
+        (calling encode() instead)`` to raw stderr (#963 adversarial
+        follow-up: #993 only wrapped the model LOAD). Deliberately NOT
+        wrapped in ``dedup_native_stderr()`` at this level - measured live
+        that grouping buys nothing here, since a typical call (one text, or
+        one group) feeds the grouper exactly one line and flushes it raw at
+        scope exit either way; the real repetition is ACROSS separate
+        embed() calls (20 single-text RAG/memory calls in a row emit the
+        SAME line 20 times), which only a scope spanning multiple calls can
+        collapse. See ``_embedder_runner.py``'s dispatch loop, which wraps
+        the whole isolated child's run of "embed" commands in one scope for
+        exactly this reason."""
         with self._lock:
             if self._ctx is None:
                 raise RuntimeError("embedder is closed")
@@ -930,7 +944,8 @@ class GGUFEmbedder:
                     pending_toks.append(toks)
                 else:
                     out[i] = [0.0] * self.dim
-            for group in self._pack_groups(pending_toks):
+            groups = self._pack_groups(pending_toks) if pending_toks else []
+            for group in groups:
                 group_idx = [pending_idx[j] for j in group]
                 group_toks = [pending_toks[j] for j in group]
                 vecs = ([self._decode_single(group_toks[0])] if len(group_toks) == 1

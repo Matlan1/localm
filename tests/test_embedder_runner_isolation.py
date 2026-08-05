@@ -451,6 +451,138 @@ class TestCpuOnlyHidesGpuDevices:
         assert "cpu_only" not in seen["kwargs"]
 
 
+class TestEmbedStderrWrapping:
+    """The isolated child's native EMBED-time llama_decode calls must run
+    inside ONE dedup_native_stderr() scope spanning the child's whole run of
+    "embed" commands, not one scope per call and not around "load" (which
+    already has its own scope inside GGUFEmbedder.__init__ - #993).
+
+    #963's adversarial follow-up measured live that wrapping each embed()
+    call individually (the first version of this fix, reverted - see
+    embedder.py's embed() docstring) collapses nothing: a typical call (one
+    RAG query, one memory fact) feeds dedup_native_stderr's grouper exactly
+    one line, which flushes RAW the instant that call's own scope closes.
+    The repetition #963 cares about is ACROSS separate embed() RPCs - many
+    small calls in a row emitting the identical native line - so only a
+    scope spanning MULTIPLE calls lets the grouper actually see the repeat.
+
+    Drives _runner_main's own dispatch loop directly (same pattern as
+    TestCpuOnlyHidesGpuDevices above) - no real subprocess needed, the
+    scope-lifetime question is answered entirely by which commands were
+    dispatched between enter and exit."""
+
+    def _stub_and_spy(self, monkeypatch):
+        import contextlib
+        import queue as _q
+
+        events = []
+
+        @contextlib.contextmanager
+        def spy_dedup():
+            events.append("enter")
+            yield
+            events.append("exit")
+
+        monkeypatch.setattr("localm.debuglog.dedup_native_stderr", spy_dedup)
+
+        class _StubGGUFEmbedder:
+            def __init__(self, **kwargs):
+                self.dim = 4
+                self.declared_pooling = None
+                self.pooling_type = 1
+                self.n_ctx = 512
+
+            def embed(self, texts):
+                events.append(f"embed:{len(texts)}")
+                return [[0.0] * self.dim for _ in texts]
+
+            def close(self):
+                events.append("close")
+
+        monkeypatch.setattr(
+            "localm.inference.embedder.GGUFEmbedder", _StubGGUFEmbedder)
+        req_q, resp_q = _q.Queue(), _q.Queue()
+        return req_q, resp_q, events
+
+    _LOAD_CMD = ("load", dict(
+        model_path="x.gguf", n_gpu_layers=0, n_ctx=512, pooling_type=1))
+
+    def test_one_scope_spans_every_embed_call_not_reentered(self, monkeypatch):
+        req_q, resp_q, events = self._stub_and_spy(monkeypatch)
+        req_q.put(self._LOAD_CMD)
+        req_q.put(("embed", ["a"]))
+        req_q.put(("embed", ["b", "c"]))
+        req_q.put(("embed", ["d"]))
+        req_q.put(("shutdown", None))
+
+        runner_mod._runner_main(req_q, resp_q)
+
+        # ONE enter bracketing all three embed calls (not three separate
+        # enter/exit pairs), closed once at shutdown BEFORE the embedder
+        # itself is closed (_close_embed_stderr_ctx runs first in the
+        # "shutdown" branch) - "load" never touches this scope at all.
+        assert events == [
+            "enter", "embed:1", "embed:2", "embed:1", "exit", "close",
+        ], events
+        for _ in range(4):
+            assert resp_q.get_nowait()[0] == "ok"
+
+    def test_scope_never_entered_when_no_embed_command_arrives(self, monkeypatch):
+        req_q, resp_q, events = self._stub_and_spy(monkeypatch)
+        req_q.put(self._LOAD_CMD)
+        req_q.put(("shutdown", None))
+
+        runner_mod._runner_main(req_q, resp_q)
+
+        assert events == ["close"], (
+            "dedup_native_stderr was entered even though no embed() command "
+            f"ever arrived: {events}")
+
+    def test_scope_closes_on_the_none_sentinel_too(self, monkeypatch):
+        """The parent-died sentinel (None on req_q) is a second, separate
+        shutdown path from the explicit "shutdown" command - both must
+        close an open scope, not just one of them."""
+        req_q, resp_q, events = self._stub_and_spy(monkeypatch)
+        req_q.put(self._LOAD_CMD)
+        req_q.put(("embed", ["a"]))
+        req_q.put(None)
+
+        runner_mod._runner_main(req_q, resp_q)
+
+        assert events == ["enter", "embed:1", "exit"], events
+
+    def test_idle_gap_closes_the_scope_then_the_next_burst_reopens_it(self, monkeypatch):
+        """The failure this idle-close exists to prevent: holding the scope
+        open for the child's whole remaining lifetime would silence the live
+        view indefinitely on a server that keeps running between bursts (see
+        the module-level _EMBED_STDERR_IDLE_CLOSE_SECS docstring). Shrinks
+        the threshold so the test does not need a real 5-second sleep, then
+        proves a genuine idle gap (a real time.sleep on a background feeder
+        thread, not a pre-queued command) closes the scope on its own -
+        before the next burst arrives and reopens a FRESH one."""
+        import threading
+        import time
+
+        monkeypatch.setattr(runner_mod, "_EMBED_STDERR_IDLE_CLOSE_SECS", 0.1)
+        req_q, resp_q, events = self._stub_and_spy(monkeypatch)
+        req_q.put(self._LOAD_CMD)
+        req_q.put(("embed", ["a"]))
+
+        def _feed_second_burst():
+            time.sleep(0.4)   # well past the 0.1s idle threshold
+            req_q.put(("embed", ["b"]))
+            req_q.put(("shutdown", None))
+
+        threading.Thread(target=_feed_second_burst, daemon=True).start()
+        runner_mod._runner_main(req_q, resp_q)
+
+        assert events == [
+            "enter", "embed:1", "exit",    # first burst, closed on idle
+            "enter", "embed:1", "exit",    # second burst, its OWN fresh scope
+            "close",
+        ], events
+
+
 class TestConcurrentEmbedSerialization:
     """The worker protocol has NO request-id correlation: one req_q/resp_q pair
     feeds one child, so two overlapping embed() calls are two threads blocked in
