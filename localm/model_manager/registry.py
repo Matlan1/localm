@@ -29,6 +29,8 @@ from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_is_mmproj
+from .gguf import gguf_registry_metadata
+from .gguf import _gguf_metadata_probe
 
 MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
 
@@ -135,8 +137,9 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
 
 
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
-                             is_blob: bool = False) -> str:
+                             is_blob: bool = False) -> tuple[str, dict]:
     """Deterministically classify a LOCAL model's type from HARD metadata only.
+    Returns ``(model_type, gguf_metadata)``.
 
     A .gguf file or Ollama blob (the same GGUF byte format under a renamed file)
     is first checked for a vision-projector signal in its OWN GGUF metadata
@@ -147,17 +150,29 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     config.json: a LoRA/adapter dir -> 'lora'; an ``architectures`` class ending
     in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
     cannot resolve -> 'unknown' (never a silent 'llm').
+
+    *gguf_metadata* (F8-PERSIST-ARCH-AND-EXPERT-COUNT) is ``gguf_registry_metadata``'s
+    ``{"architecture", "expert_count"}`` dict for a GGUF/blob path, ``{}`` for an
+    HF dir or an undetected type (nothing GGUF-shaped to read). The mmproj/
+    embedding checks below already read this file's header once (``meta``,
+    shared via the *meta* param both accept - MEASURED: this halves the cost
+    of also wanting architecture, from three probe reads down to two); this
+    only adds ``gguf_expert_count``'s own separate, equally-bounded read on
+    top, so every caller that persists a registry entry gets architecture and
+    expert count for close to the cost it already paid for the type alone.
     """
     try:
         if is_gguf or is_blob:
-            if gguf_is_mmproj(path):
-                return "mmproj"
-            if gguf_embedding_signal(path):
-                return "embedding"
-            return "llm"
+            meta = _gguf_metadata_probe(path)
+            gguf_metadata = gguf_registry_metadata(path, meta=meta)
+            if gguf_is_mmproj(path, meta=meta):
+                return "mmproj", gguf_metadata
+            if gguf_embedding_signal(path, meta=meta):
+                return "embedding", gguf_metadata
+            return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():
-                return "lora"
+                return "lora", {}
             cfg_path = path / "config.json"
             if cfg_path.exists():
                 conf = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -166,12 +181,12 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                     isinstance(a, str) and a.endswith(_HF_LLM_ARCH_SUFFIXES)
                     for a in archs
                 ):
-                    return "llm"
+                    return "llm", {}
     except Exception as e:
         # Detection is best-effort metadata reading; an unreadable/odd config.json
         # means "no hard signal", which is exactly 'unknown' - surfaced, not muted.
         logger.debug("local model-type detection failed for %s: %s", path, e)
-    return "unknown"
+    return "unknown", {}
 
 
 
@@ -1063,15 +1078,33 @@ def _register(
     sha256: Optional[str] = None,
     model_type: str = "llm",
     mmproj: Optional[Path] = None,
+    architecture: Optional[str] = None,
+    expert_count: Optional[int] = None,
 ) -> None:
     """*mmproj*, when given, is a vision projector already verified and placed
     on disk (pull.py's job) and is recorded on the entry so get_model_mmproj
-    finds it without depending on the directory-sibling fallback (#957)."""
+    finds it without depending on the directory-sibling fallback (#957).
+
+    *architecture* / *expert_count* (F8-PERSIST-ARCH-AND-EXPERT-COUNT): the
+    GGUF header's own ``general.architecture`` and ``<arch>.expert_count``,
+    read once at registration (gguf_registry_metadata) so the local model
+    list can show the same real architecture/MoE badge HuggingFace search
+    results already do, instead of only ever having a name-guess. Both use
+    ``is not None`` throughout this module, NEVER a truthiness check:
+    ``expert_count=0`` is a real, confirmed fact (a dense model's header WAS
+    read and genuinely has no experts) and must stay written and distinct
+    from an entry that was never checked at all (the key absent entirely) -
+    collapsing the two would show a real MoE model as confirmed-dense the
+    moment a caller defaults a missing field to 0."""
     entry = {"path": str(path.resolve()), "source": source, "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
     if mmproj:
         entry["mmproj"] = str(Path(mmproj).resolve())
+    if architecture is not None:
+        entry["architecture"] = architecture
+    if expert_count is not None:
+        entry["expert_count"] = expert_count
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -1119,11 +1152,15 @@ class ModelSyncResult(NamedTuple):
     flagged: int = 0        # entries newly marked missing (file gone)
     restored: int = 0       # entries whose file reappeared (flag cleared)
     pruned: int = 0         # entries deleted (only when autoprune is enabled)
+    # entries backfilled with architecture/expert_count (F8-PERSIST-ARCH-AND-
+    # EXPERT-COUNT), bounded per call - see sync_models_dir's _BACKFILL_CAP
+    backfilled: int = 0
     note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
 
     @property
     def changed(self) -> bool:
-        return bool(self.added or self.flagged or self.restored or self.pruned)
+        return bool(self.added or self.flagged or self.restored or self.pruned
+                    or self.backfilled)
 
 
 
@@ -1186,7 +1223,7 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     resolved = str(child.resolve())
                     if resolved in known:
                         continue
-                    mtype = _detect_local_model_type(child, is_gguf=False, is_hf=True)
+                    mtype, _gmeta = _detect_local_model_type(child, is_gguf=False, is_hf=True)
                     _mm._register(_unique_registry_name(reg, child.name), child,
                                   model_type=mtype)
                     reg = _mm.load_registry()
@@ -1214,9 +1251,10 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     logger.debug("skipping %s: not a GGUF (bad/missing magic)",
                                  child.name)
                     continue
-                mtype = _detect_local_model_type(child, is_gguf=True, is_hf=False)
+                mtype, gmeta = _detect_local_model_type(child, is_gguf=True, is_hf=False)
                 _mm._register(_unique_registry_name(reg, child.stem), child,
-                              model_type=mtype)
+                              model_type=mtype, architecture=gmeta.get("architecture"),
+                              expert_count=gmeta.get("expert_count"))
                 reg = _mm.load_registry()
                 known.add(resolved)
                 added += 1
@@ -1242,11 +1280,23 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
         return is_owned_model_path(p, models_root)
 
     flagged = restored = pruned = 0
+    backfilled = 0
     note = ""
     backed_up = False
+    # F8-PERSIST-ARCH-AND-EXPERT-COUNT backfill: an entry registered before this
+    # feature existed has no architecture/expert_count at all. Opportunistic,
+    # bounded, self-correcting - same shape as #1030's RAG stats-cache backfill
+    # (measured there: a real one-time cost under the write lock, cheap again on
+    # every later read). Capped per sync call (not "every missing entry, every
+    # launch") because unlike a per-collection backfill this scan could otherwise
+    # be unbounded - a user with 50 pre-existing models would pay 50x the ~200ms
+    # measured single-file cost (see gguf_registry_metadata's docstring) on the
+    # very first post-upgrade launch. A handful per call makes steady, unnoticed
+    # progress across a few ordinary restarts instead.
+    _BACKFILL_CAP = 5
 
     def _reconcile(reg: dict) -> None:
-        nonlocal flagged, restored, pruned, note, backed_up
+        nonlocal flagged, restored, pruned, note, backed_up, backfilled
 
         # Managed models = those whose file lives under the models folder.
         managed = [
@@ -1278,6 +1328,20 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                 # A previously-missing model is back - clear the flag.
                 if entry.pop("missing", None):
                     restored += 1
+                # Opportunistic architecture/expert_count backfill (see
+                # _BACKFILL_CAP above) - only a GGUF file (the format this
+                # metadata comes from), only when BOTH keys are genuinely
+                # absent (an entry with either key, even a stored 0/false, was
+                # already resolved and must never be re-read or overwritten),
+                # and only up to the per-call cap.
+                if (backfilled < _BACKFILL_CAP and path.suffix.lower() == ".gguf"
+                        and "architecture" not in entry and "expert_count" not in entry):
+                    gmeta = gguf_registry_metadata(path)
+                    if gmeta.get("architecture") is not None:
+                        entry["architecture"] = gmeta["architecture"]
+                    if gmeta.get("expert_count") is not None:
+                        entry["expert_count"] = gmeta["expert_count"]
+                    backfilled += 1
                 continue
 
             # File is gone.
@@ -1303,7 +1367,8 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     _mm.update_registry(_reconcile)
 
     return ModelSyncResult(
-        added=added, flagged=flagged, restored=restored, pruned=pruned, note=note
+        added=added, flagged=flagged, restored=restored, pruned=pruned,
+        backfilled=backfilled, note=note
     )
 
 
@@ -1475,6 +1540,8 @@ def _register_with_dedup(
     size: Optional[int] = None,
     model_type: str = "llm",
     mmproj: Optional[Path] = None,
+    architecture: Optional[str] = None,
+    expert_count: Optional[int] = None,
 ) -> bool:
     """
     Register a model, detecting duplicates first.
@@ -1487,7 +1554,11 @@ def _register_with_dedup(
 
     *mmproj*, when given, is a verified vision projector to record on the
     entry (see ``_register``); backfilled onto an already-registered same-file
-    entry the same way a fresh ``digest`` is.
+    entry the same way a fresh ``digest`` is. *architecture* / *expert_count*
+    (F8-PERSIST-ARCH-AND-EXPERT-COUNT) backfill the same way - see ``_register``'s
+    docstring for why ``expert_count=0`` must still backfill (a confirmed fact,
+    not "nothing to write") while an entry that already HAS either key, even a
+    falsy one, is never overwritten.
 
     Returns True when *model_name* ends up correctly registered for *p*
     (freshly registered, aliased, deduped, or already correct) - False for
@@ -1502,7 +1573,8 @@ def _register_with_dedup(
     reg = _mm.load_registry()
     aliases = find_aliases_by_path(p, reg)
 
-    # Same name, same file - true no-op (but backfill a fresh digest / mmproj)
+    # Same name, same file - true no-op (but backfill a fresh digest / mmproj /
+    # architecture / expert_count)
     if model_name in aliases:
         console.print(
             f"[yellow]'{model_name}' is already registered for this exact "
@@ -1510,7 +1582,13 @@ def _register_with_dedup(
         )
         need_sha_backfill = bool(digest) and not reg[model_name].get("sha256")
         need_mmproj_backfill = bool(mmproj) and not reg[model_name].get("mmproj")
-        if need_sha_backfill or need_mmproj_backfill:
+        # "key" not in e (not a truthiness check): expert_count=0 is a real,
+        # confirmed value that must still overwrite a genuinely absent key, and
+        # an entry that already has EITHER key (even 0/falsy) must never be
+        # clobbered by a later call that could not itself determine them.
+        need_arch_backfill = architecture is not None and "architecture" not in reg[model_name]
+        need_expert_backfill = expert_count is not None and "expert_count" not in reg[model_name]
+        if need_sha_backfill or need_mmproj_backfill or need_arch_backfill or need_expert_backfill:
             def _backfill(r: dict) -> None:      # atomic RMW
                 e = r.get(model_name)
                 if not isinstance(e, dict):
@@ -1519,6 +1597,10 @@ def _register_with_dedup(
                     e["sha256"] = digest.lower()
                 if need_mmproj_backfill and not e.get("mmproj"):
                     e["mmproj"] = str(Path(mmproj).resolve())
+                if need_arch_backfill and "architecture" not in e:
+                    e["architecture"] = architecture
+                if need_expert_backfill and "expert_count" not in e:
+                    e["expert_count"] = expert_count
             _mm.update_registry(_backfill)
         others = [a for a in aliases if a != model_name]
         if others:
@@ -1578,6 +1660,10 @@ def _register_with_dedup(
                     entry["sha256"] = digest.lower()
                 if mmproj:
                     entry["mmproj"] = str(Path(mmproj).resolve())
+                if architecture is not None:
+                    entry["architecture"] = architecture
+                if expert_count is not None:
+                    entry["expert_count"] = expert_count
 
                 # Move first so the file lands under MODELS_DIR (where a launch-time
                 # sync_models_dir can always recover it), THEN commit the registry in
@@ -1601,7 +1687,7 @@ def _register_with_dedup(
         # action == "register" falls through unchanged
 
     _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
-                  mmproj=mmproj)
+                  mmproj=mmproj, architecture=architecture, expert_count=expert_count)
     console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
     return True
 
@@ -2195,8 +2281,13 @@ def add_local(
 
     # Resolve an unspecified type deterministically (GGUF -> llm, HF config.json ->
     # architectures, else 'unknown') instead of silently defaulting to 'llm'.
+    # gguf_metadata (F8-PERSIST-ARCH-AND-EXPERT-COUNT) is captured regardless of
+    # whether model_type needed detecting - an explicit --type override changes
+    # what label the model gets, not whether its own header is worth reading.
+    detected_type, gguf_metadata = _detect_local_model_type(
+        p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
     if model_type is None:
-        model_type = _detect_local_model_type(p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
+        model_type = detected_type
 
     # The interactive path can still decline (or a rarer post-move content
     # dedup can) - report that honestly rather than claiming success for a
@@ -2204,6 +2295,7 @@ def add_local(
     # (sync_models_dir/`localm list` will pick it up under an auto name).
     registered = _mm._register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
+        architecture=gguf_metadata.get("architecture"), expert_count=gguf_metadata.get("expert_count"),
     )
     if not registered and store:
         verb = "moved" if store == "move" else "copied"

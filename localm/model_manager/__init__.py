@@ -52,6 +52,7 @@ from .gguf import (
     first_split_part,
     gguf_embedding_signal,
     gguf_is_mmproj,
+    gguf_registry_metadata,
     missing_split_parts,
     split_gguf_parts,
 )
@@ -136,6 +137,7 @@ __all__ = [
     "_HASH_THREAD_MIN_BYTES", "_iter_file_blocks",
     "_hash_with_progress", "_has_gguf_magic",
     "_gguf_first_parts", "_GGUF_MIN_BYTES", "gguf_embedding_signal", "gguf_is_mmproj",
+    "gguf_registry_metadata",
     # registry
     "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",

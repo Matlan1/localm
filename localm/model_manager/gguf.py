@@ -723,7 +723,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
     return {"architecture": architecture, "has_pooling_type": has_pooling_type}
 
 
-def gguf_embedding_signal(path: Path) -> bool:
+def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     """True when *path*'s own GGUF metadata marks it as an embedding/pooling
     model rather than a causal-chat LLM: either its ``general.architecture`` is
     one of llama.cpp's dedicated encoder/embedding architectures
@@ -735,8 +735,18 @@ def gguf_embedding_signal(path: Path) -> bool:
     key is the only signal that catches them). Both are hard metadata baked
     into the file itself - never a filename guess. Used by
     ``_detect_local_model_type`` (local add + folder auto-sync) and by
-    ``pull.py`` (a freshly-downloaded remote GGUF)."""
-    meta = _gguf_metadata_probe(path)
+    ``pull.py`` (a freshly-downloaded remote GGUF).
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result - MEASURED on a real 6.6 GB model: a bare probe costs ~205-260ms
+    (Python-level KV-block parsing, not raw disk I/O - repeated warm-cache
+    calls did not collapse toward zero), so a caller that already has one
+    (F8-PERSIST-ARCH-AND-EXPERT-COUNT's ``_detect_local_model_type``, which
+    also needs the architecture string) passes it in rather than paying for a
+    second read of the same bytes. Defaults to None (reads *path* itself, the
+    original behavior) so every existing caller is unaffected."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
     if meta.get("architecture") in _GGUF_EMBEDDING_ARCHITECTURES:
         return True
     return bool(meta.get("has_pooling_type"))
@@ -752,7 +762,7 @@ def gguf_embedding_signal(path: Path) -> bool:
 _GGUF_MMPROJ_ARCHITECTURE = "clip"
 
 
-def gguf_is_mmproj(path: Path) -> bool:
+def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     """True when *path*'s own GGUF metadata marks it as a vision projector
     (mmproj) rather than a standalone text LLM: its ``general.architecture`` is
     ``"clip"``. Hard metadata baked into the file itself by every llama.cpp
@@ -761,7 +771,43 @@ def gguf_is_mmproj(path: Path) -> bool:
     and is a filename heuristic by necessity). Used by
     ``_detect_local_model_type`` (local add + folder auto-sync) and by
     ``pull.py`` (a freshly-downloaded remote GGUF), the same two call sites as
-    ``gguf_embedding_signal``."""
-    meta = _gguf_metadata_probe(path)
+    ``gguf_embedding_signal``.
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result - see ``gguf_embedding_signal``'s docstring for why and the
+    measured cost. Defaults to None (reads *path* itself)."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
+
+
+def gguf_registry_metadata(path: Path, meta: Optional[dict] = None) -> dict:
+    """Architecture family and MoE expert count for a GGUF file, to persist on
+    its registry entry at registration time (F8-PERSIST-ARCH-AND-EXPERT-COUNT)
+    - the same real header the HuggingFace SEARCH page already reads to badge
+    a remote repo's architecture/MoE-ness, now captured for a LOCAL file too
+    instead of only ever being available as a name-guess.
+
+    Returns ``{"architecture": Optional[str], "expert_count": Optional[int]}``.
+    Both are None together when the header could not be read/parsed at all
+    (unreadable file, bad magic, a v1 GGUF, or a truncated read that never
+    reached ``general.architecture``) - genuinely UNKNOWN, never coerced to a
+    false "0 experts" that would misreport a real MoE model as confirmed
+    dense the moment a caller trusted it. ``expert_count`` is 0 (not None)
+    only once ``architecture`` was actually resolved, since that is the one
+    condition under which "no expert_count key" is a real, confirmed answer
+    rather than a guess about a read that did not get far enough to know.
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result (see ``gguf_embedding_signal``'s docstring) - avoids a THIRD read of
+    the same header when the caller already ran mmproj/embedding detection.
+    ``gguf_expert_count`` still does its own separate, equally-bounded read
+    regardless (a different key scan, not captured by the shared probe) -
+    MEASURED on a real 6.6 GB model: ~205ms for that one remaining read plus
+    parse, called once per registration, never per request."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    architecture = meta.get("architecture")
+    expert_count = gguf_expert_count(path) if architecture is not None else None
+    return {"architecture": architecture, "expert_count": expert_count}
 

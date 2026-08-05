@@ -181,6 +181,20 @@ export async function refreshModelsPage() {
     const nameTd = el("td", "name-cell");
     nameTd.appendChild(iconEl("models", "ic ic-model"));
     nameTd.appendChild(el("span", "name", m.name));
+    // F8-PERSIST-ARCH-AND-EXPERT-COUNT: the same real, from-the-file-header
+    // architecture/MoE badges the HuggingFace search page shows (discRepoRow
+    // below), now available for an already-registered model too - hard
+    // metadata read once at registration/pull time, not a name guess.
+    // Falsy-checked (m.architecture, m.expert_count > 0), never a fallback
+    // default: a model registered before this existed, or whose header could
+    // not be read, has these as null/undefined and correctly shows NEITHER
+    // badge - never a false "not MoE" claim about a model nobody has checked.
+    if (m.architecture) {
+      nameTd.appendChild(el("span", "arch-badge", m.architecture));
+    }
+    if (m.expert_count > 0) {
+      nameTd.appendChild(el("span", "moe-badge moe-confirmed", MOE_LABEL.confirmed));
+    }
     if (m.active) nameTd.appendChild(el("span", "active-tag", "active"));
     // Independent of "active": a model can sit resident in VRAM without being
     // the one currently serving requests - surfaced so a background-loaded
