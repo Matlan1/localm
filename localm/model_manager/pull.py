@@ -48,6 +48,36 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
     sys.stdout.flush()
 
 
+def _report_success(rich_msg: str, plain_msg: str) -> None:
+    """Announce a completed pull without letting a DISPLAY failure read as an
+    OPERATION failure. Every call site reaches this only after the download,
+    checksum verification and registry write are already fully done - that is
+    the precondition that makes swallowing a failure here safe: there is no
+    remaining work this call could be masking. Moving a call to this function
+    earlier, before that work completes, would silently break that guarantee.
+
+    ``except Exception`` (not a narrower type) is deliberate and MEASURED, not
+    a guess: this exact line has independently crashed two different ways on
+    the checkmark glyph - a ``ModuleNotFoundError`` from rich's cell-width
+    lookup (``rich._unicode_data``) and a ``UnicodeEncodeError`` from a legacy
+    Windows console write path (see
+    dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md) - so an
+    enumerated except clause would have missed one of them. The GUI runs pull
+    as a subprocess and treats a non-zero exit as "the pull failed"
+    (localm/plugins/gui/jobs.py), so an uncaught exception here reports a
+    provably successful multi-GB download as failed.
+    """
+    try:
+        console.print(rich_msg)
+    except Exception as e:
+        logger.warning("could not render the pull success message (%s); "
+                        "falling back to a plain-ASCII version", e)
+        try:
+            console.print(plain_msg)
+        except Exception as e2:
+            logger.warning("plain-text fallback also failed to print: %s", e2)
+
+
 
 
 def _progress_file_info(target_parts: List[Path]) -> "tuple[str | None, int, int]":
@@ -1066,9 +1096,11 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"))
-        console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
+        _report_success(f"[green]✓[/green] [bold]{model_name}[/bold] is ready",
+                        f"[green]OK[/green] [bold]{model_name}[/bold] is ready")
     else:
-        console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
+        _report_success(f"[green]✓[/green] [bold]{filename}[/bold] downloaded",
+                        f"[green]OK[/green] [bold]{filename}[/bold] downloaded")
     return True
 
 
@@ -1402,7 +1434,8 @@ def _pull_hf_snapshot(
             "'localm alias' it in."
         )
         return False
-    console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")
+    _report_success(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}",
+                    f"[green]OK[/green] [bold]{model_name}[/bold] downloaded to {dest}")
     return True
 
 
@@ -1692,7 +1725,8 @@ def _pull_url(
                     return True
 
     _mm._register(name, dest, url, sha256=actual, model_type=model_type)
-    console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
+    _report_success(f"[green]✓[/green] [bold]{name}[/bold] is ready",
+                    f"[green]OK[/green] [bold]{name}[/bold] is ready")
     return True
 
 
