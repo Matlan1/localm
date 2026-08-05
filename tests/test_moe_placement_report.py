@@ -31,11 +31,41 @@ diagnostic was silently broken. This file covers:
 
 import os
 import re
+import struct
 from unittest.mock import patch
 
 import pytest
 
 from localm.inference.backends.llamacpp import llama as llama_mod
+
+_T_UINT32 = 4
+_T_STRING = 8
+
+
+def _s(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    return struct.pack("<Q", len(raw)) + raw
+
+
+def _dense_gguf(path):
+    """A REAL minimal GGUF header for an architecture with NO expert_count
+    key - the "no_experts" skip path _apply_cpu_moe reports via
+    MOE_SKIP_MESSAGES. Same construction as test_moe_cpu_placement.py's own
+    _gguf() helper, trimmed to just this one shape."""
+    kv = [
+        ("general.architecture", _T_STRING, "llama"),
+        ("llama.block_count", _T_UINT32, 32),
+    ]
+    out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", 0, len(kv))]
+    for key, vtype, val in kv:
+        out.append(_s(key))
+        out.append(struct.pack("<I", vtype))
+        if vtype == _T_STRING:
+            out.append(_s(val))
+        else:
+            out.append(struct.pack("<I", val))
+    path.write_bytes(b"".join(out))
+    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -227,6 +257,178 @@ class TestLoadFailureDetailSurvivesUnlink:
         assert "run with LOCALM_DEBUG=1" not in message, (
             "a real captured reason exists but the generic fallback hint "
             "was shown anyway")
+
+
+# --------------------------------------------------------------------------- #
+#  ONE contiguous native-call scope - the "0:00:00" spinner bug's regression   #
+#  lock. llama_backend_init() used to get its own SEPARATE _quiet_stderr()     #
+#  scope that exited before _apply_cpu_moe ran, leaving a gap where neither    #
+#  fd 2 nor the debug-mode console mirror was managed - exactly where a        #
+#  debug-mode _dbg.info() call from _apply_cpu_moe reached the shared          #
+#  terminal raw, desyncing the parent's Rich Progress cursor tracking and      #
+#  stranding a stuck "0:00:00" spinner frame on screen.                        #
+# --------------------------------------------------------------------------- #
+
+class TestMergedNativeCallScope:
+    def _drive(self, monkeypatch, events, *, n_cpu_moe=0, verbose=False):
+        import contextlib
+
+        # Layout-agnostic here too (see TestLoadFailureDetailSurvivesUnlink's
+        # own comment above) - only tensor_buft_overrides is touched.
+        from localm.inference.backends.llamacpp._structs import (
+            LlamaModelParamsV1 as LlamaModelParams)
+
+        @contextlib.contextmanager
+        def spy_capture():
+            events.append("capture_enter")
+            yield None
+            events.append("capture_exit")
+
+        @contextlib.contextmanager
+        def spy_mirror():
+            events.append("mirror_enter")
+            yield
+            events.append("mirror_exit")
+
+        def _fake_backend_init():
+            events.append("backend_init")
+
+        def _fake_default_params():
+            return LlamaModelParams()
+
+        def _fake_apply_cpu_moe(mp, n, model_path):
+            events.append("apply_cpu_moe")
+            return None, None
+
+        def _fake_load_model_from_file(path, params):
+            events.append("load_model")
+            return None   # NULL - a clean load "failure", same safe shape as
+                           # TestLoadFailureDetailSurvivesUnlink above: stops
+                           # __init__ right after this scope, before any
+                           # native call needs a REAL model pointer.
+
+        monkeypatch.setattr(llama_mod, "_capture_stderr", spy_capture)
+        monkeypatch.setattr("localm.debuglog.suppress_console_mirror", spy_mirror)
+        monkeypatch.setattr(llama_mod, "_apply_cpu_moe", _fake_apply_cpu_moe)
+        monkeypatch.setattr(llama_mod.api, "llama_backend_init", _fake_backend_init)
+        monkeypatch.setattr(llama_mod.api, "llama_model_default_params",
+                            _fake_default_params)
+        monkeypatch.setattr(llama_mod.api, "llama_load_model_from_file",
+                            _fake_load_model_from_file)
+        with patch("localm.discover.apply_main_gpu", lambda mp: None), \
+             patch("localm.discover.apply_gpu_split", lambda mp, ratios_override=None: None):
+            with pytest.raises(RuntimeError):
+                llama_mod.LlamaCpp("bad.gguf", n_ctx=64, n_gpu_layers=99,
+                                   verbose=verbose, n_cpu_moe=n_cpu_moe)
+
+    def test_backend_init_and_load_share_one_scope_not_two(self, monkeypatch):
+        """The regression this whole file guards: before the fix,
+        llama_backend_init() ran inside its OWN _quiet_stderr() that had
+        already exited by the time _capture_stderr's scope began - two
+        separate enter/exit pairs with a gap between them, not one."""
+        events = []
+        self._drive(monkeypatch, events, n_cpu_moe=0)
+        assert events == [
+            "mirror_enter", "capture_enter",
+            "backend_init", "load_model",
+            "capture_exit", "mirror_exit",
+        ], events
+
+    def test_apply_cpu_moe_runs_inside_the_same_scope(self, monkeypatch):
+        """The concrete bug: _apply_cpu_moe (and the _dbg.info call inside it
+        - see TestMoeSkipReasonPrint above for what it can log) must run
+        strictly BETWEEN the one mirror/capture enter and the one exit, never
+        outside it."""
+        events = []
+        self._drive(monkeypatch, events, n_cpu_moe=2)
+        assert events == [
+            "mirror_enter", "capture_enter",
+            "backend_init", "apply_cpu_moe", "load_model",
+            "capture_exit", "mirror_exit",
+        ], events
+
+    def test_apply_cpu_moe_skipped_entirely_when_n_cpu_moe_is_zero(self, monkeypatch):
+        """The default (off) load must not pay for or touch MoE placement at
+        all - matches _apply_cpu_moe's own opt-in contract, unchanged by
+        this scope merge."""
+        events = []
+        self._drive(monkeypatch, events, n_cpu_moe=0)
+        assert "apply_cpu_moe" not in events
+
+    def test_verbose_mode_skips_both_wraps(self, monkeypatch):
+        """verbose=True means "let native output through unfiltered" - ALL
+        of it, including via the console mirror - so neither wrap engages,
+        exactly like the pre-merge code's own contextlib.nullcontext branch
+        for both _quiet_stderr and _capture_stderr individually."""
+        events = []
+        self._drive(monkeypatch, events, n_cpu_moe=2, verbose=True)
+        assert "mirror_enter" not in events
+        assert "capture_enter" not in events
+        # the underlying native/log calls still happen - only the two
+        # wraps are skipped, not the load itself.
+        assert "backend_init" in events
+        assert "apply_cpu_moe" in events
+        assert "load_model" in events
+
+
+class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
+    """The end-to-end proof, not just "the wrap was entered": with a REAL
+    console-mirror handler attached to the shared logger (the exact
+    debug-mode state _add_console_handler produces) and n_cpu_moe set high
+    enough that _apply_cpu_moe's own _dbg.info call fires for real, the
+    mirror stream must receive NOTHING while LlamaCpp.__init__'s merged scope
+    is open - this is the actual observable fix for the stuck "0:00:00"
+    spinner line, not just a spy-order assertion."""
+
+    def test_mirror_stream_receives_nothing_from_apply_cpu_moe(self, monkeypatch, tmp_path):
+        import io
+        import logging
+
+        from localm import debuglog
+        from localm.inference.backends.llamacpp._structs import (
+            LlamaModelParamsV1 as LlamaModelParams)
+
+        mirror_stream = io.StringIO()
+        mirror = logging.StreamHandler(mirror_stream)
+        mirror.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
+        saved_level = debuglog.logger.level
+        debuglog.logger.addHandler(mirror)
+        debuglog.logger.setLevel(logging.DEBUG)
+        try:
+            def _fake_backend_init():
+                pass
+
+            def _fake_default_params():
+                return LlamaModelParams()
+
+            def _fake_load_model_from_file(path, params):
+                return None
+
+            # A real, parseable dense-model GGUF header (no expert_count key)
+            # so _apply_cpu_moe's own real code (not mocked here - this test
+            # wants the REAL _dbg.info call to fire) reaches its "no experts"
+            # skip path and actually logs.
+            model_path = _dense_gguf(tmp_path / "tiny.gguf")
+
+            monkeypatch.setattr(llama_mod.api, "llama_backend_init", _fake_backend_init)
+            monkeypatch.setattr(llama_mod.api, "llama_model_default_params",
+                                _fake_default_params)
+            monkeypatch.setattr(llama_mod.api, "llama_load_model_from_file",
+                                _fake_load_model_from_file)
+            with patch("localm.discover.apply_main_gpu", lambda mp: None), \
+                 patch("localm.discover.apply_gpu_split", lambda mp, ratios_override=None: None):
+                with pytest.raises(RuntimeError):
+                    llama_mod.LlamaCpp(str(model_path), n_ctx=64, n_gpu_layers=99,
+                                       verbose=False, n_cpu_moe=2)
+
+            assert mirror_stream.getvalue() == "", (
+                "a debug-mode log record reached the shared terminal mirror "
+                "during the model-load span - this is the exact mechanism "
+                f"that stranded a stuck 0:00:00 spinner line: "
+                f"{mirror_stream.getvalue()!r}")
+        finally:
+            debuglog.logger.removeHandler(mirror)
+            debuglog.logger.setLevel(saved_level)
 
 
 # --------------------------------------------------------------------------- #

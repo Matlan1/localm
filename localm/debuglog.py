@@ -299,6 +299,54 @@ def _add_console_handler() -> None:
     logger.addHandler(handler)
 
 
+@contextlib.contextmanager
+def suppress_console_mirror():
+    """Temporarily detach the debug-mode console-mirroring handler (see
+    ``_add_console_handler`` above) so a log record emitted during this block
+    reaches only the FILE handler (when debug mode is on), never the shared
+    terminal - nothing is silently lost, only the LIVE view is paused, same
+    "never drop a record" contract as ``dedup_native_stderr``.
+
+    WHY THIS NEEDS TO EXIST SEPARATELY FROM THE fd-2 REDIRECTS
+    (``_quiet_stderr``/``_capture_stderr``/``dedup_native_stderr`` in
+    ``inference/backends/llamacpp/llama.py``): the console mirror's stream is
+    ``_stable_console_stream()``, and THAT function's own docstring states
+    its entire purpose is staying "immune to the OS-level fd-2 redirection...
+    Without this isolation it writes through fd 2 *while that fd is being
+    juggled*" - i.e. the mirror is DESIGNED to survive those redirects, on
+    purpose (SRV-5: debug activity stays visible during a load). That is a
+    real, wanted property in general. It also means a caller cannot silence
+    the mirror by widening an fd-2 redirect scope - the mirror does not go
+    through fd 2 at all, so no fd-2 trick reaches it.
+
+    Concrete case this closes: an isolated child process (the GGUF chat
+    backend's model-load worker) calling ``logger.info(...)`` in debug mode
+    writes straight to the shared terminal from a DIFFERENT process than the
+    one rendering a parent-owned Rich ``Progress``/``Live`` display - the
+    parent has zero visibility into that write, so its cursor-position
+    bookkeeping desyncs and a stale frame is stranded on screen (see
+    ``llamacpp/llama.py``'s ``LlamaCpp.__init__``, which pairs this with its
+    merged native-call redirect scope for exactly this reason - closing the
+    fd-2 gap alone does NOT stop the mirror, by design, per the paragraph
+    above).
+
+    A no-op when no console mirror is currently attached (debug mode off, or
+    never enabled) - nothing to suppress, nothing to restore."""
+    mirror = None
+    for h in logger.handlers:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            mirror = h
+            break
+    if mirror is None:
+        yield
+        return
+    logger.removeHandler(mirror)
+    try:
+        yield
+    finally:
+        logger.addHandler(mirror)
+
+
 def log_file_path() -> Optional[Path]:
     """The active debug log file, or None when debug mode is off."""
     value = os.environ.get(_ENV_VAR, "")

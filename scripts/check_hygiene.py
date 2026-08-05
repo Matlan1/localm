@@ -1316,6 +1316,32 @@ def _import_cycle_violations() -> list[str]:
 # _hf_worker.py's own comments). A child reports FACTS as return data; only
 # the PARENT renders them.
 #
+# KNOWN LIMIT, WRITTEN DOWN RATHER THAN LEFT IMPLICIT: this catches
+# console.print(...) call sites - a purely STATIC property of the code. It
+# does NOT catch a debug-mode log record (logger.info/.warning/.debug, or
+# _dbg.info/.warning as this codebase spells it) reaching the terminal
+# through debuglog.py's console-mirror handler, because whether that record
+# is live-mirrored depends on RUNTIME state (was attach_child_logging()'s
+# _add_console_handler() called in THIS process, i.e. was debug mode
+# inherited) - not on anything visible at the call site an AST pass can see.
+# That is not "not yet implemented", it is genuinely not the same kind of
+# question check 8 answers, and a blanket "flag every logger.* call in a
+# child module" would be the wrong shape too: it would fire on the large
+# majority of debug-log calls that only ever reach the FILE handler and stay
+# off the terminal, training everyone to ignore the check. This exact gap
+# shipped a real bug: LlamaCpp.__init__'s model-load span had a console.print
+# call fixed by check 8's own predecessor work, while a SIBLING _dbg.info
+# call in the identical function (_apply_cpu_moe), reaching the terminal via
+# the mirror instead, went uncaught by this check and produced a stuck
+# "0:00:00" spinner line during a real load (fixed by pairing
+# debuglog.suppress_console_mirror() with the redirect scope at that
+# specific call site - see llama.py's own comment there). If you are adding
+# a NEW debug-mode-visible write from inside a child process, ask the same
+# question by hand this check cannot ask for you: can this run while a
+# parent-owned Rich Live/Progress display might be active, and if so, is it
+# wrapped in suppress_console_mirror() (or routed through return data
+# instead, like _apply_cpu_moe's actual skip/placement facts are)?
+#
 # This existed only as a comment asserting the invariant in _hf_worker.py
 # ("GgufWorker has zero console.print calls, for the identical reason") -
 # true when written, and it drifted silently false once, when a MoE-placement
@@ -1452,7 +1478,12 @@ def _child_process_console_print_violations() -> list[str]:
                 "let the PARENT render them, never print directly. If this "
                 "call is genuinely parent-side (e.g. it always runs before "
                 "the child spawns), add it to "
-                "_CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST with a verified reason.")
+                "_CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST with a verified reason. "
+                "(Note: this check only catches console.print - a debug-mode "
+                "logger.*/_dbg.* call that reaches the terminal via "
+                "debuglog.py's console mirror is a real, separate way to hit "
+                "the same bug and this check cannot see it; see check 8's "
+                "block comment 'KNOWN LIMIT' paragraph.)")
     return problems
 
 
