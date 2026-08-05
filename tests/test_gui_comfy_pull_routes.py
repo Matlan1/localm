@@ -221,9 +221,13 @@ class TestComfyRoutesAreScoped:
 
         The route downloads into comfy_models_dest_dir(), which resolves through
         `comfy_workdir` whenever the managed ComfyUI instance is not active - the
-        default on a fresh install. `comfy_workdir` carries no admin_only flag, so
-        a config:write key chooses that folder; the route then mkdir -p's it and
-        streams a multi-gigabyte download into it from the server process. Picking
+        default on a fresh install. `comfy_workdir` is admin_only now, so a plain
+        config:write key cannot CHOOSE that folder - but an admin may have
+        already configured it, and this route's own caller only needs
+        MODELS_WRITE. Without its own gate, any MODELS_WRITE key could still
+        stream a multi-gigabyte download into whatever host directory an admin
+        previously set, with no host-fs privilege of its own; the route then
+        mkdir -p's it and streams the download from the server process. Picking
         the directory the server writes gigabytes into is host filesystem reach,
         and a UNC value there draws outbound SMB authentication from the server -
         the same capability /api/fs/dirs is gated on, and the same reason the
