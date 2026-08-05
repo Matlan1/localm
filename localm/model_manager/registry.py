@@ -21,6 +21,7 @@ from ..config import REGISTRY_FILE
 from ..config import load_config
 from ..config import update_config
 from ..debuglog import logger
+from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
 from .gguf import _gguf_first_parts
@@ -1686,9 +1687,13 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
             continue
         console.print(f"[dim]{verb} {src.name} to {dest}…[/dim]")
         if action == "copy":
-            pre_digest = _mm._sha256_file(src)
+            # Two full hashes of a multi-GB model, either side of the copy. This
+            # was the longest silence in the whole store path: the "Copying ..."
+            # line above is printed once and then nothing moves for minutes,
+            # twice, with the copy itself in between.
+            pre_digest = _verify_digest(src, purpose="to check the source before copying")
             shutil.copy2(src, dest)
-            post_digest = _mm._sha256_file(dest)
+            post_digest = _verify_digest(dest, purpose="to confirm the copy")
             if post_digest != pre_digest:
                 # Don't leave a known-bad copy sitting in MODELS_DIR - it would
                 # otherwise be a ticking time bomb for a future sync_models_dir

@@ -34,7 +34,7 @@ from ..config import (
     save_registry,
     update_registry,
 )
-from ._shared import PROGRESS_SENTINEL, console
+from ._shared import PROGRESS_SENTINEL, _emit_progress, _verify_digest, console
 from .gguf import (
     _GGUF_MIN_BYTES,
     _HASH_BLOCK_BYTES,
@@ -107,7 +107,6 @@ from .registry import (
 from .pull import (
     _check_disk_space,
     _download_progress,
-    _emit_progress,
     _fetch_explicit_mmproj,
     _hf_file_sha256,
     _hf_repo_files,
@@ -122,7 +121,6 @@ from .pull import (
     _pull_url,
     _snapshot_progress,
     _stem_from_url,
-    _verify_digest,
     pull_model,
 )
 
