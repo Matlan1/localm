@@ -212,11 +212,14 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
     configured, matching the server's own condition for requiring one at all;
     a protected-mode server always keeps using the real key.
 
-    Hoisted out of five independent copies of this exact two-line precedence
-    (``selfclient.read_activity``/``self_request``, ``cli/models.py``'s
-    ``unload_cmd``/``stop_cmd``, ``media/comfy_client.py``'s
-    ``_localm_unload``) so there is exactly one place it is written. Returns
-    a plain ``dict`` (empty when neither credential is available) rather than
+    Hoisted out of five independent copies of this precedence: four already
+    implemented it in full (``selfclient.read_activity``/``self_request``,
+    ``cli/models.py``'s ``unload_cmd``/``stop_cmd``); the fifth
+    (``media/comfy_client.py``'s ``_localm_unload``) implemented only the
+    first line (env var, via ``os.environ`` directly rather than
+    ``get_api_key()``) and had no instance_token fallback at all - fixed
+    alongside this extraction rather than ported as-is. Returns a plain
+    ``dict`` (empty when neither credential is available) rather than
     mutating a caller-supplied one, so every call site stays a simple
     ``headers = resolve_bearer_headers(...)``.
     """

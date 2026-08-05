@@ -8,9 +8,13 @@ These tests prove the seam actually SWITCHES implementations - it was previously
 config value that was read and then ignored (every call hard-wired to ComfyUI)."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from localm import music_gen as _music_gen_pkg
+from localm import video_gen as _video_gen_pkg
+from localm.image_gen import comfy as _image_comfy
 from localm.plugins import media_config
 from localm.plugins.builtin.image import backend as image_backend
 from localm.plugins.builtin.music import backend as music_backend
@@ -85,3 +89,37 @@ def test_unknown_backend_falls_back_to_comfy(monkeypatch):
 
     monkeypatch.setattr(media_config, "load_backend", boom)
     assert image_backend._impl({"backend": "ghost"}) is image_backend._COMFY_REF
+
+
+_S = {"api_url": "http://127.0.0.1:8188", "launch_cmd": "", "workdir": "",
+      "output_dir": "", "swap_policy": "never", "fast_dequant": True,
+      "delete_outputs": False, "float_type": None}
+
+
+@pytest.mark.parametrize("backend_mod, gen_args, underlying_mod, underlying_fn", [
+    (image_backend, ("a cat", Path("o.png")), _image_comfy, "generate_image"),
+    (music_backend, ("lofi", Path("o.flac")), _music_gen_pkg, "generate_music"),
+    (video_backend, ("a cat walks", Path("o.mp4")), _video_gen_pkg, "generate_video"),
+])
+def test_instance_token_survives_the_backend_seam(
+        backend_mod, gen_args, underlying_mod, underlying_fn, monkeypatch):
+    """The plug.py route's instance_token must reach the per-plugin comfy.py
+    generate_* call THROUGH the backend seam (plug.py -> backend.generate ->
+    backend.py's _comfy_generate -> comfy.py), not just when comfy.py is
+    called directly.
+
+    Distinct from tests/test_comfy_containment.py, tests/test_music_gen.py
+    and tests/test_video_gen.py's instance_token tests, which call
+    comfy.generate_image/music/video directly and would stay green even if
+    backend.py's adapter silently dropped instance_token on the floor between
+    the seam and comfy.py - the exact one-layer-removed blind spot
+    diff-review-discipline.md item 23 describes. This test goes through the
+    actual public seam (backend_mod.generate) plug.py calls."""
+    spy = MagicMock(return_value=(True, "ok"))
+    monkeypatch.setattr(underlying_mod, underlying_fn, spy)
+
+    backend_mod.generate(dict(_S), *gen_args, self_url="http://127.0.0.1:8642/v1",
+                         write_sidecar=False, instance_token="tok-xyz")
+
+    spy.assert_called_once()
+    assert spy.call_args.kwargs.get("instance_token") == "tok-xyz"
