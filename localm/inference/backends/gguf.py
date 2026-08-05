@@ -656,6 +656,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         "templated count (this notice prints once per "
                         "process; see --debug for every occurrence)",
                         type(e).__name__, e)
+                    # The comment above already says the intent is to surface
+                    # this "above --debug" - but debuglog.logger's file handler
+                    # only exists under --debug, so a real user never saw it
+                    # (same bug class as the ChatML fallback fix above).
+                    console.print(
+                        "[yellow]token counts are falling back to an estimate "
+                        "that ignores the chat template (a worker request "
+                        "failed); context budgeting may be less accurate than "
+                        "usual for the rest of this session[/yellow]"
+                    )
         return super().count_messages_tokens(messages)
 
     # ------------------------------------------------------------------ #
