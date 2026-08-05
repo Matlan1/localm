@@ -273,7 +273,10 @@ class TestMergedNativeCallScope:
     def _drive(self, monkeypatch, events, *, n_cpu_moe=0, verbose=False):
         import contextlib
 
-        from localm.inference.backends.llamacpp._structs import LlamaModelParams
+        # Layout-agnostic here too (see TestLoadFailureDetailSurvivesUnlink's
+        # own comment above) - only tensor_buft_overrides is touched.
+        from localm.inference.backends.llamacpp._structs import (
+            LlamaModelParamsV1 as LlamaModelParams)
 
         @contextlib.contextmanager
         def spy_capture():
@@ -382,7 +385,8 @@ class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
         import logging
 
         from localm import debuglog
-        from localm.inference.backends.llamacpp._structs import LlamaModelParams
+        from localm.inference.backends.llamacpp._structs import (
+            LlamaModelParamsV1 as LlamaModelParams)
 
         mirror_stream = io.StringIO()
         mirror = logging.StreamHandler(mirror_stream)
