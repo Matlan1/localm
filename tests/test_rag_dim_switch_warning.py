@@ -1,0 +1,284 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""NEW-RAG-DIM-NO-REEMBED item 3: switching the embedding model
+(``POST /api/rag/embedding``) used to end with a generic "click reindex on a
+collection below" - it never enumerated collections, never compared any
+stored dimension, and never named what it was about to invalidate. A
+collection built under the OLD model still shows "hybrid" in
+``/api/rag/collections`` right after the switch (``has_vectors`` is a purely
+offline fact, never compared against the live model) - only an actual query
+discovers the mismatch and silently drops to BM25.
+
+Covers, bottom-up: ``Collection.vector_dim()`` (the new accessor), then
+``_collection_dim_report()`` (the enumeration/comparison), then the real
+``POST /api/rag/embedding`` job end to end with only the embedder mocked, so
+the wiring between them - not just each piece in isolation - is exercised.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from localm.rag.store import Collection
+
+
+# --------------------------------------------------------------------------- #
+#  Fixture helpers                                                            #
+# --------------------------------------------------------------------------- #
+
+def _embedder(dim):
+    def embed(texts):
+        return [[0.1] * dim for _ in texts]
+    return embed
+
+
+def _collection(base: Path, name: str, texts: list[str], dim: int | None = None
+                 ) -> Collection:
+    """A saved collection with *texts* as chunks and, when *dim* is given,
+    real vectors at that dimension - mirrors test_rag_reembed.py's helper of
+    the same shape, parametrised on *base* so it can point at a fixture's
+    rag_dir() instead of always tmp_path directly."""
+    c = Collection(name, base=base).create()
+    c._chunks = [{"source": f"doc{i}.txt", "pos": i, "text": t}
+                 for i, t in enumerate(texts)]
+    if dim is not None:
+        c._vectors = _embedder(dim)(texts)
+    c._save()
+    return c
+
+
+@pytest.fixture
+def rag_home(tmp_path, monkeypatch) -> Path:
+    """Points rag_dir() (via home_dir()) at tmp_path, mirroring the pattern in
+    test_disclosure.py's rag_app / test_rag_api_mode.py's api_mode_app - so
+    collection_names()/Collection(name) (both default base=rag_dir()) resolve
+    under this test's own tmp_path with no explicit base= needed."""
+    home = tmp_path / "userhome"
+    home.mkdir()
+    data = home / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(data))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", data)
+    monkeypatch.setattr(cfg, "MODELS_DIR", data / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", data / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", data / "registry.json")
+    from localm.rag.store import rag_dir
+    return rag_dir()
+
+
+# --------------------------------------------------------------------------- #
+#  Collection.vector_dim()                                                    #
+# --------------------------------------------------------------------------- #
+
+class TestVectorDim:
+    def test_known_dim_from_a_freshly_saved_collection(self, tmp_path):
+        c = _collection(tmp_path, "kb", ["alpha", "beta"], dim=384)
+        assert c.vector_dim() == 384
+        assert Collection("kb", base=tmp_path).vector_dim() == 384
+
+    def test_none_when_never_embedded(self, tmp_path):
+        c = _collection(tmp_path, "kb", ["alpha", "beta"], dim=None)
+        assert c.vector_dim() is None
+        assert Collection("kb", base=tmp_path).stats()["has_vectors"] is False
+
+    def test_falls_back_to_the_first_vector_for_a_legacy_file_with_no_dim_key(
+            self, tmp_path):
+        """A vectors.json written before the top-level "dim" field existed -
+        _load()'s own fallback (data.get("dim") or _first_dim(vectors)) must
+        still resolve a real number, matching what the C3 add-time guard
+        already trusts as this collection's dimension."""
+        _collection(tmp_path, "kb", ["alpha", "beta"], dim=None)
+        (tmp_path / "kb" / "vectors.json").write_text(
+            json.dumps({"vectors": [[0.1] * 12, [0.2] * 12]}), encoding="utf-8")
+        reloaded = Collection("kb", base=tmp_path)
+        assert reloaded.vector_dim() == 12
+
+    def test_none_when_the_vectors_file_is_corrupt(self, tmp_path):
+        _collection(tmp_path, "kb", ["alpha", "beta"], dim=8)
+        (tmp_path / "kb" / "vectors.json").write_text("{not json", encoding="utf-8")
+        reloaded = Collection("kb", base=tmp_path)
+        assert reloaded.vector_dim() is None
+        assert reloaded.stats()["has_vectors"] is False
+        assert reloaded.stats()["vector_degrade_reason"]
+
+
+# --------------------------------------------------------------------------- #
+#  _collection_dim_report()                                                   #
+# --------------------------------------------------------------------------- #
+
+def _report(target_dim):
+    from localm.plugins.builtin.rag.plug import _collection_dim_report
+    return _collection_dim_report(target_dim)
+
+
+class TestCollectionDimReport:
+    def test_a_collection_at_a_different_dim_is_flagged_to_degrade(self, rag_home):
+        _collection(rag_home, "docs", ["a", "b", "c"], dim=768)
+        report = _report(384)
+        assert report["degrades"] == [{"name": "docs", "dim": 768, "n_chunks": 3}]
+        assert report["unknown"] == []
+        assert report["unaffected"] == 0
+
+    def test_a_collection_already_at_the_target_dim_is_only_counted(self, rag_home):
+        _collection(rag_home, "docs", ["a", "b"], dim=384)
+        report = _report(384)
+        assert report["degrades"] == []
+        assert report["unaffected"] == 1
+
+    def test_a_never_embedded_collection_is_not_mentioned_at_all(self, rag_home):
+        """It was already BM25-only before the switch and stays BM25-only
+        after it - nothing about THIS action changed anything for it (the
+        existing 're-embed needed' GUI badge already covers it, independent
+        of any model switch)."""
+        _collection(rag_home, "notes", ["a"], dim=None)
+        report = _report(384)
+        assert report == {"degrades": [], "unknown": [], "unaffected": 0}
+
+    def test_multiple_collections_are_sorted_into_the_right_buckets(self, rag_home):
+        _collection(rag_home, "old", ["a", "b"], dim=768)          # degrades
+        _collection(rag_home, "current", ["a"], dim=384)           # unaffected
+        _collection(rag_home, "empty", ["a"], dim=None)            # not mentioned
+        report = _report(384)
+        assert [c["name"] for c in report["degrades"]] == ["old"]
+        assert report["unaffected"] == 1
+
+    def test_a_corrupt_vectors_file_is_not_reported_as_will_degrade(self, rag_home):
+        """A collection whose vectors were already unusable BEFORE this
+        switch is a pre-existing state (has_vectors already False, surfaced
+        by the GUI's own 're-embed needed' badge) - it must not be
+        misreported as something THIS switch newly broke."""
+        _collection(rag_home, "broken", ["a", "b"], dim=8)
+        (rag_home / "broken" / "vectors.json").write_text("{not json", encoding="utf-8")
+        report = _report(384)
+        assert report["degrades"] == []
+        assert not any(c["name"] == "broken" for c in report["unknown"])
+
+    def test_dim_none_while_has_vectors_true_renders_unknown_not_fine(
+            self, rag_home, monkeypatch):
+        """Not reachable under the current has_vectors/vector_dim coupling
+        (has_vectors implies a resolvable vector_dim - see vector_dim()'s
+        docstring), but the report must still treat that combination as
+        UNKNOWN rather than silently skipping it as fine or reporting a
+        false dim mismatch, in case that coupling ever changes."""
+        _collection(rag_home, "docs", ["a", "b"], dim=768)
+        from localm.rag.store import Collection as StoreCollection
+        monkeypatch.setattr(StoreCollection, "vector_dim", lambda self: None)
+        report = _report(384)
+        assert report["degrades"] == []
+        assert [c["name"] for c in report["unknown"]] == ["docs"]
+
+    def test_an_unreadable_collection_directory_is_reported_unknown_not_dropped(
+            self, rag_home):
+        """A hand-placed or half-deleted directory that fails to even
+        construct as a Collection must not silently vanish from the report -
+        AGENTS rule 5: best-effort here means naming the failure, not folding
+        it into a false "nothing to see"."""
+        rogue = rag_home / "not a valid name!"
+        rogue.mkdir(parents=True)
+        (rogue / "meta.json").write_text("{}", encoding="utf-8")
+        report = _report(384)
+        assert len(report["unknown"]) == 1
+        assert "not a valid name!" in report["unknown"][0]["name"]
+        assert report["unknown"][0]["reason"]
+
+    def test_no_collections_at_all_reports_cleanly(self, rag_home):
+        assert _report(384) == {"degrades": [], "unknown": [], "unaffected": 0}
+
+
+# --------------------------------------------------------------------------- #
+#  POST /api/rag/embedding end to end: the job's own output lines             #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def embedding_route_app(rag_home, monkeypatch):
+    from fastapi import FastAPI
+
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.gui.web import attach_gui
+
+    app = FastAPI()
+    PluginManager(app, external_root=rag_home.parent / "noplugins").install("rag")
+
+    async def switch_model(name):
+        pass
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "model-a")
+    return app
+
+
+def _run_job_and_get_lines(client, app, model: str) -> str:
+    r = client.post("/api/rag/embedding", json={"model": model})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    job = app.state.jobs.get(job_id)
+    import time
+    deadline = time.time() + 10
+    while job.status == "running" and time.time() < deadline:
+        time.sleep(0.02)
+    assert job.status == "done", f"job did not finish cleanly: {job.status}"
+    return "\n".join(e.get("text", "") for e in job._history if e.get("type") == "line")
+
+
+class TestEmbeddingSwitchRouteEndToEnd:
+    def test_switch_names_the_collection_that_will_degrade(
+            self, embedding_route_app, rag_home, monkeypatch):
+        _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        import localm.inference.embedder as emb
+
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: "/fake/new-model.gguf")
+        monkeypatch.setattr(emb, "get_embedder",
+                            lambda **kw: type("E", (), {"embed": staticmethod(
+                                lambda texts: [[0.1] * 384 for _ in texts])})())
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            text = _run_job_and_get_lines(c, embedding_route_app, "new-model")
+
+        assert "Ready: new-model (384-dim)" in text
+        assert "docs" in text
+        assert "768-dim" in text
+        assert "2 chunks" in text
+        assert "re-embed" in text
+        assert "1 existing collection(s) will fall back to BM25" in text
+
+    def test_switch_says_nothing_extra_when_nothing_is_affected(
+            self, embedding_route_app, rag_home, monkeypatch):
+        _collection(rag_home, "docs", ["alpha"], dim=384)
+        import localm.inference.embedder as emb
+
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: "/fake/new-model.gguf")
+        monkeypatch.setattr(emb, "get_embedder",
+                            lambda **kw: type("E", (), {"embed": staticmethod(
+                                lambda texts: [[0.1] * 384 for _ in texts])})())
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            text = _run_job_and_get_lines(c, embedding_route_app, "new-model")
+
+        assert "Ready: new-model (384-dim)" in text
+        assert "will fall back to BM25" not in text
+        assert "could not be checked" not in text
+
+    def test_switch_with_no_collections_at_all_is_unaffected_by_the_new_code(
+            self, embedding_route_app, monkeypatch):
+        import localm.inference.embedder as emb
+
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: "/fake/new-model.gguf")
+        monkeypatch.setattr(emb, "get_embedder",
+                            lambda **kw: type("E", (), {"embed": staticmethod(
+                                lambda texts: [[0.1] * 384 for _ in texts])})())
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            text = _run_job_and_get_lines(c, embedding_route_app, "new-model")
+
+        assert "Ready: new-model (384-dim)" in text
+        assert "will fall back to BM25" not in text

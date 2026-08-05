@@ -2246,6 +2246,22 @@ class Collection:
             "vector_degrade_reason": self.vector_degrade_reason,
         }
 
+    def vector_dim(self) -> Optional[int]:
+        """The dimensionality of THIS collection's currently stored vectors, or
+        None when it cannot be established: no usable vectors are stored at all
+        (see ``stats()["has_vectors"]``), or ``_load()`` found the file present
+        but unusable for a reason ``vector_degrade_reason`` names.
+
+        Reads the same ``_vec_dim`` the C3 add-time consistency guard already
+        trusts as this collection's dimension (``self._vec_dim is not None and
+        new_dim != self._vec_dim`` above) - not a second, independently-derived
+        notion of "the dim" that could silently disagree with it. ``_load()``
+        computes it as ``data.get("dim") or _first_dim(vectors)``, so a legacy
+        vectors.json written before the "dim" field existed still resolves it
+        from the first stored vector rather than reporting unknown for no
+        reason; only a genuinely unusable/empty index falls through to None."""
+        return self._vec_dim
+
     def docs(self) -> list[dict]:
         return self._docs_from_meta(self._meta)
 

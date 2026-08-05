@@ -259,6 +259,68 @@ def _get_collection(name: str):
     return coll
 
 
+def _collection_dim_report(target_dim: int) -> dict:
+    """Compare every existing collection's currently stored vector dimension
+    against *target_dim* (a newly selected embedding model's own dimension),
+    so switching models can name exactly what it is about to invalidate
+    instead of a generic "click reindex" pointer that says which collections
+    need it for no one (NEW-RAG-DIM-NO-REEMBED item 3).
+
+    ``/api/rag/collections`` reports ``has_vectors`` as a purely OFFLINE fact
+    (are >=80% of this collection's chunks embedded), never compared against
+    the model actually active right now - so a collection built under a
+    now-replaced model still shows "hybrid" with no badge; only an actual
+    query discovers the dimension mismatch and quietly drops to BM25 (see
+    Collection._vector_scores' own guard, which this mirrors by reading the
+    same ``vector_dim()``). That silent gap is what this closes.
+
+    Three buckets; a collection with no vectors at all lands in none of
+    them - there is nothing for a model switch to invalidate:
+      "degrades": has vectors at a KNOWN dimension that no longer matches
+                  target_dim - falls back to BM25/lexical the moment it is
+                  next queried, unless re-embedded first.
+      "unknown":  has vectors, but the stored dimension cannot be
+                  established (a legacy index, or one _load() already found
+                  unusable) - NEVER folded into "fine" or "degrades", since
+                  neither is actually known.
+    Collections whose dimension already matches are only counted
+    (``unaffected``), not named - there is nothing actionable to say about
+    them.
+
+    Best-effort per collection: one that fails to even construct (a stale
+    directory mid-delete, an OS error) is counted into "unknown" rather than
+    aborting the model switch this report is secondary to (AGENTS rule 5:
+    best-effort is fine here as long as the failure is named, not folded into
+    a false "fine")."""
+    from localm.rag import Collection, collection_names
+    degrades: list = []
+    unknown: list = []
+    unaffected = 0
+    for name in collection_names():
+        try:
+            coll = Collection(name)
+            stats = coll.stats()
+            if not stats["has_vectors"]:
+                continue
+            dim = coll.vector_dim()
+        except Exception as e:
+            unknown.append({"name": name,
+                             "reason": f"could not be read ({type(e).__name__}: {e})"})
+            continue
+        if dim is None:
+            # Not reachable under the current has_vectors/vector_dim coupling
+            # (see vector_dim()'s docstring) - kept so a future change to that
+            # coupling degrades to "unknown", never silently to "fine".
+            unknown.append({"name": name,
+                             "reason": stats.get("vector_degrade_reason")
+                                       or "dimension unknown"})
+        elif dim != target_dim:
+            degrades.append({"name": name, "dim": dim, "n_chunks": stats["n_chunks"]})
+        else:
+            unaffected += 1
+    return {"degrades": degrades, "unknown": unknown, "unaffected": unaffected}
+
+
 def _require_jobs(request: Request, *, needs: str = "Background indexing"):
     """The background job manager, or a clean 503 when the GUI server isn't
     running. api-mode (``localm serve`` without the GUI) never calls
@@ -895,10 +957,40 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "embedding model. Switch to the internal default "
                  "(bge-small-en-v1.5).")
             return False
-        line(f"Ready: {model} ({dim}-dim). Semantic search is on. Click "
-             "'reindex' on a collection below to add vectors to its existing "
-             "documents (adding the same docs again does not re-embed unchanged "
-             "files).")
+        line(f"Ready: {model} ({dim}-dim). Semantic search is on.")
+        # Name exactly what this switch just invalidated, rather than a generic
+        # pointer to a button (NEW-RAG-DIM-NO-REEMBED item 3) - reported, not
+        # confirmed up front: the config write and embedder reset above already
+        # took effect before this line runs (unconditionally, even on the
+        # failure returns above), so there is no earlier point in this job
+        # where "are you sure" would still be honest about what is about to
+        # happen. A pre-switch confirmation would need a separate dry-run
+        # endpoint that computes this same report BEFORE writing config - a
+        # bigger, two-step redesign that item 3 does not ask for.
+        _MAX_NAMED = 8
+        report = _collection_dim_report(dim)
+        degrades, unknown = report["degrades"], report["unknown"]
+        if degrades:
+            shown = degrades[:_MAX_NAMED]
+            detail = ", ".join(f"{c['name']} ({c['dim']}-dim, {c['n_chunks']} chunks)"
+                               for c in shown)
+            if len(degrades) > _MAX_NAMED:
+                detail += f", and {len(degrades) - _MAX_NAMED} more"
+            line(f"{len(degrades)} existing collection(s) will fall back to "
+                 f"BM25/lexical-only search until re-embedded, because their "
+                 f"stored vectors are not {dim}-dim: {detail}. Click 're-embed' "
+                 "on each to restore semantic search.")
+        if unknown:
+            shown = unknown[:_MAX_NAMED]
+            names = ", ".join(c["name"] for c in shown)
+            if len(unknown) > _MAX_NAMED:
+                names += f", and {len(unknown) - _MAX_NAMED} more"
+            line(f"{len(unknown)} collection(s) could not be checked against "
+                 f"the new model ({names}): their stored vector dimension "
+                 "could not be determined. This does not mean they are fine - "
+                 "click 're-embed' on each to find out.")
+        line("Adding the same documents again does not re-embed unchanged "
+             "files - use 're-embed' on a collection below for that.")
         return True
 
     from localm.inference.http_server import principal_id
