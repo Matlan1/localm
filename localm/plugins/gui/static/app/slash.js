@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, chat, currentConv, newConversation, renderChat, renderConvList, saveConversations } from "./chat.js";
 import { exportCoderSession, openFilesModal } from "./coder.js";
-import { $, authHeaders, autoGrow, el, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
 /* ================================================================ */
@@ -78,7 +78,7 @@ export async function runImagineInChat(promptText) {
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = "Image generation " + end.status +
+      body.textContent = "Image generation " + jobStatusWord(end.status) +
         " - see the Images page for details.";
     }
   } catch (e) {
@@ -149,7 +149,7 @@ export async function runMusicInChat(tags) {
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = "Music generation " + end.status +
+      body.textContent = "Music generation " + jobStatusWord(end.status) +
         " - see the Music page for details.";
     }
   } catch (e) {
@@ -191,7 +191,7 @@ export async function runVideoInChat(promptText) {
       saveConversations(conv);
       renderChat();
     } else {
-      body.textContent = "Video generation " + end.status +
+      body.textContent = "Video generation " + jobStatusWord(end.status) +
         " - see the Video page for details.";
     }
   } catch (e) {

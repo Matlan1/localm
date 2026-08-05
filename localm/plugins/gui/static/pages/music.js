@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, streamJob, toast } from "../app/helpers.js";
 import { hideStop, showStop } from "./images.js";
 import { refreshMusicHistory } from "./video.js";
 import { modelOverrides } from "./workflow.js";
@@ -60,7 +60,7 @@ $("music-generate").onclick = async () => {
       $("music-result").appendChild(player);
       refreshMusicHistory();
     } else {
-      toast("Generation " + end.status, end.status !== "cancelled");
+      toast("Generation " + jobStatusWord(end.status), end.status !== "cancelled");
     }
   } catch (e) {
     toast("Music generation failed: " + e.message, true);

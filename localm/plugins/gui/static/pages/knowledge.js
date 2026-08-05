@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
-import { $, authHeaders, confirmDanger, el, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
 import { caps, refreshKbSelect } from "../app/settings-perf.js";
@@ -390,7 +390,7 @@ export async function kbRunAdd(name, paths, embed, log, retried = false, reindex
       log.scrollTop = log.scrollHeight;
     });
     toast(end.status === "done" ? "Indexing finished"
-                                : "Indexing " + end.status,
+                                : "Indexing " + jobStatusWord(end.status),
           end.status !== "done");
     refreshKnowledgePage();
   } catch (e) {
@@ -439,7 +439,7 @@ export async function kbReembedCollection(name) {
       log.scrollTop = log.scrollHeight;
     });
     toast(end.status === "done" ? "Re-embedding finished"
-                                : "Re-embedding " + end.status,
+                                : "Re-embedding " + jobStatusWord(end.status),
           end.status !== "done");
     refreshKnowledgePage();
   } catch (e) {
@@ -563,7 +563,7 @@ export async function uploadAndIndexFiles(name, files) {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
     });
-    toast(end.status === "done" ? "Upload indexed" : "Upload " + end.status,
+    toast(end.status === "done" ? "Upload indexed" : "Upload " + jobStatusWord(end.status),
           end.status !== "done");
     refreshKnowledgePage();
   } catch (e) {
