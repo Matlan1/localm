@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""`localm status` must say what a running server is DOING, and must never say
+"nothing" on the evidence of not having found out.
+
+ADR-0008 U5. Before this, no CLI command asked a running server anything about
+its work: `localm ps` and `localm status` rendered only the on-disk instance
+registry, which is written at process start and carries no activity fields at
+all, so a terminal could not see a model pull that the server was streaming to
+a browser tab at that moment.
+
+The whole risk in adding it is the failure path. "I asked and nothing is
+running" and "I could not ask" are different claims, and a command that printed
+the first when the second happened would be a fresh instance of exactly the
+defect this ADR exists to remove - a confident statement resting on an
+unanswered question. So the states are kept apart at the seam (read_activity
+returns which one occurred) and every one of them is pinned below.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import pytest
+import requests
+
+from localm.cli.models import _fmt_age, _print_activity, read_activity
+
+
+class _Resp:
+    def __init__(self, status=200, body=None, text=None):
+        self.status_code = status
+        self.ok = 200 <= status < 300
+        self._body = body
+        self.text = text if text is not None else json.dumps(body or {})
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("not json")
+        return self._body
+
+
+def _patch(monkeypatch, resp=None, exc=None):
+    def _get(url, **kw):
+        if exc is not None:
+            raise exc
+        return resp
+    monkeypatch.setattr(requests, "get", _get)
+
+
+# ---------------------------------------------------------- the seam itself
+
+def test_a_connection_failure_is_not_an_empty_activity_list(monkeypatch):
+    """THE CENTRAL ONE. A server that cannot be reached must not read as idle."""
+    _patch(monkeypatch, exc=requests.exceptions.ConnectionError("refused"))
+    state, _ = read_activity("http", 1234)
+    assert state == "unreachable"
+
+
+def test_a_timeout_is_also_unreachable(monkeypatch):
+    _patch(monkeypatch, exc=requests.exceptions.Timeout("slow"))
+    assert read_activity("http", 1234)[0] == "unreachable"
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_an_auth_refusal_is_its_own_state(monkeypatch, code):
+    _patch(monkeypatch, resp=_Resp(code, {}))
+    assert read_activity("http", 1234)[0] == "unauthorized"
+
+
+def test_an_older_server_without_the_route_is_its_own_state(monkeypatch):
+    """A running 0.1.3 has no /api/activity. That is "cannot tell me", not
+    "nothing is running"."""
+    _patch(monkeypatch, resp=_Resp(404, {}))
+    assert read_activity("http", 1234)[0] == "unsupported"
+
+
+def test_a_200_that_is_not_json_is_not_an_empty_list(monkeypatch):
+    """Something other than localm answered on that port. An empty operation
+    list would be a fabricated answer."""
+    _patch(monkeypatch, resp=_Resp(200, None, text="<html>hello</html>"))
+    assert read_activity("http", 1234)[0] == "http"
+
+
+def test_an_empty_list_is_a_real_answer(monkeypatch):
+    _patch(monkeypatch, resp=_Resp(200, {"now": 1.0, "operations": []}))
+    state, body = read_activity("http", 1234)
+    assert state == "ok"
+    assert body["operations"] == []
+
+
+# ------------------------------------------------------------- what prints
+
+def _out(capsys):
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind,exc,resp", [
+    ("unreachable", requests.exceptions.ConnectionError("x"), None),
+    ("unauthorized", None, _Resp(401, {})),
+    ("unsupported", None, _Resp(404, {})),
+    ("http", None, _Resp(500, {})),
+])
+def test_no_failure_path_ever_claims_nothing_is_running(monkeypatch, capsys,
+                                                        kind, exc, resp):
+    """Whatever went wrong, the user must not be told the server is idle."""
+    _patch(monkeypatch, resp=resp, exc=exc)
+    _print_activity("http", 1234)
+    out = _out(capsys).lower()
+    assert "nothing running" not in out, f"{kind} printed an idle claim: {out!r}"
+    assert out.strip(), f"{kind} printed nothing at all"
+
+
+def test_the_idle_case_says_so_plainly(monkeypatch, capsys):
+    _patch(monkeypatch, resp=_Resp(200, {"now": 1.0, "operations": []}))
+    _print_activity("http", 1234)
+    assert "nothing running" in _out(capsys).lower()
+
+
+def test_a_running_operation_is_listed_with_its_label(monkeypatch, capsys):
+    now = time.time()
+    _patch(monkeypatch, resp=_Resp(200, {"now": now, "operations": [
+        {"id": "a", "kind": "pull", "label": "Model pull owner/repo",
+         "status": "running", "created_at": now - 65, "finished_at": None,
+         "cancellable": True, "pct": 41.2}]}))
+    _print_activity("http", 1234)
+    out = _out(capsys)
+    assert "Model pull owner/repo" in out
+    assert "running" in out
+    assert "41%" in out
+    assert "1m" in out, f"expected an age from the server clock: {out!r}"
+
+
+def test_the_age_uses_the_server_clock_not_this_machines(monkeypatch, capsys):
+    """The payload carries the server's `now` precisely so a skewed local clock
+    cannot produce a confident, wrong duration. Here the server says the job is
+    one minute old while this machine's clock is an hour off; the printed age
+    must follow the server."""
+    server_now = time.time() - 3600
+    _patch(monkeypatch, resp=_Resp(200, {"now": server_now, "operations": [
+        {"id": "a", "kind": "pull", "label": "P", "status": "running",
+         "created_at": server_now - 60, "finished_at": None,
+         "cancellable": True}]}))
+    _print_activity("http", 1234)
+    out = _out(capsys)
+    assert "1m" in out, out
+    assert "1h" not in out, f"age was computed against the local clock: {out!r}"
+
+
+def test_no_percentage_is_printed_when_none_was_reported(monkeypatch, capsys):
+    """R1: an operation that has not reported progress is at an UNKNOWN
+    percentage, never 0%."""
+    now = time.time()
+    _patch(monkeypatch, resp=_Resp(200, {"now": now, "operations": [
+        {"id": "a", "kind": "pull", "label": "P", "status": "running",
+         "created_at": now - 5, "finished_at": None, "cancellable": True}]}))
+    _print_activity("http", 1234)
+    out = _out(capsys)
+    assert "%" not in out, f"printed a percentage nobody reported: {out!r}"
+
+
+def test_a_missing_server_clock_suppresses_the_age_rather_than_faking_one(
+        monkeypatch, capsys):
+    now = time.time()
+    _patch(monkeypatch, resp=_Resp(200, {"operations": [
+        {"id": "a", "kind": "pull", "label": "P", "status": "running",
+         "created_at": now - 7200, "finished_at": None, "cancellable": True}]}))
+    _print_activity("http", 1234)
+    out = _out(capsys)
+    assert "P" in out
+    assert "h" not in out.replace("http", ""), (
+        f"invented an age with no reference clock: {out!r}")
+
+
+# --------------------------------------------------------------- formatting
+
+@pytest.mark.parametrize("secs,want", [
+    (0, "0s"), (5, "5s"), (59, "59s"), (60, "1m"), (599, "9m"),
+    (3600, "1h00m"), (3725, "1h02m"),
+])
+def test_age_formatting(secs, want):
+    assert _fmt_age(secs) == want
+
+
+def test_a_negative_or_absent_age_renders_as_nothing():
+    """Clock skew can make now - created_at negative. Print nothing rather than
+    "-3s", which reads as a real measurement of something impossible."""
+    assert _fmt_age(-3) == ""
+    assert _fmt_age(None) == ""
