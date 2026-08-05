@@ -18,8 +18,10 @@ import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 function makeActivityFetch(responses) {
-  // responses: array of either an operations array, or "fail" for a bad read.
-  // The LAST entry repeats for any call beyond its length.
+  // responses: array of "fail", a bare operations array (now omitted from the
+  // reply, matching an old/malformed server), or {ops, now} for control over
+  // the server clock field. The LAST entry repeats for any call beyond its
+  // length.
   let call = 0;
   const calls = [];
   const fetchImpl = async (url) => {
@@ -29,7 +31,8 @@ function makeActivityFetch(responses) {
       const r = responses[Math.min(call, responses.length - 1)];
       call++;
       if (r === "fail") return { ok: false, status: 500, json: async () => ({}) };
-      return { ok: true, status: 200, json: async () => ({ operations: r }) };
+      const body = Array.isArray(r) ? { operations: r } : { operations: r.ops, now: r.now };
+      return { ok: true, status: 200, json: async () => body };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
   };
@@ -224,4 +227,62 @@ test("reattachActivity: a reattach that ends 'disconnected' does not overwrite t
   assert.match(modalBody.textContent, /running/,
     "a client-only 'disconnected' outcome must not overwrite the server's last known 'running' status");
   assert.doesNotMatch(modalBody.textContent, /disconnected/);
+});
+
+// --------------------------------------------------------------------------- //
+//  Real /api/activity contract: the "now" field and the tri-state read       //
+//  (never asked / confirmed empty / read failed) - #1075's merged route.     //
+// --------------------------------------------------------------------------- //
+
+test("showActivityDetails: before any read has succeeded, shows 'Checking…' - never 'Nothing running.' (R1)", async () => {
+  // Every read fails - the boot-time automatic reattachActivity() call never
+  // gets a successful response, so _activityKnown must stay false.
+  const { fetchImpl } = makeActivityFetch(["fail"]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /Checking/);
+  assert.doesNotMatch(modalBody.textContent, /Nothing running/,
+    "a question that was never successfully asked must not be rendered as a confirmed 'no'");
+});
+
+test("showActivityDetails: a confirmed empty read shows 'Nothing running.' (a real, not a fabricated, answer)", async () => {
+  const { fetchImpl } = makeActivityFetch([{ ops: [], now: 1000 }]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /Nothing running/);
+});
+
+test("showActivityDetails: renders a running operation's age from the SERVER's clock (now - created_at), not the browser's own", async () => {
+  // now=1000, created_at=880 -> 120s ago -> fmtDuration(120) == "2m 00s".
+  // If this were computed against Date.now() instead, the result would be
+  // wildly different (real epoch seconds vs this fixture's tiny numbers) -
+  // the assertion below can only pass if the SERVER's now is what got used.
+  const { fetchImpl } = makeActivityFetch([
+    { ops: [{ id: "j1", kind: "pull", label: "Model pull", status: "running", created_at: 880 }], now: 1000 },
+  ]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /running 2m 00s/);
+});
+
+test("showActivityDetails: a finished operation's age reads '<duration> ago', not 'running <duration>'", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    { ops: [{ id: "j1", kind: "pull", label: "Model pull", status: "done", created_at: 940 }], now: 1000 },
+  ]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  win.showActivityDetails();
+  const modalBody = win.document.getElementById("modal-body");
+  assert.match(modalBody.textContent, /1m 00s ago/);
+  assert.doesNotMatch(modalBody.textContent, /running 1m 00s/);
 });

@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "./chat.js";
-import { $, GIB, authHeaders, el, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
+import { $, GIB, authHeaders, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
 export const modelSelect = $("model-select");
@@ -109,7 +109,19 @@ export function startHwStats(intervalMs = 2500) {
 // reattach, so the details modal can show "the output it missed" even for an
 // operation whose page-specific progress UI was never open in this tab.
 const _activityLogs = new Map();
-let _activityOps = [];   // the last successfully-read /api/activity list
+let _activityOps = [];          // the last successfully-read /api/activity list
+// The SERVER's clock (epoch seconds) at that same read. Ages are rendered as
+// `_activityServerNow - op.created_at`, NEVER against this browser's own
+// clock - the /api/activity route's own docstring is explicit that a client
+// clock (a phone, a drifted box) disagrees by real amounts, and durations
+// are exactly what created_at exists to make renderable.
+let _activityServerNow = null;
+// True once at least one read has SUCCEEDED. Distinguishes "have not asked
+// yet" (boot, before the first poll resolves) from "asked, and there is
+// genuinely nothing running" (a real, confirmed answer) - collapsing the two
+// into one rendering is the same defect class as loop_lag's fabricated 0.00,
+// just in the app shell: an unasked question must never read as a "no".
+let _activityKnown = false;
 
 export function isActivityBusy() {
   return _activityOps.some((op) => op.status === "running");
@@ -117,6 +129,15 @@ export function isActivityBusy() {
 
 function activityLabel(op) {
   return (op && (op.label || op.kind)) || "operation";
+}
+
+// A compact "running 12m" / "3m ago" string, or "" when age cannot be
+// computed (no server clock yet, or a malformed created_at).
+function activityAge(op) {
+  if (_activityServerNow == null || typeof op.created_at !== "number") return "";
+  const d = fmtDuration(_activityServerNow - op.created_at);
+  if (!d) return "";
+  return op.status === "running" ? `running ${d}` : `${d} ago`;
 }
 
 export function renderActivityPill(ops) {
@@ -139,6 +160,13 @@ export function renderActivityPill(ops) {
 
 export function showActivityDetails() {
   openModal("Activity", (body) => {
+    if (!_activityKnown) {
+      // Never render "Nothing running." for a question that was never
+      // successfully asked (R1) - this only shows before the very first
+      // poll/reattach resolves, or if every attempt so far has failed.
+      body.appendChild(el("p", "sub", "Checking…"));
+      return;
+    }
     if (!_activityOps.length) {
       body.appendChild(el("p", "sub", "Nothing running."));
       return;
@@ -148,6 +176,8 @@ export function showActivityDetails() {
       const head = el("div", "job-head");
       head.appendChild(el("span", "job-name", activityLabel(op)));
       head.appendChild(el("span", "job-state st-" + op.status, op.status));
+      const age = activityAge(op);
+      if (age) head.appendChild(el("span", "sub", age));
       row.appendChild(head);
       if (typeof op.pct === "number") {
         const dl = el("div", "dl-progress");
@@ -170,20 +200,31 @@ export function showActivityDetails() {
 }
 if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
 
-export async function pollActivity() {
-  if (typeof document !== "undefined" && document.hidden) return;
+// Shared read: GET /api/activity, update the module's known state + pill,
+// and return the parsed operations list - or null on an unreadable response
+// (R1: the caller must keep whatever it last knew, never fabricate "nothing
+// running"; _activityKnown/_activityOps/_activityServerNow are simply left
+// untouched on failure, matching pollHwStats' own "transient - keep the last
+// reading" precedent).
+async function _readActivity() {
   try {
     const r = await fetch("/api/activity", { headers: authHeaders() });
-    // R1 (ADR-0008 Part 3): an unreadable state must never render as "nothing
-    // running" - keep the last known rendering (matching pollHwStats' own
-    // "transient - keep the last reading" precedent) rather than hiding the
-    // pill and falsely implying activity was confirmed absent.
-    if (!r.ok) return;
+    if (!r.ok) return null;
     const data = await r.json();
     const ops = Array.isArray(data.operations) ? data.operations : [];
     _activityOps = ops;
+    _activityServerNow = typeof data.now === "number" ? data.now : null;
+    _activityKnown = true;
     renderActivityPill(ops);
-  } catch (e) { /* transient - keep the last reading */ }
+    return ops;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function pollActivity() {
+  if (typeof document !== "undefined" && document.hidden) return;
+  await _readActivity();
 }
 
 // Boot-time reattach, mirroring coder.js's reattachSessions(): ask the server
@@ -194,12 +235,8 @@ export async function pollActivity() {
 // its own, it only needs to call streamJob() once per running operation.
 export async function reattachActivity() {
   try {
-    const r = await fetch("/api/activity", { headers: authHeaders() });
-    if (!r.ok) return;
-    const data = await r.json();
-    const ops = Array.isArray(data.operations) ? data.operations : [];
-    _activityOps = ops;
-    renderActivityPill(ops);
+    const ops = await _readActivity();
+    if (!ops) return;   // server unreachable at boot - same as reattachSessions()
     const running = ops.filter((op) => op.status === "running");
     if (!running.length) return;
     for (const op of running) {
