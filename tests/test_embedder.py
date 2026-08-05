@@ -1344,8 +1344,28 @@ def test_real_gguf_embeddings_are_semantic():
             return sum(x * y for x, y in zip(a, b))
         # semantic ordering: kitten closest to cat, then car, then unrelated
         assert cos(V[0], V[1]) > cos(V[0], V[2]) > cos(V[0], V[3])
-        # deterministic
-        assert abs(cos(e.embed(["a cat"])[0], V[0]) - 1.0) < 1e-4
+        # deterministic WITHIN one decode path: two separate single-item
+        # calls for the identical text match tightly (confirmed exactly 0.0
+        # cosine-distance live, not just "close").
+        s1 = e.embed(["a cat"])[0]
+        s2 = e.embed(["a cat"])[0]
+        assert abs(cos(s1, s2) - 1.0) < 1e-4
+        # "a cat" ABOVE was embedded as part of a 4-text BATCH (V[0]); here it
+        # is embedded ALONE, a DIFFERENT native decode path (_decode_batch vs
+        # _decode_single - see GGUFEmbedder.embed()'s own docstring). These
+        # are only NEAR-identical, not bit-identical: llama.cpp's batched
+        # multi-sequence compute graph orders floating-point operations
+        # differently than a single-sequence one, a well-known and benign
+        # source of batch-size-dependent numerical variance in native
+        # inference libraries. Measured live: 0.000674 cosine-distance
+        # between the two paths for the identical text - real, deterministic
+        # (reproduced exactly on repeat), and far below any threshold that
+        # would affect retrieval ranking (this project's own memory-recall
+        # gate uses REL_COS_MIN=0.55). 1e-3 gives headroom above the
+        # measured value while still being a meaningfully tight bound - the
+        # same order of magnitude as the batched-vs-serial correctness bar
+        # used when this batching was first proven correct (cosine > 0.999).
+        assert abs(cos(s1, V[0]) - 1.0) < 1e-3
     finally:
         e.close()
 
@@ -1413,7 +1433,7 @@ class _OverflowApi:
                 float(toks[-1] if toks else 0), float(len(toks))]
 
 
-def _stub_embedder(n_ctx=8):
+def _stub_embedder(n_ctx=8, n_seq_max=emb._EMBED_BATCH_TARGET):
     import ctypes
     import threading
     e = emb.GGUFEmbedder.__new__(emb.GGUFEmbedder)
@@ -1426,6 +1446,13 @@ def _stub_embedder(n_ctx=8):
     e._ctx = object()                        # truthy: "loaded"
     e.dim = 4
     e.model_path = "<stub>"
+    # A real GGUFEmbedder always has this set by __init__ (see
+    # _choose_n_seq_max) - matched here so a stub-based test that embeds
+    # MORE than one text at once behaves like the real thing, rather than
+    # accidentally working only because a single-item call's grouping loop
+    # never actually dereferences it (Python's `and` short-circuits on the
+    # first, empty-`current` iteration).
+    e._n_seq_max = n_seq_max
     return e
 
 
@@ -1534,6 +1561,60 @@ class TestResolveEmbedCtx:
         assert emb._resolve_embed_ctx(-1) == emb._EMBED_CTX_FALLBACK
 
 
+class TestChooseNSeqMax:
+    """The n_seq_max sizing decision, in isolation from the native load path.
+
+    Root cause (measured 2026-08-05 via subprocess-isolated bisection across
+    two models of different dim, three n_ctx values, CPU and GPU - see
+    dev-notes/FINDING-embedder-serial-batching-2026-08-04.md): n_seq_max must
+    evenly divide n_ubatch or llama_init_from_model hard-crashes
+    (uncatchable native GGML_ASSERT abort()) during its own internal
+    graph-reserve warmup. This is a property of the (n_seq_max, n_ubatch)
+    PAIR, not of the model, so the fix is a search, not a constant."""
+
+    def test_real_ctx_ceiling_lands_on_the_target(self):
+        # 2048 (_EMBED_CTX_CEILING) is a power of two, so the search finds
+        # the target on the first try - the common case for most real models.
+        assert emb._choose_n_seq_max(2048) == emb._EMBED_BATCH_TARGET
+
+    def test_real_ctx_fallback_lands_on_the_target(self):
+        # 512 (_EMBED_CTX_FALLBACK) likewise.
+        assert emb._choose_n_seq_max(512) == emb._EMBED_BATCH_TARGET
+
+    def test_non_power_of_two_ctx_finds_a_smaller_divisor(self):
+        # 48 = 2^4*3: 32 does not divide it evenly (48/32=1.5), so the search
+        # must step down to 16 (48/16=3, exact) rather than falling all the
+        # way to 1 - proves the search finds an intermediate divisor, not
+        # just the two trivial endpoints (the target or the safe floor).
+        assert emb._choose_n_seq_max(48) == 16
+
+    def test_odd_ctx_falls_back_to_one(self):
+        # No power of two > 1 divides an odd number - the search must reach
+        # its safe floor, exactly today's pre-batching single-sequence
+        # behavior, proven safe by every model this embedder has ever loaded.
+        assert emb._choose_n_seq_max(513) == 1
+
+    def test_result_always_evenly_divides_the_input(self):
+        """The actual safety property, checked directly rather than via a
+        handful of examples: for a wide range of n_ubatch values, the chosen
+        n_seq_max must be a genuine divisor - the property a hardcoded
+        constant could never guarantee for an arbitrary future model."""
+        for n_ubatch in range(1, 4096):
+            n_seq_max = emb._choose_n_seq_max(n_ubatch)
+            assert n_ubatch % n_seq_max == 0, (
+                f"n_seq_max={n_seq_max} does not evenly divide "
+                f"n_ubatch={n_ubatch} - this exact combination is the "
+                f"measured native GGML_ASSERT crash trigger")
+
+    def test_never_exceeds_target_max(self):
+        for n_ubatch in (1, 2, 100, 2048, 100000):
+            assert emb._choose_n_seq_max(n_ubatch) <= emb._EMBED_BATCH_TARGET
+
+    def test_custom_target_max_is_honoured(self):
+        assert emb._choose_n_seq_max(2048, target_max=8) == 8
+        assert emb._choose_n_seq_max(48, target_max=8) == 8
+
+
 def test_overlong_inputs_do_not_collide():
     """Two DIFFERENT over-long texts must not embed identically (pre-fix they
     all decoded the zero-filled buffer and returned one constant vector)."""
@@ -1560,6 +1641,185 @@ def test_short_input_unchanged_by_overflow_fix():
     e = _stub_embedder(n_ctx=8)
     e.embed(["abc"])
     assert e._api.decoded_tokens == e._api._tokens_for(b"abc")
+
+
+class TestEmbedBatchDispatch:
+    """embed()'s own grouping/dispatch logic - which of _decode_single vs
+    _decode_batch gets called, for which group sizes - tested in isolation
+    from native decode correctness (covered separately by the @real_gguf
+    tests below) by spying on both methods on a stub embedder. _OverflowApi
+    tokenizes roughly one token per input byte (see its own docstring), so a
+    text's token count is easy to control by its length."""
+
+    def _spied(self, monkeypatch, n_ctx=64, n_seq_max=4):
+        e = _stub_embedder(n_ctx=n_ctx, n_seq_max=n_seq_max)
+        calls = {"single": [], "batch": []}
+
+        def fake_single(tokens):
+            calls["single"].append(list(tokens))
+            return [0.0] * e.dim
+
+        def fake_batch(token_lists):
+            calls["batch"].append([list(t) for t in token_lists])
+            return [[0.0] * e.dim for _ in token_lists]
+
+        monkeypatch.setattr(e, "_decode_single", fake_single)
+        monkeypatch.setattr(e, "_decode_batch", fake_batch)
+        return e, calls
+
+    def test_single_text_uses_the_fast_path(self, monkeypatch):
+        """Measured (GPU, real model): a batched call for exactly ONE
+        sequence is SLOWER than the single-sequence path (0.60x) - the
+        multi-sequence batch machinery's own setup cost loses when there is
+        nothing to amortize it across. A lone embed (a chat memory query,
+        most /v1/embeddings calls in practice) must keep using the cheap
+        path, not the new one."""
+        e, calls = self._spied(monkeypatch)
+        out = e.embed(["hello"])
+        assert len(out) == 1
+        assert len(calls["single"]) == 1
+        assert len(calls["batch"]) == 0
+
+    def test_multiple_short_texts_use_the_batched_path(self, monkeypatch):
+        e, calls = self._spied(monkeypatch)
+        out = e.embed(["a", "b", "c"])
+        assert len(out) == 3
+        assert len(calls["batch"]) == 1
+        assert len(calls["batch"][0]) == 3
+        assert len(calls["single"]) == 0
+
+    def test_group_size_is_capped_at_n_seq_max(self, monkeypatch):
+        e, calls = self._spied(monkeypatch, n_seq_max=4)
+        texts = [f"t{i}" for i in range(10)]     # 2 tokens each - count-bound
+        out = e.embed(texts)
+        assert len(out) == 10
+        assert all(len(g) <= 4 for g in calls["batch"]), calls["batch"]
+        assert sum(len(g) for g in calls["batch"]) + len(calls["single"]) == 10
+
+    def test_group_shrinks_to_respect_the_token_budget(self, monkeypatch):
+        """A group's SUMMED token count must never exceed n_ctx (n_ubatch) -
+        llama.cpp's own hard 'encoder requires n_ubatch >= n_tokens'
+        constraint for this non-causal architecture (it cannot chunk one
+        micro-batch across multiple internal passes the way causal
+        generation can). Long texts must pack FEWER per group even when
+        n_seq_max would allow more by count alone."""
+        e, calls = self._spied(monkeypatch, n_ctx=20, n_seq_max=8)
+        texts = ["abcdefgh"] * 8   # 8 tokens each (1/byte) - token-bound, not count-bound
+        out = e.embed(texts)
+        assert len(out) == 8
+        assert len(calls["batch"]) > 1, (
+            "8 texts * 8 tokens = 64 tokens must not fit in ONE 20-token group")
+        for group in calls["batch"]:
+            total = sum(len(g) for g in group)
+            assert total <= 20, f"group exceeded the n_ctx token budget: {total}"
+
+    def test_a_text_too_long_to_share_a_group_gets_its_own(self, monkeypatch):
+        """Two texts that are each individually within n_ctx but together
+        exceed it must NOT be forced into one batched group - they fall back
+        to two single-sequence groups, exactly the pre-batching behavior for
+        this case (this is also exercised for real in
+        test_real_gguf_overlong_texts_not_identical below, with an actual
+        model instead of a spy)."""
+        e, calls = self._spied(monkeypatch, n_ctx=10, n_seq_max=8)
+        texts = ["abcdefghij", "klmnopqrst"]      # 10 tokens each = n_ctx exactly
+        out = e.embed(texts)
+        assert len(out) == 2
+        assert len(calls["batch"]) == 0, (
+            "two n_ctx-length texts together (20 tokens) exceed the "
+            "10-token budget and must each get their own single-sequence "
+            "group, not be forced into one batched call")
+        assert len(calls["single"]) == 2
+
+    def test_a_text_that_fails_to_tokenize_needs_no_native_call(self, monkeypatch):
+        """The pre-existing zero-token fallback (a text that could not be
+        tokenized at all, per _tokenize's own docstring) must stay a pure
+        Python short-circuit - it never had a native call to make even
+        before batching existed, and grouping must not accidentally route it
+        into either decode path."""
+        e, calls = self._spied(monkeypatch)
+        monkeypatch.setattr(e, "_tokenize", lambda text: [])
+        out = e.embed(["anything"])
+        assert out == [[0.0] * e.dim]
+        assert len(calls["single"]) == 0
+        assert len(calls["batch"]) == 0
+
+
+@pytest.mark.real_gguf
+@pytest.mark.skipif(not _EMBED_MODEL,
+                    reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
+class TestBatchedDecodeFailureGranularity:
+    """AGENTS.md rule 5: a partial batch failure must NEVER report as
+    success. Faults injected at the native-call boundary (llama_decode /
+    llama_get_embeddings_seq) on a REAL loaded model and a REAL
+    llama_batch_init-built batch - only the OUTCOME of the native call is
+    faked, not the batch-construction machinery itself, so this exercises
+    the actual ctypes cast/pack code the measurement unit proved correct."""
+
+    def test_a_nonzero_decode_return_raises_and_returns_nothing(self, monkeypatch):
+        e = emb.GGUFEmbedder(_EMBED_MODEL)
+        try:
+            real_decode = e._api.llama_decode
+            monkeypatch.setattr(e._api, "llama_decode", lambda ctx, batch: 1)
+            with pytest.raises(RuntimeError, match="batched embedding decode failed"):
+                e.embed(["alpha", "beta", "gamma"])
+            # restore for e.close()'s own (real, single-call) teardown path -
+            # close() does not decode, but keep the fixture honest regardless
+            monkeypatch.setattr(e._api, "llama_decode", real_decode)
+        finally:
+            e.close()
+
+    def test_one_null_sequence_in_an_otherwise_ok_batch_raises(self, monkeypatch):
+        """The genuinely dangerous partial-success shape: llama_decode
+        returns 0 (the call as a whole 'succeeded') but ONE sequence's
+        pooled output comes back NULL. Must still raise - a caller must
+        never receive a fabricated or all-zero vector for the sequence that
+        actually failed while believing the whole batch succeeded."""
+        e = emb.GGUFEmbedder(_EMBED_MODEL)
+        try:
+            real_get = e._api.llama_get_embeddings_seq
+
+            def poisoned_get(ctx, seq):
+                if seq == 1:
+                    return None
+                return real_get(ctx, seq)
+
+            monkeypatch.setattr(e._api, "llama_get_embeddings_seq", poisoned_get)
+            with pytest.raises(RuntimeError, match="null embedding for sequence 1"):
+                e.embed(["alpha", "beta", "gamma"])
+        finally:
+            e.close()
+
+    def test_a_group_failure_does_not_leak_partial_results(self, monkeypatch):
+        """embed() must not return SOME real vectors and silently drop
+        others when a later group in the same call fails - the whole call
+        raises, exactly like today's pre-existing single-text serial loop
+        already does when any one text fails (Python's list-comprehension
+        exception propagation - no caller anywhere expects a partial
+        list)."""
+        e = emb.GGUFEmbedder(_EMBED_MODEL, n_ctx=16)
+        try:
+            # n_ctx=16, n_seq_max chosen from that - force at least 2 groups
+            # by using MORE texts than n_seq_max allows in one group.
+            n_seq_max = e._n_seq_max
+            texts = [f"t{i}" for i in range(n_seq_max + 2)]
+            call_count = 0
+            real_decode = e._api.llama_decode
+
+            def fail_second_call(ctx, batch):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    return 1
+                return real_decode(ctx, batch)
+
+            monkeypatch.setattr(e._api, "llama_decode", fail_second_call)
+            with pytest.raises(RuntimeError):
+                e.embed(texts)
+            assert call_count == 2, (
+                "the fault must have been reached on the SECOND group, not "
+                "before it or not at all - otherwise this test proves nothing")
+        finally:
+            e.close()
 
 
 @pytest.mark.real_gguf
