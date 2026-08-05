@@ -392,6 +392,20 @@ class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
         mirror = logging.StreamHandler(mirror_stream)
         mirror.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
         saved_level = debuglog.logger.level
+        # suppress_console_mirror() identifies "the mirror" as the FIRST
+        # non-FileHandler StreamHandler on the logger. In the shipped product that
+        # is unambiguous - the only other handlers are a ring buffer (a plain
+        # logging.Handler) and file handlers, which the predicate excludes - but a
+        # sibling test in the same xdist worker can leave one attached, and then
+        # the suppressor detaches THAT one and this stand-in keeps receiving.
+        # That is why this failed on the Linux leg only: worker composition, not
+        # platform. Reproduced verbatim on Windows by attaching one decoy handler.
+        # Detach any pre-existing ones so this stand-in IS unambiguously the mirror.
+        preexisting = [h for h in list(debuglog.logger.handlers)
+                       if isinstance(h, logging.StreamHandler)
+                       and not isinstance(h, logging.FileHandler)]
+        for _h in preexisting:
+            debuglog.logger.removeHandler(_h)
         debuglog.logger.addHandler(mirror)
         debuglog.logger.setLevel(logging.DEBUG)
         try:
@@ -428,6 +442,8 @@ class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
                 f"{mirror_stream.getvalue()!r}")
         finally:
             debuglog.logger.removeHandler(mirror)
+            for _h in preexisting:
+                debuglog.logger.addHandler(_h)
             debuglog.logger.setLevel(saved_level)
 
 
