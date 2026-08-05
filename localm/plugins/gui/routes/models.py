@@ -273,14 +273,19 @@ def register(app: FastAPI, ctx) -> None:
         lacks host filesystem access must not reach it.
 
         The gate used to be `if workdir:`, which made that guarantee false for
-        the exact case the paragraph above asserts: `comfy_workdir` is a plain
-        Widget.FOLDER settable by any config:write key, so a bodyless POST
-        scanned a caller-CHOSEN folder with no fs_access check at all. The
-        registered rows are permanent and every consumer re-stats them on each
-        launch, so a planted UNC row is a lasting event-loop stall plus
-        outbound SMB from the server process. Scanning is authorised by host
-        filesystem reach, not by where the folder name happened to come
-        from."""
+        the exact case the paragraph above asserts: `comfy_workdir` was then a
+        plain Widget.FOLDER settable by any config:write key, so a bodyless
+        POST scanned a caller-CHOSEN folder with no fs_access check at all.
+        comfy_workdir is admin_only now (settings_schema.py, core field and its
+        per-plugin twin), but this route's own require_fs_host below is what
+        actually enforces the guarantee - relying on comfy_workdir's write gate
+        alone would leave a MODELS_WRITE-only key free to trigger a scan of
+        whatever folder an admin previously configured, with no host-fs
+        privilege of its own. The registered rows are permanent and every
+        consumer re-stats them on each launch, so a planted UNC row is a
+        lasting event-loop stall plus outbound SMB from the server process.
+        Scanning is authorised by host filesystem reach, not by where the
+        folder name happened to come from."""
         from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
         from functools import partial
@@ -700,14 +705,21 @@ def register(app: FastAPI, ctx) -> None:
         Requires host filesystem access for the same reason /api/models/scan
         does, and it is the same folder either way. When the managed ComfyUI
         instance is not active - the DEFAULT state of a fresh install -
-        comfy_models_dest_dir() resolves to `<comfy_workdir>/models/<subfolder>`,
-        and comfy_workdir carries no admin_only flag, so a plain config:write key
-        chooses it. The download then mkdir -p's that directory and streams a
-        multi-gigabyte file into it from the server process. The curated table
-        fixes the filename and subfolder, so this is not arbitrary-path WRITE -
-        but choosing the parent directory is still host filesystem reach, and a
-        UNC value draws the same outbound SMB authentication from the server that
-        the scan gate exists to prevent.
+        comfy_models_dest_dir() resolves to `<comfy_workdir>/models/<subfolder>`.
+        comfy_workdir itself is admin_only (settings_schema.py, both the core
+        field and its per-plugin twin - REC-MEDIA-CMD closed the back door where
+        only one of the two was gated), so a plain config:write key can no longer
+        CHOOSE that folder. But an ADMIN may have already configured it once, and
+        this route's own caller only needs MODELS_WRITE - so without its own
+        check, any MODELS_WRITE key could still stream a multi-gigabyte download
+        into whatever host directory an admin previously set, with no host-fs
+        privilege of its own. require_fs_host() below closes that: the CALLER
+        triggering the write must independently hold host filesystem reach, not
+        merely benefit from a destination someone else configured. The curated
+        table fixes the filename and subfolder, so this is not arbitrary-path
+        WRITE - but choosing the parent directory is still host filesystem
+        reach, and a UNC value draws the same outbound SMB authentication from
+        the server that the scan gate exists to prevent.
 
         This route was the inconsistent survivor when scan and pull were gated:
         same invariant, same config value, same harm, no gate. Fixing one door
