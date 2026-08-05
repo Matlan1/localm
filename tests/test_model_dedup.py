@@ -290,6 +290,113 @@ class TestAddLocalDedup:
             mm.add_local(str(f), "second")   # default: ask
         assert "second" not in store
 
+    # ---- NEW-STORE-MOVE-REGISTRY-DESYNC: --store move/copy used to move or
+    # copy the file into MODELS_DIR BEFORE the name-collision check, then
+    # discard _register_with_dedup's (always-None) result and report success
+    # anyway - the file displaced, the registry untouched, add_local() -> True.
+    # test_name_conflict_different_file_skipped_non_tty above covers the same
+    # collision WITHOUT --store, which is exactly why it never caught this:
+    # with store=None there is nothing to move, so the buggy ordering was
+    # never exercised. -------------------------------------------------------
+    def test_store_move_name_conflict_does_not_touch_file_non_tty(
+            self, fake_registry, tmp_path):
+        store, models_dir = fake_registry
+        existing = _file(tmp_path, "existing.gguf", b"one")
+        mm.add_local(str(existing), "collision", on_duplicate="register")
+        external = _file(tmp_path, "mymodel.gguf", b"two")
+
+        with patch("localm.model_manager.sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = False
+            result = mm.add_local(str(external), "collision", store="move")
+
+        assert result is False, "a refused registration must not report success"
+        assert external.exists(), "the source file must never be moved when " \
+            "registration is known in advance to be refused"
+        assert not (models_dir / "mymodel.gguf").exists(), \
+            "nothing may land in MODELS_DIR for a refused non-interactive move"
+        assert store["collision"]["path"] == str(existing.resolve()), \
+            "the pre-existing entry must be completely untouched"
+        assert not any(
+            mm._entry_path(e) == str((models_dir / "mymodel.gguf").resolve())
+            for e in store.values()
+        ), "the moved-away file must not become an orphaned, unregistered entry"
+
+    def test_store_copy_name_conflict_does_not_touch_file_non_tty(
+            self, fake_registry, tmp_path):
+        store, models_dir = fake_registry
+        existing = _file(tmp_path, "existing.gguf", b"one")
+        mm.add_local(str(existing), "collision", on_duplicate="register")
+        external = _file(tmp_path, "mymodel.gguf", b"two")
+
+        with patch("localm.model_manager.sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = False
+            result = mm.add_local(str(external), "collision", store="copy")
+
+        assert result is False
+        assert external.exists(), "the source is untouched either way for copy"
+        assert not (models_dir / "mymodel.gguf").exists(), \
+            "no wasted copy should be made for a refusal known in advance"
+        assert store["collision"]["path"] == str(existing.resolve())
+
+    def test_store_move_still_succeeds_without_a_collision(
+            self, fake_registry, tmp_path):
+        """The new pre-move gate must not false-positive on an ordinary,
+        non-colliding --store move - it only refuses a GENUINE name conflict."""
+        store, models_dir = fake_registry
+        external = _file(tmp_path, "mymodel.gguf")
+
+        with patch("localm.model_manager.sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = False
+            result = mm.add_local(str(external), "fresh-name", store="move")
+
+        assert result is True
+        assert not external.exists()
+        assert (models_dir / "mymodel.gguf").is_file()
+        assert store["fresh-name"]["path"] == str((models_dir / "mymodel.gguf").resolve())
+
+    def test_store_move_name_conflict_interactive_decline_reports_failure(
+            self, fake_registry, tmp_path):
+        """Interactively declining an overwrite still leaves the file moved
+        (there IS a real prompt here, unlike the non-tty case) - add_local
+        must report that honestly (False) rather than claiming success, since
+        this used to unconditionally return True regardless of the answer."""
+        store, models_dir = fake_registry
+        existing = _file(tmp_path, "existing.gguf", b"one")
+        mm.add_local(str(existing), "collision", on_duplicate="register")
+        external = _file(tmp_path, "mymodel.gguf", b"two")
+
+        with patch("localm.model_manager.sys.stdin") as fake_stdin, \
+             patch("click.confirm", return_value=False):
+            fake_stdin.isatty.return_value = True
+            result = mm.add_local(str(external), "collision", store="move")
+
+        assert result is False, "a declined overwrite must not report success"
+        assert store["collision"]["path"] == str(existing.resolve())
+
+
+class TestNameCollision:
+    """_name_collision: the pure, shared predicate add_local's pre-move gate
+    and _register_with_dedup's own conflict check both use - one definition,
+    so they can never drift apart on what counts as a conflict."""
+
+    def test_no_entry_at_all_is_no_conflict(self, fake_registry, tmp_path):
+        from localm.model_manager.registry import _name_collision
+        f = _file(tmp_path, "m.gguf")
+        assert _name_collision("free-name", f, {}) is None
+
+    def test_same_name_same_file_is_no_conflict(self, fake_registry, tmp_path):
+        from localm.model_manager.registry import _name_collision
+        f = _file(tmp_path, "m.gguf")
+        reg = {"m": {"path": str(f.resolve()), "source": "local"}}
+        assert _name_collision("m", f, reg) is None
+
+    def test_same_name_different_file_is_a_conflict(self, fake_registry, tmp_path):
+        from localm.model_manager.registry import _name_collision
+        other = _file(tmp_path, "other.gguf")
+        new = _file(tmp_path, "new.gguf")
+        reg = {"m": {"path": str(other.resolve()), "source": "local"}}
+        assert _name_collision("m", new, reg) == str(other.resolve())
+
 
 # ---------------------------------------------------------------------------
 #  remove_model alias awareness

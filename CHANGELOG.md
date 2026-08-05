@@ -287,6 +287,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **`localm add --store move` (or `copy`) can no longer relocate your file and
+  then report success while leaving it unregistered under any name.** When
+  the destination name was already taken by a genuinely different model and
+  nothing could ask you to confirm an overwrite (the GUI, a script, any
+  non-interactive caller), the file was still moved into the models folder
+  first - only afterward did registration get refused, and that refusal was
+  never checked, so the command reported success anyway. The registry still
+  pointed at the old file; the moved one sat unregistered until the next
+  `localm list` or server start picked it up under an automatic name, never
+  the one you asked for. The conflict is now checked before anything is moved
+  or copied, so a refusal leaves your file exactly where it was; an
+  interactive decline is also now correctly reported as a failure instead of
+  a false success.
 - **Stopping a reply mid-generation no longer loses it on reload.** A stopped
   reply rendered live with a "[stopped]" marker, but nothing was ever saved -
   reload the page or switch conversations and it was gone, even though it was

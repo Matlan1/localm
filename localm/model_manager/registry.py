@@ -1448,6 +1448,21 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
     return _mm.MODELS_DIR / path.name
 
 
+def _name_collision(model_name: str, p: Path, reg: dict) -> Optional[str]:
+    """The conflicting path, if *model_name* is already registered pointing at
+    a genuinely different file than *p* - the one case a non-interactive
+    caller can never resolve (no terminal to confirm an overwrite) and must
+    refuse up front, BEFORE moving or copying anything into place
+    (NEW-STORE-MOVE-REGISTRY-DESYNC: add_local used to move the file first and
+    only discover this after, when it was too late to avoid displacing it).
+    None when there is no conflict: the name is free, or already correctly
+    points at *p* itself (same path-identity aliasing _register_with_dedup
+    uses for its own no-op case)."""
+    if model_name not in reg:
+        return None
+    if model_name in find_aliases_by_path(p, reg):
+        return None
+    return _entry_path(reg[model_name]) or "?"
 
 
 def _register_with_dedup(
@@ -1460,7 +1475,7 @@ def _register_with_dedup(
     size: Optional[int] = None,
     model_type: str = "llm",
     mmproj: Optional[Path] = None,
-) -> None:
+) -> bool:
     """
     Register a model, detecting duplicates first.
 
@@ -1473,6 +1488,14 @@ def _register_with_dedup(
     *mmproj*, when given, is a verified vision projector to record on the
     entry (see ``_register``); backfilled onto an already-registered same-file
     entry the same way a fresh ``digest`` is.
+
+    Returns True when *model_name* ends up correctly registered for *p*
+    (freshly registered, aliased, deduped, or already correct) - False for
+    every path where nothing was written: a real name/content conflict
+    declined interactively, or skipped because there was no terminal to ask
+    (NEW-STORE-MOVE-REGISTRY-DESYNC). A caller that already moved or copied
+    *p* into place before calling this MUST check the result rather than
+    assume success - see add_local's callers for why.
     """
     import click
 
@@ -1500,15 +1523,11 @@ def _register_with_dedup(
         others = [a for a in aliases if a != model_name]
         if others:
             console.print(f"[dim]Also registered as: {', '.join(others)}[/dim]")
-        return
+        return True
 
     # Same name, DIFFERENT file - real conflict, never overwrite silently
-    if model_name in reg:
-        # _entry_path guards a pre-existing MALFORMED entry at this name: a non-dict
-        # value would AttributeError on .get here. Extends #562's registry hardening
-        # to this write-side by-name dedup lookup; a corrupt entry shows as '?' and
-        # is cleared with `localm rm <name>`.
-        old_path = _entry_path(reg[model_name]) or "?"
+    old_path = _name_collision(model_name, p, reg)
+    if old_path is not None:
         console.print(
             f"[yellow]'{model_name}' already points to a different file:"
             f"[/yellow] {old_path}"
@@ -1516,11 +1535,11 @@ def _register_with_dedup(
         if sys.stdin.isatty():
             if not click.confirm(f"  Overwrite '{model_name}' with {p}?"):
                 console.print("[dim]Skipped.[/dim]")
-                return
+                return False
         else:
             console.print("[dim]Non-interactive session - skipped. "
                           "Pick another name with -n.[/dim]")
-            return
+            return False
 
     # Duplicate content under other names? (path tier, then hash tier, then the
     # fast size-only tier when no digest was computed)
@@ -1539,10 +1558,10 @@ def _register_with_dedup(
         )
         if action == "skip":
             console.print("[dim]Skipped.[/dim]")
-            return
+            return False
         if action == "alias":
             alias_model(dup_names[0], model_name)
-            return
+            return True
         if action in ("copy", "move"):
             # Capture the pre-move resolved path BEFORE _store_into_models_dir
             # touches anything - it's the key the alias-relink below matches on.
@@ -1551,7 +1570,7 @@ def _register_with_dedup(
                 dest = _mm._store_into_models_dir(p, action)
             except RuntimeError as e:
                 console.print(f"[red]{e}[/red]")
-                return
+                return False
             if action == "move":
                 dest_str = str(dest.resolve())
                 entry = {"path": dest_str, "source": source, "model_type": model_type}
@@ -1577,13 +1596,14 @@ def _register_with_dedup(
 
                 _mm.update_registry(_relink_and_register)
                 console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
-                return
+                return True
             p = dest
         # action == "register" falls through unchanged
 
     _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
                   mmproj=mmproj)
     console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
+    return True
 
 
 
@@ -1941,8 +1961,13 @@ def add_local(
     store: Optional[str] = None,
 ) -> bool:
     """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
-    registration or a benign no-op (alias / user-skipped duplicate), False when the
-    path is not a usable model, so `localm pull <path>` can set its exit code.
+    registration or a benign no-op (alias / interactively-skipped duplicate), False
+    when the path is not a usable model OR when nothing was actually registered -
+    a real name/content conflict declined interactively, or refused because there
+    was no terminal to ask - so `localm pull <path>`/`localm add` can set their
+    exit code accurately (NEW-STORE-MOVE-REGISTRY-DESYNC: this used to always
+    return True past this point regardless of whether _register_with_dedup did
+    anything, so a refused registration still reported success).
 
     *model_type* None (the default) means "detect it": the type is resolved
     deterministically from hard metadata (GGUF -> llm, HF config.json architectures)
@@ -1959,7 +1984,13 @@ def add_local(
     is a hard failure of the whole call - unlike the softer dedup-prompt copy/move
     (where skipping just means "keep the old registration"), a requested --store
     that silently fell back to registering the ORIGINAL external path would be a
-    hidden problem, not a benign no-op.
+    hidden problem, not a benign no-op. A non-interactive name collision is now
+    refused BEFORE the move/copy happens (there is no terminal to confirm an
+    overwrite, so the outcome is already known); an interactive decline, or the
+    rarer post-move content-dedup skip, can still leave the file sitting in
+    MODELS_DIR unregistered under any requested name - reported to the caller
+    rather than claimed as success, and recoverable via `localm list` / the next
+    server start (sync_models_dir), just under an automatic name.
     """
     p = Path(path_str).resolve()
     if not p.exists():
@@ -1970,26 +2001,56 @@ def add_local(
     ollama = _resolve_ollama_manifest(p)
     if ollama is not None:
         blob_path, suggested = ollama
+        # Sanitize the user-supplied -n name through the same filter
+        # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
+        # raw registry key (GAP-CLI-1). Computed before any move so the
+        # collision check below and the eventual registration agree on the
+        # exact same name.
+        model_name = _sanitize_name(name) if name else suggested
         if store and _mm.is_external_path(blob_path):
+            # NEW-STORE-MOVE-REGISTRY-DESYNC: refuse before touching the
+            # filesystem when we can already tell registration will be
+            # refused - a name collision with no terminal to confirm an
+            # overwrite. Moving first and discovering this after used to
+            # silently displace the file while reporting success.
+            if not sys.stdin.isatty():
+                reg = _mm.load_registry()
+                conflict = _name_collision(model_name, blob_path, reg)
+                if conflict is not None:
+                    console.print(
+                        f"[red]'{model_name}' already points to a different "
+                        f"file:[/red] {conflict}\nRefusing to move {blob_path} "
+                        "into place non-interactively - pick another name "
+                        "with -n."
+                    )
+                    return False
             try:
                 blob_path = _mm._store_into_models_dir(blob_path, store)
             except RuntimeError as e:
                 console.print(f"[red]{e}[/red]")
                 return False
-        # Sanitize the user-supplied -n name through the same filter
-        # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
-        # raw registry key (GAP-CLI-1).
-        model_name = _sanitize_name(name) if name else suggested
         # Ollama blob filenames already ARE the sha256 digest - store it free
         digest = blob_path.name.removeprefix("sha256-") \
             if blob_path.name.startswith("sha256-") else None
         # An Ollama blob is a GGUF text model, so an unspecified type is 'llm'.
-        _mm._register_with_dedup(
+        # The interactive path can still decline (or a rarer post-move content
+        # dedup can) - report that honestly rather than claiming success for a
+        # file that is now sitting in MODELS_DIR unregistered under any name
+        # (sync_models_dir/`localm list` will pick it up under an auto name).
+        registered = _mm._register_with_dedup(
             model_name, blob_path, "ollama",
             on_duplicate=on_duplicate, digest=digest,
             model_type=(model_type if model_type is not None else "llm"),
         )
-        return True
+        if not registered and store:
+            verb = "moved" if store == "move" else "copied"
+            console.print(
+                f"[yellow]{blob_path} was {verb} into the models folder but "
+                f"not registered as '{model_name}'.[/yellow] It will be picked "
+                "up under an automatic name the next time models are scanned "
+                "(`localm list`, or the next server start)."
+            )
+        return registered
 
     # Refuse the localm data directory (and its models root): its config.json is
     # the app's settings file, not a model config, so registering it would poison
@@ -2070,21 +2131,43 @@ def add_local(
                 if first_path.is_file():
                     p = first_path
 
+    # Sanitize the user-supplied -n name (GAP-CLI-1): never let '../evil' or
+    # 'a/b' become a raw registry key. p.stem is already path-component-safe.
+    # Computed BEFORE any store/move (the move preserves the filename, so the
+    # value is identical either way) so the collision check below and the
+    # eventual registration agree on the exact same name.
+    model_name = _sanitize_name(name) if name else (split_base or p.stem)
+    kind = "hf" if is_hf else "local"
+
     # Bring an external file/dir into managed storage BEFORE registering, so the
     # registry ends up pointing at the copy/move destination, not the original.
     # Handles the split-GGUF parts and any sibling mmproj on its own
     # (_store_into_models_dir); works for is_hf's whole directory too.
     if store and _mm.is_external_path(p):
+        # NEW-STORE-MOVE-REGISTRY-DESYNC: refuse before touching the filesystem
+        # when we can already tell registration will be refused - a name
+        # collision with no terminal to confirm an overwrite. This used to
+        # move the file first and only discover the refusal after, silently
+        # displacing it while _register_with_dedup's result went unchecked
+        # and add_local reported success anyway. Reproduced and measured: the
+        # file really does move, the registry is untouched, and it becomes
+        # unregistered under ANY name until the next sync_models_dir scan
+        # picks it up under an auto-generated name - never the one requested.
+        if not sys.stdin.isatty():
+            reg = _mm.load_registry()
+            conflict = _name_collision(model_name, p, reg)
+            if conflict is not None:
+                console.print(
+                    f"[red]'{model_name}' already points to a different "
+                    f"file:[/red] {conflict}\nRefusing to {store} {p} into "
+                    "place non-interactively - pick another name with -n."
+                )
+                return False
         try:
             p = _mm._store_into_models_dir(p, store)
         except RuntimeError as e:
             console.print(f"[red]{e}[/red]")
             return False
-
-    # Sanitize the user-supplied -n name (GAP-CLI-1): never let '../evil' or
-    # 'a/b' become a raw registry key. p.stem is already path-component-safe.
-    model_name = _sanitize_name(name) if name else (split_base or p.stem)
-    kind = "hf" if is_hf else "local"
 
     size: Optional[int] = None
     if is_blob:
@@ -2115,10 +2198,22 @@ def add_local(
     if model_type is None:
         model_type = _detect_local_model_type(p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
 
-    _mm._register_with_dedup(
+    # The interactive path can still decline (or a rarer post-move content
+    # dedup can) - report that honestly rather than claiming success for a
+    # file that is now sitting in MODELS_DIR unregistered under any name
+    # (sync_models_dir/`localm list` will pick it up under an auto name).
+    registered = _mm._register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
     )
-    return True
+    if not registered and store:
+        verb = "moved" if store == "move" else "copied"
+        console.print(
+            f"[yellow]{p} was {verb} into the models folder but not "
+            f"registered as '{model_name}'.[/yellow] It will be picked up "
+            "under an automatic name the next time models are scanned "
+            "(`localm list`, or the next server start)."
+        )
+    return registered
 
 
 
