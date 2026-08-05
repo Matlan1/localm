@@ -133,14 +133,40 @@ _RE_NAME_KEY = re.compile(r"""["']name["']\s*:""")
 _RE_ARGS_KEY = re.compile(r"""["'](?:args|arguments)["']\s*:""")
 
 
-def looks_like_tool_attempt(text: str) -> bool:
+def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool:
     """True when *text* looks like a botched tool call - a tool-call marker or
     fence, or a JSON object carrying both a name and an args field - even
     though :func:`parse_tool_calls` recovered nothing. Lets the caller
-    re-prompt for the correct format rather than show the broken call."""
+    re-prompt for the correct format rather than show the broken call.
+
+    When *tool_names* is supplied, ALSO recognises an XML-ish open tag naming
+    one of those tools - ``<read_file``, ``<edit_file ...>`` - even with none
+    of the markers above: some finetunes (observed live on a "thinking"
+    heretic-abliterated model) hallucinate a per-tool XML convention (closer
+    to Anthropic's own ``<function_calls><invoke name="...">`` shape) instead
+    of this project's ``<tool_call>{"name": ...}`` wrapper, while still
+    getting the TOOL NAME itself exactly right (it is in the system prompt).
+    Before this, such a response matched none of the checks above, so it fell
+    through as if the model had never attempted anything at all - the exact
+    failure NEW-CODER-NO-TOOLCALL-SILENT is about, just one layer more subtle
+    than "no output at all": the model DID try, in a foreign dialect nothing
+    here was watching for. A plain prose answer does not coincidentally
+    contain ``<read_file`` as literal text, so this is a low-false-positive
+    signal of intent even in a shape :func:`parse_tool_calls` cannot recover -
+    and same as every other case this function reports, a false hit costs
+    only one repair re-prompt, which explicitly tells the model to ignore it
+    and give its plain-text final answer if it did not mean to call a tool."""
     if _RE_TOOL_MARKER.search(text) or _RE_TOOL_FENCE.search(text):
         return True
-    return bool(_RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text))
+    if _RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text):
+        return True
+    if tool_names:
+        pattern = re.compile(
+            r"<\s*(?:" + "|".join(re.escape(n) for n in tool_names) + r")\b",
+            re.IGNORECASE)
+        if pattern.search(text):
+            return True
+    return False
 
 
 def _detriple_quoted(s: str) -> str:
