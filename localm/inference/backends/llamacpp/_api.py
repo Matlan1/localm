@@ -18,10 +18,21 @@ from ._structs import (
     LlamaBatch,
     LlamaChatMessage,
     LlamaContextParams,
-    LlamaModelParams,
     LlamaSamplerChainParams,
     llama_token,
 )
+
+
+def _model_params_class():
+    """The ``llama_model_params`` ctypes class matching the LOADED runtime.
+
+    upstream reordered that struct in place at an unchanged 72-byte size (see
+    ``_structs``' docstring), so the class cannot be a module constant - it is
+    a property of whichever library got loaded. Resolved once per process by
+    ``_abi.model_params_layout``; imported lazily to keep the
+    ``_api -> _abi -> _loader`` import order acyclic."""
+    from ._abi import model_params_class, model_params_layout
+    return model_params_class(model_params_layout())
 
 # Opaque handle types
 LlamaModel   = ctypes.c_void_p   # struct llama_model*
@@ -55,8 +66,15 @@ def llama_backend_free() -> None:
 #  Default params
 # ---------------------------------------------------------------------------
 
-def llama_model_default_params() -> LlamaModelParams:
-    fn = _bind("llama_model_default_params", LlamaModelParams)
+def llama_model_default_params():
+    """Native default model params, as an instance of the LOADED build's layout.
+
+    The concrete class is ``LlamaModelParamsV1`` or ``...V2`` - callers must not
+    assume either. Fields present in both (``n_gpu_layers``, ``split_mode``,
+    ``main_gpu``, ``tensor_split``, ``tensor_buft_overrides``, ...) can be set
+    directly; for mmap use ``_structs.set_use_mmap``, which is the one field
+    with no V2 counterpart."""
+    fn = _bind("llama_model_default_params", _model_params_class())
     return fn()
 
 
@@ -76,13 +94,23 @@ def llama_sampler_chain_default_params() -> LlamaSamplerChainParams:
 
 def llama_load_model_from_file(
     path: str,
-    params: LlamaModelParams,
+    params,
 ) -> Optional[ctypes.c_void_p]:
+    cls = _model_params_class()
+    if not isinstance(params, cls):
+        # Passing the other layout's class by value would marshal main_gpu and
+        # the load/mmap flags into the wrong native fields with no error from
+        # ctypes and no crash from llama.cpp - the exact silent corruption the
+        # two-layout split exists to prevent. Refuse loudly instead.
+        raise TypeError(
+            f"model params are {type(params).__name__} but the loaded llama "
+            f"runtime uses {cls.__name__}; build them with "
+            "_api.llama_model_default_params()")
     fn = _bind(
         "llama_load_model_from_file",
         LlamaModel,
         ctypes.c_char_p,
-        LlamaModelParams,
+        cls,
     )
     result = fn(path.encode(), params)
     return result if result else None
@@ -511,12 +539,37 @@ def llama_sampler_init_temp(temp: float) -> ctypes.c_void_p:
 
 
 def has_penalties_sampler() -> bool:
-    """True when this llama.dll exports llama_sampler_init_penalties."""
+    """True when this llama.dll exports llama_sampler_init_penalties AND localm
+    can determine which of its two signatures the build uses.
+
+    The symbol alone is not enough: upstream #26520 prepended an ``int32_t
+    n_vocab`` without renaming it or adding any other symbol, and calling either
+    arity against the other corrupts the arguments (see
+    ``_abi.penalties_arity``). A build whose arity cannot be PROVEN reports
+    False here, so the caller drops the repetition-penalty stage rather than
+    make an unsafe call - and says so, rather than quietly sampling without it."""
     try:
         getattr(load_lib(), "llama_sampler_init_penalties")
-        return True
     except AttributeError:
         return False
+    from ._abi import penalties_arity
+    if penalties_arity() == 0:
+        from localm.debuglog import logger
+        logger.warning(
+            "the provisioned llama runtime's llama_sampler_init_penalties "
+            "signature cannot be determined (it is a post-reorder build with "
+            "ggml < 0.18.1, where upstream changed the argument list without "
+            "changing any symbol). Skipping the repetition-penalty sampler "
+            "rather than risk a mis-marshalled call; run 'localm setup-llama "
+            "--force' to move to a build localm can bind exactly.")
+        return False
+    return True
+
+
+def penalties_needs_n_vocab() -> bool:
+    """True when this build's penalties sampler takes the leading n_vocab."""
+    from ._abi import penalties_arity
+    return penalties_arity() == 5
 
 
 def llama_sampler_init_penalties(
@@ -524,8 +577,32 @@ def llama_sampler_init_penalties(
     penalty_repeat: float,
     penalty_freq: float = 0.0,
     penalty_present: float = 0.0,
+    n_vocab: int = 0,
 ) -> ctypes.c_void_p:
-    """Repetition penalty sampler (current 4-argument signature)."""
+    """Repetition penalty sampler, dispatched on the build's argument list.
+
+    Two live signatures (see ``_abi.penalties_arity`` for how they are told
+    apart and why guessing is unsafe):
+
+      <= b10269 / lemonade b1288:  (penalty_last_n, repeat, freq, present)
+      >= 935cad6497e8 / b1307:     (n_vocab, penalty_last_n, repeat, freq, present)
+
+    *n_vocab* is ignored by the 4-argument form. Callers on the 5-argument form
+    must pass the real vocabulary size; upstream uses it to size the sampler's
+    per-token frequency counters, so a 0 there would under-allocate."""
+    from ._abi import penalties_arity
+    arity = penalties_arity()
+    if arity == 5:
+        return _bind(
+            "llama_sampler_init_penalties", LlamaSampler,
+            ctypes.c_int32, ctypes.c_int32,
+            ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        )(n_vocab, penalty_last_n, penalty_repeat, penalty_freq, penalty_present)
+    if arity != 4:
+        raise RuntimeError(
+            "refusing to call llama_sampler_init_penalties: this build's "
+            "argument list could not be determined, and calling the wrong one "
+            "mis-marshals every argument (guard with has_penalties_sampler())")
     return _bind(
         "llama_sampler_init_penalties", LlamaSampler,
         ctypes.c_int32, ctypes.c_float, ctypes.c_float, ctypes.c_float,

@@ -35,10 +35,17 @@ import sys
 import urllib.request
 from pathlib import Path
 
-# The upstream ref whose llama.h localm's layouts are expected to match. localm's
-# structs include ctx_other (added after b1288), matching b9682+/master. Bump
-# this whenever you bump the bundled build, then reconcile any reported drift.
-LLAMA_ABI_REF = "b9740"
+# upstream reordered llama_model_params IN PLACE at an unchanged 72-byte size
+# (load_mode inserted, use_mmap/use_direct_io/use_mlock removed), so localm binds
+# TWO layouts and selects one per loaded library. Both must keep matching a real
+# upstream header, so the default run checks BOTH refs - a pin for the newest
+# build carrying each layout. Bump these whenever you bump a bundled build, then
+# reconcile any reported drift.
+LLAMA_ABI_REFS = {
+    "v1": "b9870",    # pre-reorder: use_mmap/use_direct_io/use_mlock, main_gpu@24
+    "v2": "b10276",   # post-reorder: load_mode@24, main_gpu@28, load_mtp
+}
+LLAMA_ABI_REF = LLAMA_ABI_REFS["v2"]
 _REPO = "ggml-org/llama.cpp"
 
 # The structs we actually care about (passed by value / read field-by-field).
@@ -172,7 +179,16 @@ def _layout(fields):
 #  localm side (ctypes introspection)
 # --------------------------------------------------------------------------- #
 
-def _localm_layout(struct_name: str):
+def _header_model_params_layout(header: str) -> str:
+    """Which llama_model_params layout a header carries: 'v1' or 'v2'.
+
+    Keyed on the field that defines the split rather than on a version number,
+    so an arbitrary --ref or --header is classified by what it actually says."""
+    body = _strip_comments(_extract_struct_body(header, "llama_model_params"))
+    return "v2" if re.search(r"\bload_mode\b", body) else "v1"
+
+
+def _localm_layout(struct_name: str, layout: str):
     """name -> (offset, size) for localm's ctypes struct of the C *struct_name*."""
     import ctypes
 
@@ -180,7 +196,8 @@ def _localm_layout(struct_name: str):
     from localm.inference.backends.llamacpp import _structs as S
 
     cls = {
-        "llama_model_params": S.LlamaModelParams,
+        "llama_model_params": (S.LlamaModelParamsV2 if layout == "v2"
+                               else S.LlamaModelParamsV1),
         "llama_context_params": S.LlamaContextParams,
         "llama_batch": S.LlamaBatch,
     }[struct_name]
@@ -194,10 +211,10 @@ def _localm_layout(struct_name: str):
 #  Diff
 # --------------------------------------------------------------------------- #
 
-def _check(struct_name: str, header: str) -> int:
+def _check(struct_name: str, header: str, layout: str) -> int:
     body = _extract_struct_body(header, struct_name)
     upstream, up_size = _layout(_parse_fields(body))
-    localm, lm_size = _localm_layout(struct_name)
+    localm, lm_size = _localm_layout(struct_name, layout)
 
     print(f"\n=== {struct_name} ===")
     print(f"  upstream native size: {up_size}   localm allocated size: {lm_size}")
@@ -245,24 +262,43 @@ def _localm_last_named(localm) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ref", default=LLAMA_ABI_REF,
-                    help=f"upstream tag/commit/branch, or 'latest' to resolve the "
-                         f"newest release (default {LLAMA_ABI_REF})")
+    ap.add_argument("--ref", default=None,
+                    help="upstream tag/commit/branch, or 'latest' to resolve the "
+                         "newest release. Default: check BOTH pinned refs, "
+                         f"{LLAMA_ABI_REFS['v1']} (pre-reorder) and "
+                         f"{LLAMA_ABI_REFS['v2']} (post-reorder), since localm "
+                         "binds both llama_model_params layouts.")
     ap.add_argument("--header", default=None,
                     help="path to a local llama.h instead of fetching")
     args = ap.parse_args()
 
+    headers = []   # (label, header text)
     if args.header:
-        header = Path(args.header).read_text(encoding="utf-8", errors="replace")
-        print(f"Checking localm structs against header: {args.header}")
-    else:
+        headers.append((args.header,
+                        Path(args.header).read_text(encoding="utf-8", errors="replace")))
+    elif args.ref:
         ref = _resolve_ref(args.ref)
-        print(f"Checking localm structs against {_REPO}@{ref}")
-        header = _fetch_header(ref)
+        headers.append((f"{_REPO}@{ref}", _fetch_header(ref)))
+    else:
+        for want, ref in LLAMA_ABI_REFS.items():
+            headers.append((f"{_REPO}@{ref} (expect {want})", _fetch_header(ref)))
 
     total = 0
-    for s in _STRUCTS:
-        total += _check(s, header)
+    seen_layouts = set()
+    for label, header in headers:
+        layout = _header_model_params_layout(header)
+        seen_layouts.add(layout)
+        print(f"\n############ Checking localm structs against {label} "
+              f"[llama_model_params layout: {layout}] ############")
+        for s in _STRUCTS:
+            total += _check(s, header, layout)
+
+    # A run that silently exercised only ONE layout would pass while leaving the
+    # other unverified, and read exactly like a full pass. Name it.
+    if not args.header and not args.ref and seen_layouts != {"v1", "v2"}:
+        print(f"\nFAIL: expected to check both layouts, only saw {sorted(seen_layouts)} "
+              "- the pinned refs in LLAMA_ABI_REFS no longer straddle the reorder.")
+        total += 1
 
     print()
     if total:
@@ -270,7 +306,8 @@ def main() -> int:
               "corrupts memory - update _structs.py (and _abi anchors) to match, then "
               "re-probe a real build. See issues/abi-verification-design-2026-06-20.md.")
         return 1
-    print("ABI check passed: localm's named fields match upstream offsets.")
+    print(f"ABI check passed: localm's named fields match upstream offsets "
+          f"for layout(s) {sorted(seen_layouts)}.")
     return 0
 
 

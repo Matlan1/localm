@@ -193,7 +193,11 @@ class TestLoadFailureDetailSurvivesUnlink:
         '(run with LOCALM_DEBUG=1 ...)' hint the pre-fix code always fell
         back to (verified live against this exact code path: a corrupted
         GGUF's RuntimeError contained zero native detail before this fix)."""
-        from localm.inference.backends.llamacpp._structs import LlamaModelParams
+        # Layout-agnostic here: only tensor_buft_overrides is touched, and it is
+        # at the same offset in both llama_model_params layouts (guarded by
+        # test_moe_cpu_placement.test_tensor_buft_overrides_offset_is_layout_agnostic).
+        from localm.inference.backends.llamacpp._structs import (
+            LlamaModelParamsV1 as LlamaModelParams)
 
         def _fake_backend_init():
             pass

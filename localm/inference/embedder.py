@@ -648,7 +648,10 @@ class GGUFEmbedder:
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
         if n_gpu_layers >= 99:
-            mp.use_mmap = False
+            # See llamacpp/llama.py: newer builds have no use_mmap field, and
+            # assigning it would silently write into check_tensors instead.
+            from localm.inference.backends.llamacpp._structs import set_use_mmap
+            set_use_mmap(mp, False)
         # Multi-GPU: honour the configured main_gpu_index / gpu_split_indices,
         # same as the chat backend (see discover.apply_main_gpu/apply_gpu_split
         # and llamacpp/llama.py). The returned buffer must stay alive through
