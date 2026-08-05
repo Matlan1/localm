@@ -31,10 +31,44 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
 MEDIA_TYPES = ("image", "music", "video")
+
+# Per-media mutual exclusion for the four workflow routes (list/upload/select/
+# delete). Before the routes were offloaded to run_in_threadpool (event-loop-
+# blocking fix), their synchronous, zero-`await` bodies ran atomically for
+# free: uvicorn is single-process/single-worker, so the event loop could never
+# preempt one handler mid-body to run another's. Moving the whole body onto a
+# real OS thread (anyio's worker pool) removed that for free serialization
+# without replacing it - two requests for the SAME media can now genuinely
+# interleave, and every check-then-act sequence here (is_file() then stat(),
+# a "not currently selected" check then unlink(), a successful save then an
+# is_file() check before recording the selection) assumed the atomicity that
+# no longer holds. Confirmed live (adversarial review, 2026-08-05): a
+# concurrent delete racing a listing produced an unhandled 500; concurrent
+# uploads to the same name corrupted the saved JSON in 59-74% of trials;
+# delete-vs-select races left the config pointing at a workflow file that no
+# longer exists.
+#
+# One lock PER MEDIA (not one global lock): image/music/video are independent
+# directory trees and independent config blocks, so serializing across all
+# three would only add contention with no correctness benefit. Acquired
+# INSIDE the run_in_threadpool-dispatched closure (on the worker thread), so
+# waiting on it never blocks the event loop - the property the original
+# offload fix exists to protect stays intact.
+_media_locks: dict[str, threading.Lock] = {}
+_media_locks_guard = threading.Lock()
+
+
+def _lock_for(media: str) -> threading.Lock:
+    with _media_locks_guard:
+        lock = _media_locks.get(media)
+        if lock is None:
+            lock = _media_locks[media] = threading.Lock()
+        return lock
 
 # Distinct from None, which is a legitimate VALUE for `active` (no workflow
 # selected) - using None as both "caller did not pass this" and "resolved to
@@ -104,9 +138,20 @@ def list_workflows(media: str, *, active=_UNSET) -> list:
     if d.is_dir():
         files = [p for p in d.glob("*.json") if p.is_file()]
         for p in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True):
-            items.append({"name": p.name, "is_active": p.name == active,
-                          "size_bytes": p.stat().st_size,
-                          "mtime": p.stat().st_mtime})
+            # Defense in depth on top of the caller-side per-media lock
+            # (_lock_for): a file can still vanish between the is_file()
+            # check above and here from something the lock does not cover -
+            # a user manually deleting it on disk, an external tool, another
+            # localm process sharing this LOCALM_HOME. Skip it rather than
+            # crash the whole listing over one file that is simply gone by
+            # the time we get to it; it will not appear in the NEXT listing
+            # either, so nothing is silently hidden, just not resurrected.
+            try:
+                items.append({"name": p.name, "is_active": p.name == active,
+                              "size_bytes": p.stat().st_size,
+                              "mtime": p.stat().st_mtime})
+            except FileNotFoundError:
+                continue
     return items
 
 
@@ -336,10 +381,20 @@ def make_workflow_router(media: str):
     # worst on GET, which the GUI polls on its own timer, so this was a
     # repeating, self-inflicted stall for as long as the page was open. Same
     # REG-638 shape as the already-offloaded comfy-model-slots route.
+    #
+    # Every route ALSO acquires _lock_for(media) around its whole body, inside
+    # the threadpool closure (so it costs the worker thread, never the event
+    # loop) - see the module-level comment on _lock_for for why: offloading
+    # alone removed the free serialization these check-then-act sequences
+    # depended on, and this restores it.
 
     @router.get(f"/api/{media}/workflows")
     async def _list_workflows():
-        workflows, selected = await run_in_threadpool(_list_and_selected, media)
+        def _do() -> tuple:
+            with _lock_for(media):
+                return _list_and_selected(media)
+
+        workflows, selected = await run_in_threadpool(_do)
         return {"workflows": workflows, "selected": selected}
 
     @router.post(f"/api/{media}/workflows")
@@ -351,11 +406,12 @@ def make_workflow_router(media: str):
         name = str(body.get("name") or "workflow.json")
 
         def _do() -> dict:
-            saved = save_workflow(media, name, json.dumps(wf).encode("utf-8"))
-            if body.get("activate"):
-                select_workflow(media, saved)
-            workflows, selected = _list_and_selected(media)
-            return {"name": saved, "workflows": workflows, "selected": selected}
+            with _lock_for(media):
+                saved = save_workflow(media, name, json.dumps(wf).encode("utf-8"))
+                if body.get("activate"):
+                    select_workflow(media, saved)
+                workflows, selected = _list_and_selected(media)
+                return {"name": saved, "workflows": workflows, "selected": selected}
 
         try:
             return await run_in_threadpool(_do)
@@ -365,8 +421,9 @@ def make_workflow_router(media: str):
     @router.post(f"/api/{media}/workflows/select")
     async def _select_workflow(body: dict):
         def _do() -> dict:
-            sel = select_workflow(media, body.get("name"))
-            return {"selected": sel, "workflows": list_workflows(media, active=sel)}
+            with _lock_for(media):
+                sel = select_workflow(media, body.get("name"))
+                return {"selected": sel, "workflows": list_workflows(media, active=sel)}
 
         try:
             return await run_in_threadpool(_do)
@@ -376,9 +433,10 @@ def make_workflow_router(media: str):
     @router.delete(f"/api/{media}/workflows/{{name}}")
     async def _delete_workflow(name: str):
         def _do() -> dict:
-            delete_workflow(media, name)
-            workflows, selected = _list_and_selected(media)
-            return {"workflows": workflows, "selected": selected}
+            with _lock_for(media):
+                delete_workflow(media, name)
+                workflows, selected = _list_and_selected(media)
+                return {"workflows": workflows, "selected": selected}
 
         try:
             return await run_in_threadpool(_do)

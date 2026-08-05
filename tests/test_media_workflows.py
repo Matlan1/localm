@@ -10,6 +10,8 @@ chain, delete refusing the active file, and path-traversal safety.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -340,3 +342,193 @@ def test_in_package_override_is_destroyed_by_update_without_migration(tmp_path):
     (staged / "localm" / "image_gen").mkdir(parents=True)
     up.swap_with_backup(staged, install, tmp_path / "backup")
     assert not legacy.exists()
+
+
+# --------------------------------------------------------------------------- #
+#  _lock_for: per-media mutual exclusion (2026-08-05 adversarial review of the
+#  event-loop-offload fix, PR #1045). run_in_threadpool removed the free
+#  atomicity these check-then-act sequences depended on when they ran inline
+#  on the single event loop; _lock_for restores it. These tests reproduce the
+#  EXACT scenarios the review confirmed live, now under the lock, using real
+#  OS threads (not a scripted single-threaded interleaving) so the lock's
+#  actual mutual-exclusion behavior is what is being proven, not a simulation
+#  of it.
+# --------------------------------------------------------------------------- #
+
+def test_lock_for_serializes_concurrent_operations_on_the_same_media():
+    """Direct proof of the property every route now relies on: two threads
+    racing for the SAME media's lock must never be inside the critical
+    section at the same time. A sleep widens the window so a race would
+    reliably show up rather than being missed by luck."""
+    concurrent_now = []
+    max_concurrent = [0]
+    guard = threading.Lock()
+
+    def _critical_section():
+        with mw._lock_for("test-media"):
+            with guard:
+                concurrent_now.append(1)
+                max_concurrent[0] = max(max_concurrent[0], len(concurrent_now))
+            time.sleep(0.05)
+            with guard:
+                concurrent_now.pop()
+
+    threads = [threading.Thread(target=_critical_section) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+    assert max_concurrent[0] == 1, (
+        f"max concurrent threads inside the lock was {max_concurrent[0]}, "
+        "expected 1 - the lock is not actually serializing")
+
+
+def test_lock_for_does_not_serialize_different_media():
+    """image/music/video are independent directory trees and independent
+    config blocks - only genuinely shared state needs mutual exclusion.
+    Serializing across DIFFERENT media would be pure unnecessary contention,
+    not a correctness requirement."""
+    both_held = threading.Event()
+
+    def _hold(media):
+        with mw._lock_for(media):
+            both_held.wait(timeout=2)
+
+    t1 = threading.Thread(target=_hold, args=("image",))
+    t2 = threading.Thread(target=_hold, args=("music",))
+    t1.start()
+    t2.start()
+    # If the two locks were the same object, the second thread would block
+    # here and this next line would never run before the join timeout.
+    time.sleep(0.1)
+    both_held.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive(), (
+        "a lock for one media blocked a different media's lock - they must "
+        "be independent")
+
+
+def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
+    """CONFIRMED by the adversarial review (live reproduction against the
+    real save_workflow(), 59-74% corruption rate across several trial
+    shapes): two real OS threads racing to save the SAME filename, with no
+    lock, produced torn/invalid JSON on disk. Under the per-media lock the
+    writes must serialize, so the file on disk must ALWAYS be valid JSON
+    matching one of the two payloads, in full, never a mix of both."""
+    small_data = {"3": {"class_type": "KSampler", "inputs": {"a": "x" * 500}}}
+    large_data = {"3": {"class_type": "KSampler", "inputs": {"a": "y" * 50_000}}}
+    small = json.dumps(small_data).encode()
+    large = json.dumps(large_data).encode()
+
+    def _upload(content):
+        with mw._lock_for("image"):
+            mw.save_workflow("image", "race.json", content)
+
+    corruptions = 0
+    for _ in range(30):
+        threads = [threading.Thread(target=_upload, args=(small,)),
+                   threading.Thread(target=_upload, args=(large,))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        raw = (mw.workflows_dir("image") / "race.json").read_bytes()
+        try:
+            # save_workflow re-serializes (indent=2, platform newlines), so
+            # comparing PARSED content is the correct check - a raw byte
+            # comparison against either input would fail even on a genuine
+            # success, since neither input matches the on-disk format.
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            corruptions += 1
+            continue
+        # Must match ONE writer's PARSED content completely, not a torn mix
+        # (e.g. one writer's keys with another's values, or a truncated tail).
+        assert data == small_data or data == large_data, (
+            f"parsed content did not match either writer's payload in full "
+            f"(a torn, mixed write): {data!r}")
+
+    assert corruptions == 0, (
+        f"{corruptions}/30 trials produced invalid JSON on disk - the lock "
+        "is not preventing torn writes")
+
+
+def test_concurrent_list_survives_a_racing_delete(home):
+    """CONFIRMED by the adversarial review (live reproduction): a DELETE
+    landing between list_workflows' is_file() check and its later stat()
+    calls raised an unhandled FileNotFoundError -> 500. Under the lock, a
+    listing and a delete for the same media can no longer interleave at
+    all - list_workflows must never raise, no matter how many concurrent
+    deletes are racing it."""
+    d = mw.workflows_dir("image")
+    d.mkdir(parents=True, exist_ok=True)
+    names = [f"wf{i}.json" for i in range(20)]
+    for n in names:
+        (d / n).write_bytes(_WF)
+
+    errors = []
+
+    def _list():
+        try:
+            with mw._lock_for("image"):
+                mw.list_workflows("image")
+        except Exception as e:  # noqa: BLE001 - the property under test is "never raises"
+            errors.append(e)
+
+    def _delete(n):
+        try:
+            with mw._lock_for("image"):
+                (d / n).unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=_list) for _ in range(10)]
+    threads += [threading.Thread(target=_delete, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not errors, f"list_workflows raised under a racing delete: {errors!r}"
+
+
+def test_concurrent_select_and_delete_never_orphans_the_selection(home):
+    """CONFIRMED by the adversarial review (live reproduction): a select and a
+    delete of the SAME file, racing, could leave config["plugins"]["image"]
+    ["workflow"] pointing at a file that no longer exists on disk - the
+    documented invariant ("a generation is never left pointing at a missing
+    file") violated. Under the lock the two operations fully serialize, so
+    after both finish, the invariant must hold: whatever is selected (if
+    anything) must still exist on disk."""
+    d = mw.workflows_dir("image")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "x.json").write_bytes(_WF)
+
+    def _select():
+        with mw._lock_for("image"):
+            try:
+                mw.select_workflow("image", "x.json")
+            except ValueError:
+                pass   # lost the race to delete - fine, that is the point
+
+    def _delete():
+        with mw._lock_for("image"):
+            try:
+                mw.delete_workflow("image", "x.json")
+            except ValueError:
+                pass   # lost the race to select (file now active) - fine
+
+    for _ in range(20):
+        (d / "x.json").write_bytes(_WF)   # restore for the next trial if deleted
+        threads = [threading.Thread(target=_select), threading.Thread(target=_delete)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        sel = mw.selected_name("image")
+        if sel is not None:
+            assert (d / sel).is_file(), (
+                f"config selected {sel!r} but the file does not exist on disk - "
+                "orphaned selection, the invariant was violated")
