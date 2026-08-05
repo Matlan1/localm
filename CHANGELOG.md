@@ -356,6 +356,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **`localm doctor` no longer invents a reason when its native-ABI check cannot
+  run.** If that probe timed out or crashed, doctor still reported the cause as
+  "runtime not loadable" - a specific diagnosis it had not made, pointing at a
+  repair command that cannot fix a probe which never ran. It now says the probe
+  did not run, and still passes through the real reason whenever the probe
+  reported one.
 - **`localm doctor` no longer shows a green tick for a GPU driver that is
   broken.** It read whatever `nvidia-smi` or `rocm-smi` printed without checking
   whether the tool had actually succeeded, so a driver that fails to initialise -
