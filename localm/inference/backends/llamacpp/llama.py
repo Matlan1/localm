@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional
+from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
 
 from . import _api as api
 from ._structs import (
@@ -338,7 +338,7 @@ def _warn_chatml_fallback(reason: str) -> None:
         "understand; chat and vision output quality may be degraded", reason)
 
 
-def _apply_model_template(model_ptr: int, messages: List[Dict]) -> "tuple[str, Optional[str]]":
+def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optional[str]]:
     """
     Format *messages* using the model's own embedded Jinja chat template.
 
