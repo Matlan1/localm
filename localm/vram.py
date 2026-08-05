@@ -531,7 +531,8 @@ def wait_for_vram_release(
 # (which backend is "the image/music/video backend") differs between them, so it
 # lives here once instead of copy-pasted per plugin.
 
-def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
+def unload_chat_for_media(job: Any, self_url: str, media_label: str,
+                          instance_token: Optional[str] = None) -> bool:
     """Unload the chat model BEFORE a media (image/music/video) model loads, so
     it gets the VRAM.
 
@@ -544,11 +545,17 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
     and in use; any pinned model (the chat engine or a sibling) yields False,
     because what matters to this caller is resident VRAM, and the caller then
     falls back to its own conservative swap handling.
-    *media_label* names the caller ("image"/"music"/"video") for the messages."""
+    *media_label* names the caller ("image"/"music"/"video") for the messages.
+    *instance_token*: this instance's attach token (``request.app.state.
+    instance_token``), forwarded to ``self_request`` so the call authenticates
+    in OPEN mode too - see ``selfclient.self_request``'s docstring. Without it
+    this round trip 403s on every keyless (default) server, which is a
+    permanent no-op of the exact VRAM collision this module exists to prevent."""
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:
         from localm.selfclient import self_request
-        resp = self_request("POST", "/models/unload", timeout=300, base_url=self_url)
+        resp = self_request("POST", "/models/unload", timeout=300, base_url=self_url,
+                            instance_token=instance_token)
         if not resp.ok:
             job.push({"type": "line", "text":
                       f"Could not unload the chat model (HTTP {resp.status_code}) - "
@@ -629,10 +636,13 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
 
 
 def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
-                            media_label: str) -> None:
+                            media_label: str,
+                            instance_token: Optional[str] = None) -> None:
     """Hand VRAM back: ask *backend* (the plugin's own backend module, exposing
     ``free_vram(s)``) to drop its models, then reload the chat model so the next
-    reply is instant. Skipped when reload-after-generate is off."""
+    reply is instant. Skipped when reload-after-generate is off.
+    *instance_token*: forwarded to ``self_request`` - see
+    ``unload_chat_for_media``'s docstring."""
     if not s["reload_after"]:
         job.push({"type": "line", "text":
                   f"Keeping the {media_label} backend loaded (reload is off) - "
@@ -646,7 +656,8 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     job.push({"type": "line", "text": "Reloading the chat model..."})
     try:
         from localm.selfclient import self_request
-        resp = self_request("POST", "/models/load", timeout=300, base_url=self_url)
+        resp = self_request("POST", "/models/load", timeout=300, base_url=self_url,
+                            instance_token=instance_token)
         if not resp.ok:
             # A non-2xx (503 "No model specified", 401, or a 500 when the engine
             # load fails because the media backend still holds VRAM - the exact

@@ -114,17 +114,28 @@ def resolve_self_url(app) -> Optional[str]:
 
 
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
-                  timeout: float = 30, base_url: Optional[str] = None) -> requests.Response:
+                  timeout: float = 30, base_url: Optional[str] = None,
+                  instance_token: Optional[str] = None) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
     Builds an ``Authorization: Bearer`` header from the ACTIVE owner key
     (``localm.auth.get_api_key`` - the ``LOCALM_API_KEY`` env var, else the
-    persisted ``<home>/auth.key``) when one is configured; open mode sends none
-    (the endpoint allows it). Reading env-ONLY was the bug behind memory-audit
-    cluster 19: on a ``localm key generate`` / launcher-keyed server the key
-    lives in auth.key, not the env, so every self-call (RAG self-embed, the
-    chat<->media VRAM swap) got a 401 and RAG silently degraded to lexical-only.
+    persisted ``<home>/auth.key``) when one is configured. Reading env-ONLY
+    was the bug behind memory-audit cluster 19: on a ``localm key generate`` /
+    launcher-keyed server the key lives in auth.key, not the env, so every
+    self-call (RAG self-embed, the chat<->media VRAM swap) got a 401 and RAG
+    silently degraded to lexical-only.
+
+    *instance_token*: in OPEN (keyless) mode there is no key to send, and the
+    open-mode management gate (``_origin_guard``) requires proof of a local
+    process for state-changing calls like ``/v1/models/unload``/``load`` - an
+    empty ``Authorization`` header 403s there. Same fix as #953's
+    ``read_activity`` (this module): the per-instance attach token from the
+    0600 registry file is that proof, and the gate already accepts it. Used
+    ONLY when no API key is configured, mirroring ``read_activity``'s own
+    condition - a protected-mode server keeps using the real key, unaffected.
+
     Resolves the TLS verify argument via ``localm.tls.requests_verify`` so a
     loopback HTTPS self-call trusts this install's own local CA.
 
@@ -143,6 +154,8 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     key = get_api_key()          # env var, else the persisted <home>/auth.key
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    elif instance_token:
+        headers["Authorization"] = f"Bearer {instance_token}"
     from localm import tls as _tls
     url = f"{base_url}{path}"
     return requests.request(method, url, json=json, headers=headers,
