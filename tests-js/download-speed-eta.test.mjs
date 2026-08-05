@@ -159,3 +159,43 @@ test("pull progress hides the file line for a single-file download", async () =>
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(win.__hidden, true, "single-file pull keeps the file line hidden");
 });
+
+// --------------------------------------------------------------------------- //
+// A lost SSE connection (streamJob giving up after exhausting its reconnect   //
+// budget) must never be rendered the same as a genuine pull failure - see     //
+// streamjob-reconnect.test.mjs for the helpers.js-level contract this renders.//
+// --------------------------------------------------------------------------- //
+
+test("a disconnected pull (streamJob gave up reconnecting) is NOT painted as failed", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  runScript(win, `
+    streamJob = async (jobId, onLine, onProgress) => ({ status: "disconnected" });
+  `);
+  win.document.getElementById("pull-spec").value = "owner/repo:m.gguf";
+  win.document.getElementById("pull-start").click();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  const bar = win.document.getElementById("pull-bar");
+  const pct = win.document.getElementById("pull-pct").textContent;
+  assert.ok(!bar.classList.contains("failed"),
+    "a lost connection must not be styled as a failed pull");
+  assert.doesNotMatch(pct, /failed/i, "the status text must not claim the pull failed");
+  assert.match(pct, /connection|lost/i, "the status text names the real fact - a lost connection");
+});
+
+test("a genuinely failed pull is still painted as failed - the fix must not mask a real one", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  runScript(win, `
+    streamJob = async (jobId, onLine, onProgress) => ({ status: "failed", returncode: 1 });
+  `);
+  win.document.getElementById("pull-spec").value = "owner/repo:m.gguf";
+  win.document.getElementById("pull-start").click();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  const bar = win.document.getElementById("pull-bar");
+  const pct = win.document.getElementById("pull-pct").textContent;
+  assert.ok(bar.classList.contains("failed"), "a real failure is still styled as failed");
+  assert.match(pct, /failed/i);
+});

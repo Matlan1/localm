@@ -70,6 +70,13 @@ function installStubs(win, { fetchImpl } = {}) {
   }
   win.EventSource = class { constructor() {} close() {} addEventListener() {} };
   if (!win.AbortController) win.AbortController = AbortController;   // node global
+  // jsdom does not expose these on window by default (a real browser does).
+  // helpers.js's readSSE() needs TextDecoder to decode a streamed fetch body;
+  // without this, any test that drives streamJob/readSSE for real (rather
+  // than stubbing streamJob itself, the pre-existing pattern) fails with a
+  // silent "TextDecoder is not defined" swallowed by readSSE's own caller.
+  if (!win.TextDecoder) win.TextDecoder = TextDecoder;   // node global
+  if (!win.TextEncoder) win.TextEncoder = TextEncoder;   // node global
   win.fetch = fetchImpl
     || (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" }));
   // speechSynthesis (speak()) - record calls so abort tests can assert it was NOT called.
