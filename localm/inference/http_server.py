@@ -3046,6 +3046,44 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         return JSONResponse(status_code=500,
                             content={"detail": "Internal server error"})
 
+    # A refusal carries its REASON in the HTTPException detail, and that detail
+    # used to reach only the client: the debug log recorded the status and the
+    # timing and NOTHING else. A real 0.1.4 report ("POST /v1/chat/completions ->
+    # 400 (9 ms)") therefore left no way for anyone - including the maintainer
+    # holding the full DEBUG log - to learn why it was refused, and two separate
+    # diagnoses of that one line reached opposite wrong answers. A user-facing
+    # failure whose cause is unrecoverable from a debug log is exactly what
+    # AGENTS.md rule 5 forbids, so log the detail next to the status and every
+    # future refusal is self-diagnosing from the log alone.
+    #
+    # Gated on debug_enabled() like the request/timing lines it sits beside, NOT
+    # on debug_content_enabled(): an HTTPException detail is server-authored
+    # operational text (which validation refused, which capability is missing),
+    # never chat content. Nothing here reads the request body. See
+    # docs/privacy.md and the debuglog gating note in the middleware below.
+    #
+    # Registered for starlette's HTTPException (fastapi's subclasses it, and
+    # fastapi registers the starlette class as its own key), then DELEGATED to
+    # fastapi's own handler so the response - status, body shape, and any
+    # WWW-Authenticate / Retry-After headers - stays byte-identical. This is a
+    # logging seam, not a response change.
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    @app.exception_handler(_StarletteHTTPException)
+    async def _log_http_exception(request, exc):  # noqa: ANN001 - framework signature
+        from fastapi.exception_handlers import http_exception_handler
+        from localm.debuglog import debug_enabled, logger as _dbg
+        if debug_enabled():
+            # Truncated: a detail can be long by design (the VRAM-overflow 503
+            # carries a multi-line "Options:" list), and the point here is to
+            # name the cause, not to mirror the whole body into the log.
+            detail = str(getattr(exc, "detail", "") or "")
+            if len(detail) > 500:
+                detail = detail[:500] + " ...[truncated]"
+            _dbg.debug("%s %s refused %d: %s", request.method,
+                       request.url.path, exc.status_code, detail)
+        return await http_exception_handler(request, exc)
+
     from fastapi.exceptions import RequestValidationError
 
     @app.exception_handler(RequestValidationError)
