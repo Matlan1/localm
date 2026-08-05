@@ -814,6 +814,27 @@ class LlamaCpp:
         self._cancel_event = cancel_event
         self._load_progress_cb = None   # keep-alive ref for the native callback
         if cancel_event is not None:
+            # _progress is DISCARDED ON PURPOSE, and it is worth saying why: it
+            # looks like a ready-made load percentage and it is not one.
+            # MEASURED 2026-08-05 across 7 configurations, by recording every
+            # call (full data: dev-notes/P14-load-progress-fraction-
+            # measurement-2026-08-05.md):
+            #   - The VALUE is impeccable - 0.0 -> 1.0, STRICTLY increasing,
+            #     zero regressions, every sample distinct, in all 7 arms.
+            #   - The TIMING is unusable. The span between the first and last
+            #     callback covers 0.0% of load wall time on CPU-only and at
+            #     best 44.5% when offloading, because the count is per-TENSOR,
+            #     not per-unit-time: it is 292 calls for a 0.5B and 340 for a
+            #     7B regardless of whether that load took 1.2s or 13.0s.
+            #   - 49% to 99% of every load elapses BEFORE the first call. On a
+            #     cold CPU-only 7B, 12.859 of 12.984s pass silently and then
+            #     all 340 calls fire inside one sub-millisecond tick.
+            # So rendering this as a bar would sit dead for most of the wait and
+            # then flash 0->100%, which is the same "claims what it does not
+            # know" defect #1098 fixed on the download path. If load progress is
+            # wanted, report a PHASE over _runner.py's non-terminal "progress"
+            # envelope; a percentage is only meaningful INSIDE the tensor-upload
+            # phase and must be labelled as such.
             @ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_float, ctypes.c_void_p)
             def _load_progress(_progress, _user_data, _ev=cancel_event):
                 try:
