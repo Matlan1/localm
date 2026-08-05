@@ -595,45 +595,47 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         deadline=discover._GPU_PROBE_CLI_DEADLINE,
                         wait_for_inflight=True))
                 free_vram = v_info.get("free")
-                # v_info may also carry a "free_scope" tag (FREE_SCOPE_DEVICE vs
+                # v_info also carries a "free_scope" tag (FREE_SCOPE_DEVICE vs
                 # FREE_SCOPE_PROCESS, PR #697/#700): whether `free` counts all
-                # processes or only this one. This gate DELIBERATELY keys only on
-                # probe_status, not free_scope, for THIS change's scope. The asymmetry:
-                #  - REFUSE direction: ignoring it is unconditionally safe.
-                #  - PERMIT direction: a PROCESS-scoped `free` OVER-reports (blind to
-                #    other processes), so permitting on it can OOM. As of #700 the label
-                #    is accurate (PROCESS means genuinely process-local, no longer
-                #    over-firing onto correct multi-NVIDIA), so a future permit-side
-                #    caution on a PROCESS reading (prefer single-resident) is POSSIBLE -
-                #    left out here deliberately, not because the signal is unusable. See
+                # processes or only this one. Threaded into the PERMIT decision as
+                # of 2026-08-05 (this is the model-LOAD admission gate, not a
+                # context-grow gate - that is a separate, already-fixed mechanism in
+                # llamacpp/_sizing.py; see
+                # dev-notes/FINDING-vram-load-gate-process-scope-2026-08-05.md) via
+                # residency.fits_alongside_residents's is_process_scoped: every
+                # resident model lives in its OWN isolated worker subprocess
+                # (backends/gguf.py), so a PROCESS-scoped reading is structurally
+                # blind to exactly the VRAM this check exists to account for - it
+                # can only ever OVER-report free space, never under. The asymmetry
+                # that made ignoring scope safe to defer is still why this is
+                # PERMIT-only, never a REFUSE gate:
+                #  - REFUSE direction: ignoring scope was, and remains,
+                #    unconditionally safe (a wrong-in-the-LOW-direction number only
+                #    costs a spurious refusal, not an OOM).
+                #  - PERMIT direction: a PROCESS-scoped `free` over-reporting
+                #    headroom is the direction that OOMs, which is why it is now
+                #    gated exactly like an unmeasurable reading (see
+                #    fits_alongside_residents's docstring). See
                 #    dev-notes/pr697-followup-review.md.
-                # Residual permit-on-PROCESS OOM risk: HISTORICAL, CORRECTED
-                # 2026-08-05 (verified, not assumed - see tests/test_discover.py's
-                # test_no_production_caller_passes_a_short_gpu_probe_deadline). This
-                # paragraph originally said joining a concurrent probe (the 2500ms
-                # /api/stats heartbeat, wait_for_inflight below) inherited the
-                # STARTER's "thinner 4s budget", under which the cold device-global
-                # (ADL) source was skipped, so for one cold cycle the joined reading
-                # could be PROCESS-scoped and the gate might permit on a blind number.
-                # That was accurate when #697/#700/#701 wrote it (2026-07-16), but
-                # #725 (2026-07-17) retired the 4.0s _GPU_PROBE_DEADLINE default in
-                # favour of a single 15.0s value used everywhere - it corrected the
-                # neighbouring paragraph above (about _GPU_PROBE_CLI_DEADLINE's own
-                # history) but never touched this one, though its premise depends on
-                # the exact cap #725 removed. /api/stats's own probe
-                # (localm/sysstats.py's _vram(), the "STARTER" above) calls
-                # vram_capacity() with no explicit deadline, so it now gets the SAME
-                # unified 15.0s default this gate's own _GPU_PROBE_CLI_DEADLINE
-                # resolves to - there is no more "thinner" budget for a join to
-                # inherit, and discover.py's own cold-source-skip guard
-                # (_apply_device_global_free) now matters only to a caller that passes
-                # a deliberately short deadline - no production call site does. So
-                # under real operation a joined reading is DEVICE-scoped just like a
-                # fresh one, and the one-cycle PROCESS-scoped-permit window this used
-                # to describe does not currently occur. The underlying discover.py
-                # guard is untouched and still exists for a future short-deadline
-                # caller, which would reopen this exact gap - the pinned test above
-                # exists so that reintroduction cannot happen silently.
+                free_scope = v_info.get("free_scope")
+                # Historical note on ONE specific avenue into a PROCESS-scoped
+                # permit, kept for the forensic trail - the direct scope-check
+                # above now closes every avenue regardless of cause, so this no
+                # longer gates anything by itself. Joining a concurrent probe (the
+                # 2500ms /api/stats heartbeat, wait_for_inflight below) used to be
+                # able to inherit a thinner cold-start budget, causing discover.py's
+                # device-global correction to be cold-skipped
+                # (_apply_device_global_free) and the joined reading to come back
+                # PROCESS-scoped. That was accurate when #697/#700/#701 wrote it
+                # (2026-07-16); #725 (2026-07-17) later unified every deadline to
+                # 15.0s, closing that thin-budget window specifically (pinned by
+                # tests/test_discover.py::
+                # test_no_production_caller_passes_a_short_gpu_probe_deadline, added
+                # 2026-08-05). The underlying discover.py cold-skip guard is
+                # untouched and still exists for a future short-deadline caller -
+                # which would now be caught here regardless, since the check above
+                # reads the resulting free_scope tag directly rather than relying on
+                # no cause ever producing one.
                 # Two states that master conflated under one `measurable` flag, and
                 # they want OPPOSITE handling (AGENTS.md rule 5 - do not collapse a
                 # benign case into an unknown one):
@@ -691,7 +693,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     _engines_lru, name, resident_cap)
                 vram_ok = residency.fits_alongside_residents(
                     free_vram=free_vram, vram_required=vram_required,
-                    probe_ok=probe_ok, headroom=headroom, shortfall=shortfall)
+                    probe_ok=probe_ok, headroom=headroom, shortfall=shortfall,
+                    is_process_scoped=free_scope == discover.FREE_SCOPE_PROCESS)
                 if vram_ok and not over_cap:
                     break
 

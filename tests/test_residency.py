@@ -60,6 +60,39 @@ class TestFitsAlongsideResidents:
         assert self._fits(free_vram=6 * GB, headroom=1 * GB) is True
         assert self._fits(free_vram=6 * GB, headroom=3 * GB) is False
 
+    def test_process_scoped_reading_refuses_despite_plenty_of_free_vram(self):
+        """Regression case from FINDING-vram-load-gate-process-scope-2026-08-05.md.
+        Every resident model lives in its OWN isolated worker subprocess, so a
+        PROCESS-scoped reading is structurally blind to a resident peer's VRAM and
+        can only ever OVER-report free space. Before this guard, exactly this
+        shape (a fresh, "sufficient" 15GB/10GB reading) returned True even though
+        only ~7GB was genuinely free once an 8GB resident model - invisible to a
+        process-scoped probe - was accounted for. Kept as the literal call from
+        the diagnosis, not a paraphrase of it."""
+        assert residency.fits_alongside_residents(
+            free_vram=15 * GB, vram_required=10 * GB, probe_ok=True,
+            is_process_scoped=True) is False
+
+    def test_process_scoped_refuses_even_when_free_vram_is_enormous(self):
+        """Not a stricter threshold - an unconditional early return. A reading
+        that would trivially clear any headroom still refuses once it is known to
+        be blind to other processes' VRAM."""
+        assert self._fits(free_vram=1000 * GB, is_process_scoped=True) is False
+
+    def test_device_scoped_reading_admits_exactly_as_before(self):
+        """The PERMIT-only guardrail: an explicit is_process_scoped=False (an
+        ordinary device-wide reading) must behave IDENTICALLY to the pre-existing
+        behavior - this guard must never turn a previously-permitted load into a
+        refusal on a genuinely trustworthy reading."""
+        assert self._fits(is_process_scoped=False) is True
+
+    def test_process_scoped_flag_defaults_to_false(self):
+        """A caller that does not know about scope yet (or omits the keyword
+        entirely, as every test above this one does) must see IDENTICAL behavior
+        to before this parameter existed - no silent behavior change for an
+        unaware caller."""
+        assert self._fits() is True
+
 
 class TestRequiredBytes:
     def test_applies_the_overhead_factor(self):
