@@ -287,6 +287,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Stopping a reply mid-generation no longer loses it on reload.** A stopped
+  reply rendered live with a "[stopped]" marker, but nothing was ever saved -
+  reload the page or switch conversations and it was gone, even though it was
+  still on screen a moment before. It is now saved as its own message, so it
+  survives a reload; it is explicitly marked stopped so a later turn can never
+  mistake it for a finished, continuable reply - it still cannot be spoken
+  aloud or trigger a web-search follow-up on its own, the same as before.
+  Separately: a completed reply's token-rate figures (tok/s, time to first
+  token) reached the on-screen status line but never the saved message, so
+  they were gone on reload for every turn, not just a stopped one - both the
+  figures and the context-usage gauge are now saved with the reply and shown
+  again on reload or when switching back to that conversation.
 - **The GUI no longer needs a manual reminder to invalidate its own cache when
   a static file changes.** Every change to the app's HTML, JS or CSS used to
   need a hand-typed version bump so browsers would fetch the new copy; missing
