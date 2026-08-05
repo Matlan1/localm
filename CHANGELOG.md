@@ -302,6 +302,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   serving your next request immediately, instead of reloading first.
 
 ### Changed
+- **Windows installs no longer carry 49 command-line tools localm never runs.**
+  `setup-llama` was copying every executable out of the upstream archive -
+  `llama-cli`, `llama-server`, `llama-bench`, an RPC server daemon and ~45
+  others - none of which localm invokes: it loads the runtime in-process. They
+  are no longer installed, which is also what the macOS and Linux installs have
+  always done. Re-run `localm setup-llama --force` to clear them from an
+  existing install. No library is affected.
 - **The bundled AMD (ROCm) llama.cpp runtime moves to build b1307**, from
   b1288. Two months of upstream llama.cpp, a newer ROCm runtime, and more
   gfx1030 GEMM kernels than the previous build shipped. Run
