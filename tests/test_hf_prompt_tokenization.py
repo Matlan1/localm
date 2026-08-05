@@ -53,6 +53,22 @@ def test_chat_tokenization_suppresses_double_bos(monkeypatch):
     monkeypatch.setattr(transformers, "TextIteratorStreamer", _FakeStreamer)
     monkeypatch.setattr(hfmod, "_grammar_processor", lambda *a, **k: None)
 
+    # chat_stream's own `from transformers import StoppingCriteriaList, ...`
+    # triggers transformers' lazy-module loader to import
+    # generation/stopping_criteria.py, which does a fresh `import torch` - the
+    # importorskip above guards a DIFFERENT, unrelated transformers ImportError
+    # and does not cover this. Same known-doomed DLL-identity conflict as
+    # test_doctor_hf_backend_usable.py's guard, placed here (immediately before
+    # the call that actually triggers it) rather than at the importorskip site.
+    from localm.inference.backends.llamacpp import _loader
+    if _loader.native_lib_loaded():
+        pytest.skip("llama.cpp's native runtime is already loaded in this "
+                     "process (a real compute-device probe ran earlier in "
+                     "this same pytest worker) - chat_stream's transformers "
+                     "import triggers a fresh torch import, which is the "
+                     "known-doomed DLL-identity conflict, not this test's "
+                     "own subject")
+
     list(be.chat_stream([{"role": "user", "content": "hi"}], max_tokens=1))
 
     # The re-tokenization of the already-BOS'd template string must NOT add a
