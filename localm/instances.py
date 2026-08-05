@@ -502,11 +502,17 @@ def attach_target(home: Path, root_dir: str,
 
 
 def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
-             reap: bool = True) -> list[dict]:
+             reap: bool = True, *, include_token: bool = False) -> list[dict]:
     """Registry entries for ``localm ps``: each gains an ``alive`` flag from an
     identity-verified /whoami probe, with the attach ``token`` stripped (a
     listing must never surface a credential). Process-gone entries are reaped
-    first unless *reap* is False. Sorted by start time (oldest first)."""
+    first unless *reap* is False. Sorted by start time (oldest first).
+
+    ``include_token``: keep the attach token in each row instead of stripping
+    it. Default False (every DISPLAY caller, e.g. ``localm ps``). Set True only
+    for an INTERNAL caller that needs the token to authenticate its OWN request
+    to that instance (#953's MCP ``server_activity`` tool, which asks each
+    discovered instance over HTTP) - never for anything a human reads."""
     probe = probe or default_probe
     if reap:
         reap_stale(home)
@@ -516,7 +522,7 @@ def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
             alive = probe(e)
         except Exception:
             alive = False
-        row = {k: v for k, v in e.items() if k != "token"}
+        row = dict(e) if include_token else {k: v for k, v in e.items() if k != "token"}
         row["alive"] = alive
         rows.append(row)
     rows.sort(key=lambda r: r.get("started") or "")

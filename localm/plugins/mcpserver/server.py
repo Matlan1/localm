@@ -611,7 +611,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         from localm.config import home_dir
         from localm.selfclient import read_activity
 
-        rows = instances.snapshot(home_dir())
+        # include_token=True: this call ASKS each discovered instance over HTTP
+        # (an internal, non-display use), so it needs the attach token a
+        # genuinely open (keyless) instance's middleware requires (#953) - never
+        # do this for anything a human reads (e.g. `localm ps`, which keeps the
+        # default-stripped snapshot()).
+        rows = instances.snapshot(home_dir(), include_token=True)
         if not rows:
             return _text_result(
                 "No localm server is running on this machine, so there is "
@@ -624,13 +629,20 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 lines.append(f"{where}: registered but not responding; "
                              f"its activity is unknown.")
                 continue
-            state, payload = read_activity(e.get("scheme", "http"), e.get("port"))
+            state, payload = read_activity(
+                e.get("scheme", "http"), e.get("port"), e.get("token"))
             if state == "unreachable":
                 lines.append(f"{where}: could not be reached ({payload}); "
                              f"its activity is unknown.")
             elif state == "unauthorized":
-                lines.append(f"{where}: needs an API key this process does not "
-                             f"have; its activity is unknown.")
+                # #953: match the "could not be X" register the other failure
+                # branches already use, not a "needs a key" requirement
+                # statement - the latter reads as an optional hardening tip
+                # rather than what this actually is: this process genuinely
+                # cannot tell what the server is doing right now.
+                lines.append(f"{where}: could not be asked (it requires an "
+                             f"API key this process does not have); its "
+                             f"activity is unknown.")
             elif state == "unsupported":
                 lines.append(f"{where}: does not report activity (older "
                              f"localm); its activity is unknown.")

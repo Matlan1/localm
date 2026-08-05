@@ -534,19 +534,27 @@ def _fmt_age(seconds) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
-def _print_activity(scheme: str, port) -> None:
+def _print_activity(scheme: str, port, instance_token=None) -> None:
     """Render what the server is doing, or why that could not be determined."""
-    state, payload = read_activity(scheme, port)
+    state, payload = read_activity(scheme, port, instance_token)
     console.print()
     if state == "unreachable":
         console.print("[yellow]![/yellow]  Could not ask this server what it is "
                       f"doing ({payload}). It may have just stopped.")
         return
     if state == "unauthorized":
-        console.print("[yellow]![/yellow]  This server needs an API key this "
-                      "client does not have, so its activity is unknown.")
-        console.print("[dim]Set LOCALM_API_KEY, or run from the install whose "
-                      "auth.key it uses.[/dim]")
+        # #953: lead with the SAME "could not ask" framing as the unreachable
+        # branch above, not with "needs a key" - that phrasing reads as an
+        # optional hardening tip rather than what it actually is, a genuine
+        # inability to answer. B1/B2 are the reminder this exists for: a busy
+        # and an idle server print this identical message, so it must never
+        # imply "nothing is running" - it means this client cannot tell.
+        console.print("[yellow]![/yellow]  Could not ask this server what it "
+                      "is doing: it requires an API key this client does not "
+                      "have.")
+        console.print("[dim]Set LOCALM_API_KEY to the server's key, or run "
+                      "from the install whose auth.key it uses, to see what "
+                      "it is doing.[/dim]")
         return
     if state == "unsupported":
         console.print("[dim]This server does not report activity (it predates "
@@ -607,7 +615,7 @@ def status_cmd(project):
     # fixed at process start; none of it can tell you a model pull is halfway
     # through. Printed last so the identity block still renders when the server
     # cannot be reached.
-    _print_activity(scheme, entry.get("port"))
+    _print_activity(scheme, entry.get("port"), entry.get("token"))
     console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 

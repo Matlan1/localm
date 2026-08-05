@@ -3417,8 +3417,24 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                                      require_auth_enabled)
             if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)
+                # #953: a keyless LOCAL process (`localm status`, the MCP
+                # server_activity tool) has no way to obtain shell_token - it is
+                # per-process, never persisted, and only ever injected into the
+                # browser-served SPA. It DOES already have this instance's own
+                # attach token (instances.py's per-instance registry file,
+                # 0600/owner-only, read via instances.attach_target/snapshot) -
+                # the exact credential /v1/surfaces/gui's mount_gui route
+                # already accepts for the same "local process, not a browser"
+                # distinction. Accepting it here too turns keyless CLI/MCP
+                # activity reads on, without touching what a browser can do:
+                # a browser has no filesystem access to the registry file and
+                # so can never present this token, unlike shell_token (which
+                # DOES reach the browser and needs the cross-origin check
+                # below as its own defence).
+                inst_token = getattr(request.app.state, "instance_token", None)
                 presented = _bearer_token(request)
-                token_ok = ct_equal(presented, token)
+                token_ok = ct_equal(presented, token) or (
+                    bool(inst_token) and ct_equal(presented, inst_token))
                 # AUD-CORSTOKEN: an unsafe-method request already passed the
                 # same-origin check above (or is exempt as _CROSS_ORIGIN_OK,
                 # which never reaches here); a metadata GET never went through
@@ -3426,6 +3442,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 # otherwise a token stolen via CORS (the default policy trusts
                 # every localhost:PORT origin to READ a response) is directly
                 # replayable cross-origin against every /api/*, /v1/* read.
+                # Applies uniformly to both token kinds: a real CLI/MCP client
+                # never sends an Origin header at all (that is a browser-only
+                # header), so this costs the legitimate case nothing, and it is
+                # defence-in-depth against a caller that somehow obtained the
+                # (never-served) instance token some other way.
                 cross_origin = is_metadata_get and _cross_origin_refused(request)
                 if not token_ok or cross_origin:
                     return JSONResponse(

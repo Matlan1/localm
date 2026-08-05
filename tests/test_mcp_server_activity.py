@@ -60,7 +60,8 @@ def _patch_instances(monkeypatch, rows):
 
 def _patch_read(monkeypatch, state, payload):
     import localm.selfclient as sc
-    monkeypatch.setattr(sc, "read_activity", lambda scheme, port: (state, payload))
+    monkeypatch.setattr(sc, "read_activity",
+                        lambda scheme, port, instance_token=None: (state, payload))
 
 
 _LIVE = [{"scheme": "http", "port": 1234, "alive": True}]
@@ -112,7 +113,52 @@ def test_only_a_real_answer_reports_idle(tools, monkeypatch):
     assert _claims_idle(out)
 
 
+def test_unauthorized_matches_the_other_failure_branches_register(tools, monkeypatch):
+    """#953 (grader 2): the pre-fix "needs an API key this process does not
+    have" wording read like an optional hardening tip rather than the same
+    kind of failure "could not be reached"/"could not be read" already are.
+    Match their "could not be X" register instead."""
+    _patch_instances(monkeypatch, _LIVE)
+    _patch_read(monkeypatch, "unauthorized", 401)
+    out = _call(tools)
+    assert "could not be asked" in out.lower()
+    assert "needs an api key" not in out.lower()
+
+
 # ------------------------------------------------------------ the good case
+
+def test_snapshot_called_with_include_token(tools, monkeypatch):
+    """#953: this tool asks each discovered instance over HTTP, so it needs
+    the attach token a genuinely open instance's middleware requires - unlike
+    `localm ps`, which must never see it. Confirms the ONE flag distinguishing
+    those two callers is actually passed."""
+    from localm import instances
+    captured = {}
+
+    def _spy_snapshot(*a, **kw):
+        captured.update(kw)
+        return []
+    monkeypatch.setattr(instances, "snapshot", _spy_snapshot)
+    _call(tools)
+    assert captured.get("include_token") is True
+
+
+def test_the_rows_token_reaches_read_activity(tools, monkeypatch):
+    """The token snapshot() now returns per-row must actually reach
+    read_activity, not just exist in the row - a real, working credential is
+    useless if the call site never reads it."""
+    _patch_instances(monkeypatch, [
+        {"scheme": "http", "port": 1234, "alive": True, "token": "row-token"}])
+    captured = {}
+
+    def _fake_read_activity(scheme, port, instance_token=None):
+        captured["instance_token"] = instance_token
+        return "ok", {"now": time.time(), "operations": []}
+    import localm.selfclient as sc
+    monkeypatch.setattr(sc, "read_activity", _fake_read_activity)
+    _call(tools)
+    assert captured["instance_token"] == "row-token"
+
 
 def test_running_operations_are_listed(tools, monkeypatch):
     now = time.time()

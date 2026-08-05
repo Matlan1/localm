@@ -21,7 +21,7 @@ from typing import Optional
 import requests
 
 
-def read_activity(scheme: str, port) -> tuple:
+def read_activity(scheme: str, port, instance_token: Optional[str] = None) -> tuple:
     """Ask a running localm server what it is doing. Returns ``(state, payload)``.
 
     *state* is one of:
@@ -42,6 +42,15 @@ def read_activity(scheme: str, port) -> tuple:
     activity tool), and a second copy of a state machine whose entire value is
     telling five outcomes apart is exactly the kind of thing that drifts into
     telling four of them apart.
+
+    *instance_token* (#953): a genuinely OPEN (keyless) server's open-mode
+    middleware needs the caller to prove it is a local process, not a browser -
+    an API key does not exist to send in that mode. The per-instance attach
+    token from the 0600 registry file (``instances.attach_target``/``snapshot``)
+    is that proof; a caller with filesystem access to it is exactly the "local
+    process" principal the middleware means to admit. Used ONLY when no API key
+    is configured, matching the server's own condition for requiring it at all -
+    a protected-mode server keeps using the real key, unaffected.
     """
     from localm import tls as _tls
     from localm.auth import get_api_key
@@ -55,6 +64,8 @@ def read_activity(scheme: str, port) -> tuple:
     key = get_api_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    elif instance_token:
+        headers["Authorization"] = f"Bearer {instance_token}"
     try:
         r = requests.get(url, headers=headers, timeout=5,
                          verify=_tls.requests_verify(url))
