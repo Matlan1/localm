@@ -344,6 +344,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Re-running `setup-llama` on an AMD box now tells you it is an upgrade, and
+  from which build.** It records the build tag it installed, so a genuine move
+  between llama.cpp builds says "Upgrading the amd-rocm build: b1288 -> b1307"
+  instead of a bare "Re-downloading" that reads like a no-op. An install set up
+  before this existed, or on a backend whose build tag cannot be determined
+  without a network call, still says only what it actually knows rather than
+  guessing a version. No re-provision is needed to pick this up: the tag is
+  recorded next time you run setup-llama.
 - **Warming up the embedding model no longer promises "up to a minute" for
   something it gives five.** The progress line shown while an embedding model
   loads quoted a ceiling five times shorter than the one the load actually runs
