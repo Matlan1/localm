@@ -131,13 +131,15 @@ function activityLabel(op) {
   return (op && (op.label || op.kind)) || "operation";
 }
 
-// A compact "running 12m" / "3m ago" string, or "" when age cannot be
-// computed (no server clock yet, or a malformed created_at).
+// A compact "12m" / "3m ago" string, or "" when age cannot be computed (no
+// server clock yet, or a malformed created_at). No "running " prefix for a
+// running op - the adjacent .job-state pill already says "running"; verified
+// live that a prefix there reads as "runningrunning 21s" (#1078 follow-up).
 function activityAge(op) {
   if (_activityServerNow == null || typeof op.created_at !== "number") return "";
   const d = fmtDuration(_activityServerNow - op.created_at);
   if (!d) return "";
-  return op.status === "running" ? `running ${d}` : `${d} ago`;
+  return op.status === "running" ? d : `${d} ago`;
 }
 
 export function renderActivityPill(ops) {

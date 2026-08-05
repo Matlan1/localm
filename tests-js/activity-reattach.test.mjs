@@ -263,6 +263,10 @@ test("showActivityDetails: renders a running operation's age from the SERVER's c
   // If this were computed against Date.now() instead, the result would be
   // wildly different (real epoch seconds vs this fixture's tiny numbers) -
   // the assertion below can only pass if the SERVER's now is what got used.
+  //
+  // No "running " prefix on the age itself - verified live against a real
+  // server that a prefix there reads as "runningrunning 21s" next to the
+  // adjacent .job-state pill, which already says "running" on its own.
   const { fetchImpl } = makeActivityFetch([
     { ops: [{ id: "j1", kind: "pull", label: "Model pull", status: "running", created_at: 880 }], now: 1000 },
   ]);
@@ -271,7 +275,9 @@ test("showActivityDetails: renders a running operation's age from the SERVER's c
 
   win.showActivityDetails();
   const modalBody = win.document.getElementById("modal-body");
-  assert.match(modalBody.textContent, /running 2m 00s/);
+  assert.match(modalBody.textContent, /2m 00s/);
+  assert.doesNotMatch(modalBody.textContent, /runningrunning/,
+    "the age must not repeat the word the adjacent status pill already shows");
 });
 
 test("showActivityDetails: a finished operation's age reads '<duration> ago', not 'running <duration>'", async () => {
