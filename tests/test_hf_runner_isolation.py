@@ -399,7 +399,9 @@ class TestCooperativeCancel:
         received_cancel = []
 
         def _child():
-            cmd = r._req_q.get(timeout=5)
+            # The value is unused; the get() is the synchronisation point that
+            # makes the child wait for the request before replying.
+            r._req_q.get(timeout=5)
             r._resp_q.put(("chunk", "hi"))
             try:
                 received_cancel.append(r._ctrl_q.get(timeout=2))

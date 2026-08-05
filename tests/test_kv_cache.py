@@ -324,9 +324,14 @@ class TestRepeatPenaltySampler:
     the sampler chain, so models prone to looping repeated marker lines
     until max_tokens."""
 
-    def _mock_api(self, has_penalties=True):
+    def _mock_api(self, has_penalties=True, n_vocab=32000, needs_n_vocab=False):
         mock_api = MagicMock()
         mock_api.has_penalties_sampler.return_value = has_penalties
+        # Newer llama builds take the vocabulary size as a leading argument
+        # (upstream #26520); _api dispatches on the build but the caller must
+        # supply the real value, so the chain builder reads it off the vocab.
+        mock_api.llama_vocab_n_tokens.return_value = n_vocab
+        mock_api.penalties_needs_n_vocab.return_value = needs_n_vocab
         return mock_api
 
     def test_penalty_added_when_set(self):
@@ -334,7 +339,32 @@ class TestRepeatPenaltySampler:
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             _build_sampler(vocab=1, repeat_penalty=1.1)
         mock_api.llama_sampler_init_penalties.assert_called_once_with(
-            64, 1.1, 0.0, 0.0)
+            64, 1.1, 0.0, 0.0, n_vocab=32000)
+
+    def test_n_vocab_is_read_from_the_real_vocab_not_hardcoded(self):
+        """A 0 or wrong n_vocab under-allocates the native sampler's per-token
+        frequency counters, so the value has to come from the model."""
+        mock_api = self._mock_api(n_vocab=151936)
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=0xABCD, repeat_penalty=1.1)
+        mock_api.llama_vocab_n_tokens.assert_called_once_with(0xABCD)
+        assert mock_api.llama_sampler_init_penalties.call_args.kwargs[
+            "n_vocab"] == 151936
+
+    def test_skipped_when_build_needs_n_vocab_and_none_is_available(self):
+        """Rather than call a 5-argument penalties sampler with n_vocab=0."""
+        mock_api = self._mock_api(n_vocab=0, needs_n_vocab=True)
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=0, repeat_penalty=1.1)
+        mock_api.llama_sampler_init_penalties.assert_not_called()
+
+    def test_still_added_when_build_does_not_need_n_vocab(self):
+        """The older 4-argument builds ignore n_vocab, so a missing vocab must
+        NOT cost those users their repetition penalty."""
+        mock_api = self._mock_api(n_vocab=0, needs_n_vocab=False)
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=0, repeat_penalty=1.1)
+        mock_api.llama_sampler_init_penalties.assert_called_once()
 
     def test_no_penalty_at_neutral_value(self):
         mock_api = self._mock_api()

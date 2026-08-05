@@ -90,12 +90,21 @@ def _check_native_abi() -> None:
         "from localm.inference.backends.llamacpp._abi import abi_report;"
         "v=abi_report();"
         "print('ABI_RESULT:'+json.dumps("
-        "{'status':v.status,'detail':v.detail,'failures':v.failures[:3]}))"
+        "{'status':v.status,'detail':v.detail,'failures':v.failures[:3],"
+        "'layout':v.layout}))"
     )
     abi = _run_probe_subprocess(abi_code, "ABI_RESULT:") or {}
     status = abi.get("status", "unchecked")
+    # WHICH of the two llama_model_params layouts was selected is worth showing:
+    # upstream reordered that struct in place at an unchanged size, so this is
+    # the only externally visible sign of which generation of runtime is
+    # installed, and it is the first thing anyone diagnosing a wrong-GPU or
+    # unexpected-memory-behaviour report needs. See llamacpp/_structs.py.
+    layout = abi.get("layout") or ""
+    suffix = f" [dim](model params layout {layout})[/dim]" if layout else ""
     if status == "ok":
-        console.print(f"  {_OK_SYM}  native ABI: struct layout matches this build")
+        console.print(f"  {_OK_SYM}  native ABI: struct layout matches this build"
+                      + suffix)
     elif status == "mismatch":
         console.print(f"  {_FAIL_SYM}  native ABI MISMATCH - the runtime's struct "
                       "layout differs from this build; loading is refused to avoid "

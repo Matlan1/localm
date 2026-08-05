@@ -25,7 +25,8 @@ from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional
 
 from . import _api as api
 from ._structs import (
-    llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride)
+    llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
+    set_use_mmap)
 
 
 _stderr_lock = threading.Lock()
@@ -554,12 +555,23 @@ def _build_sampler(
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
         api.llama_sampler_chain_add(chain, gsampler)
 
-    # Repetition penalty applies to greedy and stochastic sampling alike
+    # Repetition penalty applies to greedy and stochastic sampling alike.
+    # Newer builds take the vocabulary size as a leading argument (upstream
+    # #26520); _api dispatches on the build, but it needs the real n_vocab to
+    # pass - a 0 there would under-allocate the sampler's frequency counters.
     if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
-        api.llama_sampler_chain_add(
-            chain,
-            api.llama_sampler_init_penalties(64, repeat_penalty, 0.0, 0.0),
-        )
+        n_vocab = api.llama_vocab_n_tokens(vocab) if vocab else 0
+        if not n_vocab and api.penalties_needs_n_vocab():
+            from localm.debuglog import logger
+            logger.warning(
+                "skipping the repetition-penalty sampler: this llama build "
+                "needs the vocabulary size and no vocab pointer was available.")
+        else:
+            api.llama_sampler_chain_add(
+                chain,
+                api.llama_sampler_init_penalties(
+                    64, repeat_penalty, 0.0, 0.0, n_vocab=n_vocab),
+            )
 
     if temperature <= 0.0:
         api.llama_sampler_chain_add(chain, api.llama_sampler_init_greedy())
@@ -746,7 +758,11 @@ class LlamaCpp:
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
         if n_gpu_layers >= 99:
-            mp.use_mmap = False
+            # Newer builds replaced use_mmap/use_mlock/use_direct_io with a
+            # single load_mode enum at a DIFFERENT offset; set_use_mmap writes
+            # whichever this build has. Assigning mp.use_mmap directly would
+            # land in check_tensors on those builds - same size, no error.
+            set_use_mmap(mp, False)
         # Multi-GPU: honour the configured main_gpu_index (validated against
         # the devices actually visible right now); leaves the native default
         # (device 0) untouched when unset. See discover.apply_main_gpu.

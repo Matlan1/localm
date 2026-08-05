@@ -331,8 +331,8 @@ def test_resolve_amd_rocm_asset_warns_when_gfx103x_asset_missing(monkeypatch, ca
     gfx103X asset (e.g. only other GPU variants are listed) - that must warn
     too, not just the empty-list case."""
     dummy_assets = [{
-        "name": "llama-b1288-windows-rocm-gfx110X-x64.zip",
-        "browser_download_url": "https://dummy.github/releases/download/b1288/llama-rocm-gfx110X.zip",
+        "name": "llama-b1307-windows-rocm-gfx110X-x64.zip",
+        "browser_download_url": "https://dummy.github/releases/download/b1307/llama-rocm-gfx110X.zip",
         "digest": "sha256:othergpuvariant",
     }]
     monkeypatch.setattr(sl.sys, "platform", "win32")
@@ -348,8 +348,8 @@ def test_resolve_amd_rocm_asset_warns_when_gfx103x_asset_missing(monkeypatch, ca
 
 def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsys):
     dummy_assets = [{
-        "name": "llama-b1288-windows-rocm-gfx103X-x64.zip",
-        "browser_download_url": "https://dummy.github/releases/download/b1288/llama-rocm.zip",
+        "name": "llama-b1307-windows-rocm-gfx103X-x64.zip",
+        "browser_download_url": "https://dummy.github/releases/download/b1307/llama-rocm.zip",
         "digest": "sha256:dummyrocmsha",
     }]
     monkeypatch.setattr(sl.sys, "platform", "win32")
@@ -357,7 +357,7 @@ def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsy
 
     url, sha = sl._resolve_backend_asset("amd-rocm")
 
-    assert url == "https://dummy.github/releases/download/b1288/llama-rocm.zip"
+    assert url == "https://dummy.github/releases/download/b1307/llama-rocm.zip"
     assert sha == "dummyrocmsha"
     out = capsys.readouterr().out.lower()
     assert "could not find" not in out
@@ -736,3 +736,46 @@ class TestIssue827Reproduction:
         assert "network" in msg or "proxy" in msg or "filter" in msg
         assert "196608" in msg or "196,608" in str(exc_info.value)
         assert "33554432" in msg
+
+
+# --------------------------------------------------------------------------- #
+#  The pinned AMD build and its checksum must not drift apart
+# --------------------------------------------------------------------------- #
+
+def test_default_url_tag_and_pin_are_coherent():
+    """DEFAULT_URL, _ROCM_TAG, DEFAULT_URL_SHA256 and the pinned table are four
+    places that name the same artifact. Bumping the build while leaving one of
+    them behind yields an offline fallback that downloads one file and verifies
+    it against another's hash - a hard failure for users with no release-API
+    access, and invisible to anyone testing online (where the digest comes off
+    the API instead). Assert they agree rather than trusting the bump."""
+    fname = sl.DEFAULT_URL.rsplit("/", 1)[-1]
+
+    assert f"/{sl._ROCM_TAG}/" in sl.DEFAULT_URL, (
+        f"DEFAULT_URL {sl.DEFAULT_URL!r} does not point at tag {sl._ROCM_TAG!r}")
+    assert sl._ROCM_TAG in fname, (
+        f"asset name {fname!r} does not carry tag {sl._ROCM_TAG!r}")
+    assert fname in sl._PINNED_FALLBACK_SHA256, (
+        f"{fname!r} has no entry in _PINNED_FALLBACK_SHA256")
+    assert sl._PINNED_FALLBACK_SHA256[fname] == sl.DEFAULT_URL_SHA256, (
+        "DEFAULT_URL_SHA256 disagrees with the pinned table entry for the same file")
+    assert len(sl.DEFAULT_URL_SHA256) == 64, "sha256 pins are 64 hex chars"
+
+
+def test_every_rocm_pin_matches_the_current_tag():
+    """A stale pin from a previous build is dead weight that reads as coverage:
+    the offline path looks up by FILENAME, so an entry for an older tag can
+    never be hit, while its presence suggests that build is still supported."""
+    # Match the lemonade-sdk naming (`-rocm-gfx<target>-`) specifically. A bare
+    # "rocm" substring also catches upstream's own ggml-org asset
+    # `llama-<tag>-bin-ubuntu-rocm-7.2-x64.tar.gz`, which is pinned against
+    # _FALLBACK_TAG and has nothing to do with _ROCM_TAG.
+    rocm = [k for k in sl._PINNED_FALLBACK_SHA256 if "-rocm-gfx" in k]
+    assert rocm, "the pinned table should still carry the lemonade ROCm assets"
+    stale = [k for k in rocm if sl._ROCM_TAG not in k]
+    assert not stale, f"pinned ROCm assets for a tag other than {sl._ROCM_TAG}: {stale}"
+    # And the upstream ROCm asset must still track _FALLBACK_TAG, so this test
+    # cannot be satisfied by simply deleting entries.
+    upstream_rocm = [k for k in sl._PINNED_FALLBACK_SHA256
+                     if "rocm" in k and "-rocm-gfx" not in k]
+    assert all(sl._FALLBACK_TAG in k for k in upstream_rocm), upstream_rocm

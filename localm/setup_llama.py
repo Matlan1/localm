@@ -71,8 +71,21 @@ console = Console(highlight=False)
 # no separate HIP SDK. See rocm-canary-forge/windows-native for the provenance.
 DEFAULT_URL = (
     "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/"
-    "b1288/llama-b1288-windows-rocm-gfx103X-x64.zip"
+    "b1307/llama-b1307-windows-rocm-gfx103X-x64.zip"
 )
+
+# sha256 of the DEFAULT_URL asset, used when the release lookup is unavailable.
+# Named rather than repeated inline so the URL and its pin cannot drift apart.
+DEFAULT_URL_SHA256 = (
+    "495323bfb522f2f5297a0786d8a2bec23f57421abdb01a1a07ff3b04d9ee7f0b"
+)
+
+# The lemonade-sdk release tag DEFAULT_URL points at. b1307 is built from
+# llama.cpp 07132750825a (ggml 0.18.1), which carries the reordered
+# llama_model_params and the 5-argument llama_sampler_init_penalties - see
+# inference/backends/llamacpp/_structs.py and _abi.py, which bind BOTH that
+# layout and the older b1288 one so an already-provisioned runtime keeps working.
+_ROCM_TAG = "b1307"
 
 # Upstream llama.cpp prebuilts (ggml-org/llama.cpp). We resolve the latest
 # release tag with uploaded assets at runtime; this pin is the fallback if that
@@ -80,23 +93,30 @@ DEFAULT_URL = (
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
 _FALLBACK_TAG = "b9870"
 
-# Pinned fallback checksums for tag b9870 and b1288 (lemonade AMD build) release assets
+# Pinned fallback checksums for tag b9870 and b1307 (lemonade AMD build) release
+# assets. Only consulted when the release API is unreachable or publishes no
+# `digest` - the online path reads the digest straight off the asset listing.
+#
+# The b1307 values are the API's own `digest` fields. That is not taken on
+# trust: the gfx103X asset was downloaded and hashed locally on 2026-08-05 and
+# came out byte-identical to the digest GitHub reports, which is what makes the
+# remaining thirteen usable without pulling 4.4 GB.
 _PINNED_FALLBACK_SHA256 = {
-    # tag b1288 ROCm assets
-    "llama-b1288-windows-rocm-gfx103X-x64.zip": "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e",
-    "llama-b1288-windows-rocm-gfx110X-x64.zip": "1271b7088d934e6f443ac7e32b206a2aaa9297b232f52492f0039d9a8a8820aa",
-    "llama-b1288-windows-rocm-gfx1150-x64.zip": "33f7f8917ce0dd3f09d9b84269d60db286f2684b238f6b558c0788a4ef54df3a",
-    "llama-b1288-windows-rocm-gfx1151-x64.zip": "c94198d329256ac6f33c2e9701885a960574cd79d9df61422091e60976bd572f",
-    "llama-b1288-windows-rocm-gfx120X-x64.zip": "d7416e3a5bf7c4c058b5e729cf98d540eaf095614e66d4b207fc38e27af8ae24",
-    "llama-b1288-windows-rocm-gfx908-x64.zip": "fd2fb30d31671fd16ba4e4e9288c2706c913d02725a700409bbcc80143318e8f",
-    "llama-b1288-windows-rocm-gfx90a-x64.zip": "6f6d49bda990ecb2795ece9c1bf04c6f5827c770889dabe842f98b8d82e5c927",
-    "llama-b1288-ubuntu-rocm-gfx103X-x64.zip": "bc793bf354444a1fe3a2c57aa4a190da6c00bf6953c6864de7ab83208cb1a1a5",
-    "llama-b1288-ubuntu-rocm-gfx110X-x64.zip": "3bd617bbb21731d727cf5948e0536caa6d7be4d7605542306d219704d6a01da3",
-    "llama-b1288-ubuntu-rocm-gfx1150-x64.zip": "3db631e7fded551af4be1e63ffa74c78b1cfa493f83a28fb54ef7f5cdd2a7d2a",
-    "llama-b1288-ubuntu-rocm-gfx1151-x64.zip": "4fec75e80673511a43c4f98e33ee019143bf2193778c17b1b26ef3e20afdad2e",
-    "llama-b1288-ubuntu-rocm-gfx120X-x64.zip": "f0f5534e902cacbd1a159bca3708abb3dd76a1de597227896ee7f3e561b24381",
-    "llama-b1288-ubuntu-rocm-gfx908-x64.zip": "bb54bdc6e4eafa0a20888613f8b62c6caf79b1bd941fb3e2d11f4741b9977984",
-    "llama-b1288-ubuntu-rocm-gfx90a-x64.zip": "8c1d54115b820f30c6fff64b4a37bed6700dd4b882c39ee09d638558798cd19b",
+    # tag b1307 ROCm assets (llama.cpp 07132750825a, ROCm 10.1.0a20260804)
+    "llama-b1307-windows-rocm-gfx103X-x64.zip": "495323bfb522f2f5297a0786d8a2bec23f57421abdb01a1a07ff3b04d9ee7f0b",
+    "llama-b1307-windows-rocm-gfx110X-x64.zip": "90dfa8a2ad803cf2f6a9bc069a599a6e89aa2c0a86ea46f4469b8ecf4e340978",
+    "llama-b1307-windows-rocm-gfx1150-x64.zip": "fbc4ad15db7019f513760dd4ee73e39a030b5773b5efd1aacbff9973ece9865c",
+    "llama-b1307-windows-rocm-gfx1151-x64.zip": "075c2cbb9c1d075295b6fa9ec6643b37629c7ef32532811f1cad6dec4aa91610",
+    "llama-b1307-windows-rocm-gfx120X-x64.zip": "432c56fb566511e81a81a4558809c1773c82ada7dcc8b1223be5c1a5251be167",
+    "llama-b1307-windows-rocm-gfx908-x64.zip": "43f81dbc884d1d08d929103a49a2f6ebf54916f208c40ecf4f476fc1148e2d65",
+    "llama-b1307-windows-rocm-gfx90a-x64.zip": "6ff31e1124d267706d113b7de0a55a5509f971fa671f44993b0dc56c41970944",
+    "llama-b1307-ubuntu-rocm-gfx103X-x64.zip": "d316029a29bab71fbb751d70034989ebabff343ed2a32bcac07c54e87fba5ea7",
+    "llama-b1307-ubuntu-rocm-gfx110X-x64.zip": "9e6ca73dedcd58857918df2852d2cb6b7d6c1c9c12754e9afb5d666b6b7420c2",
+    "llama-b1307-ubuntu-rocm-gfx1150-x64.zip": "b65630ae9062f0d1f2fc02012acfa743969074866b821afe9e9eb6877a2e1835",
+    "llama-b1307-ubuntu-rocm-gfx1151-x64.zip": "846af2c097475e0640f2011bfb9a39852e1dfecf74fee7093d63dbe16d334b9d",
+    "llama-b1307-ubuntu-rocm-gfx120X-x64.zip": "74a38230048a1081a2ebf86825c27f394de6fc5447a155ab4c8ebe81ffc3de30",
+    "llama-b1307-ubuntu-rocm-gfx908-x64.zip": "9d10467e59ee05e26d21131a251077d45f41f76ceefee8de88a17222a0c8500b",
+    "llama-b1307-ubuntu-rocm-gfx90a-x64.zip": "149e3d871830bf9e429c5edfa2d4d427830529a3813ad4d789925095cdd57ade",
     # tag b9870 upstream assets
     "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
     "cudart-llama-bin-win-cuda-13.3-x64.zip": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
@@ -272,6 +292,14 @@ def _is_wanted(f: Path) -> bool:
 # lemonade-sdk b1288 gfx103X archive DOES ship a complete rocblas/library/ (410
 # files, including gfx1030 kernels) and hipblaslt/library/ - the data was always
 # there, just always dropped on the way in.
+#
+# Re-measured 2026-08-05 on the b1307 gfx103X archive: rocblas/library/ is still
+# there and now carries 142 gfx1030 kernel files (up from 88), while
+# hipblaslt/library/ is GONE. That is not a regression to chase - b1288's
+# hipblaslt data contained gfx1100 kernels ONLY, zero gfx1030, so it was never
+# usable by the gfx103X target this archive is built for. Both names stay listed
+# because the same code provisions the gfx110X/gfx120X archives too, and a
+# missing directory is already a no-op here.
 _BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt")
 
 
@@ -405,7 +433,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
                 "the self-contained 'amd-rocm' build is Windows-only; on Linux "
                 "use --backend hip (needs ROCm) or build with --from.")
         # Try to resolve dynamically first
-        tag = "b1288"
+        tag = _ROCM_TAG
         assets = _release_assets(tag, repo="lemonade-sdk/llamacpp-rocm")
         for a in assets:
             if "windows-rocm-gfx103X" in a.get("name", ""):
@@ -413,7 +441,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
                 digest = a.get("digest")
                 sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
                 if not sha:
-                    sha = "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
+                    sha = DEFAULT_URL_SHA256
                 return url, sha
         # Surface the fallback so the user knows the build may not be current
         # (the lemonade-sdk release lookup was unreachable, or this release is
@@ -423,7 +451,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
         console.print("[yellow]Could not find a lemonade-sdk/llamacpp-rocm release asset "
                       f"for {tag}; using pinned amd-rocm build - rerun later for the "
                       "latest.[/yellow]")
-        return DEFAULT_URL, "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
+        return DEFAULT_URL, DEFAULT_URL_SHA256
 
     plat = _platform_key()
     entry = _ASSET_MATCH.get(plat, {}).get(backend)

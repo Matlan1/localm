@@ -279,6 +279,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   serving your next request immediately, instead of reloading first.
 
 ### Changed
+- **The bundled AMD (ROCm) llama.cpp runtime moves to build b1307**, from
+  b1288. Two months of upstream llama.cpp, a newer ROCm runtime, and more
+  gfx1030 GEMM kernels than the previous build shipped. Run
+  `localm setup-llama --force` to pick it up; an existing installation keeps
+  working untouched until you do.
+
 - **Settings now shows you which fields you've actually changed.** A field
   still on its shipped default now renders blank with the default shown as a
   greyed placeholder, instead of looking identical to a value you chose
@@ -298,6 +304,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **A newer llama.cpp runtime could silently apply the wrong model settings.**
+  Upstream rearranged the fields inside one of the structures localm passes to
+  the native library, without changing its size, so nothing detected the
+  change. Against such a build localm's "use this GPU" setting was quietly
+  discarded (the model loaded on the default device instead), its request to
+  skip memory-mapping the weights had no effect, and the value meant for the
+  GPU index landed on the setting that controls how the weights are mapped into
+  memory. localm now recognises both arrangements and picks the right one for
+  whichever runtime is installed, so old and new builds both behave correctly,
+  and it refuses to load a runtime it cannot place confidently rather than
+  guessing. This affected anyone who provisioned a very recent llama.cpp build,
+  not only the AMD one.
+- **Repetition penalty is now applied correctly on newer llama.cpp builds.**
+  Upstream added an argument to the repetition-penalty sampler; on a build
+  carrying that change localm was calling it the old way, which scrambled every
+  value it passed. On a build where localm cannot tell which form that build
+  expects, the repetition-penalty stage is now skipped with a warning naming
+  the reason, rather than making a call that would misbehave silently.
 - **`localm add --store move` (or `copy`) can no longer relocate your file and
   then report success while leaving it unregistered under any name.** When
   the destination name was already taken by a genuinely different model and

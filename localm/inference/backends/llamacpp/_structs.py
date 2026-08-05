@@ -2,30 +2,9 @@
 """
 ctypes Structure definitions for the llama.cpp C API.
 
-These layouts were derived by probing the prebuilt llama.dll with known default
-values and cross-referencing against llama.h.  The prebuilt is from a commit that
-ALREADY carries the 'devices' / 'tensor_buft_overrides' fields, at the FRONT of
-llama_model_params (see the annotated offsets below).  Re-probed 2026-07-28
-against the shipped amd-rocm build b1-7c158fb: llama_model_default_params()
-returns devices = NULL at offset 0, tensor_buft_overrides = NULL at 8,
-n_gpu_layers = -1 at 16 and split_mode = 1 at 20, i.e. the NEW layout; reading
-those bytes as the OLD layout is self-inconsistent (it yields n_gpu_layers = 0
-and split_mode = 0).  Keep this paragraph correct and name the build you probed:
-``_abi.verify_abi`` does NOT check THIS struct's layout (it fingerprints
-llama_context_params' three -1 enums plus a split_mode range check), so this note
-is the only record of it, and a stale one sends the next reader to the wrong
-conclusion about what the runtime supports.
-
-The ``sizeof`` asserts below guard against editing these definitions wrong; they
-do NOT validate against the loaded DLL (a struct is the same size whatever the
-DLL contains).  The runtime cross-check against the ACTUAL native layout lives in
-``_abi.py`` (``verify_abi``), called from ``_loader.load_lib`` on first load.
-
-Verified NATIVE sizes (against the cpu / vulkan / amd-rocm prebuilts, b1288..b9740):
-    llama_model_params   = 72 bytes
-    llama_context_params = 152 bytes on b1288; 160 bytes on b9682+ (adds a
-                           trailing ``ctx_other`` pointer)
-    llama_batch          = 56 bytes (7 pointers + 1 int32 + padding)
+These layouts were derived by diffing the ACTUAL ``include/llama.h`` at the
+ACTUAL upstream commit each prebuilt was built from, and corroborated by probing
+the shipped DLL's ``*_default_params()`` return bytes.
 
 upstream appends fields to the params structs several times a quarter with no ABI
 or soname bump, so localm OVER-allocates both by-value params structs (a named
@@ -33,8 +12,61 @@ trailing field for what we know plus a reserved pad) and round-trips
 ``*_default_params()`` - we only overwrite the fields we name, so any field we do
 not know keeps its native default and a newer build never reads past our buffer
 in ``llama_load_model_from_file`` / ``llama_init_from_model``. A trailing append
-is therefore harmless; a mid-struct REORDER is caught at load time by
-``_abi.verify_abi``.
+is therefore harmless.
+
+A mid-struct REORDER is NOT harmless, and upstream did one:
+
+TWO llama_model_params LAYOUTS EXIST, BOTH 72 BYTES
+---------------------------------------------------
+``llama_model_params`` was reordered in place between llama.cpp `7c158fbb4aec`
+(lemonade b1288, ggml 0.13.1) and `07132750825a` (lemonade b1307, ggml 0.18.1),
+landing somewhere in upstream b10090..b10180. ``sizeof`` is 72 on BOTH sides, so
+nothing about the size trips - the fields simply moved:
+
+    offset   V1 (b1288, upstream <= ~b10090)   V2 (b1307, upstream >= ~b10180)
+    [16]     n_gpu_layers                      n_gpu_layers
+    [20]     split_mode                        split_mode
+    [24]     main_gpu                          load_mode      <-- INSERTED
+    [28]     (pad)                             main_gpu       <-- MOVED
+    [64]     vocab_only                        vocab_only
+    [65]     use_mmap                          check_tensors  <-- use_mmap,
+    [66]     use_direct_io                     use_extra_bufts    use_direct_io
+    [67]     use_mlock                         no_host            and use_mlock
+    [68]     check_tensors                     no_alloc           DELETED; mmap /
+    [69]     use_extra_bufts                   load_mtp           mlock / direct-io
+    [70]     no_host                           (pad)              are now the
+    [71]     no_alloc                          (pad)              load_mode enum
+
+Writing a V1 ``main_gpu`` into a V2 build lands in ``load_mode`` and silently
+drops the user's GPU selection while changing how the weights are mapped; writing
+``check_tensors`` at the V1 offset lands in V2's ``no_alloc``, which loads
+metadata and no weights at all. None of it raises.
+
+localm therefore ships BOTH layouts and picks one per loaded library at load time
+(``_abi.detect_model_params_layout``), rather than binding one and hoping. There
+is deliberately NO bare ``LlamaModelParams`` name: a caller must go through
+``_abi.model_params_class()`` / ``_api.llama_model_default_params()`` so it is not
+possible to construct the wrong one by habit.
+
+Fields at offsets that did NOT move (``devices``, ``tensor_buft_overrides``,
+``n_gpu_layers``, ``split_mode``, ``tensor_split``, the callbacks,
+``kv_overrides``, ``vocab_only``) are named identically in both classes, so call
+sites can set them directly. ``main_gpu`` is also named in both, at its own
+correct offset in each, so ``mp.main_gpu = i`` is right once the class is right.
+The ONE field with no V2 counterpart is ``use_mmap``; use :func:`set_use_mmap`.
+
+Verified NATIVE sizes:
+    llama_model_params   = 72 bytes (V1 and V2 alike)
+    llama_context_params = 152 bytes on b1288; 160 bytes on b9682+ / b1307
+                           (adds a trailing ``ctx_other`` pointer). Trailing
+                           append only - no mid-struct movement, re-diffed
+                           7c158fbb4aec -> 07132750825a on 2026-08-05.
+    llama_batch          = 56 bytes (7 pointers + 1 int32 + padding)
+
+The ``sizeof`` asserts below guard against editing these definitions wrong; they
+do NOT validate against the loaded DLL (a struct is the same size whatever the
+DLL contains).  The runtime cross-check against the ACTUAL native layout lives in
+``_abi.py`` (``verify_abi``), called from ``_loader.load_lib`` on first load.
 """
 
 from __future__ import annotations
@@ -48,18 +80,37 @@ llama_pos     = ctypes.c_int32   # position in sequence
 llama_seq_id  = ctypes.c_int32   # sequence id
 
 
-# llama_model_params  (72 bytes - probed)
+# enum llama_load_mode  (V2 builds only - b1307 / upstream >= ~b10180)
 #
-# This is the NEW layout that includes 'devices' and 'tensor_buft_overrides'
-# at the beginning (added in recent llama.cpp).  Verified by probing the
-# prebuilt llama.dll:
+# Replaces V1's separate use_mmap / use_mlock / use_direct_io booleans with a
+# single enum. Values read from llama.h at 07132750825a.
+LLAMA_LOAD_MODE_NONE       = 0   # no special loading mode (i.e. no mmap)
+LLAMA_LOAD_MODE_MMAP       = 1   # memory map the model (the native default)
+LLAMA_LOAD_MODE_MLOCK      = 2   # keep in RAM, no swap/compress
+LLAMA_LOAD_MODE_MMAP_MLOCK = 3   # both
+LLAMA_LOAD_MODE_DIRECT_IO  = 4   # direct I/O where available
+
+_VALID_LOAD_MODES = (
+    LLAMA_LOAD_MODE_NONE,
+    LLAMA_LOAD_MODE_MMAP,
+    LLAMA_LOAD_MODE_MLOCK,
+    LLAMA_LOAD_MODE_MMAP_MLOCK,
+    LLAMA_LOAD_MODE_DIRECT_IO,
+)
+
+
+# llama_model_params V1  (72 bytes)
+#
+# llama.cpp <= 7c158fbb4aec (lemonade b1288, upstream tag b9870 and older).
+# Native defaults from llama_model_default_params(), probed live on the shipped
+# amd-rocm b1288 build 2026-08-05 (ggml_commit() == "7c158fb"):
 #   - [0-7]   ptr  devices                = NULL
 #   - [8-15]  ptr  tensor_buft_overrides  = NULL
 #   - [16]    i32  n_gpu_layers           = -1 (default: all layers)
 #   - [20]    i32  split_mode             = 1 (LLAMA_SPLIT_MODE_LAYER)
 #   - [24]    i32  main_gpu               = 0
 #   - [28]    pad
-#   - [32-39] ptr  tensor_split           = <static default array>
+#   - [32-39] ptr  tensor_split           = NULL
 #   - [40-47] ptr  progress_callback      = NULL
 #   - [48-55] ptr  progress_callback_user_data = NULL
 #   - [56-63] ptr  kv_overrides           = NULL
@@ -99,7 +150,7 @@ class LlamaModelTensorBuftOverride(ctypes.Structure):
     ]
 
 
-class LlamaModelParams(ctypes.Structure):
+class LlamaModelParamsV1(ctypes.Structure):
     _fields_ = [
         ("devices",                     ctypes.c_void_p),    # ggml_backend_dev_t**
         ("tensor_buft_overrides",       ctypes.c_void_p),
@@ -120,16 +171,116 @@ class LlamaModelParams(ctypes.Structure):
         ("no_host",                     ctypes.c_bool),
         ("no_alloc",                    ctypes.c_bool),
         # Forward-compat headroom (see the module docstring). The native struct
-        # ends at no_alloc (72 bytes today); we over-allocate so a newer build
-        # that appends trailing fields never reads past our buffer.
+        # ends at no_alloc (72 bytes); we over-allocate so a newer build that
+        # appends trailing fields never reads past our buffer.
         ("_reserved",                   ctypes.c_uint8 * 32),
     ]
 
-# Self-consistency guard ONLY (this does NOT validate against the DLL - that is
-# _abi.verify_abi). 72 native bytes + 32 reserved = 104.
-assert ctypes.sizeof(LlamaModelParams) == 104, (
-    f"LlamaModelParams size mismatch: {ctypes.sizeof(LlamaModelParams)} != 104"
+
+# llama_model_params V2  (72 bytes)
+#
+# llama.cpp >= the load_mode reorder (lemonade b1307 / 07132750825a, upstream
+# >= ~b10180). Native defaults read from llama_model_default_params() in
+# src/llama-model.cpp at 07132750825a:
+#   - [16]    i32  n_gpu_layers    = -1
+#   - [20]    i32  split_mode      = 1 (LLAMA_SPLIT_MODE_LAYER)
+#   - [24]    i32  load_mode       = 1 (LLAMA_LOAD_MODE_MMAP)
+#   - [28]    i32  main_gpu        = 0
+#   - [64]    bool vocab_only      = False
+#   - [65]    bool check_tensors   = False
+#   - [66]    bool use_extra_bufts = True
+#   - [67]    bool no_host         = False
+#   - [68]    bool no_alloc        = False
+#   - [69]    bool load_mtp        = False
+# main_gpu at 28 needs no explicit pad after it: 28 + 4 == 32, already aligned
+# for the tensor_split pointer.
+
+class LlamaModelParamsV2(ctypes.Structure):
+    _fields_ = [
+        ("devices",                     ctypes.c_void_p),    # ggml_backend_dev_t**
+        ("tensor_buft_overrides",       ctypes.c_void_p),
+        ("n_gpu_layers",                ctypes.c_int32),
+        ("split_mode",                  ctypes.c_int32),
+        ("load_mode",                   ctypes.c_int32),     # enum llama_load_mode
+        ("main_gpu",                    ctypes.c_int32),
+        ("tensor_split",                ctypes.c_void_p),    # const float*
+        ("progress_callback",           ctypes.c_void_p),
+        ("progress_callback_user_data", ctypes.c_void_p),
+        ("kv_overrides",                ctypes.c_void_p),
+        ("vocab_only",                  ctypes.c_bool),
+        ("check_tensors",               ctypes.c_bool),
+        ("use_extra_bufts",             ctypes.c_bool),
+        ("no_host",                     ctypes.c_bool),
+        ("no_alloc",                    ctypes.c_bool),
+        ("load_mtp",                    ctypes.c_bool),
+        ("_pad0",                       ctypes.c_uint8 * 2),
+        # Forward-compat headroom, same rationale as V1.
+        ("_reserved",                   ctypes.c_uint8 * 32),
+    ]
+
+
+# Self-consistency guards ONLY (these do NOT validate against the DLL - that is
+# _abi.verify_abi). 72 native bytes + 32 reserved = 104, for BOTH layouts: the
+# reorder did not change the size, which is exactly why it needed catching.
+assert ctypes.sizeof(LlamaModelParamsV1) == 104, (
+    f"LlamaModelParamsV1 size mismatch: {ctypes.sizeof(LlamaModelParamsV1)} != 104"
 )
+assert ctypes.sizeof(LlamaModelParamsV2) == 104, (
+    f"LlamaModelParamsV2 size mismatch: {ctypes.sizeof(LlamaModelParamsV2)} != 104"
+)
+# The offsets are the whole point of having two classes, so assert them rather
+# than trusting that the field lists above were transcribed correctly.
+for _cls, _off in (
+    (LlamaModelParamsV1, {"n_gpu_layers": 16, "split_mode": 20, "main_gpu": 24,
+                          "vocab_only": 64, "use_mmap": 65, "use_direct_io": 66,
+                          "use_mlock": 67, "check_tensors": 68,
+                          "use_extra_bufts": 69, "no_host": 70, "no_alloc": 71}),
+    (LlamaModelParamsV2, {"n_gpu_layers": 16, "split_mode": 20, "load_mode": 24,
+                          "main_gpu": 28, "vocab_only": 64, "check_tensors": 65,
+                          "use_extra_bufts": 66, "no_host": 67, "no_alloc": 68,
+                          "load_mtp": 69}),
+):
+    for _name, _want in _off.items():
+        _got = getattr(_cls, _name).offset
+        assert _got == _want, f"{_cls.__name__}.{_name} at {_got}, expected {_want}"
+del _cls, _off, _name, _want, _got
+
+
+def set_use_mmap(mp, enabled: bool) -> None:
+    """Express "memory-map the weights (or do not)" on EITHER layout.
+
+    V1 has a ``use_mmap`` bool; V2 folded mmap / mlock / direct-io into the
+    ``load_mode`` enum, so there is no field of that name to assign and a plain
+    ``mp.use_mmap = False`` on a V2 struct would raise (or, if the wrong class
+    were bound, silently write into ``check_tensors``). Call sites use this
+    instead of naming either field.
+
+    Any mlock the caller already asked for is preserved across the flip -
+    localm does not set mlock today, but mapping "no mmap" onto a bare
+    LLAMA_LOAD_MODE_NONE would silently drop it if that ever changes.
+    """
+    if isinstance(mp, LlamaModelParamsV2):
+        keep_mlock = mp.load_mode in (LLAMA_LOAD_MODE_MLOCK,
+                                      LLAMA_LOAD_MODE_MMAP_MLOCK)
+        if enabled:
+            mp.load_mode = (LLAMA_LOAD_MODE_MMAP_MLOCK if keep_mlock
+                            else LLAMA_LOAD_MODE_MMAP)
+        else:
+            mp.load_mode = (LLAMA_LOAD_MODE_MLOCK if keep_mlock
+                            else LLAMA_LOAD_MODE_NONE)
+        return
+    mp.use_mmap = enabled
+
+
+def get_use_mmap(mp) -> bool:
+    """Read back whether the weights will be memory-mapped, on either layout.
+
+    DIRECT_IO is deliberately NOT mmap: upstream documents it as taking
+    precedence over mmap, and V1 carried it as its own separate flag.
+    """
+    if isinstance(mp, LlamaModelParamsV2):
+        return mp.load_mode in (LLAMA_LOAD_MODE_MMAP, LLAMA_LOAD_MODE_MMAP_MLOCK)
+    return bool(mp.use_mmap)
 
 
 # llama_context_params  (152 bytes - probed)

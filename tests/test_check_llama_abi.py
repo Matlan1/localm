@@ -19,7 +19,8 @@ abichk = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(abichk)
 
 
-# The structs as defined by upstream llama.cpp b9740 (matches localm's layout).
+# The structs as defined by upstream llama.cpp BEFORE the llama_model_params
+# reorder (b9870 and older) - i.e. localm's V1 layout.
 _GOOD_HEADER = """
 struct llama_model_params {
     ggml_backend_dev_t * devices;
@@ -89,6 +90,31 @@ struct llama_batch {
 };
 """
 
+# The same header AFTER upstream's in-place reorder of llama_model_params
+# (lemonade b1307 / upstream b10180+) - localm's V2 layout. Note it is still 72
+# bytes: load_mode is inserted at 24 and three booleans are replaced by it, which
+# is precisely why a size check cannot detect this and an OFFSET check must.
+_GOOD_HEADER_V2 = _GOOD_HEADER.replace(
+    """    enum llama_split_mode split_mode;
+    int32_t main_gpu;""",
+    """    enum llama_split_mode split_mode;
+    enum llama_load_mode load_mode;
+    int32_t main_gpu;""",
+).replace(
+    """    bool use_mmap;
+    bool use_direct_io;
+    bool use_mlock;
+    bool check_tensors;
+    bool use_extra_bufts;
+    bool no_host;
+    bool no_alloc;""",
+    """    bool check_tensors;
+    bool use_extra_bufts;
+    bool no_host;
+    bool no_alloc;
+    bool load_mtp;""",
+)
+
 # A mid-struct insertion that shifts every later field (the dangerous drift).
 _BAD_HEADER = _GOOD_HEADER.replace(
     "    uint32_t n_ctx;\n",
@@ -96,14 +122,37 @@ _BAD_HEADER = _GOOD_HEADER.replace(
 )
 
 
+def test_embedded_headers_are_the_two_real_layouts():
+    """Guards the fixtures themselves: if the V2 edit above stopped producing a
+    genuinely different llama_model_params, every test below would silently
+    check V1 twice and still pass."""
+    assert abichk._header_model_params_layout(_GOOD_HEADER) == "v1"
+    assert abichk._header_model_params_layout(_GOOD_HEADER_V2) == "v2"
+
+
 @pytest.mark.parametrize("struct", ["llama_model_params", "llama_context_params", "llama_batch"])
-def test_verifier_passes_on_matching_header(struct):
-    assert abichk._check(struct, _GOOD_HEADER) == 0
+@pytest.mark.parametrize("header,layout", [
+    (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2")])
+def test_verifier_passes_on_matching_header(struct, header, layout):
+    assert abichk._check(struct, header, layout) == 0
 
 
-def test_verifier_fails_on_midstruct_insertion():
+@pytest.mark.parametrize("header,layout", [
+    (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2")])
+def test_verifier_fails_on_midstruct_insertion(header, layout):
     # The injected field shifts n_batch onward -> many offset mismatches.
-    assert abichk._check("llama_context_params", _BAD_HEADER) > 0
+    bad = header.replace(
+        "    uint32_t n_ctx;\n",
+        "    uint32_t n_ctx;\n    int32_t injected_evil_field;\n")
+    assert abichk._check("llama_context_params", bad, layout) > 0
+
+
+def test_verifier_fails_when_the_wrong_model_params_layout_is_selected():
+    """The upgrade's core hazard, as the offline verifier sees it: a V2 header
+    checked against the V1 class (what a stale binding does) must FAIL, and vice
+    versa. If either direction passed, the two-layout split would be cosmetic."""
+    assert abichk._check("llama_model_params", _GOOD_HEADER_V2, "v1") > 0
+    assert abichk._check("llama_model_params", _GOOD_HEADER, "v2") > 0
 
 
 def test_layout_natural_alignment():
