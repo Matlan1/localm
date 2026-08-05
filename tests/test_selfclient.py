@@ -93,6 +93,43 @@ def test_no_auth_header_in_open_mode(monkeypatch):
     assert "Authorization" not in captured["headers"]
 
 
+def test_open_mode_uses_instance_token_when_no_key_configured(monkeypatch):
+    """FINDING #2 / release-verify-pass 2026-08-05: an open (keyless) server's
+    own self-call (the chat<->media VRAM handover) sent no Authorization header
+    at all, so http_server.py's open-mode management gate 403'd it - a
+    permanent no-op on the default configuration. Mirrors read_activity's
+    instance_token fallback."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    self_request("POST", "/models/unload", base_url="http://127.0.0.1:8642/v1",
+                instance_token="inst-token-abc")
+    assert captured["headers"]["Authorization"] == "Bearer inst-token-abc"
+
+
+def test_owner_key_still_wins_over_instance_token(monkeypatch):
+    """A protected-mode server (an owner key configured) must keep using the
+    real key even when a caller also passes instance_token - the token is a
+    keyless-mode fallback only, never a second credential that could shadow
+    the real one."""
+    monkeypatch.setenv("LOCALM_API_KEY", "sekret123")
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    self_request("POST", "/models/unload", base_url="http://127.0.0.1:8642/v1",
+                instance_token="inst-token-abc")
+    assert captured["headers"]["Authorization"] == "Bearer sekret123"
+
+
 def test_passes_json_payload_through(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}

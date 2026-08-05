@@ -118,6 +118,9 @@ async def imagine(req: ImagineRequest, request: Request):
         raise HTTPException(503, "Image generation needs this server's own "
                                  "address to free VRAM first, and it could not "
                                  "be determined.")
+    # A keyless (open-mode) server's own self-call to /v1/models/unload|load
+    # is unauthenticated without this - see self_request()'s docstring.
+    instance_token = getattr(request.app.state, "instance_token", None)
 
     images_dir = _images_dir()
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +168,8 @@ async def imagine(req: ImagineRequest, request: Request):
             # Unload here (authenticated + logged) so the chat model is actually
             # gone before FLUX loads; fall back to the backend's own unload only
             # if this one could not reach the server.
-            if not unload_chat_for_media(job, self_url, "image"):
+            if not unload_chat_for_media(job, self_url, "image",
+                                         instance_token=instance_token):
                 gen_swap = True
         else:
             job.push({"type": "line", "text":
@@ -209,7 +213,8 @@ async def imagine(req: ImagineRequest, request: Request):
         # right restore on both the cancel and the error paths too.
         if swap:
             from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "image")
+            reload_chat_after_media(job, self_url, s, _backend, "image",
+                                    instance_token=instance_token)
         return ok
 
     job = jobs.start_fn("imagine", _generate, result_path=out_path.name,

@@ -93,6 +93,9 @@ async def video(req: VideoRequest, request: Request):
         raise HTTPException(503, "Video generation needs this server's own "
                                  "address to free VRAM first, and it could not "
                                  "be determined.")
+    # A keyless (open-mode) server's own self-call to /v1/models/unload|load
+    # is unauthenticated without this - see self_request()'s docstring.
+    instance_token = getattr(request.app.state, "instance_token", None)
 
     video_dir = _video_dir()
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +141,8 @@ async def video(req: VideoRequest, request: Request):
                       "card - unloading the chat model first."})
         gen_swap = False
         if swap:
-            if not unload_chat_for_media(job, self_url, "video"):
+            if not unload_chat_for_media(job, self_url, "video",
+                                         instance_token=instance_token):
                 gen_swap = True
         else:
             job.push({"type": "line", "text":
@@ -184,7 +188,8 @@ async def video(req: VideoRequest, request: Request):
         # restore on the error and cancel paths too. Mirrors image/plug.py.
         if swap:
             from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "video")
+            reload_chat_after_media(job, self_url, s, _backend, "video",
+                                    instance_token=instance_token)
         return ok
 
     job = jobs.start_fn("video", _generate, result_path=out_path.name,

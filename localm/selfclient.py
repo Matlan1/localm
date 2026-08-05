@@ -114,19 +114,33 @@ def resolve_self_url(app) -> Optional[str]:
 
 
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
-                  timeout: float = 30, base_url: Optional[str] = None) -> requests.Response:
+                  timeout: float = 30, base_url: Optional[str] = None,
+                  instance_token: Optional[str] = None) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
     Builds an ``Authorization: Bearer`` header from the ACTIVE owner key
     (``localm.auth.get_api_key`` - the ``LOCALM_API_KEY`` env var, else the
-    persisted ``<home>/auth.key``) when one is configured; open mode sends none
-    (the endpoint allows it). Reading env-ONLY was the bug behind memory-audit
-    cluster 19: on a ``localm key generate`` / launcher-keyed server the key
-    lives in auth.key, not the env, so every self-call (RAG self-embed, the
-    chat<->media VRAM swap) got a 401 and RAG silently degraded to lexical-only.
+    persisted ``<home>/auth.key``) when one is configured. Reading env-ONLY
+    was the bug behind memory-audit cluster 19: on a ``localm key generate`` /
+    launcher-keyed server the key lives in auth.key, not the env, so every
+    self-call (RAG self-embed, the chat<->media VRAM swap) got a 401 and RAG
+    silently degraded to lexical-only.
     Resolves the TLS verify argument via ``localm.tls.requests_verify`` so a
     loopback HTTPS self-call trusts this install's own local CA.
+
+    *instance_token*: an OPEN (keyless) server's open-mode management gate
+    (``_origin_guard`` in ``http_server.py``) requires the per-process
+    ``shell_token`` OR this instance's own attach token for any unsafe-method
+    or metadata-GET route not in ``_CROSS_ORIGIN_OK`` - an API key does not
+    exist to send in that mode, so without this a keyless server's own
+    self-calls to a gated route (the chat<->media VRAM swap's
+    ``/v1/models/unload``/``/v1/models/load``) were unauthenticated and 403'd,
+    a permanent no-op for anyone who has not run ``localm key generate``.
+    Mirrors ``read_activity``'s *instance_token* param and the same "used only
+    when no API key is configured" condition. RAG's self-calls (``/embeddings``,
+    ``/chat/completions``) sit inside ``_CROSS_ORIGIN_OK`` and never reach that
+    gate, so they need no token and pass None.
 
     *base_url* is the caller's already-resolved self-URL (e.g.
     ``http://127.0.0.1:PORT/v1``) - required, since every caller already has
@@ -143,6 +157,8 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     key = get_api_key()          # env var, else the persisted <home>/auth.key
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    elif instance_token:
+        headers["Authorization"] = f"Bearer {instance_token}"
     from localm import tls as _tls
     url = f"{base_url}{path}"
     return requests.request(method, url, json=json, headers=headers,
