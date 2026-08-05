@@ -296,7 +296,25 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
     while i < n:
         rec = records[i]
         if is_error_record(rec):
-            out.extend(rec["lines"])
+            # Collapse REPEATED lines within this record's own body (the same
+            # line-run collapse the benign branches below get) - not the
+            # record itself, and never a different record's lines. An error
+            # record with genuinely distinct lines (the ordinary case: one
+            # header + a few different traceback frames) has no run to
+            # collapse and passes through _collapse_line_runs unchanged; only
+            # a run of _MIN_RUN_TO_COLLAPSE+ near-duplicate CONSECUTIVE lines
+            # folds. Raw native (ggml/CUDA/HIP) stderr has no header of its
+            # own, so a long repeated run of it always lands as continuation
+            # lines of whatever record precedes it - including a genuine
+            # WARNING/ERROR, not just a benign one (#958/#952: 122 identical
+            # continuation lines glued to one WARNING record survived
+            # uncollapsed here while the record-level and other line-level
+            # collapsing both worked, because this was the one branch that
+            # never called _collapse_line_runs at all). "Errors are kept
+            # verbatim" still holds: the header and one real instance of
+            # every repeated line survive, with a repeat count in place of
+            # the other copies - nothing distinct is discarded.
+            out.extend(_collapse_line_runs(rec["lines"]))
             i += 1
             continue
         tmpl = record_template(rec)

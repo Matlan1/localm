@@ -255,6 +255,91 @@ def test_save_user_report_scrubs_what_expected_and_happened(tmp_path, monkeypatc
     assert "<redacted>" in text
 
 
+# ------------------- #958: description-only must not duplicate ----------- #
+
+def test_description_only_renders_not_stated_not_a_duplicate(tmp_path, monkeypatch):
+    """#958's actual artifact, reproduced: before this fix, leaving "what
+    happened" blank made the title AND the "What happened" section repeat
+    the description verbatim - a report that LOOKS like it has three
+    sections of content but is really one sentence copied three times."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    desc = "the image generator crashed when I clicked generate twice quickly"
+    path = bugreport.save_user_report(desc)
+    text = path.read_text(encoding="utf-8")
+    did_section = text.split("## What I was doing")[1].split("## What happened")[0]
+    happened_section = text.split("## What happened")[1].split("## App state")[0]
+    assert desc in did_section
+    assert "(not stated)" in happened_section
+    assert desc not in happened_section
+    assert text.startswith(f"# localm bug report: {desc}")
+
+
+def test_description_and_happened_both_filled_no_duplication(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report(
+        "clicked generate twice", what_happened="the app crashed with a CUDA error")
+    text = path.read_text(encoding="utf-8")
+    happened_section = text.split("## What happened")[1].split("## App state")[0]
+    assert "clicked generate twice" not in happened_section
+    assert "the app crashed with a CUDA error" in happened_section
+
+
+def test_automatic_crash_report_keeps_the_summary_reason_fallback(monkeypatch):
+    """The fallback build_report() drops for USER reports (what_i_did present,
+    what_happened blank) must stay EXACTLY as before for an AUTOMATIC report
+    (report_failure / a raised exception, no user-composed fields at all) -
+    there was never a separate "what happened" question to leave blank, and
+    summary+reason genuinely IS the report's account of what happened."""
+    text = bugreport.build_report(
+        "image generation crashed", reason="segfault in native worker")
+    happened_section = text.split("## What happened")[1].split("## App state")[0]
+    assert "image generation crashed" in happened_section
+    assert "segfault in native worker" in happened_section
+    assert "(not stated)" not in happened_section
+
+
+def test_report_title_prefers_what_happened_over_description():
+    assert bugreport.report_title("", "it crashed", "clicked the button") == "it crashed"
+
+
+def test_report_title_falls_back_to_description_when_happened_blank():
+    assert bugreport.report_title("", "", "clicked the button") == "clicked the button"
+
+
+def test_report_title_explicit_summary_wins_over_both():
+    assert bugreport.report_title("explicit title", "happened", "did") == "explicit title"
+
+
+def test_report_title_never_empty():
+    assert bugreport.report_title("", "", "") == "user-reported issue"
+
+
+def test_report_title_matches_what_save_user_report_actually_titled_it(
+        tmp_path, monkeypatch):
+    """The whole reason report_title is a standalone function: a caller that
+    needs the title AFTER the report is built (the CLI, to hand to
+    offer_to_send/upload_report) must get the SAME value the saved report's
+    own H1 carries - not a second, independently-derived guess."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    what_happened, description = "the app froze", "trying to load a model"
+    path = bugreport.save_user_report(description, what_happened=what_happened)
+    text = path.read_text(encoding="utf-8")
+    computed = bugreport.report_title("", what_happened, description)
+    assert text.startswith(f"# localm bug report: {computed}")
+
+
+def test_extra_hang_trace_from_a_different_process_is_attached(tmp_path, monkeypatch):
+    """The localm bug-report CLI's own case (REG-736): its pid never froze,
+    so the internal self-pid check finds nothing, and the CLI must be able
+    to hand save_user_report a trace it found elsewhere (the live server's
+    own registry entry) instead."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report(
+        "the app hung", extra_hang_trace="CLI-SUPPLIED-MARKER event loop stalled 30s")
+    text = path.read_text(encoding="utf-8")
+    assert "CLI-SUPPLIED-MARKER" in text
+
+
 # --------------------------- the interactive offer ------------------------ #
 
 def test_report_failure_noninteractive_saves_without_prompt(tmp_path, monkeypatch, capsys):

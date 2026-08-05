@@ -531,17 +531,49 @@ class TestNativeLineRunCollapsesWithinOneRecord:
         assert digest.count("ggml_cuda: buffer pool alloc") == 2
         assert "repeated" not in digest
 
-    def test_error_record_native_lines_are_never_collapsed(self):
-        # An error-classified record (the crash-signal scan promoted it) must
-        # stay verbatim, exactly like before this fix - line-level collapsing
-        # only ever applies to BENIGN records.
-        header = "2026-07-13 15:25:20,000 DEBUG   localm: GET /api/stream -> 200 (7 ms)"
+    def test_error_record_repeated_lines_now_also_collapse(self):
+        """#958/#952 (measured 2026-08-05): the ORIGINAL version of this test
+        asserted the opposite - that an error-classified record's lines
+        "must stay verbatim... line-level collapsing only ever applies to
+        BENIGN records". That was the bug, not a design boundary: collapse_records
+        called _collapse_line_runs on every benign branch but skipped it
+        entirely for is_error_record's branch, so a long run of near-
+        duplicate native (ggml/CUDA/HIP) stderr glued onto a WARNING/ERROR
+        header - not just a benign one - survived fully uncollapsed. A real
+        production report measured 122 such lines / 3123 chars from exactly
+        this gap. "Errors are kept verbatim" still holds after this fix: the
+        header and one real instance of every distinct line survive; only a
+        genuinely-repeating run (same text once numbers are masked, same as
+        the benign path) folds to a repeat count - see
+        test_error_record_with_distinct_lines_stays_fully_verbatim below for
+        the case this must NOT touch."""
+        header = "2026-07-13 15:25:20,000 WARNING localm: GPU probe degraded"
+        # Differs only by a masked number, exactly like the benign fixtures
+        # above - a genuine near-duplicate run, not distinct diagnostic content.
         spam = [f"CUDA error: op {i} not permitted while stream is capturing"
                 for i in range(10)]
         text = "\n".join([header] + spam)
         digest = ld.build_digest(text)
-        for i in range(10):
-            assert f"CUDA error: op {i} not permitted" in digest
+        assert header in digest
+        assert digest.count("CUDA error: op") == 1
+        assert "repeated 10x" in digest
+
+    def test_error_record_with_distinct_lines_stays_fully_verbatim(self):
+        """The counter-case: a run this short of the 3-line minimum, or lines
+        that genuinely differ (not just by a masked number), must NOT be
+        folded - collapsing must never discard distinct diagnostic content
+        from an error record, only compress genuine repetition."""
+        header = "2026-07-13 15:24:50,123 ERROR   localm: model load failed"
+        frames = [
+            'File "engine.py", line 191, in load',
+            "    self._backend.load()",
+            'File "gguf.py", line 164, in load',
+            "RuntimeError: out of memory",
+        ]
+        text = "\n".join([header] + frames)
+        digest = ld.build_digest(text)
+        for line in [header] + frames:
+            assert line in digest
         assert "repeated" not in digest
 
 
