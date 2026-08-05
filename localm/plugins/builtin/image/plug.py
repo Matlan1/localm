@@ -326,13 +326,21 @@ async def imagine_comfy_models():
     (commonly several MB, 10s timeout), so it runs OFF the event loop - inline
     it froze the whole server, and every concurrent chat stream and job SSE
     with it, whenever ComfyUI was slow or cold (REG-638), the same way the
-    /comfy-launch route below already offloads its own slow call."""
-    from fastapi.concurrency import run_in_threadpool
+    /comfy-launch route below already offloads its own slow call.
 
+    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
+    urlopen timeout, so this only ever fires for a call genuinely stuck
+    beyond that (a wedged native call, not ordinary slow-ComfyUI load)."""
     from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
     s = _backend.settings(load_config())
-    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
-    loras = await run_in_threadpool(_backend._comfy_lora_options, s)
+    try:
+        slots = await run_in_threadpool_bounded(_backend._comfy_model_slots, s, timeout=20.0)
+        loras = await run_in_threadpool_bounded(_backend._comfy_lora_options, s, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
     if slots is None:
         return {"reachable": False, "api_url": s["api_url"], "slots": [], "loras": [],
                 "message": "ComfyUI is not running - launch it to see available models."}
@@ -345,12 +353,25 @@ async def imagine_comfy_launch():
     """Start (or confirm) ComfyUI is up for the image plugin, without running a
     generation - backs the Workflow panel's "Launch ComfyUI" button. Runs the
     same ensure_available() path a real generation uses, off the event loop
-    since a cold ComfyUI start can take minutes."""
-    from fastapi.concurrency import run_in_threadpool
+    since a cold ComfyUI start can take minutes.
 
+    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
+    itself will honour (comfy_launch_wait_seconds), plus a buffer - not an
+    independent guess, or this could silently abort a launch that was still
+    legitimately progressing under a larger user-configured timeout."""
     from localm.config import load_config
-    s = _backend.settings(load_config())
-    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    from localm.media.comfy_client import comfy_launch_wait_seconds
+    cfg = load_config()
+    s = _backend.settings(cfg)
+    budget = comfy_launch_wait_seconds(cfg) + 30.0
+    try:
+        ok, message = await run_in_threadpool_bounded(
+            _backend.ensure_available, s, timeout=budget)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Launching ComfyUI timed out: {e}")
     return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 

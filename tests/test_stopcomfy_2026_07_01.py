@@ -120,3 +120,34 @@ def test_stop_route_calls_stop_comfy(tmp_path, monkeypatch):
     r = client.post("/v1/comfy/stop", headers=tok)
     assert r.status_code == 200
     assert r.json() == {"ok": True, "message": "stopped ok"}
+
+
+def test_stop_route_504s_when_stop_comfy_hangs_past_budget(tmp_path, monkeypatch):
+    """Follow-up to #1057: before this fix, a wedged stop_comfy() call (a
+    taskkill that never returns, say) left the HTTP request hanging forever
+    - the exact gap #1057's own docstring named. Now it returns a clear 504
+    within the configured budget instead."""
+    import time
+
+    from localm.inference.routes import config as config_routes
+    from localm.media import comfy_client as cc
+
+    def _hangs(api_url=None):
+        time.sleep(2.0)
+        return True, "should never get here in time"
+
+    monkeypatch.setattr(cc, "stop_comfy", _hangs)
+    monkeypatch.setattr(config_routes, "_COMFY_STOP_TIMEOUT_S", 0.2)
+    app = _keyless_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+    tok = {"Authorization": f"Bearer {app.state.shell_token}"}
+
+    start = time.monotonic()
+    r = client.post("/v1/comfy/stop", headers=tok)
+    elapsed = time.monotonic() - start
+
+    assert r.status_code == 504, r.text
+    assert "timed out" in r.json()["detail"].lower()
+    assert elapsed < 1.5, (
+        f"the route waited {elapsed:.2f}s despite a 0.2s budget - the "
+        "timeout did not actually bound the request")
