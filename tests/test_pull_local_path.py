@@ -126,6 +126,73 @@ class TestSafeFilenameFailsClosed:
         assert mm._safe_models_filename(good) == good
 
 
+class TestSafeFilenameRejectsWindowsHazardClass:
+    """A filename that passes the single-component/no-traversal checks can
+    still be a Windows filename-CONFUSION hazard rather than a directory
+    escape: it stays confined to base_dir (the CWE-22 property CodeQL's
+    py/path-injection alert checks holds), but names something other than
+    what it appears to. Live-confirmed via a real write+listdir+read on this
+    box (not merely reasoned about) before this test was written:
+
+    - 'somefile.exe:mmproj.gguf' opens an NTFS Alternate Data Stream. The
+      write succeeds, `os.listdir` shows only a 0-byte 'somefile.exe', and
+      gguf_is_mmproj's hard-verify (an ordinary open()) transparently reads
+      the hidden stream too - so a crafted CLIP-architecture payload placed
+      there passes BOTH the filename guard and the metadata hard-verify.
+    - 'evil.gguf.' / 'evil.gguf ' - Windows silently strips a trailing dot or
+      space when resolving a path, so these name the SAME file as
+      'evil.gguf': a download using one of these forms would silently
+      overwrite an existing model, with the collision invisible in any
+      directory listing (which only ever shows the stripped form).
+
+    This is the sibling to test_registry_confinement.py:435's
+    _sanitize_name colon assertion - that whitelist already excluded ':'
+    for registry KEYS; this validator, for download-destination FILENAMES,
+    never learned the same lesson until now."""
+
+    @pytest.mark.parametrize("hazard", [
+        "somefile.exe:mmproj.gguf",     # NTFS ADS - live-confirmed bypass
+        "evil.gguf:hidden",             # ADS on a plausible model name
+        "evil.gguf.",                   # trailing dot - silent collision
+        "evil.gguf ",                   # trailing space - silent collision
+        "CON",                          # bare reserved device name
+        "CON.gguf",                     # reserved device name with extension
+        "con.mmproj.gguf",              # reserved stem before the FIRST dot
+        "NUL.gguf",
+        "COM1.gguf",
+        "LPT1.gguf",
+        "evil<file.gguf",
+        "evil>file.gguf",
+        "evil|file.gguf",
+        "evil?file.gguf",
+        "evil*file.gguf",
+        'evil"file.gguf',
+    ])
+    def test_hazard_rejected(self, hazard, isolated_home):
+        assert mm._safe_models_filename(hazard) is None
+
+    @pytest.mark.parametrize("legit", [
+        "Qwen3-VL-8B-Instruct-abliterated.Q2_K.gguf",
+        "mmproj-model-f16.gguf",
+        "model-00001-of-00005.gguf",
+        "a.b.c.gguf",
+        "CONTROL.gguf",   # starts with "CON" but its stem is "CONTROL", not "CON"
+        "CONSOLE.gguf",
+    ])
+    def test_legitimate_name_still_passes(self, legit, isolated_home):
+        assert mm._safe_models_filename(legit) == legit
+
+    def test_ads_candidate_never_enters_the_real_pick_pool(self, tmp_path, isolated_home):
+        """End-to-end: a malicious HF repo listing offering an ADS-named
+        'mmproj' sibling must never be picked as a candidate by the real
+        caller, not just rejected by the validator in isolation."""
+        from localm.model_manager.pull import _pick_mmproj_from_listing
+        base = tmp_path / "models"
+        base.mkdir()
+        files = ["model.gguf", "somefile.exe:mmproj.gguf"]
+        assert _pick_mmproj_from_listing(files, "model.gguf", base) is None
+
+
 class TestGetModelInfoPathologicalName:
     """get_model_info must return None for a pathological/nonexistent name, never
     crash run/benchmark/serve. On Windows a dots-only name ('....') stats as an
