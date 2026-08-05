@@ -391,7 +391,14 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     bad = _nonlocal_spec_reason(spec)
     if bad:
         _record_resolve_failure(
-            f"ignoring embedding_model {spec!r}: {bad}. Use a known key "
+            # NOT {spec!r}: repr() doubles backslashes in a Windows path, so
+            # pathscrub's literal-prefix match (and its regex backstop, which
+            # requires exactly one separator after the drive letter) never
+            # recognises the escaped form - the home directory, and with it
+            # the OS account name, survived scrubbing this way (measured
+            # 2026-08-04). Quoting without repr() keeps the readability and
+            # lets the scrub see the real separators.
+            f"ignoring embedding_model '{spec}': {bad}. Use a known key "
             f"{tuple(KNOWN_EMBEDDING_MODELS)}, a registered model name, or a "
             "local GGUF path.")
         return None
@@ -452,11 +459,13 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     # 3. A known embedding-model key.
     known = KNOWN_EMBEDDING_MODELS.get(spec)
     if not known:
+        # Neither branch uses {spec!r} - see the why-comment on the identical
+        # choice at this function's step-0 refusal above.
         if registered_not_gguf is not None:
             kind = ("a directory (a HuggingFace-format model)"
                     if registered_not_gguf else "not a single file")
             reason = (
-                f"embedding_model {spec!r} is registered but resolves to {kind}, "
+                f"embedding_model '{spec}' is registered but resolves to {kind}, "
                 "not a GGUF file. This dedicated embedder only loads a GGUF "
                 f"embedding model: pick a known key {tuple(KNOWN_EMBEDDING_MODELS)}, "
                 "a registered GGUF model, or a local .gguf path. A HuggingFace "
@@ -464,7 +473,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
                 "model instead, not via embedding_model.")
         else:
             reason = (
-                f"embedding_model {spec!r} is not a path, a registered model, or "
+                f"embedding_model '{spec}' is not a path, a registered model, or "
                 f"a known key {tuple(KNOWN_EMBEDDING_MODELS)}.")
         _record_resolve_failure(reason)
         return None
