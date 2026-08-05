@@ -1052,14 +1052,30 @@ class Collection:
         # above is deliberately decided before anything writes or unlinks that
         # filename) is a bigger risk than one extra write on what is already an
         # infrequent, multi-write path.
-        self._meta[_STATS_CACHE_KEY] = {
+        self._meta[_STATS_CACHE_KEY] = self._stats_cache_block()
+        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
+
+    def _stats_cache_block(self) -> dict:
+        """The ``_stats_cache`` block for meta.json, computed from THIS
+        instance's current in-memory state and a FRESH fingerprint of
+        chunks.jsonl/vectors.json taken right now (see ``_file_fingerprint``).
+
+        Factored out of ``_save()`` so ``load_and_maybe_backfill()`` below can
+        write the identical shape from a load that never rewrote those files -
+        one definition, so the two cannot drift apart. Both callers share the
+        same precondition this method does not itself enforce: it is only
+        SAFE to call while holding this collection's write lock (``_save()``'s
+        callers all do; ``load_and_maybe_backfill()`` acquires it itself
+        before ever constructing the ``Collection`` this method runs on) -
+        without that, the fingerprint could describe files a concurrent
+        writer is mid-way through replacing."""
+        return {
             "n_chunks": len(self._chunks),
             "has_vectors": self._has_vectors(self._chunks, self._vectors),
             "vector_degrade_reason": self.vector_degrade_reason,
             "corrupt": self.corrupt,
             "fingerprint": self._file_fingerprint(),
         }
-        self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
 
     def _vector_index_complete(self) -> bool:
         """True when every chunk currently has a usable vector.
@@ -2367,6 +2383,77 @@ class Collection:
         if stats is None:
             return None
         return {**stats, "docs": cls._docs_from_meta(meta)}
+
+    @classmethod
+    def load_and_maybe_backfill(cls, name: str, base: Optional[Path] = None
+                                ) -> "Collection":
+        """The COLD-fallback path for ``peek_stats()``/``peek_detail()``: a
+        full, authoritative load of *name* (identical to plain ``Collection(
+        name, base)``), with an opportunistic attempt to backfill its
+        ``_stats_cache`` so future listings of this SAME collection stop
+        paying the full-load cost - closing the gap named in ``rag_collections``'s
+        own docstring: ``_load()`` never calls ``_save()``, so a collection
+        written once and only ever LISTED afterward stayed on this fallback
+        forever, not just once.
+
+        ORDERING IS THE WHOLE POINT: the write lock is acquired FIRST, and the
+        load happens INSIDE it - never load-then-lock. Loading first and
+        locking only to persist would reopen exactly the race this exists to
+        avoid: a concurrent writer could rewrite chunks.jsonl/vectors.json in
+        the gap between our read and our lock acquisition, and we would cache
+        OUR now-stale snapshot with a fingerprint that (taken after their
+        write) matches the NEW files - so the next ``peek_stats()`` would
+        trust stale counts with full confidence, the "answers wrong instead
+        of not at all" failure this whole cache design exists to avoid.
+        Acquiring first makes that gap not exist at all: nothing else can
+        write to this collection while we hold its lock (every real writer -
+        ``create``/``add_paths``/etc - takes the SAME file lock before
+        touching disk), so whatever ``_load()`` reads while we hold it IS
+        current for as long as we hold it, and the fingerprint taken from
+        that same held state (still inside the lock, before it is released)
+        can never describe anything but what was just read. Same ordering
+        ``_save()`` itself already uses - its fingerprint is taken from what
+        THAT call just wrote, under a lock its own callers already hold -
+        just applied to a read instead of a write.
+
+        Deliberately takes ONLY the cross-process file lock, not the
+        in-process ``_collection_lock`` every real writer also holds (see
+        ``create()``). ``_collection_lock`` exists for two IN-PROCESS writers
+        each loading, mutating DIFFERENTLY, and each ``_save()``-ing - a
+        lost-update hazard between two MUTATIONS. This method never mutates
+        anything (no add/delete/embed): it only re-derives a cache from bytes
+        it read under the file lock, and every real writer takes that SAME
+        file lock before touching disk, so a genuine writer and a concurrent
+        backfill attempt are already fully serialised by it alone. The worst
+        possible interleaving is this method's cache write being immediately
+        superseded by a real writer's own subsequent ``_save()`` (which runs
+        after, on the same lock, with its own fresher fingerprint) - never
+        data loss, never a wrong answer surfacing.
+
+        ``timeout=0``: this is an OPPORTUNISTIC path serving a READ (a
+        collections listing or detail view), not a real write with something
+        worth waiting for. A collection whose lock is busy is, BY
+        CONSTRUCTION, one currently being written - and a write always ends
+        in its own ``_save()``, which caches it anyway. So the collections
+        this method cannot backfill are exactly the ones that do not need
+        it: refusing to wait costs nothing a moment would have bought back.
+        On a busy lock this returns exactly what today's uncached fallback
+        already returns - a fully loaded, fully correct ``Collection``, just
+        without a cache written this time."""
+        base = base or rag_dir()
+        checked_name = _check_name(name)
+        coll_dir = base / checked_name
+        try:
+            with collection_write_lock(
+                    lock_path_for(coll_dir), collection=checked_name,
+                    op="a stats-cache backfill", timeout=0):
+                coll = cls(checked_name, base)   # _load() runs INSIDE the lock
+                if coll.exists():
+                    coll._meta[_STATS_CACHE_KEY] = coll._stats_cache_block()
+                    coll._atomic_write("meta.json", json.dumps(coll._meta, indent=2))
+                return coll
+        except CollectionLockedError:
+            return cls(checked_name, base)       # busy: today's exact fallback
 
 
 def _cosine(a: list, b: list) -> float:
