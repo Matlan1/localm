@@ -11,7 +11,22 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from localm.discover import GPU_PROBE_OK
 from localm.plugins.gui.web import attach_gui
+
+
+def _vram_dict_stub(payload):
+    """A vram_info()/list_gpus()-shaped test double that honors return_status
+    the same way the real functions do: a bare value by default, (value,
+    GPU_PROBE_OK) when the caller opts in via return_status=True (and any
+    other kwarg, e.g. deadline/wait_for_inflight, is accepted and ignored).
+    _vram_total() (used by every /api/discover/* route) always calls
+    vram_capacity(return_status=True) so it can gate `free` on
+    sysstats._vram_reading_trusted() - a bare no-arg/no-status stand-in would
+    either TypeError or return the wrong shape for that unpack."""
+    def _inner(*a, **kw):
+        return (payload, GPU_PROBE_OK) if kw.get("return_status") else payload
+    return _inner
 
 
 @pytest.fixture
@@ -39,7 +54,7 @@ def gui_app(tmp_path, monkeypatch):
     # replaced per test. The route imports these from localm.discover at call
     # time, so patching the module attribute is what the closure resolves.
     import localm.discover as disc
-    monkeypatch.setattr(disc, "vram_info", lambda: {})
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub({}))
     return app, disc
 
 
@@ -168,13 +183,58 @@ def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
 
     monkeypatch.setattr(disc, "hf_search", spy)
     monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
-    monkeypatch.setattr(disc, "vram_info", lambda: {"total": 16_000_000_000})
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub({"total": 16_000_000_000}))
     with TestClient(app) as c:
         r = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
     assert r.status_code == 200, r.text
     by_id = {x["id"]: x for x in r.json()["results"]}
     assert by_id["org/small"]["fit"] == "fits"    # 2 GB on 16 GB VRAM -> fits
     assert "fit" not in by_id["org/unknown"]       # no size -> no fit (GUI: unknown)
+
+
+def test_vram_free_withheld_when_reading_is_untrusted(gui_app, monkeypatch):
+    """_vram_total() must gate `vram.free` on sysstats._vram_reading_trusted()
+    (fresh AND device-global) exactly like /api/vram-estimate and /api/stats
+    already do - forwarding an untrusted free verbatim would let this route's
+    own API contract present the same wrong-number-as-fact this repo already
+    fixed on the CLI/GUI VRAM surfaces (AGENTS.md rule 5). `total` is a static
+    hardware fact and stands regardless."""
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        return []
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    # A PROCESS-scoped reading: total stands, free must be withheld.
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub(
+        {"total": 16_000_000_000, "free": 15_000_000_000,
+         "free_scope": disc.FREE_SCOPE_PROCESS}))
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 200, r.text
+    vram = r.json()["vram"]
+    assert vram["total"] == 16_000_000_000
+    assert "free" not in vram
+
+
+def test_vram_free_shown_when_reading_is_trusted(gui_app, monkeypatch):
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        return []
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub(
+        {"total": 16_000_000_000, "free": 15_000_000_000,
+         "free_scope": disc.FREE_SCOPE_DEVICE}))
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 200, r.text
+    vram = r.json()["vram"]
+    assert vram["total"] == 16_000_000_000
+    assert vram["free"] == 15_000_000_000
 
 
 def _configure_split(monkeypatch, gpu_split_indices):
@@ -205,10 +265,10 @@ def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
     monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
     # need ~= 15e9*1.1 + 1.5e9 = 18e9: exceeds the 16 GB main GPU alone
     # (too-big), but fits under 0.85 * the 24 GB combined split (fits).
-    monkeypatch.setattr(disc, "list_gpus", lambda: [
+    monkeypatch.setattr(disc, "list_gpus", _vram_dict_stub([
         {"index": 0, "name": "A", "total": 16_000_000_000, "free": 16_000_000_000},
         {"index": 1, "name": "B", "total": 8_000_000_000, "free": 8_000_000_000},
-    ])
+    ]))
     _configure_split(monkeypatch, [0, 1])
     with TestClient(app) as c:
         r = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
@@ -222,8 +282,8 @@ def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
     # not a coincidence of the fit_label threshold math. vram_capacity() falls
     # back to vram_info() here, so pin that directly to the single-GPU number
     # (same convention test_hf_result_gets_fit_from_size already uses above).
-    monkeypatch.setattr(disc, "vram_info",
-                        lambda: {"total": 16_000_000_000, "free": 16_000_000_000})
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub(
+        {"total": 16_000_000_000, "free": 16_000_000_000}))
     _configure_split(monkeypatch, None)
     with TestClient(app) as c:
         r2 = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())

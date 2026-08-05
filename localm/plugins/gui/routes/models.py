@@ -918,10 +918,24 @@ def register(app: FastAPI, ctx) -> None:
 
     async def _vram_total():
         """Off-thread vram_capacity() plus its extracted 'total' bytes, both
-        of which discover_search/discover_files feed into fit_label()."""
+        of which discover_search/discover_files feed into fit_label().
+
+        The returned dict's `free` is withheld unless the reading is BOTH
+        fresh and device-global (sysstats._vram_reading_trusted, same gate
+        /api/vram-estimate and /api/stats already apply) - `total` is a static
+        hardware fact that stands even under a stale/process-scoped probe,
+        but forwarding an untrusted `free` verbatim as this route's own
+        `vram.free` would let the API contract present exactly the
+        wrong-number-as-fact this repo already fixed on the other VRAM
+        surfaces (AGENTS.md rule 5)."""
         from localm.discover import vram_capacity
+        from localm.sysstats import _vram_reading_trusted
         loop = asyncio.get_running_loop()
-        vram = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
+        info, status = await loop.run_in_executor(
+            get_plugin_executor(), lambda: vram_capacity(return_status=True))
+        vram = {"total": info.get("total")}
+        if _vram_reading_trusted(info, status):
+            vram["free"] = info.get("free")
         return vram, vram.get("total")
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])

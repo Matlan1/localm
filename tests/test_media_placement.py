@@ -58,11 +58,21 @@ GB = 1024 ** 3
 def _fake_gpus(monkeypatch, *specs):
     """Patch list_gpus() to report the given (index, free_bytes) devices, and pin
     non-Vulkan so resolve_gpu_split's membership validation actually runs regardless of
-    how the ambient box is provisioned (same pin/reason as test_media_split_gpu_532.py)."""
+    how the ambient box is provisioned (same pin/reason as test_media_split_gpu_532.py).
+
+    Honors return_status the same way the real list_gpus() does: a bare list by
+    default, (list, GPU_PROBE_OK) when a caller opts in.
+    media_single_device_shortfall() now calls list_gpus(return_status=True) (a
+    freshness gate closing a gap this fix found), so a stand-in that always
+    returns a bare list would make that call's `gpus, status = list_gpus(...)`
+    unpack the device dicts themselves instead of a status."""
     import localm.discover as disc
     gpus = [{"index": i, "name": f"fake{i}", "free": free, "total": free * 2}
             for i, free in specs]
-    monkeypatch.setattr(disc, "list_gpus", lambda **kw: list(gpus))
+    monkeypatch.setattr(
+        disc, "list_gpus",
+        lambda **kw: (list(gpus), disc.GPU_PROBE_OK) if kw.get("return_status")
+        else list(gpus))
     monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: False)
     return gpus
 
@@ -416,6 +426,29 @@ def test_shortfall_none_when_policy_not_auto(home, monkeypatch):
     for policy in ("always", "never"):
         settings = {"swap_policy": policy, "vram_estimate_bytes": 4 * GB}
         assert media_single_device_shortfall(settings, config=conf) is None
+
+
+def test_shortfall_none_when_probe_did_not_complete_fresh(home, monkeypatch):
+    """The OOM scenario, but the probe this call made is TIMEOUT/BUSY, not
+    GPU_PROBE_OK - a served last-known-good list is not a current measurement
+    (AGENTS.md rule 5, same discipline discover.gpu_split_shortfall's own
+    docstring documents). Must return None (cannot check this call), never
+    compute a shortfall - and never a stale one - from it. This is the
+    freshness gap the fix closed: list_gpus() was previously called bare (no
+    return_status), so a served-stale reading was indistinguishable from a
+    fresh one and got used for this decision regardless."""
+    from localm.vram import media_single_device_shortfall
+    import localm.discover as disc
+    gpus = [{"index": 0, "name": "fake0", "free": 4 * GB, "total": 8 * GB},
+            {"index": 1, "name": "fake1", "free": 4 * GB, "total": 8 * GB}]
+    monkeypatch.setattr(
+        disc, "list_gpus",
+        lambda **kw: (list(gpus), disc.GPU_PROBE_TIMEOUT)
+        if kw.get("return_status") else list(gpus))
+    monkeypatch.setattr(disc, "_native_backend_has_vulkan", lambda: False)
+    conf = {"gpu_split_indices": [0, 1]}
+    settings = {"swap_policy": "auto", "vram_estimate_bytes": 4 * GB}
+    assert media_single_device_shortfall(settings, config=conf) is None
 
 
 def test_shortfall_none_on_single_gpu_box(home, monkeypatch):

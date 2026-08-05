@@ -661,6 +661,17 @@ def _list_gpus_double(gpus, status):
     return _inner
 
 
+def _vram_info_double(payload, status=GPU_PROBE_OK):
+    """Faithful double of vram_info()'s two-shape contract: a bare dict, or
+    ``(payload, status)`` when return_status=True. /api/discover/* routes now
+    always call vram_capacity(return_status=True) (to gate `free` on
+    sysstats._vram_reading_trusted()), so a bare no-kwarg stand-in for
+    vram_info would TypeError or return the wrong shape for that unpack."""
+    def _inner(*a, **kw):
+        return (payload, status) if kw.get("return_status") else payload
+    return _inner
+
+
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 
@@ -2487,7 +2498,7 @@ class TestDiscoverEndpoints:
                 {"id": "org/m", "downloads": 1, "likes": 0, "updated": "",
                  "formats": ["gguf"]}])
         monkeypatch.setattr("localm.discover.vram_info",
-                            lambda: {"total": 16_000_000_000})
+                            _vram_info_double({"total": 16_000_000_000}))
         with TestClient(app) as client:
             data = client.get("/api/discover/search?q=llama").json()
         assert data["results"][0]["id"] == "org/m"
@@ -2501,7 +2512,7 @@ class TestDiscoverEndpoints:
             lambda repo: [{"file": "m-Q4_K_M.gguf", "quant": "Q4_K_M",
                            "size_bytes": 4_000_000_000, "n_parts": 1}])
         monkeypatch.setattr("localm.discover.vram_info",
-                            lambda: {"total": 16_000_000_000})
+                            _vram_info_double({"total": 16_000_000_000}))
         with TestClient(app) as client:
             data = client.get("/api/discover/files?repo=org/m").json()
         assert data["files"][0]["fit"] == "fits"
@@ -2518,10 +2529,10 @@ class TestDiscoverEndpoints:
             "localm.discover.hf_gguf_files",
             lambda repo: [{"file": "m-Q8_0.gguf", "quant": "Q8_0",
                            "size_bytes": 15_000_000_000, "n_parts": 1}])
-        monkeypatch.setattr("localm.discover.list_gpus", lambda: [
+        monkeypatch.setattr("localm.discover.list_gpus", _list_gpus_double([
             {"index": 0, "name": "A", "total": 16_000_000_000, "free": 16_000_000_000},
             {"index": 1, "name": "B", "total": 8_000_000_000, "free": 8_000_000_000},
-        ])
+        ], GPU_PROBE_OK))
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         monkeypatch.setattr(
@@ -2531,6 +2542,22 @@ class TestDiscoverEndpoints:
             data = client.get("/api/discover/files?repo=org/m").json()
         assert data["vram"]["total"] == 24_000_000_000
         assert data["files"][0]["fit"] == "fits"
+
+    def test_files_vram_free_withheld_when_untrusted(self, gui_app, monkeypatch):
+        """/api/discover/files shares _vram_total() with /api/discover/search -
+        a PROCESS-scoped reading must withhold `free` there too."""
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.discover.hf_gguf_files",
+            lambda repo: [{"file": "m-Q4_K_M.gguf", "quant": "Q4_K_M",
+                           "size_bytes": 4_000_000_000, "n_parts": 1}])
+        monkeypatch.setattr("localm.discover.vram_info", _vram_info_double(
+            {"total": 16_000_000_000, "free": 15_000_000_000,
+             "free_scope": "process"}))
+        with TestClient(app) as client:
+            data = client.get("/api/discover/files?repo=org/m").json()
+        assert data["vram"]["total"] == 16_000_000_000
+        assert "free" not in data["vram"]
 
     def test_net_off_is_403(self, gui_app, monkeypatch):
         from localm.discover import DiscoverError
