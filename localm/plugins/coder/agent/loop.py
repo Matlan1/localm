@@ -286,8 +286,8 @@ class _LoopMixin:
                 # Pass the known tool names so the lenient, name-gated formats
                 # (bare JSON and ```json / bare fences) are recognised without
                 # mistaking a JSON example in prose for a call.
-                calls = parse_tool_calls(
-                    response, tool_names=set(TOOL_REGISTRY) - self.disabled_tools)
+                tool_names = set(TOOL_REGISTRY) - self.disabled_tools
+                calls = parse_tool_calls(response, tool_names=tool_names)
 
                 if not calls:
                     should_break, fr = self._handle_no_tool_calls(
@@ -356,7 +356,7 @@ class _LoopMixin:
                 # returning True on the leftover - would otherwise re-trigger
                 # this notice indefinitely, once per turn, forever.
                 leftover = "".join(seg for seg in segments if isinstance(seg, str))
-                if looks_like_tool_attempt(leftover):
+                if looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1
                         result_blocks.append(
@@ -459,6 +459,10 @@ class _LoopMixin:
 
         Returns ``(should_break, final_response)``: ``(False, "")`` to continue the
         loop, ``(True, text)`` to end it with that final response."""
+        # Live-attribute access, same reasoning as _loop's own TOOL_REGISTRY read:
+        # tests patch agent.TOOL_REGISTRY, and disabled_tools can differ per agent.
+        tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
+
         # The exit-code oracle goes FIRST among the finish gates: it is the only
         # un-gameable one (the harness runs a command and reads its exit code, so
         # the model cannot talk its way past it), and it costs no tokens. Running
@@ -467,7 +471,7 @@ class _LoopMixin:
         # pass on code that does not pass. Skipped for a response that only LOOKS
         # like a broken tool call - that model is not finished, it is mid-call,
         # and the repair turn below handles it.
-        if not looks_like_tool_attempt(response):
+        if not looks_like_tool_attempt(response, tool_names):
             gated = self._run_verify_gate(response, interactive, st)
             if gated is not None:
                 return gated
@@ -515,7 +519,7 @@ class _LoopMixin:
         if (
             st.repair_count < _MAX_TOOL_REPAIRS
             and self._turns < self.max_turns
-            and looks_like_tool_attempt(response)
+            and looks_like_tool_attempt(response, tool_names)
         ):
             st.repair_count += 1
             self._add_assistant(response)
@@ -543,7 +547,7 @@ class _LoopMixin:
         # finalising a hidden <tool_call> block - which the streaming
         # display hides, leaving an empty bubble + "task finished" + no
         # file (a silent no-op the user gets zero feedback on).
-        if looks_like_tool_attempt(response):
+        if looks_like_tool_attempt(response, tool_names):
             self._emit("info", text=(
                 "the model tried to call a tool but emitted invalid output "
                 f"{st.repair_count + 1} times - surfacing its raw attempt "

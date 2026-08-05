@@ -225,6 +225,36 @@ class TestRepairTurn:
         assert _final_answer(result) == "Here is the answer."
         assert self._repairs(agent) == []
 
+    def test_hallucinated_xml_tool_tag_repairs_instead_of_silently_finishing(self, tmp_path):
+        """NEW-CODER-NO-TOOLCALL-SILENT: a real, live-reproduced failure (2026-08-05,
+        a "thinking" heretic-abliterated model given a file-edit task) - the model
+        hallucinates <edit_file>/<read_file path="..."> tags (an Anthropic-invoke-
+        adjacent convention) using this project's REAL tool names, instead of its
+        own <tool_call>{"name":...} wrapper. parse_tool_calls() recovers nothing,
+        and the OLD looks_like_tool_attempt() (no tool_names) also missed it - it
+        checks only for the literal "tool_call"/"tool_code" markers and a
+        "name"+"args" JSON key pair, and this response has neither. Before the fix,
+        this fell straight through _handle_no_tool_calls's final branch and was
+        silently accepted as the finished answer (verified: 1 turn used, the raw
+        garbled text returned verbatim, no notice of any kind). After the fix, it
+        is recognised via the tool-name-tagged form and routed through the SAME
+        repair-then-surface path proven above, so the user is told plainly that
+        nothing was run or written instead of receiving a misleading "final
+        answer" full of stray XML tags."""
+        agent = _make_agent(tmp_path)
+        raw = (
+            '<edit_file>\n{"path": "sample.py", "old": "def add(a, b): pass", '
+            '"new": "..."}\n\nLet me verify the file exists before making changes:'
+            '\n\n<read_file path="sample.py">\n\nPlease confirm if add is in this '
+            "file or provide more context about what you're trying to modify."
+        )
+        with patch.object(agent, "_call_llm", return_value=raw):
+            result = agent.run_task("Add a docstring to the add function in sample.py")
+        assert len(self._repairs(agent)) == 2          # capped at _MAX_TOOL_REPAIRS
+        assert "could not produce valid tool-call JSON" in result
+        assert "nothing was run or written" in result
+        assert raw in result                           # the raw attempt is not lost
+
     def test_bare_json_call_parses_without_repair(self, tmp_path):
         """A well-formed bare JSON call now parses and runs - no repair turn."""
         agent = _make_agent(tmp_path)

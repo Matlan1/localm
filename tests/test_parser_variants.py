@@ -197,6 +197,52 @@ class TestLooksLikeToolAttempt:
     def test_name_word_alone_not_flagged(self):
         assert not looks_like_tool_attempt('the "name" field is required')
 
+    # ---- tool_names-gated XML-tag hallucination detection (NEW-CODER-NO-TOOLCALL-SILENT) ----
+    # Live-reproduced 2026-08-05 on a "thinking" heretic-abliterated model given a
+    # real file-edit task: it hallucinated an Anthropic-style <invoke>-adjacent XML
+    # convention (<edit_file>/<read_file path="...">) using this project's REAL
+    # tool names, instead of this project's own <tool_call>{"name":...} wrapper.
+    # Before this, that response matched none of the checks above and fell
+    # through as if the model had never attempted anything at all.
+    _REAL_TOOL_NAMES = {"read_file", "write_file", "edit_file", "run_shell", "run_tests"}
+
+    def test_hallucinated_xml_tag_flagged_when_tool_names_given(self):
+        text = (
+            '<edit_file>\n{"path": "sample.py", "old": "def add(a, b): pass", '
+            '"new": "..."}\n\nLet me verify the file exists:\n\n'
+            '<read_file path="sample.py">\n\nPlease confirm.'
+        )
+        assert looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
+
+    def test_hallucinated_xml_tag_not_flagged_without_tool_names(self):
+        # No tool_names passed -> falls back to the original, narrower checks
+        # only (backward compatible default; every existing caller that omits
+        # the argument keeps its old behavior).
+        text = '<edit_file>\n{"path": "sample.py"}\n</edit_file>'
+        assert not looks_like_tool_attempt(text)
+
+    def test_unregistered_tag_name_not_flagged(self):
+        # A tag that merely LOOKS like a tool call, but names something not in
+        # the registry, must not be treated as an attempt - only a REAL tool's
+        # exact name is a reliable signal of intent.
+        text = "<some_random_tag>not a tool</some_random_tag>"
+        assert not looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
+
+    def test_legitimate_prose_answer_not_flagged_even_with_tool_names(self):
+        # The baseline that must never regress: a genuinely tool-free answer
+        # (no tag of any kind) stays unflagged regardless of what tool names
+        # are known, so a real Q&A turn is never routed into the repair loop.
+        text = (
+            "Idempotence in HTTP: a request method is idempotent if making the "
+            "same request multiple times has the same effect as making it once. "
+            "GET, HEAD, OPTIONS and TRACE are idempotent; POST is not."
+        )
+        assert not looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
+
+    def test_hallucinated_tag_flagged_case_insensitively(self):
+        text = '<Read_File path="sample.py">'
+        assert looks_like_tool_attempt(text, self._REAL_TOOL_NAMES)
+
 
 class TestStreamHiding:
     def _collect(self, pieces):
