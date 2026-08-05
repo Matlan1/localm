@@ -120,7 +120,13 @@ def _check_native_abi() -> None:
         "{'status':v.status,'detail':v.detail,'failures':v.failures[:3],"
         "'layout':v.layout}))"
     )
-    abi = _run_probe_subprocess(abi_code, "ABI_RESULT:") or {}
+    # Kept separately from the `or {}` fallback below: None means the PROBE never
+    # ran (subprocess timed out, crashed, or printed no matching line - see
+    # _run_probe_subprocess), which is a different fact from the probe running
+    # and reporting that it could not check. The reason line below has to tell
+    # those apart; the rest of this function does not care.
+    abi_raw = _run_probe_subprocess(abi_code, "ABI_RESULT:")
+    abi = abi_raw or {}
     status = abi.get("status", "unchecked")
     # WHICH of the two llama_model_params layouts was selected is worth showing:
     # upstream reordered that struct in place at an unchanged size, so this is
@@ -141,8 +147,21 @@ def _check_native_abi() -> None:
     elif status == "skipped":
         console.print(f"  {_WARN_SYM}  native ABI check skipped (LOCALM_SKIP_ABI_CHECK set)")
     else:
-        console.print(f"  {_WARN_SYM}  native ABI not verified "
-                      f"[dim]({abi.get('detail', 'runtime not loadable')})[/dim]")
+        # The verdict ("not verified") was always honest; the REASON was not.
+        # abi_report() populates detail on every path it can return from
+        # ("runtime not loadable: ...", "loader import failed: ..."), so the old
+        # hardcoded 'runtime not loadable' default could ONLY ever be reached
+        # when the probe did not run at all - precisely the case where that
+        # reason is least likely to be true, and it sent the user to
+        # 'setup-llama --force' for a subprocess timeout it cannot fix.
+        # _check_gpu_verdict already distinguishes its own probe's None (see
+        # marker_trustworthy); this line now does too.
+        if abi_raw is None:
+            detail = ("the ABI probe did not run - it timed out, crashed, or "
+                      "printed no result")
+        else:
+            detail = abi.get("detail") or "no reason reported"
+        console.print(f"  {_WARN_SYM}  native ABI not verified [dim]({detail})[/dim]")
 
 
 def _worker_spawn_probe(conn) -> None:
