@@ -162,9 +162,17 @@ class TestAgeSeconds:
 # ------------------------------------------------------------------ #
 
 class TestListGpuPeers:
-    def _write(self, d, iid, port, model=None):
+    def _write(self, d, iid, port, model=None, pid=None):
+        # Default pid is deliberately NOT os.getpid(): these entries stand in
+        # for a genuinely different process. A pid equal to this test
+        # process's own would now (correctly) be excluded as self by
+        # list_gpu_peers() regardless of exclude_self_id - see
+        # test_self_pid_excluded_even_without_exclude_self_id below, which
+        # tests that behaviour on purpose.
+        if pid is None:
+            pid = os.getpid() + 1
         return gpu_registry.write_entry(
-            d, instance_id=iid, pid=os.getpid(), port=port, host="127.0.0.1",
+            d, instance_id=iid, pid=pid, port=port, host="127.0.0.1",
             scheme="http", model=model, vram_estimate_bytes=None, gpu_index=0,
             coordination_token=f"tok-{iid}")
 
@@ -205,8 +213,61 @@ class TestListGpuPeers:
         peers = gpu_registry.list_gpu_peers(d, exclude_self_id="self-id")
         assert peers == []
 
+    def test_self_pid_excluded_even_without_exclude_self_id(self, tmp_path, monkeypatch):
+        """The caller may have no instance_id to pass at all -
+        llamacpp/_sizing.py's _vram_holder_hint has none, by design (see its
+        docstring) - and must still never see itself as a peer. A registry
+        entry whose pid is THIS test process's own pid must be excluded even
+        with no exclude_self_id given, and even though pid_alive/_try_whoami
+        would happily vouch for it: this is the exact real-world shape of the
+        bug (a low-VRAM warning blaming "another localm instance" that was
+        actually itself, port and all)."""
+        d = tmp_path / "reg"
+        self._write(d, "self-by-pid", 9010, model="my-model", pid=os.getpid())
+        monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
+        monkeypatch.setattr(gpu_registry, "_try_whoami",
+                            lambda scheme, port, iid, timeout: True)
+        peers = gpu_registry.list_gpu_peers(d)   # no exclude_self_id passed
+        assert peers == []
+
     def test_missing_directory_returns_empty(self, tmp_path):
         assert gpu_registry.list_gpu_peers(tmp_path / "nope") == []
+
+
+# ------------------------------------------------------------------ #
+#  own_entry: find THIS process's own registry entry by pid           #
+# ------------------------------------------------------------------ #
+
+class TestOwnEntry:
+    def test_returns_entry_matching_own_pid(self, tmp_path):
+        d = tmp_path / "reg"
+        gpu_registry.write_entry(
+            d, instance_id="me", pid=os.getpid(), port=8642, host="127.0.0.1",
+            scheme="http", model="gemma", vram_estimate_bytes=None,
+            gpu_index=0, coordination_token="t")
+        entry = gpu_registry.own_entry(d)
+        assert entry is not None and entry["instance_id"] == "me"
+
+    def test_none_when_no_entry_matches(self, tmp_path):
+        d = tmp_path / "reg"
+        gpu_registry.write_entry(
+            d, instance_id="someone-else", pid=os.getpid() + 1, port=1,
+            host="h", scheme="http", model=None, vram_estimate_bytes=None,
+            gpu_index=0, coordination_token="t")
+        assert gpu_registry.own_entry(d) is None
+
+    def test_none_when_directory_missing(self, tmp_path):
+        assert gpu_registry.own_entry(tmp_path / "nope") is None
+
+    def test_default_directory_uses_registry_dir(self, tmp_path, monkeypatch):
+        d = tmp_path / "reg"
+        monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
+        gpu_registry.write_entry(
+            d, instance_id="me2", pid=os.getpid(), port=1, host="h",
+            scheme="http", model=None, vram_estimate_bytes=None,
+            gpu_index=0, coordination_token="t")
+        entry = gpu_registry.own_entry()   # no directory arg -> registry_dir()
+        assert entry is not None and entry["instance_id"] == "me2"
 
 
 # ------------------------------------------------------------------ #
