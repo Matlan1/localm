@@ -212,16 +212,20 @@ class TestEmbeddingStatusScrub:
         """Plant a failure message shaped exactly like the real one at
         embedder.py:997 - a genuine cause plus a machine-identifying path.
 
-        Also latches ``_LOAD_FAILED``, matching what get_embedder()'s own
+        Also latches ``_LOAD_FAILED_SPEC``, matching what get_embedder()'s own
         exception handler actually sets alongside ``_LAST_ERROR`` on a real
         load failure (see its ``except Exception as e:`` branch) - the two
-        are never set independently in production. Without this, the route's
-        own ``resolve_embedding_model_path(allow_download=False)`` call (made
-        to compute ``installed``) can walk into a DIFFERENT, unrelated
-        resolve outcome for the fixture's un-downloaded default model and
-        overwrite this poisoned value before ``last_error()`` is ever read -
-        not a wording nit, a genuinely incomplete simulation of the state
-        this test means to represent."""
+        are never set independently in production. Set to the fixture's
+        actual CURRENT spec (``DEFAULT_EMBEDDING_MODEL`` - ``rag_app`` never
+        overrides ``embedding_model``), not an arbitrary sentinel: the guard
+        is spec-aware now, so a latch for a spec that does not match what is
+        actually configured would not suppress anything, and the route's own
+        ``resolve_embedding_model_path(allow_download=False)`` call (made to
+        compute ``installed``) would walk into a DIFFERENT, unrelated resolve
+        outcome for the fixture's un-downloaded default model and overwrite
+        this poisoned value before ``last_error()`` is ever read - not a
+        wording nit, a genuinely incomplete simulation of the state this test
+        means to represent."""
         from localm.config import home_dir
         import localm.inference.embedder as emb
         secret_path = str(home_dir() / "models" / "embeddings" / "bge.gguf")
@@ -230,7 +234,8 @@ class TestEmbeddingStatusScrub:
             emb, "_LAST_ERROR",
             f"failed to load embedding model: {secret_path} "
             f"(also tried {user_path}): not an embedding model", raising=False)
-        monkeypatch.setattr(emb, "_LOAD_FAILED", True, raising=False)
+        monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", emb.DEFAULT_EMBEDDING_MODEL,
+                            raising=False)
         fake = types.SimpleNamespace(
             gpu_fallback_reason=f"native GPU crash loading {secret_path}; using CPU",
             dim=None, model_path=None, active_requests=0)
