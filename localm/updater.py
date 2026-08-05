@@ -496,10 +496,23 @@ def _installed_backend() -> str:
     """Best-effort backend for a runtime re-provision: the hwdetect recommendation
     (the same universal-safe policy setup uses), defaulting to the vendor-neutral
     'vulkan'. The install manifest does not record the chosen backend, so this is a
-    detection, not a lookup."""
+    detection, not a lookup.
+
+    MUST call recommended_install_backend() - the docstring above already claimed
+    "the same policy setup uses", but the code read Detection.recommended instead, a
+    legacy field that (per its own comment in hwdetect.py) can only ever be "vulkan"
+    or "cpu" and predates the CUDA/ROCm-aware policy. This is the #833 bug
+    (bugreport.py:177-184 fixed it there, for the same reason) recurring here: this
+    function feeds post_swap_command's "runtime" class, i.e. a REAL self-update on a
+    user's machine re-provisioning the native binaries after a code swap. Measured
+    live on a Windows AMD RX 6900 XT (RDNA2/gfx1030) box: Detection.recommended read
+    "vulkan" while recommended_install_backend() correctly read "amd-rocm" - so a
+    user on that hardware class running `localm update` through a "runtime"-class
+    update would have had their ROCm install silently swapped to Vulkan, with no
+    prompt and no record of the downgrade."""
     try:
         from localm import hwdetect
-        return hwdetect.detect().recommended or "vulkan"
+        return hwdetect.recommended_install_backend() or "vulkan"
     except Exception:
         return "vulkan"
 

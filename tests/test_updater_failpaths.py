@@ -125,13 +125,27 @@ def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, mon
 
 # --------------------------- _installed_backend ---------------------------
 
-def test_installed_backend_uses_hwdetect_recommendation(monkeypatch):
+def test_installed_backend_uses_the_shared_install_policy_not_the_legacy_field(monkeypatch):
+    """_installed_backend() must call recommended_install_backend() - the ONE policy
+    setup.bat/setup.sh/setup_llama.py's own _auto_backend() all share - never
+    Detection.recommended, a legacy field that can only ever be "vulkan" or "cpu"
+    and predates the CUDA/ROCm-aware policy.
+
+    The previous version of this test used vendors=[] (no GPU), where BOTH the
+    legacy field and the correct policy return "cpu" - it passed identically
+    whichever one the code called, so it caught nothing (the #833-class bug this
+    guards against shipped anyway; see updater.py's own docstring for the measured
+    case). The two mocks below return DELIBERATELY DIFFERENT values so this fails
+    loud if the wrong one is ever read again."""
     from localm import hwdetect
-    # Use a recommendation that is NOT the "vulkan" fallback default, so this
-    # proves _installed_backend returns the DETECTED value, not the catch-all.
-    monkeypatch.setattr(hwdetect, "detect",
-                        lambda: hwdetect.Detection(vendors=[], recommended="cpu"))
-    assert updater._installed_backend() == "cpu"
+
+    class _FakeDetection:
+        recommended = "vulkan-from-the-legacy-field"   # must NOT be read
+
+    monkeypatch.setattr(hwdetect, "detect", lambda: _FakeDetection())
+    monkeypatch.setattr(hwdetect, "recommended_install_backend",
+                        lambda *a, **k: "amd-rocm-from-the-shared-policy")
+    assert updater._installed_backend() == "amd-rocm-from-the-shared-policy"
 
 
 def test_installed_backend_falls_back_to_vulkan_when_detect_raises(monkeypatch):
