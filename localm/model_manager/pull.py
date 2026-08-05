@@ -5,12 +5,10 @@ resumable downloads, hashing-on-the-wire, and GUI progress streaming."""
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import contextlib
-import json
 import os
 import shutil
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -21,61 +19,14 @@ from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
 from rich.progress import TransferSpeedColumn
 from ..debuglog import logger
-from ._shared import PROGRESS_SENTINEL
+from ._shared import _emit_progress
+from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _safe_models_filename
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _sanitize_name
 from .registry import alias_model
 from .registry import find_aliases_by_path
-
-
-
-
-def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
-                   name: "str | None" = None, index: int = 0, count: int = 0) -> None:
-    pct = round(downloaded * 100 / total, 1) if total else None
-    payload = {"phase": phase, "downloaded": downloaded, "total": total, "pct": pct}
-    # R06: for a multi-file download (a split GGUF), tell the GUI which file is in
-    # flight so it can show "file 2 of 3: <name>". Omitted for a single file so the
-    # single-file progress UX is unchanged.
-    if count > 1:
-        payload["count"] = count
-        payload["index"] = index
-        if name:
-            payload["name"] = name
-    sys.stdout.write(PROGRESS_SENTINEL + json.dumps(payload) + "\n")
-    sys.stdout.flush()
-
-
-def _report_success(rich_msg: str, plain_msg: str) -> None:
-    """Announce a completed pull without letting a DISPLAY failure read as an
-    OPERATION failure. Every call site reaches this only after the download,
-    checksum verification and registry write are already fully done - that is
-    the precondition that makes swallowing a failure here safe: there is no
-    remaining work this call could be masking. Moving a call to this function
-    earlier, before that work completes, would silently break that guarantee.
-
-    ``except Exception`` (not a narrower type) is deliberate and MEASURED, not
-    a guess: this exact line has independently crashed two different ways on
-    the checkmark glyph - a ``ModuleNotFoundError`` from rich's cell-width
-    lookup (``rich._unicode_data``) and a ``UnicodeEncodeError`` from a legacy
-    Windows console write path (see
-    dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md) - so an
-    enumerated except clause would have missed one of them. The GUI runs pull
-    as a subprocess and treats a non-zero exit as "the pull failed"
-    (localm/plugins/gui/jobs.py), so an uncaught exception here reports a
-    provably successful multi-GB download as failed.
-    """
-    try:
-        console.print(rich_msg)
-    except Exception as e:
-        logger.warning("could not render the pull success message (%s); "
-                        "falling back to a plain-ASCII version", e)
-        try:
-            console.print(plain_msg)
-        except Exception as e2:
-            logger.warning("plain-text fallback also failed to print: %s", e2)
 
 
 
@@ -280,69 +231,34 @@ def _snapshot_progress(disk_bytes_fn, total_size: int):
 
 
 
-# How often the verify phase may emit. Matches _download_progress's 0.7s poll so
-# both phases tick at the same visible rate, and so a large file cannot turn one
-# emit per 4 MiB block into hundreds of events a second: _sha256_file calls back
-# after EVERY block, at a rate set by the hasher's throughput rather than by
-# anything a user could perceive.
-_VERIFY_EMIT_INTERVAL_S = 0.7
+def _report_success(rich_msg: str, plain_msg: str) -> None:
+    """Announce a completed pull without letting a DISPLAY failure read as an
+    OPERATION failure. Every call site reaches this only after the download,
+    checksum verification and registry write are already fully done - that is
+    the precondition that makes swallowing a failure here safe: there is no
+    remaining work this call could be masking. Moving a call to this function
+    earlier, before that work completes, would silently break that guarantee.
 
-
-def _verify_digest(path: Path, *, purpose: str = "to verify the download") -> str:
-    """SHA256 *path*, reporting a ``verify`` phase while it runs.
-
-    Every caller hashes a file the user has just watched download, AFTER the
-    download's own terminal event has already announced 100%. Hashing many GB
-    then takes minutes with no output at all, so the honest reading of the old
-    behaviour is not "says less than it could" but "says the download is
-    finished, then keeps working" - and ``phase`` is what tells those apart.
-    Before this, ``phase`` only ever held its "download" default at every call
-    site, so no consumer could distinguish the two stages even in principle.
-
-    In GUI mode (LOCALM_PROGRESS_JSON=1) this streams progress events on the
-    existing sentinel channel; otherwise the CLI's own bar renders it. Both are
-    driven by the same ``_sha256_file`` callback, so neither surface is a
-    reimplementation of the other and they cannot drift.
-
-    The 100% reported here is a claim about the HASHING reaching the end of the
-    file, NEVER about the digest matching. A mismatch is the caller's to report,
-    and it is reported as an error rather than as a percentage.
+    ``except Exception`` (not a narrower type) is deliberate and MEASURED, not
+    a guess: this exact line has independently crashed two different ways on
+    the checkmark glyph - a ``ModuleNotFoundError`` from rich's cell-width
+    lookup (``rich._unicode_data``) and a ``UnicodeEncodeError`` from a legacy
+    Windows console write path (see
+    dev-notes/ROOTCAUSE-pull-success-reported-as-failed-2026-08-05.md) - so an
+    enumerated except clause would have missed one of them. The GUI runs pull
+    as a subprocess and treats a non-zero exit as "the pull failed"
+    (localm/plugins/gui/jobs.py), so an uncaught exception here reports a
+    provably successful multi-GB download as failed.
     """
-    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
-        # CLI: _hash_with_progress already owns the size threshold and the bar.
-        # It returns None only for a directory, which no caller here passes; the
-        # fallback keeps the return type honest rather than propagating a None.
-        return _mm._hash_with_progress(path, purpose=purpose) or _mm._sha256_file(path)
-
-    last = 0.0
-    seen = (0, 0)                      # (done, total) as last seen from the hasher
-
-    def _report(done: int, total: int) -> None:
-        nonlocal last, seen
-        seen = (done, total)
-        now = time.monotonic()
-        if now - last < _VERIFY_EMIT_INTERVAL_S:
-            return
-        last = now
-        _emit_progress(done, total, phase="verify")
-
-    digest = _mm._sha256_file(path, progress=_report)
-    # Terminal event, unconditionally and OUTSIDE the throttle, mirroring what
-    # the download context managers do from `finally`.
-    #
-    # An earlier version tried to exempt the final callback inside _report by
-    # testing `done < total`. That is unrecognisable when total is 0 (the size
-    # could not be stat'd), so every tick including the last one was throttled
-    # away and a fast hash reported a stale count that never advanced to the
-    # end. Worst possible case to lose: with no denominator there is no
-    # percentage, so the byte count is the ONLY honest signal left.
-    #
-    # It may repeat a tick that just got through. That is deliberate and matches
-    # the download path: progress is latched, so a duplicate is free, whereas a
-    # missing terminal event strands every consumer short of the end.
-    _emit_progress(*seen, phase="verify")
-    return digest
-
+    try:
+        console.print(rich_msg)
+    except Exception as e:
+        logger.warning("could not render the pull success message (%s); "
+                        "falling back to a plain-ASCII version", e)
+        try:
+            console.print(plain_msg)
+        except Exception as e2:
+            logger.warning("plain-text fallback also failed to print: %s", e2)
 
 
 

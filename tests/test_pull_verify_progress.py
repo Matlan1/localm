@@ -31,7 +31,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm import model_manager as mm
-from localm.model_manager import pull as _pull
+from localm.model_manager import _shared
 
 
 def _events(capsys):
@@ -153,7 +153,12 @@ class TestTheEmitRateIsThrottled:
         """The throttle must never swallow the LAST event: that is the one that
         says the wait is over. Frozen time makes every event throttle-eligible,
         so only the explicit final-block exemption can let one through."""
-        monkeypatch.setattr(_pull.time, "monotonic", lambda: 10_000.0)
+        # Patched on the module that DEFINES _verify_digest. It moved from
+        # `pull` to `_shared` so `registry` could reach it without an import
+        # cycle, and `_pull.time` stopped being the clock it reads - the test
+        # went red on exactly that, which is what a patch surface pinned to the
+        # wrong module looks like when it is caught rather than silently inert.
+        monkeypatch.setattr(_shared.time, "monotonic", lambda: 10_000.0)
         mm._verify_digest(big_file)
         evs = _events(capsys)
         assert evs, "with time frozen, the final event was throttled away"
