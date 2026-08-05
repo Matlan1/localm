@@ -3431,6 +3431,19 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 # so can never present this token, unlike shell_token (which
                 # DOES reach the browser and needs the cross-origin check
                 # below as its own defence).
+                #
+                # This gate covers every open-mode management route (minting a
+                # key, changing config, unloading a model), not just activity -
+                # so accepting inst_token here is NOT scoped to /api/activity,
+                # it authorizes all of them. That is not an escalation: the
+                # PRINCIPAL, not the credential, is what decides this. Anything
+                # that can read a 0600 file under the user's own home IS that
+                # OS user, and that user can already read the keystore, the
+                # config file, and the models directory directly on disk - the
+                # token grants a local process nothing it did not already have
+                # by other means. If a future reader finds inst_token
+                # authorizing key-minting and reaches for a revert, this is the
+                # premise to check first, not the fix.
                 inst_token = getattr(request.app.state, "instance_token", None)
                 presented = _bearer_token(request)
                 token_ok = ct_equal(presented, token) or (
