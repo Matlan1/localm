@@ -34,7 +34,7 @@ def _make_agent(**kwargs) -> Agent:
     with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
          patch("localm.plugins.coder.agent.make_audit_log"), \
          patch("localm.plugins.coder.agent.load_memory"):
-        # ProjectMap.build(cwd) is a classmethod call on MockPM itself
+        # ProjectMap.build(cwd) is a classmethod call on MockPM itself.
         MockPM.build.return_value.file_count.return_value = 0
         agent = Agent(
             backend=backend,

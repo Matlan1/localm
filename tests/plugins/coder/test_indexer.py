@@ -10,6 +10,8 @@ that keeps the map from going stale after a run_shell write (which - unlike
 write_file/edit_file - has no `path` arg to refresh_file() ahead of time; see
 execution.py's _refresh_map_for_tool and context.py's _build_messages)."""
 
+import json
+import time
 from unittest.mock import patch
 
 from localm.plugins.coder.indexer import FileSummary, ProjectMap
@@ -321,3 +323,167 @@ def test_file_count_also_triggers_the_rescan(tmp_path):
     f.unlink()
     pm.mark_dirty()
     assert pm.file_count() == 0
+
+
+# --------------------------------------------------------------------------- #
+#  Cross-session cache: save_cache() / load_cached_and_reconcile()            #
+#                                                                              #
+#  MEASURED (dev-notes, "coder project-map caching"): build() on the real     #
+#  localm repo (300/1000+ files, capped) takes ~360-450ms; reconciling a      #
+#  cached map via _rescan_if_dirty() takes ~15-30ms - 13-25x faster, using    #
+#  the SAME reconciliation logic the mark_dirty()/_rescan_if_dirty() tests    #
+#  above already exercise, not a new invalidation heuristic.                 #
+#                                                                              #
+#  The cache file itself lives under ``tmp_path / ".cache"`` in every test    #
+#  below - a HIDDEN directory, so build()'s own dot-dir pruning (see          #
+#  test_prunes_skip_hidden_and_gitignored_dirs above) keeps it out of the     #
+#  scanned tree, matching production (the real cache lives under              #
+#  HOME/checkpoints/<digest>/, never inside the project it describes).        #
+#  Placing it anywhere else inside the scanned root is NOT equivalent: a      #
+#  cache file sitting in a directory reconciliation already treats as         #
+#  "known" (has a tracked file) gets discovered by the new-file listdir       #
+#  sweep and silently added to the map as if it were project source - a       #
+#  self-contamination bug found and fixed here, not a hypothetical.          #
+# --------------------------------------------------------------------------- #
+
+def test_save_cache_then_load_reconcile_round_trips_unchanged(tmp_path):
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    pm = ProjectMap.build(tmp_path)
+    pm.save_cache(cache)
+
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded is not None
+    assert loaded.file_count() == 1
+    fs = next(x for x in loaded.files if x.path.name == "a.py")
+    assert "foo" in fs.symbols
+
+
+def test_load_reconcile_picks_up_an_edit_made_after_caching(tmp_path):
+    f = tmp_path / "a.py"
+    f.write_text("def old_func():\n    pass\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    ProjectMap.build(tmp_path).save_cache(cache)
+
+    f.write_text("def new_func():\n    pass\n", encoding="utf-8")
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded.file_count() == 1   # still just a.py - no self-contamination
+    fs = next(x for x in loaded.files if x.path.name == "a.py")
+    assert "new_func" in fs.symbols and "old_func" not in fs.symbols
+
+
+def test_load_reconcile_picks_up_a_deletion_made_after_caching(tmp_path):
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    ProjectMap.build(tmp_path).save_cache(cache)
+
+    f.unlink()
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded.file_count() == 0
+
+
+def test_load_reconcile_discovers_a_new_file_when_not_capped(tmp_path):
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    (sub / "a.py").write_text("a = 1\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    pm = ProjectMap.build(tmp_path)
+    assert pm.files_capped is False
+    pm.save_cache(cache)
+
+    (sub / "b.py").write_text("def new_func():\n    pass\n", encoding="utf-8")
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded.file_count() == 2
+    assert {f.path.name for f in loaded.files} == {"a.py", "b.py"}
+
+
+def test_load_reconcile_does_not_discover_a_new_file_when_capped(tmp_path):
+    """Mirrors test_rescan_skips_new_file_discovery_on_a_capped_build: caching
+    must not weaken the existing files_capped guard - a project bigger than
+    max_files still cannot tell a genuinely-new file from one that was simply
+    never a candidate, so pass 2 stays off, same as an intra-session dirty
+    rescan."""
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    (sub / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (sub / "z.py").write_text("z = 1\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    pm = ProjectMap.build(tmp_path, max_files=1)
+    assert pm.files_capped is True
+    pm.save_cache(cache)
+
+    (sub / "brand_new.py").write_text("new = 1\n", encoding="utf-8")
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert "brand_new.py" not in {f.path.name for f in loaded.files}
+    assert loaded.files_capped is True   # the flag itself survives the round trip
+
+
+def test_load_reconcile_returns_none_for_a_missing_cache(tmp_path):
+    assert ProjectMap.load_cached_and_reconcile(
+        tmp_path, tmp_path / ".cache" / "nope.json") is None
+
+
+def test_load_reconcile_returns_none_for_a_corrupt_cache(tmp_path):
+    cache = tmp_path / ".cache" / "cache.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("{not valid json", encoding="utf-8")
+    assert ProjectMap.load_cached_and_reconcile(tmp_path, cache) is None
+
+
+def test_load_reconcile_returns_none_for_wrong_shape(tmp_path):
+    """A future-version or hand-edited cache with the wrong fields must fall
+    back to a full build(), never raise and never be trusted (rule 5)."""
+    cache = tmp_path / ".cache" / "cache.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text('{"version": 2, "files": []}', encoding="utf-8")
+    assert ProjectMap.load_cached_and_reconcile(tmp_path, cache) is None
+
+
+def test_load_reconcile_returns_none_for_a_different_root(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    ProjectMap.build(tmp_path).save_cache(cache)
+
+    other = tmp_path.parent / (tmp_path.name + "-other")
+    other.mkdir()
+    assert ProjectMap.load_cached_and_reconcile(other, cache) is None
+
+
+def test_load_reconcile_returns_none_when_older_than_max_age(tmp_path):
+    """A cache older than max_age_s is rejected. Backdates cached_at directly
+    (rather than asserting elapsed real time > 0.0) because time.time() on
+    this platform resolves via GetSystemTimeAsFileTime() at ~15.6ms
+    granularity (MEASURED: back-to-back time.time() calls return the exact
+    same value) - a save-then-load round trip this fast can complete inside
+    one tick, making elapsed == 0.0 and racing a max_age_s=0.0 bound instead
+    of testing the staleness check."""
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    ProjectMap.build(tmp_path).save_cache(cache)
+
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    data["cached_at"] = time.time() - 1000.0
+    cache.write_text(json.dumps(data), encoding="utf-8")
+
+    assert ProjectMap.load_cached_and_reconcile(
+        tmp_path, cache, max_age_s=1.0) is None
+
+
+def test_save_cache_is_atomic_no_tmp_file_left_behind(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    cache = tmp_path / ".cache" / "cache.json"
+    ProjectMap.build(tmp_path).save_cache(cache)
+    assert cache.is_file()
+    assert not cache.with_suffix(cache.suffix + ".tmp").exists()
+
+
+def test_save_cache_never_raises_on_write_failure(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path)
+    # A path whose PARENT is a FILE, not a directory: mkdir(parents=True) must
+    # fail, and save_cache must swallow that (best-effort, rule 5 - a caching
+    # failure must never break the session that hit it) rather than raise.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    pm.save_cache(blocker / "sub" / "cache.json")   # must not raise
