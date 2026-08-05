@@ -1356,6 +1356,16 @@ $("pull-start").onclick = async () => {
       if (storeInput) storeInput.value = "";
       pendingPullTypeHint = null;
       refreshModelsPage();
+    } else if (end.status === "disconnected") {
+      // streamJob gave up reconnecting (or the job was already gone) - this is
+      // NOT a job failure, just a lost transport: the pull may well still be
+      // running or have already finished server-side (verified live: a
+      // dropped SSE connection does not stop the job). Never claim "failed"
+      // for a fact we do not have; keep the bar as-is rather than painting it
+      // red, so it does not look like a completed-and-wrong outcome either.
+      pct.textContent = "connection lost - it may still be running";
+      toast("Lost connection to the pull - it may still be running in the "
+            + "background. Check the Models list in a moment.", true);
     } else {
       // Surface the failure: red bar, exit code, and keep the inputs so the
       // user can see what they typed and retry.
