@@ -398,3 +398,166 @@ class TestExplicitMmprojWins:
         assert "mmproj" not in store["main"]
         out = capsys.readouterr().out.lower()
         assert "mmproj spec must be a specific file" in out
+
+
+class TestSyncModelsDirBackfillsExistingEntry:
+    """#957: an entry pulled BEFORE the auto-attach fix (or on a build that
+    predates it) already exists in the registry with no mmproj key - a
+    re-pull is explicitly NOT an acceptable fix (maintainer's ruling: "an
+    already pulled vision model must work just as a freshly pulled one, no
+    half measures"). sync_models_dir must notice and backfill it on its own,
+    using the source the entry already recorded - the exact case
+    test_already_downloaded_branch_also_attaches_mmproj (above) does NOT
+    cover, because that test starts from an EMPTY registry and calls
+    _pull_gguf_file (a re-pull) rather than starting from an ALREADY-
+    REGISTERED entry and calling sync_models_dir (no pull at all)."""
+
+    def _preexisting_entry(self, store, models_dir, name="main", source="hf:o/r"):
+        (models_dir / f"{name}.gguf").write_bytes(_LLM_BYTES)
+        store[name] = {
+            "path": str((models_dir / f"{name}.gguf").resolve()),
+            "source": source, "model_type": "llm",
+        }
+
+    def test_preexisting_entry_gets_mmproj_backfilled_with_no_repull(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+
+        result = mm.sync_models_dir()
+
+        assert store["main"]["mmproj"] == str(
+            (models_dir / "mmproj-main-f16.gguf").resolve())
+        assert (models_dir / "mmproj-main-f16.gguf").is_file()
+        assert result.mmproj_backfilled == 1
+        assert result.changed is True
+
+    def test_entry_already_carrying_mmproj_is_never_re_fetched(
+            self, fake_registry, monkeypatch):
+        """An entry with mmproj already recorded (even resolved-empty in some
+        odd past state) must never be re-queried - matches the architecture/
+        expert_count backfill's own 'key present, even falsy, means resolved'
+        rule two blocks up."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        store["main"]["mmproj"] = str(models_dir / "already-set.gguf")
+        called = []
+
+        class _SpyHfApi:
+            def list_repo_files(self, repo_id):
+                called.append(repo_id)
+                return ["main.gguf", "mmproj-main-f16.gguf"]
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _SpyHfApi)
+
+        result = mm.sync_models_dir()
+
+        assert called == [], "an entry with mmproj already set must not be re-queried"
+        assert store["main"]["mmproj"] == str(models_dir / "already-set.gguf")
+        assert result.mmproj_backfilled == 0
+
+    def test_repo_genuinely_has_no_projector_is_not_counted_as_backfilled(
+            self, fake_registry, monkeypatch):
+        """A repo that was actually checked (net_mode allowed it) but has no
+        mmproj sibling at all is the legitimate silent case - distinct from
+        net_mode blocking the check. `mmproj_backfilled` counts SUCCESSFUL
+        attaches only: this attempt found nothing, wrote nothing to the
+        registry, so it must not be counted, and `changed` must stay False -
+        a no-op reconciliation pass must not report itself as having
+        changed anything."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        # Pre-set architecture/expert_count so the UNRELATED F8-PERSIST-ARCH-
+        # AND-EXPERT-COUNT backfill (registry.py, right above this one) does
+        # not also fire on this entry and set `backfilled` - that would make
+        # `changed` True for a reason that has nothing to do with mmproj,
+        # muddying exactly the signal this test exists to isolate.
+        store["main"]["architecture"] = "llama"
+        store["main"]["expert_count"] = 0
+        _wire_repo_listing(monkeypatch, ["main.gguf"])  # no mmproj sibling
+        _wire_download(monkeypatch, {})
+
+        result = mm.sync_models_dir()
+
+        assert "mmproj" not in store["main"]
+        assert result.mmproj_backfilled == 0
+        assert result.changed is False
+
+    def test_non_hf_source_is_never_a_candidate(self, fake_registry, monkeypatch):
+        """A locally-added model (source='local' or similar) has no repo to
+        even check - must not crash or attempt a listing."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir, source="local")
+        called = []
+
+        class _SpyHfApi:
+            def list_repo_files(self, repo_id):
+                called.append(repo_id)
+                return []
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _SpyHfApi)
+
+        result = mm.sync_models_dir()
+
+        assert called == []
+        assert "mmproj" not in store["main"]
+        assert result.mmproj_backfilled == 0
+
+    def test_net_mode_off_blocks_the_fetch_and_names_the_model_precisely(
+            self, fake_registry, monkeypatch):
+        """The ONE case that must be loud: net_mode=off blocks the check, and
+        the resulting note names the model and net_mode by name - never
+        collapsed with the silent 'looked and found nothing' outcome."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        called = []
+
+        class _SpyHfApi:
+            def list_repo_files(self, repo_id):
+                called.append(repo_id)
+                return []
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _SpyHfApi)
+        monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "off")
+
+        result = mm.sync_models_dir()
+
+        assert called == [], "net_mode=off must block the check itself, not just the download"
+        assert "mmproj" not in store["main"]
+        assert result.mmproj_backfilled == 0
+        assert "main" in result.note
+        assert "net_mode" in result.note
+
+    def test_net_mode_ask_still_backfills_no_half_measure_behind_a_setting(
+            self, fake_registry, monkeypatch):
+        """The maintainer's ruling ("no half measures") must hold under the
+        DEFAULT net_mode ("ask"), not only for installs that separately opted
+        into net_mode=allow - matching _pull_gguf_file's own net_mode gate for
+        this identical operation on an explicit pull."""
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir)
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+        monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "ask")
+
+        result = mm.sync_models_dir()
+
+        assert store["main"]["mmproj"] == str(
+            (models_dir / "mmproj-main-f16.gguf").resolve())
+        assert result.mmproj_backfilled == 1
+
+    def test_backfill_is_capped_per_call(self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        for i in range(5):
+            self._preexisting_entry(store, models_dir, name=f"m{i}", source=f"hf:o/r{i}")
+        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
+        _wire_download(monkeypatch, {"mmproj-main-f16.gguf": _CLIP_BYTES})
+
+        result = mm.sync_models_dir()
+
+        assert result.mmproj_backfilled == 3, "capped at _MMPROJ_BACKFILL_CAP, not all 5 at once"

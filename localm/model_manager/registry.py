@@ -566,7 +566,31 @@ def vision_capable_models() -> List[str]:
 
 
 
-def vision_input_guidance(mmproj_failed: bool = False) -> str:
+def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
+    """(name, repo_id) when *active_model_path* resolves to a registered LLM
+    GGUF pulled from an HF repo with no mmproj recorded yet - #957's
+    already-pulled-before-the-fix state. None when the path is not
+    registered, not a candidate, or already has one (including a resolved-
+    but-failed one, which is ``mmproj_failed``'s case, not this one)."""
+    reg = _mm.load_registry()
+    try:
+        names = find_aliases_by_path(Path(active_model_path), reg=reg)
+    except OSError:
+        return None
+    if not names:
+        return None
+    entry = reg.get(names[0])
+    if not isinstance(entry, dict):
+        return None
+    source = str(entry.get("source", ""))
+    if (entry.get("model_type") == "llm" and source.startswith("hf:")
+            and not entry.get("mmproj")):
+        return names[0], source[len("hf:"):]
+    return None
+
+
+def vision_input_guidance(mmproj_failed: bool = False,
+                          active_model_path: Optional[str] = None) -> str:
     """Capability-aware, install-specific message for when an image is attached
     to a model that cannot see it. Instead of a flat dead-end, point the user at
     a path that EXISTS on THIS install: a vision model already in their library,
@@ -578,13 +602,32 @@ def vision_input_guidance(mmproj_failed: bool = False) -> str:
     (mmproj) but it did not load (supports_images is still False). GGUF vision IS
     implemented (the built-in mtmd path), so do NOT claim it is unimplemented: the
     honest cause is that this particular projector failed to load - likely
-    incompatible with the model, or the mtmd vision runtime is unavailable."""
+    incompatible with the model, or the mtmd vision runtime is unavailable.
+
+    *active_model_path* (the loaded backend's own resolved model path, when the
+    caller has one) is #957's third, previously-uncovered case: the ACTIVE model
+    IS a vision-capable GGUF pulled from an HF repo, but no mmproj was ever
+    recorded for it (an install predating the auto-attach fix, or interrupted
+    before sync_models_dir's backfill has run). Without this check the generic
+    "no vision model is registered yet" branch below fires for exactly this
+    user - telling them to pull a model they already have."""
     import importlib.util
     if mmproj_failed:
         head = ("This model cannot accept image input: a vision projector (mmproj) "
                 "was provided but failed to load - it may be incompatible with this "
                 "model, or the mtmd vision runtime is unavailable (see the server "
                 "log for the mtmd error).")
+    elif active_model_path and (missing := _active_model_missing_mmproj(active_model_path)):
+        name, repo_id = missing
+        return (
+            "This model cannot accept image input yet: "
+            f"'{name}' is a vision-capable model, but its vision projector "
+            "(mmproj) has not been downloaded. localm checks for it "
+            "automatically the next time it starts (subject to your network "
+            "setting) - restart localm, or reload the Models page. If network "
+            "access is off (net_mode=off), turn it on, or pull the projector "
+            f"explicitly: `localm pull {repo_id} --mmproj <repo>:<file>`."
+        )
     else:
         head = ("This model cannot accept image input (it is text-only), so the "
                 "attached image would be ignored.")
@@ -1155,12 +1198,15 @@ class ModelSyncResult(NamedTuple):
     # entries backfilled with architecture/expert_count (F8-PERSIST-ARCH-AND-
     # EXPERT-COUNT), bounded per call - see sync_models_dir's _BACKFILL_CAP
     backfilled: int = 0
+    # entries backfilled with a vision projector (#957), bounded per call
+    # separately from `backfilled` - see sync_models_dir's _MMPROJ_BACKFILL_CAP
+    mmproj_backfilled: int = 0
     note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
 
     @property
     def changed(self) -> bool:
         return bool(self.added or self.flagged or self.restored or self.pruned
-                    or self.backfilled)
+                    or self.backfilled or self.mmproj_backfilled)
 
 
 
@@ -1281,6 +1327,10 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
     flagged = restored = pruned = 0
     backfilled = 0
+    mmproj_backfilled = 0
+    mmproj_attempts = 0    # network round-trips spent this call (cap input);
+                            # mmproj_backfilled counts only real SUCCESSES -
+                            # see the increment site below for why they differ
     note = ""
     backed_up = False
     # F8-PERSIST-ARCH-AND-EXPERT-COUNT backfill: an entry registered before this
@@ -1294,9 +1344,20 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     # very first post-upgrade launch. A handful per call makes steady, unnoticed
     # progress across a few ordinary restarts instead.
     _BACKFILL_CAP = 5
+    # #957 mmproj backfill: SAME shape (bounded, opportunistic, self-correcting
+    # across ordinary restarts) but a much more expensive unit of work - an HF
+    # repo listing plus, when found, a real file download, not a local read -
+    # so it gets its OWN, smaller budget rather than sharing _BACKFILL_CAP.
+    # Sharing one counter would let a run of architecture-only entries starve
+    # the (rarer, more urgent) vision-projector backfill's budget, or vice
+    # versa: a handful of slow network fetches would stall the cheap local
+    # metadata reads for the rest of the call.
+    _MMPROJ_BACKFILL_CAP = 3
+    net_blocked_mmproj = []   # entry names skipped this call by net_mode=off
 
     def _reconcile(reg: dict) -> None:
         nonlocal flagged, restored, pruned, note, backed_up, backfilled
+        nonlocal mmproj_backfilled, mmproj_attempts
 
         # Managed models = those whose file lives under the models folder.
         managed = [
@@ -1342,6 +1403,41 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     if gmeta.get("expert_count") is not None:
                         entry["expert_count"] = gmeta["expert_count"]
                     backfilled += 1
+                # #957 mmproj backfill (see _MMPROJ_BACKFILL_CAP above): an
+                # already-registered LLM pulled from an hf: source, with no
+                # mmproj recorded, gets the exact same same-repo auto-attach
+                # a fresh pull already does - retroactively, using the source
+                # this entry already carries. Cheap candidacy check first
+                # (mmproj_backfill_candidate, no I/O) so the cap is spent only
+                # on entries that could possibly qualify.
+                if mmproj_attempts < _MMPROJ_BACKFILL_CAP:
+                    from localm.model_manager.pull import (
+                        backfill_mmproj_for_entry, mmproj_backfill_candidate)
+                    if mmproj_backfill_candidate(entry, path):
+                        from localm.netpolicy import network_mode
+                        if network_mode() == "off":
+                            # Loud-at-the-right-place, not here: sync_models_dir
+                            # runs silently on every launch (see its own
+                            # docstring), so this is recorded for the caller to
+                            # surface via `note`, not printed - the actual
+                            # chat-time surface is vision_input_guidance, which
+                            # names net_mode explicitly when the user tries to
+                            # use the feature and finds it still missing. Not
+                            # counted against mmproj_attempts: it costs no
+                            # network round-trip, so it should not starve the
+                            # budget the cap exists to protect.
+                            net_blocked_mmproj.append(name)
+                        else:
+                            mmproj_attempts += 1
+                            found = backfill_mmproj_for_entry(entry, path)
+                            if found is not None:
+                                # Only a genuine attach counts as "backfilled" -
+                                # a repo that was checked and genuinely has no
+                                # projector (found is None) must NOT count:
+                                # nothing was written, and ModelSyncResult.changed
+                                # must not fire for a no-op reconciliation pass.
+                                entry["mmproj"] = str(found.resolve())
+                                mmproj_backfilled += 1
                 continue
 
             # File is gone.
@@ -1366,9 +1462,24 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
     _mm.update_registry(_reconcile)
 
+    if net_blocked_mmproj:
+        # Precise per constraint: which model(s), that the projector is
+        # missing, and that net_mode is why - never collapsed with "no
+        # projector found" (that is a different, silent-by-design outcome;
+        # see _hf_repo_files/_maybe_fetch_repo_mmproj's own distinction
+        # between "could not look" and "looked and found nothing").
+        blocked_note = (
+            f"{len(net_blocked_mmproj)} model(s) may be missing a vision "
+            f"projector ({', '.join(net_blocked_mmproj)}) but network access "
+            "is off (net_mode=off), so localm did not check. Enable network "
+            "access to let localm look, or pull the projector explicitly with "
+            "--mmproj."
+        )
+        note = f"{note} {blocked_note}".strip() if note else blocked_note
+
     return ModelSyncResult(
         added=added, flagged=flagged, restored=restored, pruned=pruned,
-        backfilled=backfilled, note=note
+        backfilled=backfilled, mmproj_backfilled=mmproj_backfilled, note=note
     )
 
 
