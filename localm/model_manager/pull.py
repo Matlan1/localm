@@ -26,6 +26,7 @@ from .gguf import _safe_models_filename
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _sanitize_name
 from .registry import alias_model
+from .registry import find_aliases_by_path
 
 
 
@@ -1146,6 +1147,43 @@ def _pull_hf_snapshot(
                 alias_model(same_source[0], model_name)
                 return True
 
+    # COLLISION CHECK (#957-adjacent finding, 2026-08-05): model_name comes from
+    # _sanitize_name, a LOSSY coercion (any run of disallowed characters collapses
+    # to a single '-', consecutive dots collapse to one) used directly as both the
+    # MODELS_DIR subdirectory name and the registry key, with no uniqueness check
+    # anywhere upstream. Two genuinely different repos - or, more commonly, a
+    # plain --name reused across two different pulls, no special characters
+    # required at all - can compute the exact same dest. Without this check,
+    # dest.exists() above only asks "is THIS repo's snapshot already complete
+    # here" (a few lines up) and, when that is False (a genuinely different repo,
+    # or a stale/incomplete download), falls straight through to
+    # snapshot_download's local_dir=dest, which MERGES into whatever is already
+    # there rather than clearing it first - silently mixing a different model's
+    # files in, overwriting its config.json, orphaning its weight files, and
+    # about to overwrite its registry entry too, all reported as an ordinary
+    # successful pull. Confirmed live: this corrupts an earlier pull with zero
+    # warning, not a theoretical concern.
+    #
+    # The signal: is there ALREADY a registry entry pointing at this exact dest,
+    # for a DIFFERENT source? A resumable partial of the SAME repo (interrupted
+    # before it ever reached registration) has no registry entry yet, so this
+    # does not false-positive on it; a genuine redownload of the model already
+    # registered here has a matching source, so it is excluded, not refused.
+    if dest.exists():
+        reg_now = _mm.load_registry()
+        foreign = [n for n in find_aliases_by_path(dest, reg_now)
+                  if reg_now[n].get("source") != f"hf:{repo_id}"]
+        if foreign:
+            console.print(
+                f"[red]Refusing to pull {repo_id} into {dest}:[/red] this "
+                f"folder already holds a DIFFERENT model, registered as "
+                f"{', '.join(repr(n) for n in foreign)}. Pulling here would "
+                f"silently mix the two repos' files together. Pull with "
+                f"[bold]-n <a-different-name>[/bold] to give this repo its "
+                "own directory."
+            )
+            return False
+
     def _disk_bytes() -> int:
         return _snapshot_bytes_on_disk(dest)
 
@@ -1177,8 +1215,32 @@ def _pull_hf_snapshot(
         return False
 
     _warn_if_repo_ships_code(dest, repo_id)
-    _mm._register(model_name, dest, f"hf:{repo_id}",
-                  model_type=_resolve_snapshot_type(dest, model_type))
+    # _register_with_dedup, not the plain _register _pull_hf_snapshot used to
+    # call here - the same asymmetry the collision check above closes at the
+    # directory level: _pull_gguf_file already routes through the dedup-aware
+    # registration (see its own calls above), this path did not.
+    #
+    # Its bool return MUST be checked, not assumed True: the dest-collision
+    # block above only guards a foreign occupant already sitting at THIS
+    # path - it says nothing about model_name itself already being taken by
+    # a DIFFERENT path (e.g. dest didn't exist yet, so that block never ran).
+    # _register_with_dedup can still decline in that case (non-interactively,
+    # per its own docstring), and by then the download has already written
+    # real bytes to disk. Reporting success anyway would mean "the model is
+    # on disk under no name" masquerading as an ordinary successful pull -
+    # add_ollama_blob's call site (registry.py) already follows this same
+    # check-and-report-honestly pattern for the identical reason.
+    registered = _mm._register_with_dedup(
+        model_name, dest, f"hf:{repo_id}",
+        model_type=_resolve_snapshot_type(dest, model_type))
+    if not registered:
+        console.print(
+            f"[yellow]{repo_id} was downloaded to {dest}, but could not be "
+            f"registered as '{model_name}'[/yellow] (see message above) - "
+            "the files are on disk. Retry with a different -n name, or "
+            "'localm alias' it in."
+        )
+        return False
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")
     return True
 
