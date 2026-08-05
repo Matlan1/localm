@@ -45,8 +45,11 @@ release):
    ``get_device_properties(i).pci_bus_id`` - so a multi-GPU box gets the RIGHT
    number per device rather than a guess.
 2. PDH (``\\GPU Adapter Memory(*)\\Dedicated Usage``, the vendor-neutral WDDM
-   counter Task Manager itself uses), via ``win32pdh`` from pywin32, already a
-   dependency. Covers non-AMD Windows GPUs, where ADL does not exist. Its instance
+   counter Task Manager itself uses), via ``win32pdh`` from pywin32, a
+   Windows-gated dependency (declared in pyproject.toml; this line previously
+   claimed it was "already a dependency" when it was declared nowhere, and was
+   true only of a venv that happened to have it). Covers non-AMD Windows GPUs,
+   where ADL does not exist - it is the ONLY device-global source there. Its instance
    name is a LUID and carries NO PCI bus, so it CANNOT be mapped to a device index
    on a multi-GPU box - it is therefore used ONLY when the mapping is unambiguous
    (exactly one GPU and one adapter instance). Guessing there would be worse than
