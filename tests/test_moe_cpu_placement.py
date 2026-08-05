@@ -229,7 +229,7 @@ class TestApplyCpuMoe:
 
 def test_tensor_buft_overrides_offset_is_layout_agnostic():
     """The premise of using one layout's class above: the field MoE placement
-    writes did not move in the b1288 -> b1307 reorder. If a future reorder moves
+    writes did not move in the lemonade b1288 -> b1307 reorder. If a future reorder moves
     it, these tests must start covering both layouts instead of silently
     exercising the wrong offset."""
     assert (LlamaModelParamsV1.tensor_buft_overrides.offset

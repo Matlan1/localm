@@ -152,8 +152,8 @@ def _reset_layout_cache(monkeypatch):
     symbol lives in ggml-base.dll rather than llama.dll. But it means a fake lib
     constructed WITHOUT a version silently read the machine's actually-installed
     runtime. That made ``(good_model_v2, None) -> 0`` pass for the wrong reason
-    while this box had b1288 (ggml 0.13.1, below every threshold), and it flipped
-    to 5 the moment the box was upgraded to b1307 (ggml 0.18.1). A unit test must
+    while this box had lemonade b1288 (ggml 0.13.1, below every threshold), and it
+    flipped to 5 the moment the box was upgraded to lemonade b1307 (ggml 0.18.1). A unit test must
     not change its answer because someone provisioned a different DLL, so the
     fallback is stubbed out here and "no version" means no version."""
     from localm.inference.backends.llamacpp import _loader
@@ -317,7 +317,7 @@ def test_anchor_offsets_match_struct():
 
 
 # --------------------------------------------------------------------------- #
-#  llama_model_params layout detection (the b1288 -> b1307 reorder)
+#  llama_model_params layout detection (the lemonade b1288 -> b1307 reorder)
 # --------------------------------------------------------------------------- #
 
 def test_detects_v1_and_v2_layouts():
@@ -328,7 +328,7 @@ def test_detects_v1_and_v2_layouts():
 def test_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now():
     """The exact silent-corruption case this whole split exists for.
 
-    A b1307 build's default-params bytes, forced through the OLD V1 class. Both
+    A lemonade b1307 build's default-params bytes, forced through the OLD V1 class. Both
     structs are 72 bytes so nothing about the size trips, and split_mode at
     offset 20 - previously the ONLY model_params check - is 1 either way. What
     now catches it is that V1's `main_gpu` reads V2's `load_mode`... which is
@@ -666,7 +666,7 @@ def test_assumed_layout_does_not_prove_the_penalties_arity():
 
 
 def test_determined_v1_still_proves_4arg():
-    """The complement, so the guard above cannot silently cost real b1288 users
+    """The complement, so the guard above cannot silently cost real lemonade b1288 users
     their repetition penalty: a genuine pre-reorder build exports no
     llama_load_mode_* symbols and fingerprints cleanly as v1."""
     lib = _FakeLib(good_model_v1(), good_ctx(), ggml_version="0.13.1")
