@@ -164,6 +164,78 @@ def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
         "timeout did not actually bound the request")
 
 
+def test_rmw_timeout_has_headroom_over_a_single_holders_own_work_ceiling():
+    """Structural guard (diff-review-discipline: assert the ARITHMETIC, not
+    the literal): _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually
+    uses, but all four routes share ONE _lock_for(media) lock acquired INSIDE
+    that same bounded call - so a request's own clock also covers however
+    long it waits behind another holder. If this ever regresses to matching
+    _WORKFLOW_OWN_WORK_TIMEOUT_S exactly, a merely-slow (not hung) writer can
+    again collaterally 504 a concurrently-queued, otherwise-instant reader
+    sharing the same lock (see test_a_merely_slow_write_does_not_collaterally_
+    504_a_queued_read below for the reproduction)."""
+    assert mw._WORKFLOW_RMW_TIMEOUT_S >= 2 * mw._WORKFLOW_OWN_WORK_TIMEOUT_S
+
+
+@pytest.mark.anyio
+async def test_a_merely_slow_write_does_not_collaterally_504_a_queued_read(monkeypatch):
+    """Regression for a cascade found in adversarial review of the #1057
+    follow-up: a write that is merely slow (not hung, and would have
+    exceeded a naive single-holder budget) must not push a concurrently-
+    queued, trivially-fast read past ITS OWN budget purely from waiting on
+    the shared per-media lock. Reproduced end to end over real concurrent
+    HTTP requests, not just at the function level."""
+    import asyncio
+
+    import httpx
+    from fastapi import FastAPI
+
+    # Scale down for a fast test while preserving the real >=2x relationship,
+    # with generous margins (not the tight 0.4s/0.6s this test originally
+    # used, which itself flaked under ordinary box scheduling jitter -
+    # exactly the timing-margin fragility a review of this same change
+    # flagged elsewhere; a timing-based test needs real headroom, not just a
+    # mathematically-sufficient one).
+    monkeypatch.setattr(mw, "_WORKFLOW_RMW_TIMEOUT_S", 3.0)
+
+    write_entered = threading.Event()
+
+    def _slow_but_legitimate_write(media, name, content):
+        write_entered.set()
+        # 1.0s: a third of the ACTUAL 3.0s budget (comfortable margin against
+        # scheduling jitter), but would have exceeded a naive single-holder
+        # ceiling of 1.5s (what _WORKFLOW_RMW_TIMEOUT_S would be without the
+        # 2x headroom, scaled the same way) - the "merely slow, not hung"
+        # case the review reproduced.
+        time.sleep(1.0)
+        return "x.json"
+
+    monkeypatch.setattr(mw, "save_workflow", _slow_but_legitimate_write)
+
+    app = FastAPI()
+    app.include_router(mw.make_workflow_router("image"))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        write_task = asyncio.ensure_future(
+            client.post("/api/image/workflows",
+                       json={"name": "x", "workflow": {"3": {"class_type": "K"}}}))
+        # Deterministic hand-off (not a hardcoded sleep - see the test-quality
+        # finding this replaced): wait until the write has genuinely entered
+        # its critical section (holding the lock) before firing the read.
+        for _ in range(500):
+            if write_entered.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert write_entered.is_set(), "the write never reached its critical section"
+
+        read_resp = await client.get("/api/image/workflows")
+        write_resp = await write_task
+
+    assert write_resp.status_code == 200, write_resp.text
+    assert read_resp.status_code == 200, (
+        f"a merely-slow (not hung) write starved a queued fast read: {read_resp.text}")
+
+
 def test_generator_uses_selected_workflow(monkeypatch):
     # The image generator's workflow_path() resolves the selected file first.
     from pathlib import Path

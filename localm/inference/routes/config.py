@@ -24,12 +24,17 @@ from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threa
 #     to be a bit larger so THAT more specific TimeoutError surfaces first.
 #   _COMFY_STATUS_TIMEOUT_S: _comfy_alive()'s own urlopen timeout is 1.0s.
 #   _COMFY_STOP_TIMEOUT_S: stop_comfy()'s own worst case is bounded by
-#     interrupt_comfy (two 10s urlopens) + free_comfy_vram (one 30s urlopen,
-#     already wrapped in try/except there) + a process-tree kill (normally
-#     instant, rarely a few seconds on Windows) - roughly 50s, so budget 70s.
+#     interrupt_comfy (two sequential 10s urlopens = 20s) + free_comfy_vram
+#     (one 30s urlopen, already wrapped in try/except there) + a
+#     process-tree kill (comfy_client._kill_process_tree's Windows branch is
+#     an explicit `subprocess.run(["taskkill", ...], timeout=15)`, NOT
+#     "normally instant" as an earlier version of this comment claimed -
+#     verified against the actual code) = 65s worst case, so budget 90s for
+#     genuine margin (a prior 70s budget left only ~5s, not the ~20s that
+#     earlier, uncorrected arithmetic implied).
 _CONFIG_RMW_TIMEOUT_S = 20.0
 _COMFY_STATUS_TIMEOUT_S = 15.0
-_COMFY_STOP_TIMEOUT_S = 70.0
+_COMFY_STOP_TIMEOUT_S = 90.0
 
 
 def _scrub_media_admin_only(cfg: dict) -> None:

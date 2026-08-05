@@ -25,6 +25,7 @@ building this module - not speculative coverage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -146,13 +147,17 @@ async def test_abandoning_releases_the_capacity_limiter_token_immediately():
     # wrapper (it uses the default pool, matching run_in_threadpool), so
     # exercise the underlying primitive directly here to pin the limiter
     # semantics run_in_threadpool_bounded relies on.
-    start = time.monotonic()
+    abandon_start = time.monotonic()
     with pytest.raises(TimeoutError):
         with anyio.move_on_after(0.1) as scope:
             await anyio.to_thread.run_sync(
                 _blocking_sleep, 3.0, abandon_on_cancel=True, limiter=limiter)
         if scope.cancelled_caught:
             raise TimeoutError("abandoned")
+    abandon_elapsed = time.monotonic() - abandon_start
+    assert abandon_elapsed < 1.0, (
+        f"abandonment took {abandon_elapsed:.2f}s - expected the 0.1s "
+        "deadline to bound it, not the full 3.0s blocking call")
     stats = limiter.statistics()
     assert stats.borrowed_tokens == 0, (
         f"expected the limiter token to be released immediately on "
@@ -183,13 +188,20 @@ async def test_media_workflows_lock_survives_an_abandoned_writer():
     timeout-wrapped: an abandoned (timed-out) writer's REAL thread must keep
     holding media_workflows._lock_for's lock for as long as it actually
     runs, so a request that arrives after seeing the timeout (e.g. a user
-    retry) still queues behind it instead of racing it."""
+    retry) still queues behind it instead of racing it.
+
+    Synchronized deterministically throughout (a threading.Event polled from
+    async code, matching test_gpu_probe_nonblocking.py's own pattern) rather
+    than fixed sleeps - a hardcoded sleep here could in principle flake under
+    box load (see the test-quality finding this replaced), and every ordering
+    fact this test needs has a genuine event to wait on instead."""
     from localm import media_workflows
 
     key = "test-threadpool-timeout-abandoned-lock"
     media_workflows._media_locks.pop(key, None)
     order = []
     proceed = threading.Event()
+    b_attempting = threading.Event()
 
     def slow_holder():
         with media_workflows._lock_for(key):
@@ -198,30 +210,38 @@ async def test_media_workflows_lock_survives_an_abandoned_writer():
             order.append("A-out")
 
     def quick_second():
+        b_attempting.set()   # signalled BEFORE trying to acquire the lock
         with media_workflows._lock_for(key):
             order.append("B-in")
 
-    async def run_slow():
+    try:
+        # Awaiting this to completion IS the synchronization: it only
+        # returns once run_in_threadpool_bounded's own 0.15s deadline has
+        # fired and the caller has given up - A's real thread keeps running
+        # in the background, still holding the lock, exactly the abandoned-
+        # call state this test needs to exist before dispatching B.
         with pytest.raises(ThreadCallTimeout):
             await run_in_threadpool_bounded(slow_holder, timeout=0.15)
+        assert order == ["A-in"], "A should still be inside the lock at this point"
 
-    async def run_quick():
-        await run_in_threadpool_bounded(quick_second, timeout=5.0)
-
-    try:
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(run_slow)
-            await anyio.sleep(0.4)   # let A's own timeout fire and the caller give up
-            assert order == ["A-in"], "A should still be inside the lock at this point"
-
-            tg.start_soon(run_quick)
-            # give B a fair chance to (wrongly) proceed if the lock did not hold
-            await anyio.sleep(0.3)
-            assert "B-in" not in order, (
-                "B entered the critical section while A's abandoned thread "
-                "still holds the lock - the timeout defeated the existing "
-                "serialization guarantee")
-            proceed.set()   # let A's real thread finish and release the lock
+        b_task = asyncio.ensure_future(
+            run_in_threadpool_bounded(quick_second, timeout=5.0))
+        for _ in range(500):
+            if b_attempting.is_set():
+                break
+            await anyio.sleep(0.005)
+        assert b_attempting.is_set(), "B's worker thread never started"
+        # B is now either blocked on lock.acquire() or has just barely
+        # slipped through - but structurally it CANNOT have appended "B-in"
+        # yet, because `proceed` has not been set and A's real thread still
+        # unconditionally holds the lock. This is a guarantee from the lock
+        # semantics, not a timing race, so it needs no further wait.
+        assert "B-in" not in order, (
+            "B entered the critical section while A's abandoned thread "
+            "still holds the lock - the timeout defeated the existing "
+            "serialization guarantee")
+        proceed.set()   # let A's real thread finish and release the lock
+        await b_task
     finally:
         proceed.set()
         media_workflows._media_locks.pop(key, None)
@@ -233,11 +253,14 @@ async def test_remove_managed_comfy_lock_survives_an_abandoned_caller(tmp_path, 
     """Same fires-control as above, for managed_comfy.py's new _remove_lock -
     proves a client retry after a timeout cannot start a second concurrent
     rmtree against the same managed ComfyUI install while an abandoned
-    first call's thread is still deleting files."""
+    first call's thread is still deleting files. Synchronized deterministically
+    throughout - see test_media_workflows_lock_survives_an_abandoned_writer's
+    docstring for why."""
     from localm.media import managed_comfy
 
     order = []
     proceed = threading.Event()
+    b_attempting = threading.Event()
     calls: list = []
 
     def _fake_rmtree(path):
@@ -255,27 +278,31 @@ async def test_remove_managed_comfy_lock_survives_an_abandoned_caller(tmp_path, 
                         lambda with_models=False: [fake_target])
     monkeypatch.setattr(managed_comfy, "rmtree_robust", _fake_rmtree)
 
-    async def run_slow():
+    def run_second():
+        # Signalled BEFORE remove_managed_comfy is even called, so it fires
+        # right as B's worker thread starts - before B has any chance to
+        # contend for _remove_lock.
+        b_attempting.set()
+        return managed_comfy.remove_managed_comfy(False)
+
+    try:
         with pytest.raises(ThreadCallTimeout):
             await run_in_threadpool_bounded(
                 managed_comfy.remove_managed_comfy, False, timeout=0.15)
+        assert order == ["A-in"]
 
-    async def run_quick():
-        await run_in_threadpool_bounded(
-            managed_comfy.remove_managed_comfy, False, timeout=5.0)
-
-    try:
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(run_slow)
-            await anyio.sleep(0.4)
-            assert order == ["A-in"]
-
-            tg.start_soon(run_quick)
-            await anyio.sleep(0.3)
-            assert "B-in" not in order, (
-                "a second remove_managed_comfy call proceeded while the "
-                "first (abandoned) call's rmtree was still running")
-            proceed.set()
+        b_task = asyncio.ensure_future(
+            run_in_threadpool_bounded(run_second, timeout=5.0))
+        for _ in range(500):
+            if b_attempting.is_set():
+                break
+            await anyio.sleep(0.005)
+        assert b_attempting.is_set(), "B's worker thread never started"
+        assert "B-in" not in order, (
+            "a second remove_managed_comfy call proceeded while the "
+            "first (abandoned) call's rmtree was still running")
+        proceed.set()
+        await b_task
     finally:
         proceed.set()
 

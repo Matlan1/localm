@@ -74,15 +74,32 @@ def _lock_for(media: str) -> threading.Lock:
 # Budget for run_in_threadpool_bounded() in make_workflow_router's four
 # routes below (follow-up to #1057) - module-level, not a router-local
 # variable, so a test can monkeypatch it down for a fast timeout simulation.
-# Safe against corruption regardless of what value this is set to: an
-# abandoned writer's real thread keeps holding _lock_for's lock for as long
-# as it actually runs (see the lock's own comment above), so a client retry
-# after seeing a timeout still queues behind it rather than racing it - the
-# #1045 shape _lock_for was added to close. 30s covers ordinary file I/O plus
-# a wait behind another slow request holding the same media's lock;
-# genuinely large workflow uploads on a slow disk are the rare case this is
-# meant to eventually catch, not the common one it should ever fire for.
-_WORKFLOW_RMW_TIMEOUT_S = 30.0
+#
+# _WORKFLOW_OWN_WORK_TIMEOUT_S is the ceiling for how long a SINGLE holder's
+# own real work (file I/O, update_config's atomic write) should legitimately
+# take - genuinely large workflow uploads on a slow disk are the rare case
+# this is meant to eventually catch, not the common one it should ever fire
+# for.
+#
+# _WORKFLOW_RMW_TIMEOUT_S - the actual value passed to run_in_threadpool_
+# bounded - MUST exceed 2x that ceiling, not just match it. All four routes
+# share ONE _lock_for(media) lock, and the lock acquisition happens INSIDE
+# the bounded closure - so a request's own clock also covers however long it
+# waits behind another holder. If both used the SAME single-holder ceiling,
+# a writer that legitimately finishes just under ITS OWN budget could still
+# push a concurrently-queued, otherwise-instant reader (e.g. the GUI's own
+# list poll) past ITS budget purely from queueing, even though nothing ever
+# hung - CONFIRMED by direct reproduction during review: a writer at 1.3x its
+# budget (not hung, still completes) starved a queued no-op reader sharing
+# the identical constant. Budgeting 2x the single-holder ceiling guarantees
+# any request queued behind exactly one other NON-HUNG worst-case holder
+# still has a full ceiling's worth of margin left for its own (typically
+# trivial) work. A holder that is genuinely stuck well past its own ceiling
+# can still eventually starve a queued request - that residual is accepted,
+# matching _lock_for's own "queues behind it rather than racing it" design;
+# this fix only closes the ORDINARY-slowness case, not a genuine hang.
+_WORKFLOW_OWN_WORK_TIMEOUT_S = 30.0
+_WORKFLOW_RMW_TIMEOUT_S = 2 * _WORKFLOW_OWN_WORK_TIMEOUT_S
 
 # Distinct from None, which is a legitimate VALUE for `active` (no workflow
 # selected) - using None as both "caller did not pass this" and "resolved to
