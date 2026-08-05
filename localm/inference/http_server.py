@@ -160,14 +160,16 @@ _gpu_coord: Optional[dict] = None
 # with what either request was doing (see dev-notes/restart-loop-lag-
 # investigation-2026-08-04.md for the full trace that found this). Both
 # readers below (_loop_lag_seconds, the watchdog thread) treat None as "no
-# reading yet" - report 0.0 / skip the check - rather than inventing a
-# number from a timestamp that was never real. Do not "simplify" this back
-# to a time.monotonic() seed; that is the bug, not a redundancy.
+# reading yet" - report None / skip the check (ADR-0008 U6: _loop_lag_seconds
+# used to return 0.0 here, the same reading as healthy; every caller now
+# renders its None explicitly instead) - rather than inventing a number from
+# a timestamp that was never real. Do not "simplify" this back to a
+# time.monotonic() seed; that is the bug, not a redundancy.
 _HEARTBEAT_INTERVAL_S = 1.0
 _hb_monotonic: Optional[float] = None
 
 
-def _loop_lag_seconds() -> float:
+def _loop_lag_seconds() -> Optional[float]:
     """Real event-loop scheduling delay, in seconds - NOT time-since-last-
     heartbeat-tick (see the comment above _hb_monotonic). ~0.0 on a healthy
     loop; grows only when a heartbeat tick was itself delayed, meaning
@@ -187,15 +189,16 @@ def _loop_lag_seconds() -> float:
     request with a preceding stall, not for catching sub-second ones.
 
     COLD START, before the heartbeat task's first tick (_hb_monotonic is
-    still None): reports 0.0, the SAME reading as "healthy", never a growing
-    elapsed-since-import number. This is a deliberate choice between two
-    honest options (report nothing, or report zero) - zero was picked
-    because every caller already treats this as a plain float (the debug
-    request log's "%.2fs" format, /debug/stacks' round(...)), so "nothing"
-    would need every caller updated to handle absence, for a window that
-    only ever under-reports (never claims a stall that is not there)."""
+    still None): returns None (ADR-0008 U6). It used to return 0.0 here -
+    the SAME reading as "healthy" - which is exactly the #955/#950 shape
+    this module fixed once already, just moved from the producer that grows
+    with wall-clock time to the producer that reports a fixed false-healthy
+    number. Every caller must render None as explicitly unavailable, never
+    silently reuse the "0.0 = no stall longer than the interval" reading for
+    a state that has no reading at all - see the debug request log and
+    /debug/stacks call sites."""
     if _hb_monotonic is None:
-        return 0.0
+        return None
     return max(0.0, (time.monotonic() - _hb_monotonic) - _HEARTBEAT_INTERVAL_S)
 
 def _default_engine_factory(name: str) -> Engine:
@@ -3156,13 +3159,19 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             # saws 0..1s even when nothing is wrong (#955/#950). Resolution
             # limit: a stall shorter than _HEARTBEAT_INTERVAL_S also reads 0.0
             # (see _loop_lag_seconds' docstring) - 0.0 means "no stall LONGER
-            # than the interval", not "no stall at all".
+            # than the interval", not "no stall at all". None (cold start,
+            # before the heartbeat's first tick) renders as "n/a", never as
+            # 0.0 - ADR-0008 U6: those used to be the same reading, so a
+            # request served during startup looked identically healthy to
+            # one served with a real lag measurement behind it.
+            lag = _loop_lag_seconds()
+            lag_str = f"{lag:.2f}s" if lag is not None else "n/a"
             _dbg.debug(
-                "%s %s -> %d (%.0f ms, loop_lag=%.2fs)",
+                "%s %s -> %d (%.0f ms, loop_lag=%s)",
                 request.method, request.url.path,
                 response.status_code,
                 (time.perf_counter() - start) * 1000,
-                _loop_lag_seconds(),
+                lag_str,
             )
             return response
 
@@ -3230,8 +3239,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 anyio_limiter=anyio.to_thread.current_default_thread_limiter())
         except Exception:
             executors = {}
+        # None (cold start, before the heartbeat's first tick) renders as
+        # JSON null, never as 0.0 - ADR-0008 U6: those used to be the same
+        # reading, so a stack dump taken during startup looked identically
+        # healthy to one taken with a real lag measurement behind it.
+        lag = _loop_lag_seconds()
         return {"pid": os.getpid(),
-                "loop_lag_s": round(_loop_lag_seconds(), 2),
+                "loop_lag_s": round(lag, 2) if lag is not None else None,
                 "threads": threads, "tasks": tasks, "executors": executors}
 
     # CORS: localhost-only by default. A wildcard here would let ANY website
