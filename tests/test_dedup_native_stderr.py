@@ -190,3 +190,93 @@ def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, c
     assert len(warns) == 1, (
         f"expected exactly one latched warning, got {len(warns)}: "
         f"{[w.getMessage() for w in warns]}")
+
+
+# --------------------------------------------------------------------------- #
+#  Template grouping: the varying-integer flood the class originally exempted
+#
+#  Measured 2026-08-05 from a real 9012-line capture (issues/cuda graphs.txt):
+#  "CUDA Graph id N reused" does NOT change every occurrence, as the old
+#  docstring assumed. N cycles a bounded set - 21 distinct values there, each
+#  recurring ~425 times - so the lines ARE verbatim repeats, merely spaced wider
+#  than the LRU is deep. 8934 of 9012 lines were emitted individually, to the
+#  console and the GUI activity ring.
+# --------------------------------------------------------------------------- #
+
+def _group(lines):
+    """Drive _LineGrouper directly - no fd redirection, no ring buffer."""
+    out = []
+    g = debuglog._LineGrouper(out.append)
+    for line in lines:
+        g.feed(line)
+    g.flush()
+    return out
+
+
+def test_varying_integer_flood_collapses_to_one_counted_line():
+    """The reported symptom. A cycle LONGER than _MAX_PENDING never groups by
+    exact match no matter how the LRU is sized, because every entry is evicted
+    before it comes round."""
+    cap = debuglog._LineGrouper._MAX_PENDING
+    cycle = [f"CUDA Graph id {700 + 2 * i} reused" for i in range(cap * 3)]
+    out = _group(cycle * 40)
+
+    assert len(out) == 1, f"expected one counted line, got {len(out)}: {out[:4]}"
+    assert out[0] == f"CUDA Graph id <N> reused (x{len(cycle) * 40}, {len(cycle)} distinct)"
+
+
+def test_the_flood_no_longer_evicts_the_lines_that_DO_repeat_verbatim():
+    """The second-order damage, and the thing the class was built to prevent:
+    with more varying ids in flight than slots, the genuinely-repeating pair is
+    evicted before it can accumulate a count. In the real capture
+    'warmup reset' appeared 23x ungrouped against only 4x grouped.
+
+    THE INTERLEAVING RATIO IS LOAD-BEARING - do not "simplify" this to one id
+    per pair. With a single id between them the pair is touched every third
+    line, so move_to_end keeps it most-recently-used and it is NEVER the LRU
+    victim; the test then passes with OR without the fix and proves nothing
+    (measured - the first version of this test did exactly that). The real
+    stream emits many CONSECUTIVE ids between warmup lines, which is what
+    actually evicts the pair."""
+    cap = debuglog._LineGrouper._MAX_PENDING
+    rounds = 24
+    stream = []
+    for _ in range(rounds):
+        stream += [f"CUDA Graph id {700 + 2 * j} reused" for j in range(cap + 4)]
+        stream += ["ggml: warmup complete", "ggml: warmup reset"]
+    out = _group(stream)
+    assert f"ggml: warmup complete({rounds})" in out, out
+    assert f"ggml: warmup reset({rounds})" in out, out
+
+
+def test_a_LIST_of_distinct_messages_is_never_collapsed():
+    """Guards the fix against over-reach, which is the real risk of templating.
+    28 layer-assignment lines that each appear ONCE are a list, not a flood -
+    collapsing them would lose every layer number to save nothing. Both
+    conditions in _emit_one exist for this."""
+    lines = [f"load_tensors: layer {i} assigned to device ROCm0" for i in range(28)]
+    out = _group(lines)
+    assert out == lines, "a non-repeating list must pass through verbatim"
+
+
+def test_few_variants_still_group_individually_with_their_own_counts():
+    """At or below _MAX_PENDING distinct variants, exact matching already works
+    and is MORE informative than a placeholder - each id keeps its own count.
+    Templating must not destroy that."""
+    out = _group([f"CUDA Graph id {i % 2} reused" for i in range(8)])
+    assert out == ["CUDA Graph id 0 reused(4)", "CUDA Graph id 1 reused(4)"], out
+
+
+def test_lines_without_digits_are_completely_unaffected():
+    out = _group(["no digits here"] * 5)
+    assert out == ["no digits here(5)"]
+
+
+def test_distinct_variant_count_is_bounded_but_still_reported():
+    """The retained-variant set is capped so a never-repeating stream cannot
+    make this unbounded memory; past the cap the count is reported as 'N+'
+    rather than silently understated."""
+    cap = debuglog._LineGrouper._MAX_VARIANTS
+    out = _group([f"thing {i} done" for i in range(cap + 50)] * 3)
+    assert len(out) == 1
+    assert f"{cap}+ distinct" in out[0], out[0]
