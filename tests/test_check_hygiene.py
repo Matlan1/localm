@@ -779,6 +779,89 @@ def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
     assert ch.main([]) == 0
 
 
+# ---- release-manifest gate wiring -------------------------------------------
+# check_hygiene.py's own module docstring claimed the release-manifest gate
+# (scripts/check_manifest.py) was "folded in" here, when in fact main() never
+# called it at all - release-manifest.toml drifted 13 stale-exclude entries on
+# master with this reporting a clean pass throughout (dev-notes/
+# release-manifest-gate-wiring.md). These pin the wiring so that regresses loudly.
+
+def test_release_manifest_gate_failures_fail_the_build(monkeypatch):
+    """A real classification problem from _release_manifest_gate() must surface
+    as a hygiene FAILURE (exit 1), not be silently dropped - this is the exact
+    wiring gap that let 13 stale manifest entries go unnoticed."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "_tracked_files", lambda: [Path("ok.py")])
+    monkeypatch.setattr(ch, "_scan", lambda f: [])
+    monkeypatch.setattr(ch, "_changelog_append_only", lambda: [])
+    monkeypatch.setattr(ch, "_raw_accessor_violations", lambda t: [])
+    monkeypatch.setattr(ch, "_big_test_write_violations", lambda t: [])
+    monkeypatch.setattr(ch, "_sw_cache_derivation_violations", lambda: [])
+    monkeypatch.setattr(ch, "_import_cycle_violations", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    monkeypatch.setattr(ch, "_release_manifest_gate",
+                        lambda: (["release.exclude pattern 'X' matches no tracked file"], []))
+    assert ch.main([]) == 1
+
+
+def test_release_manifest_gate_warns_but_passes_by_default_and_strict_escalates(monkeypatch, capsys):
+    """A WARNING from _release_manifest_gate() (the expected shape when
+    check_manifest.py is absent, e.g. on CI/most external clones) does not fail
+    the default run, but DOES escalate under --strict - same contract as the
+    other warn-only checks (4b)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "_tracked_files", lambda: [Path("ok.py")])
+    monkeypatch.setattr(ch, "_scan", lambda f: [])
+    monkeypatch.setattr(ch, "_changelog_append_only", lambda: [])
+    monkeypatch.setattr(ch, "_raw_accessor_violations", lambda t: [])
+    monkeypatch.setattr(ch, "_big_test_write_violations", lambda t: [])
+    monkeypatch.setattr(ch, "_sw_cache_derivation_violations", lambda: [])
+    monkeypatch.setattr(ch, "_import_cycle_violations", lambda: [])
+    monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
+    monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    monkeypatch.setattr(ch, "_release_manifest_gate",
+                        lambda: ([], ["release-manifest gate SKIPPED: ..."]))
+
+    assert ch.main([]) == 0
+    assert "release-manifest gate SKIPPED" in capsys.readouterr().err
+
+    assert ch.main(["--strict"]) == 1
+    assert "release-manifest gate SKIPPED" in capsys.readouterr().err
+
+
+def test_release_manifest_gate_reports_a_warning_when_check_manifest_not_importable(monkeypatch):
+    """Real (non-stubbed) behavior of _release_manifest_gate() itself: when
+    scripts/check_manifest.py cannot be imported - the normal state on CI and
+    most external clones, since it is gitignored per AGENTS.md rule 6 - this must
+    return a warning, never silently return (([], [])) as if there were nothing
+    to report."""
+    ch = _load_check_hygiene()
+    monkeypatch.setitem(ch.sys.modules, "check_manifest", None)   # forces ImportError
+    failures, warnings = ch._release_manifest_gate()
+    assert failures == []
+    assert len(warnings) == 1
+    assert "check_manifest.py" in warnings[0]
+    assert "SKIPPED" in warnings[0]
+
+
+def test_release_manifest_gate_runs_the_real_checker_when_importable():
+    """Real (non-stubbed) behavior when scripts/check_manifest.py IS importable
+    (true in this dev checkout): _release_manifest_gate() must actually call
+    check_manifest.check_manifest(), not just claim to - this is the exact
+    wiring the docstring described but the old code never performed."""
+    ch = _load_check_hygiene()
+    scripts_dir = str(REPO_ROOT / "scripts")
+    if scripts_dir not in ch.sys.path:
+        ch.sys.path.insert(0, scripts_dir)
+    import check_manifest as cm
+    failures, warnings = ch._release_manifest_gate()
+    assert warnings == []
+    # Whatever check_manifest.check_manifest() reports against the real tree right
+    # now (expected: []), _release_manifest_gate() must report the SAME thing -
+    # proving it is a live passthrough, not a hardcoded stub.
+    assert failures == list(cm.check_manifest())
+
+
 # ---- [Unreleased] draft corruption WARNINGS (sibling-bullet-loss backstop) ----
 # The append-only gate above deliberately EXEMPTS the [Unreleased] draft: it is
 # freely rewritable until cut (test_changelog_rewriting_unreleased_is_allowed).
