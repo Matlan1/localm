@@ -467,8 +467,16 @@ class TestEmbeddingWarmupRoute:
         monkeypatch.setattr(emb, "loaded_dim", lambda: None)
 
         def _fake_get_embedder(*, on_progress=None):
+            # Synthetic stage text, deliberately NOT the product's real wording.
+            # get_embedder is faked out wholesale here, so all this test can prove
+            # is that the job/SSE pipe carries lines through unaltered; a verbatim
+            # copy of the real copy reads as coverage of wording nothing here
+            # constrains. It was exactly that: this line still promised "up to a
+            # minute" while the real message was corrected against its own 300s
+            # ceiling, and stayed green. The wording itself is pinned in
+            # test_embedder.py::test_get_embedder_progress_states_the_real_load_bound.
             for msg in ("Resolving the embedding model...",
-                       "Loading into memory (this can take up to a minute)...",
+                       "Loading into memory (synthetic stage text)...",
                        "Ready (5-dim)."):
                 if on_progress:
                     on_progress(msg)
@@ -482,7 +490,7 @@ class TestEmbeddingWarmupRoute:
 
         texts = [e["text"] for e in events if e.get("type") == "line"]
         assert texts == ["Resolving the embedding model...",
-                         "Loading into memory (this can take up to a minute)...",
+                         "Loading into memory (synthetic stage text)...",
                          "Ready (5-dim)."]
         assert events[-1] == {"type": "end", "status": "done",
                               "returncode": None, "result": None}

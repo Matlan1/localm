@@ -1559,8 +1559,17 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
             _LOAD_FAILED_SPEC = None
             _LAST_ERROR = None
         try:
+            # The stated bound is the deadline this stage ACTUALLY runs under:
+            # _embedder_runner.LOAD_TIMEOUT_DEFAULT (300s), which applies because
+            # _reload's spawn_and_load() call passes no override. It said "up to a
+            # minute", understating its own ceiling 5x, so a user watching a slow
+            # first load had every reason to think it had hung. The OTHER 300s
+            # window this function can spend (vram.evict_chat_for_embedder) is
+            # already past by here, which is why this says five and not ten.
+            # test_get_embedder_progress_states_the_real_load_bound pins the two
+            # together, so changing the constant without the copy fails.
             _emit_stage(on_progress,
-                       "Loading into memory (this can take up to a minute)...")
+                       "Loading into memory (this can take up to five minutes)...")
             from localm.inference.engine import _LOAD_LOCK
             with _LOAD_LOCK:
                 _EMBEDDER = IsolatedEmbedder(
