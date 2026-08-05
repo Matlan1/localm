@@ -896,11 +896,18 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
-        # Model's true transformer layer count, read once here - the only place it
-        # is knowable (there is no pre-load GGUF header parser in the tree). The
-        # GGUF backend caches it (localm.model_meta) so later loads and the GUI
-        # VRAM estimate can size a partial GPU offload precisely; the clamp note
-        # below reuses it.
+        # Model's true transformer layer count, read once here from the loaded
+        # model. This is the only place it is currently EXPOSED, which is NOT the
+        # same as the only place it is knowable: this comment used to claim "there
+        # is no pre-load GGUF header parser in the tree" and that is simply false.
+        # model_manager/gguf.py parses the header before any load, and
+        # gguf_kv_bytes_per_token already reads <arch>.block_count off it - it just
+        # consumes the value for KV arithmetic instead of surfacing it. So a
+        # pre-load layer count is an extraction away, not a missing capability;
+        # anyone weighing a layer-count denominator should cost it on that basis.
+        # The GGUF backend caches this one (localm.model_meta) so later loads and
+        # the GUI VRAM estimate can size a partial GPU offload precisely; the clamp
+        # note below reuses it.
         self.n_layers: Optional[int] = None
         try:
             actual = api.llama_model_n_layer(self._model_ptr)

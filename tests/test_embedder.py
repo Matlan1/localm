@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import types
 from pathlib import Path
 
@@ -810,6 +811,68 @@ def test_get_embedder_on_progress_announces_stages_on_success(monkeypatch):
     assert any("resolv" in m.lower() for m in messages), messages
     assert any("loading" in m.lower() for m in messages), messages
     assert any("ready" in m.lower() and "5" in m for m in messages), messages
+
+
+_MINUTE_WORDS = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                 "fifteen": 15, "twenty": 20, "thirty": 30}
+
+
+def _stated_minutes(msg):
+    """Minutes claimed by a progress line ('up to five minutes', 'up to 90
+    seconds'), or None when it states no bound. Accepts both a spelled-out word
+    and a digit so a reword does not fail this for the wrong reason."""
+    m = re.search(r"up to (\w+) (minutes?|seconds?)", msg, re.I)
+    if not m:
+        return None
+    word, unit = m.group(1), m.group(2).lower()
+    n = _MINUTE_WORDS.get(word.lower())
+    if n is None:
+        try:
+            n = float(word)
+        except ValueError:
+            return None
+    return float(n) / 60.0 if unit.startswith("second") else float(n)
+
+
+def test_get_embedder_progress_states_the_real_load_bound(monkeypatch):
+    """The 'loading' stage quotes a ceiling, and it must be the ceiling this stage
+    genuinely runs under: _embedder_runner.LOAD_TIMEOUT_DEFAULT, which applies
+    because _reload's spawn_and_load() passes no override. It used to promise "up
+    to a minute" against a 300s deadline, so a slow-but-perfectly-healthy first
+    load looked hung to anyone watching it.
+
+    Pinned to the CONSTANT, never to a literal sentence, so raising the timeout
+    without touching the copy fails HERE rather than misinforming a user. The
+    sibling stage test above only asserts a 'loading' line exists at all, which
+    is exactly why the wrong figure survived in it."""
+    from localm.inference._embedder_runner import LOAD_TIMEOUT_DEFAULT
+
+    _cfg(monkeypatch)
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/bge-small.gguf")
+
+    class _Ok:
+        dim = 5
+
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Ok)
+
+    messages: list[str] = []
+    assert emb.get_embedder(on_progress=messages.append) is not None
+
+    loading = [m for m in messages if "loading" in m.lower()]
+    assert loading, messages
+    stated = _stated_minutes(loading[0])
+    assert stated is not None, f"the loading stage states no bound: {loading[0]!r}"
+    assert stated == pytest.approx(LOAD_TIMEOUT_DEFAULT / 60.0), (
+        f"progress promises {stated} min but the real ceiling is "
+        f"{LOAD_TIMEOUT_DEFAULT / 60.0} min: {loading[0]!r}")
 
 
 def test_get_embedder_on_progress_reports_no_model_available(monkeypatch):

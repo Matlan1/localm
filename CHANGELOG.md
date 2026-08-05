@@ -344,6 +344,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Warming up the embedding model no longer promises "up to a minute" for
+  something it gives five.** The progress line shown while an embedding model
+  loads quoted a ceiling five times shorter than the one the load actually runs
+  under, so a slow but perfectly healthy first load - a large model, a cold
+  cache, a slow disk - looked like it had hung with four minutes still legitimately
+  left on the clock. It now states the real bound.
 - **A model download could show a confident percentage it had no basis for.**
   Five related problems in the pull progress bar: a failed download announced
   100% before reporting failure; resuming an interrupted direct-URL download
