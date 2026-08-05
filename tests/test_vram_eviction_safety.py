@@ -696,9 +696,20 @@ class TestSplitAwareCapacityGate:
     fix against the same real, size-derived vram_required arithmetic the
     maintainer's original bug report hit, not just a hardcoded default."""
 
+    # free_scope=device: resolve_auto_split_ratios() now requires a
+    # device-global reading on every configured device before computing a
+    # real proportion. An untagged double would decline to the equal-split
+    # fallback instead - numerically identical here (both devices are
+    # symmetric), but the ADAPTIVE-vs-DECLINED distinction still matters:
+    # switch_engine only defers a combined-short load to the backend's own
+    # sizing when shares_adaptive is True (auto genuinely computed the
+    # shares), never on the declined/equal-fallback path - see
+    # test_exceeds_even_the_combined_split_defers_to_backend below.
     _SPLIT_GPUS = [
-        {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3},
-        {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3},
+        {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3,
+         "free_scope": "device"},
+        {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3,
+         "free_scope": "device"},
     ]
 
     def _install(self, monkeypatch, tmp_path, *, size_bytes, gpus, gpu_split_indices,
@@ -906,10 +917,21 @@ class TestPerDeviceSplitFitGate:
         SAME asymmetric occupancy that the pinned test above refuses now
         LOADS with ratios unset - the auto free-VRAM-proportional split gives
         the occupied GPU 0 only its ~6% share (~0.4 GiB vs 2 GiB free), so no
-        device is short and no eviction pressure exists."""
+        device is short and no eviction pressure exists.
+
+        free_scope=device on both entries: resolve_auto_split_ratios() now
+        requires a device-global reading on every configured device before
+        computing a real proportion (see its TRUSTWORTHINESS docstring
+        section) - an untagged double here would decline to the SAFE equal
+        split instead, which genuinely 503s in this asymmetric scenario
+        (that IS the point of the pinned test above), defeating what this
+        test exists to prove."""
+        from localm.discover import FREE_SCOPE_DEVICE
         gpus = [
-            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
-            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3,
+             "free_scope": FREE_SCOPE_DEVICE},
+            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3,
+             "free_scope": FREE_SCOPE_DEVICE},
         ]
         self._install(monkeypatch, tmp_path, filename="model-a.gguf",
                       gpus=gpus, gpu_split_indices=[0, 1])

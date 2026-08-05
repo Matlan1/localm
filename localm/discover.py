@@ -1882,6 +1882,10 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
     - The probe did not complete fresh this call (non-``GPU_PROBE_OK``):
       distributing by a frozen last-known-good snapshot is the same rule-5
       gap ``gpu_split_shortfall``'s probe-freshness contract closes.
+    - (``list_gpus()`` path only) any configured device's reading is not
+      device-global (``free_scope != FREE_SCOPE_DEVICE``) - see the
+      TRUSTWORTHINESS section below for why this, unlike
+      ``gpu_split_shortfall``'s use of the same reading, cannot be skipped.
 
     On the ``vulkan`` build the reading comes from
     :func:`native_gpu_devices` (the crash-isolated probe daemon's view of
@@ -1892,6 +1896,47 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
     ``list_gpus()``'s, reusing the caller-injected *gpus* snapshot when given
     (``gpu_split_shortfall`` passes its own fresh ``GPU_PROBE_OK`` reading,
     so gate and shares are computed from ONE snapshot).
+
+    TRUSTWORTHINESS (AGENTS.md rule 5), audited per branch rather than copied
+    wholesale from the display surfaces this mirrors - a PROPORTIONAL split
+    is a materially different question from a display or a refuse-only gate,
+    and each branch's own reading has a different, separately-measured
+    trust story:
+
+    * Freshness is a non-issue on BOTH branches, not merely checked on one.
+      The ``list_gpus()`` branch's ``GPU_PROBE_OK`` check above is the
+      explicit form of it; :func:`native_gpu_devices` needs no such check
+      because its contract (see its own and ``_probe_roundtrip``'s
+      docstrings) is fresh-or-``None`` with NO last-known-good caching at
+      all - a non-``None`` reply is this call's own live round-trip to the
+      probe daemon, so there is no "served stale" state to distinguish.
+    * Scope DOES differ by branch, and only one side has evidence backing a
+      check. ``list_gpus()``'s entries are scope-tagged by
+      :func:`_apply_device_global_free`, which MEASURED that Windows + an
+      AMD ROCm/HIP torch build reports free VRAM blind to every other
+      process (dev-notes/vram-cross-process-blindness.md) - so this branch
+      REQUIRES every configured device's ``free_scope`` to be
+      :data:`FREE_SCOPE_DEVICE` before trusting the proportion, unlike
+      ``gpu_split_shortfall``'s refuse-only use of the identical reading
+      (there, an over-stated free only makes a refusal MORE conservative;
+      here, a reading equally blind on every device makes an empty card and
+      a nearly-full one look equally free, which can steer too much of a
+      real split onto the full one - a materially wrong allocation, not
+      merely an imprecise refusal).
+      :func:`native_gpu_devices` carries no such tag, and - unlike the HIP
+      case - NO measurement in this codebase shows ggml-vulkan's own
+      ``ggml_backend_dev_memory`` query is cross-process blind (the
+      confirmed comparison was HIP-vs-HIP: torch's ``mem_get_info`` against
+      llama.cpp's OWN bundled HIP runtime, not against Vulkan). Asserting an
+      unmeasured blindness would be exactly the "spurious uncertainty flag
+      on a number that is actually fine" this same file's own
+      ``raw_reading_is_process_scoped`` docstring warns against for the
+      CUDA case - so the vulkan branch is deliberately left UNGATED on
+      scope pending a real measurement on genuinely distinct multi-GPU
+      Vulkan hardware (this project's own dev box is single-GPU and cannot
+      take that measurement - see tests/test_gpu_split_native_vulkan.py,
+      which DOES exercise this branch for real when that hardware is
+      available).
 
     A device reporting 0 bytes free keeps a tiny positive share (1-byte
     floor) instead of a 0.0 ratio: ``resolve_gpu_split`` discards the WHOLE
@@ -1958,6 +2003,19 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
             if not isinstance(free, int):
                 return _fallback(
                     f"device {i} is not detected or reported no free VRAM")
+            # Device-global or nothing: see the TRUSTWORTHINESS section of
+            # this function's docstring for why a PROPORTIONAL split cannot
+            # accept a PROCESS-scoped (or untagged) reading the way
+            # gpu_split_shortfall's refuse-only gate does. Real list_gpus()
+            # output always carries this tag (_apply_device_global_free sets
+            # it on every entry, every platform) - a missing tag here means a
+            # synthetic/test double, not a production reading, and is
+            # rejected the same as an explicitly PROCESS-scoped one rather
+            # than silently assumed safe.
+            if g.get("free_scope") != FREE_SCOPE_DEVICE:
+                return _fallback(
+                    f"device {i}'s free-VRAM reading is not device-global "
+                    f"(free_scope={g.get('free_scope')!r})")
             frees.append(free)
 
     floored = [max(f, 1) for f in frees]
