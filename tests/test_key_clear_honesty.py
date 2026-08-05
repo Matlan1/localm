@@ -57,7 +57,7 @@ class TestClearApiKeyReportsWhatSurvived:
         failures = auth.clear_api_key()
 
         assert failures, "an undeletable key file must be reported, not swallowed"
-        assert any(key_name in f for f in failures)
+        assert any(key_name in f["path"] for f in failures)
         # The whole point: the credential SURVIVED, so the caller must be able
         # to tell. Proving the file is still there proves the report is not
         # merely cosmetic.
@@ -67,7 +67,19 @@ class TestClearApiKeyReportsWhatSurvived:
         runner.invoke(main, ["key", "generate"])
         _unlink_denied_for(monkeypatch, auth.key_file().name)
         failures = auth.clear_api_key()
-        assert any("PermissionError" in f for f in failures)
+        assert any("PermissionError" in f["error"] for f in failures)
+
+    def test_label_is_path_free_so_a_network_caller_can_use_it(
+            self, runner, monkeypatch):
+        """``what`` must never carry the path: it is the ONLY field the HTTP
+        route is allowed to put on the wire, so if it embedded the path the
+        route's disclosure boundary would be defeated silently."""
+        runner.invoke(main, ["key", "generate"])
+        _unlink_denied_for(monkeypatch, auth.key_file().name)
+        home = str(auth.key_file().parent)
+        for f in auth.clear_api_key():
+            assert home not in f["what"]
+            assert "Error" not in f["what"]
 
 
 class TestKeyClearCliDoesNotClaimSuccess:
@@ -125,3 +137,22 @@ class TestClearRouteDoesNotClaimSuccess:
             "open mode")
         assert body["warnings"], "the caller must learn WHAT survived"
         assert auth.key_file().exists()
+
+    def test_response_discloses_no_path_and_no_exception_text(
+            self, runner, monkeypatch):
+        """Honest does not mean verbose. The absolute path carries the account
+        name (rule 2) and raw OS exception text is stack-trace exposure, so
+        neither may ride out on an HTTP response - CodeQL flagged exactly this
+        on the first draft of the fix. The local CLI still shows both."""
+        runner.invoke(main, ["key", "generate"])
+        key = auth.get_api_key()
+        _unlink_denied_for(monkeypatch, auth.key_file().name)
+        home = str(auth.key_file().parent)
+
+        c = self._client()
+        r = c.post("/api/auth/key/clear", headers={"Authorization": f"Bearer {key}"})
+
+        blob = r.text
+        assert home not in blob, "the data dir path must not go on the wire"
+        assert "PermissionError" not in blob, "no raw exception text on the wire"
+        assert "the API key file" in blob, "but it must still say WHAT survived"

@@ -129,10 +129,18 @@ def register(app: FastAPI, ctx) -> None:
             # a lie the GUI then shows the user as open mode. Report it honestly
             # rather than raising - the revocation half did happen, and a 500
             # would imply nothing had.
+            #
+            # ONLY the path-free "what" labels go on the wire. clear_api_key also
+            # returns "path" (an absolute filesystem path, which carries the
+            # account name - rule 2) and "error" (raw OS exception text -
+            # py/stack-trace-exposure). Those are for the LOCAL CLI and the local
+            # log, never for an HTTP response. clear_api_key's own logger.warning
+            # already recorded the full detail locally.
+            what = [f["what"] for f in failed]
             _dbg.warning(
                 "owner API key clear via /api/auth/key/clear was INCOMPLETE: %s",
-                "; ".join(failed))
-            return {"cleared": False, "warnings": failed}
+                "; ".join(what))
+            return {"cleared": False, "warnings": what}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
         return {"cleared": True, "warnings": []}
 

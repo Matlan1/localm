@@ -131,8 +131,14 @@ def key_clear(yes):
         # green tick while the key on disk still granted access.
         console.print("[red]x[/red] API key NOT fully cleared - credentials may "
                       "still grant access:")
+        # The CLI is a LOCAL surface: the user owns this machine and needs the
+        # path and the OS error to fix it by hand. The HTTP route deliberately
+        # shows only "what" (see clear_api_key's docstring).
         for item in failed:
-            console.print(f"  [yellow]-[/yellow] {item}")
+            console.print(f"  [yellow]-[/yellow] {item['what']}: "
+                          f"{item['path']} ({item['error']})")
+        console.print("[dim]Delete the listed file(s) by hand, then run "
+                      "'localm key clear' again to confirm.[/dim]")
     else:
         console.print("[green]✓[/green] API key cleared - open mode.")
     if revoked:
