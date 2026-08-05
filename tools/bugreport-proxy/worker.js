@@ -28,7 +28,7 @@ export default {
         return await listIssues(request, env, url);
       }
       if (request.method === "GET" && path === "/update") {
-        return await latestRelease(request, env);
+        return await latestRelease(request, env, url);
       }
       if (request.method === "GET" && path === "/update/download") {
         return await downloadBuild(request, env, url);
@@ -156,13 +156,26 @@ function trimIssue(it) {
 
 // ------------------------ update: latest release ------------------------
 
-async function latestRelease(request, env) {
+async function latestRelease(request, env, url) {
   const gate = updateGateOrError(request, env);
   if (gate) return gate;
-  const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases/latest`);
-  if (gh.status === 404) return json({ ok: true, version: null, note: "no releases yet" });
-  if (!gh.ok) return json({ error: "release lookup failed", status: gh.status }, 502);
-  const rel = await gh.json();
+  // Opt-in prerelease channel (localm's update_allow_prerelease setting, admin_only,
+  // default off - see dev-notes/self-updater-design's prerelease-channel addendum).
+  // The DEFAULT path below is byte-for-byte what this function did before the
+  // channel existed - a non-opted-in client's answer must never change because
+  // this param exists to be read.
+  const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
+  let rel;
+  if (!wantsPrerelease) {
+    const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases/latest`);
+    if (gh.status === 404) return json({ ok: true, version: null, note: "no releases yet" });
+    if (!gh.ok) return json({ error: "release lookup failed", status: gh.status }, 502);
+    rel = await gh.json();
+  } else {
+    rel = await latestIncludingPrerelease(env);
+    if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
+    if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
+  }
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
   // Prefer a .zip asset (the build); else the first asset; else none.
   const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
@@ -180,6 +193,36 @@ async function latestRelease(request, env) {
     ok: true, version: rel.tag_name, name: rel.name,
     notes: String(rel.body || "").slice(0, 8000), published_at: rel.published_at,
     asset, signature,
+  });
+}
+
+// Opted-in path: the single most recent NON-DRAFT release, stable or prerelease.
+// Returns the release object, null (no qualifying release - the /update route
+// reports this the same as /releases/latest's own 404 case), or undefined (the
+// GitHub call itself failed - reported as a 502, same as the default path).
+//
+// Uses /releases (the list endpoint), not /releases/latest, because GitHub's own
+// docs define /releases/latest as excluding prereleases by name - verified against
+// GitHub's REST API documentation, not assumed. Two things NOT trusted from that
+// same reading:
+//   - Sort order: unlike /releases/latest's documented "sorted by created_at",
+//     the List Releases docs name NO ordering guarantee, so this picks the max by
+//     published_at explicitly rather than trusting array order or index 0.
+//   - Draft visibility: GitHub's docs say only a push-access token even RECEIVES
+//     draft entries in this listing, so UPDATE_GITHUB_TOKEN (a Contents:read token,
+//     not a collaborator) most likely never sees one - but a draft must never be
+//     offered to ANYONE, so this filters draft === true explicitly rather than
+//     relying on that token-permission behavior holding.
+async function latestIncludingPrerelease(env) {
+  const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases?per_page=30`);
+  if (!gh.ok) return undefined;
+  const all = await gh.json();
+  const candidates = (Array.isArray(all) ? all : []).filter((r) => r.draft !== true);
+  if (!candidates.length) return null;
+  return candidates.reduce((best, r) => {
+    const rt = Date.parse(r.published_at || r.created_at || 0) || 0;
+    const bt = Date.parse(best.published_at || best.created_at || 0) || 0;
+    return rt > bt ? r : best;
   });
 }
 

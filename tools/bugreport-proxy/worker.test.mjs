@@ -258,6 +258,129 @@ test("update: no releases yet -> ok with version null", async () => {
   } finally { restore(); }
 });
 
+// ------------------------ update: prerelease channel ----------------------
+
+test("update: no channel param -> unchanged /releases/latest call, no drafts endpoint hit", async () => {
+  const seen = {};
+  const restore = stubFetch(async (url, opts) => {
+    seen.url = url; seen.opts = opts;
+    return new Response(JSON.stringify({
+      tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "2026-07-01T00:00:00Z",
+      assets: [{ id: 2, name: "localm-0.2.0.zip", size: 1234 }],
+    }), { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 200);
+    assert.match(seen.url, /\/releases\/latest$/, "the default path is byte-for-byte the pre-channel call");
+  } finally { restore(); }
+});
+
+test("update: an unrecognized channel value falls through to the default (stable) path", async () => {
+  // Anything other than the literal string "prerelease" must be treated as absent -
+  // never partially matched, never a second code path with its own bugs to find.
+  const seen = {};
+  const restore = stubFetch(async (url) => {
+    seen.url = url;
+    return new Response(JSON.stringify({
+      tag_name: "v0.2.0", assets: [], published_at: "2026-07-01T00:00:00Z",
+    }), { status: 200 });
+  });
+  try {
+    await worker.fetch(
+      req(undefined, { method: "GET", path: "/update?channel=stable", headers: { "X-Localm-Token": "s3cret" } }),
+      ENV_UP);
+    assert.match(seen.url, /\/releases\/latest$/);
+  } finally { restore(); }
+});
+
+test("update: channel=prerelease picks the single most recent NON-DRAFT release by published_at, not array order", async () => {
+  // Deliberately out of chronological order and with a DRAFT that is the newest
+  // entry by date - proves this does not trust index 0 (GitHub's List Releases
+  // docs name no sort-order guarantee) and does not offer a draft to anyone.
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases?")) {
+      return new Response(JSON.stringify([
+        { tag_name: "v0.1.4-rc1", draft: false, prerelease: true,
+          published_at: "2026-08-01T00:00:00Z", assets: [] },
+        { tag_name: "v0.1.5-draft", draft: true, prerelease: true,
+          published_at: "2026-08-10T00:00:00Z", assets: [] },   // newest by date, but a DRAFT
+        { tag_name: "v0.1.4-rc2", draft: false, prerelease: true,
+          published_at: "2026-08-05T00:00:00Z",                  // newest NON-draft
+          assets: [{ id: 9, name: "localm-0.1.4-rc2.zip", size: 1 }] },
+        { tag_name: "v0.1.3", draft: false, prerelease: false,
+          published_at: "2026-07-01T00:00:00Z", assets: [] },
+      ]), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update?channel=prerelease",
+                       headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.equal(out.version, "v0.1.4-rc2", "newest NON-draft by date, not by array position");
+    assert.equal(out.asset.id, 9);
+  } finally { restore(); }
+});
+
+test("update: channel=prerelease with only drafts available -> no releases yet, never offers a draft", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases?")) {
+      return new Response(JSON.stringify([
+        { tag_name: "v0.2.0-draft", draft: true, published_at: "2026-08-01T00:00:00Z", assets: [] },
+      ]), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update?channel=prerelease",
+                       headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.ok, true);
+    assert.equal(out.version, null);
+  } finally { restore(); }
+});
+
+test("update: channel=prerelease surfaces a GitHub list-releases failure as 502", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases?")) return new Response("forbidden", { status: 403 });
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update?channel=prerelease",
+                       headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 502);
+  } finally { restore(); }
+});
+
+test("update: channel=prerelease can pick a stable release when it IS the newest overall", async () => {
+  // Opted-in does not mean "always show an rc" - it means "consider the whole
+  // list", and a plain stable release winning that comparison is correct.
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases?")) {
+      return new Response(JSON.stringify([
+        { tag_name: "v0.1.4-rc1", draft: false, prerelease: true,
+          published_at: "2026-07-20T00:00:00Z", assets: [] },
+        { tag_name: "v0.1.4", draft: false, prerelease: false,
+          published_at: "2026-08-01T00:00:00Z", assets: [] },
+      ]), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update?channel=prerelease",
+                       headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.version, "v0.1.4");
+  } finally { restore(); }
+});
+
 test("update/download: streams the asset via the signed redirect", async () => {
   const restore = stubFetch(async (url) => {
     if (url.includes("/releases/assets/")) {

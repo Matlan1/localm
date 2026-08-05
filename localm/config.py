@@ -597,6 +597,13 @@ DEFAULT_CONFIG: dict = {
     # `localm update` hidden). See tools/bugreport-proxy/ and dev-notes/self-updater-design.
     "update_url": None,
     "update_token": None,
+    # Opt-in only: the update check stays stable-only unless a local admin turns
+    # this on (settings_schema.py's update_allow_prerelease, admin_only). A
+    # prerelease build is signed and anti-rollback checked exactly like a stable
+    # one - this does not weaken verification, it only widens WHICH candidate the
+    # proxy considers offering. See dev-notes/self-updater-design's prerelease
+    # channel addendum.
+    "update_allow_prerelease": False,
     # Names of enabled engine plugins (WordPress-style). Managed by the plugin
     # engine (plugin enable/disable, GUI Plugins page) via update_config, NOT the
     # settings form. Declared here for a documented home + default (else the

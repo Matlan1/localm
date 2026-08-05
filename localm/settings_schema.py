@@ -558,6 +558,24 @@ CORE_FIELDS: list = [
                  "Override shared secret for the updater (defaults to the bug-report "
                  "token when blank). Set in config.json, not here.",
                  group="Bug reports", admin_only=True),
+    # admin_only: this decides WHICH BUILDS the updater will suggest installing on
+    # this machine - the same "widens trust reach" reasoning as update_url/
+    # update_token/bugreport_upload_url right above (all admin_only in this same
+    # group). A prerelease is signed and anti-rollback-checked exactly like a
+    # stable release (see updater.py's CHK-UPDATER-INTEGRITY), so this is not
+    # about authenticity - it is about a non-admin config:write caller being able
+    # to make the GUI start suggesting release-candidate builds to whoever
+    # actually clicks "Update now", without that person having made the choice
+    # themselves. Default MUST be False: this is an OPT-IN channel, not a
+    # default-on one - see dev-notes/self-updater-design (prerelease channel).
+    SettingField("update_allow_prerelease", Widget.TOGGLE,
+                 "Offer prerelease updates",
+                 "Also offer release-candidate builds (not just stable releases) "
+                 "when checking for updates. Off by default: a prerelease is signed "
+                 "and verified the same way as a stable release, but is less "
+                 "field-tested. Turn this on only if you want to help test rc "
+                 "builds.",
+                 group="Bug reports", admin_only=True),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",

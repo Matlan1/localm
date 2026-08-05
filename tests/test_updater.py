@@ -93,6 +93,65 @@ def test_check_unconfigured_raises(monkeypatch):
         updater.check()
 
 
+# ------------------------ prerelease channel -----------------------------
+
+def test_check_stable_by_default_no_channel_param(monkeypatch):
+    """Opt-in only: with the setting absent (a config saved before it existed)
+    OR explicitly False, the request must be byte-identical to before this
+    feature - no query string at all, not even an empty one."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
+    op = _opener({"ok": True, "version": "v0.2.0"})
+    updater.check(opener=op)
+    assert op.url.endswith("/update")
+    assert "channel" not in op.url
+
+
+def test_check_prerelease_opt_in_adds_channel_param(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://w", "update_allow_prerelease": True})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
+    op = _opener({"ok": True, "version": "v0.2.0"})
+    updater.check(opener=op)
+    assert op.url.endswith("/update?channel=prerelease")
+
+
+def test_prerelease_channel_enabled_reads_the_setting(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"update_allow_prerelease": True})
+    assert updater._prerelease_channel_enabled() is True
+    monkeypatch.setattr("localm.config.load_config", lambda: {"update_allow_prerelease": False})
+    assert updater._prerelease_channel_enabled() is False
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    assert updater._prerelease_channel_enabled() is False, "absent -> stable-only, not offered"
+
+
+def test_prerelease_channel_enabled_fails_safe_to_stable(monkeypatch):
+    """An unreadable config must never be read as 'prereleases on' - that would
+    be the wrong fail-open direction for a setting whose whole point is opt-in."""
+    def boom():
+        raise OSError("config unreadable")
+    monkeypatch.setattr("localm.config.load_config", boom)
+    assert updater._prerelease_channel_enabled() is False
+
+
+def test_opting_out_after_an_rc_does_not_strand_or_downgrade(monkeypatch):
+    """The downgrade edge case from the design: a client on 0.1.4-rc2 opts back
+    out. If the stable channel's latest is still older (0.1.3), the client
+    correctly stays on the rc (not newer, no downgrade offered, no crash) - it
+    is not stranded, it simply has nothing newer to move to yet."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://w", "update_allow_prerelease": False})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.4-rc2")
+    res = updater.check(opener=_opener({"ok": True, "version": "0.1.3"}))
+    assert res["newer"] is False
+
+    # Once the matching final release ships, moving off the rc IS offered - a
+    # forward upgrade, not a downgrade, via the existing final-outranks-its-own-
+    # prerelease tie-break (no new code needed for this case).
+    res2 = updater.check(opener=_opener({"ok": True, "version": "0.1.4"}))
+    assert res2["newer"] is True
+
+
 # ------------------------------ classify --------------------------------
 
 def test_classify_reboot_when_deps_unchanged(tmp_path):

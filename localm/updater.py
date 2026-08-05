@@ -180,20 +180,41 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _prerelease_channel_enabled() -> bool:
+    """Whether this install opted into the prerelease update channel
+    (settings_schema.py's ``update_allow_prerelease``, admin_only, default
+    False - an rc build is signed and anti-rollback checked exactly like a
+    stable one, but this is still an explicit opt-in, never a default-on
+    channel). Best-effort: an unreadable config falls back to stable-only,
+    the safe direction, never to silently offering prereleases."""
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("update_allow_prerelease", False))
+    except Exception:
+        return False
+
+
 def check(*, opener=None) -> dict:
     """Ask the proxy for the latest release and compare to the running version.
 
     Returns ``{current, latest, newer, notes, published_at, asset}``. *latest* is
     None when there are no releases. Raises :class:`~localm.bugreport.LocalmError`
     when not configured or the proxy fails - the caller decides whether to surface it
-    (the manual command does) or swallow it (the startup check does)."""
+    (the manual command does) or swallow it (the startup check does).
+
+    When the prerelease channel is opted into, appends ``?channel=prerelease`` to
+    the request; the PROXY (not this client) decides which single candidate
+    release to return for that channel (see tools/bugreport-proxy/worker.js's
+    latestRelease) - is_newer() below just orders whatever ONE candidate comes
+    back against the running version, unchanged either way."""
     from localm import _proxy
     from localm.bugreport import LocalmError
     base, token = endpoint()
     if not base:
         raise LocalmError("the updater is not configured",
                           reason="set bugreport_upload_url (or update_url) to enable it")
-    data = _proxy.request(base, "/update", token=token, opener=opener)
+    path = "/update?channel=prerelease" if _prerelease_channel_enabled() else "/update"
+    data = _proxy.request(base, path, token=token, opener=opener)
     current = _version.read_version()
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
