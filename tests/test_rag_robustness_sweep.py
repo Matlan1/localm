@@ -224,6 +224,59 @@ def test_non_dict_chunk_line_does_not_crash(tmp_path, bad_line):
     assert c.add_paths(docs, force=True)["chunks"] >= 1   # repair must not crash
 
 
+def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
+    """_load() runs from __init__, and every /api/rag request builds a FRESH
+    Collection - so a warning with no dedup guard fires on essentially every
+    request for a collection with any corrupt lines at all. Must warn on the
+    first Collection() for this directory and stay silent on a second one for
+    the SAME directory/count, matching the sibling _note_vector_degrade
+    warn-once pattern (test_rag.py's test_malformed_vectors_json_degrades_
+    not_crashes). self.corrupt must still be set on EVERY load regardless -
+    only the duplicate LOG LINE is suppressed, not the actual state."""
+    base = _seed(tmp_path)
+    chunks_file = base / "kb" / "chunks.jsonl"
+    with chunks_file.open("a", encoding="utf-8") as fh:
+        fh.write("\nnot valid json\n")
+
+    with caplog.at_level("WARNING", logger="localm"):
+        c1 = Collection("kb", base=base)
+        caplog.clear()
+        c2 = Collection("kb", base=base)
+
+    assert c1.corrupt is True and c2.corrupt is True, (
+        "the malformed-line state must be set on every load, dedup is only "
+        "about the LOG line")
+    assert "malformed" not in caplog.text, (
+        f"a second Collection() for the same directory re-logged the "
+        f"warning instead of being deduped: {caplog.text!r}")
+
+
+def test_malformed_chunk_line_warning_still_fires_for_a_different_collection(tmp_path, caplog):
+    """The dedup key must include the collection directory - two DIFFERENT
+    collections each having their own corruption must both be reported, never
+    collapsed into "one warning covers every collection" (the coordinator's
+    explicit caution: a flood fix must not hide a genuinely broken SECOND
+    collection behind the first one's already-logged warning)."""
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    base1 = _seed(tmp_path / "one")
+    base2 = _seed(tmp_path / "two")
+    for base in (base1, base2):
+        (base / "kb" / "chunks.jsonl").open("a", encoding="utf-8").write("\nnot valid json\n")
+
+    with caplog.at_level("WARNING", logger="localm"):
+        Collection("kb", base=base1)
+        first_text = caplog.text
+        caplog.clear()
+        Collection("kb", base=base2)
+        second_text = caplog.text
+
+    assert "malformed" in first_text
+    assert "malformed" in second_text, (
+        "a different collection's identical-shaped corruption must still "
+        "warn - the dedup key collapsed two distinct collections into one")
+
+
 def test_chunk_line_missing_text_key_does_not_crash(tmp_path):
     base = _seed(tmp_path)
     chunks_file = base / "kb" / "chunks.jsonl"

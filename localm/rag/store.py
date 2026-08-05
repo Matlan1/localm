@@ -685,11 +685,16 @@ _MAX_REJECTED_KEPT = 3
 #: from inside a function needs `global`, and this is read from a hot path.
 _NUMPY_DEGRADE_LOGGED: set = set()
 
-#: (collection dir, reason) pairs already logged in THIS process. _load() runs
-#: from __init__ and every request builds a fresh Collection, so an instance-level
-#: guard re-armed constantly and the same warning was emitted 25+ times a session.
-#: Process-scoped so the first occurrence is still loud and the rest are quiet.
-#: Never consulted for state - only for whether to LOG (see _note_vector_degrade).
+#: Warn-once keys already logged in THIS process - not just vector degrades
+#: (_note_vector_degrade) despite the name, also the chunks.jsonl malformed-line
+#: warning in _load() below. _load() runs from __init__ and every request builds
+#: a fresh Collection, so an instance-level guard re-armed constantly and the
+#: same warning was emitted 25+ times a session. Process-scoped so the first
+#: occurrence is still loud and the rest are quiet. Never consulted for state -
+#: only for whether to LOG. Every key starts with the collection dir so two
+#: DIFFERENT collections' warnings never collapse into one; a distinguishing
+#: tag (a literal string, or the reason text) as the second element keeps this
+#: shared set's entries from colliding across unrelated warning sites.
 _WARNED_DEGRADES: set = set()
 
 #: meta.json key for the derived-stats cache _save() writes and peek_stats() /
@@ -838,9 +843,25 @@ class Collection:
                 self._chunks.append(obj)
             if bad_lines:
                 self.corrupt = True
-                _log.warning("RAG collection %r: skipped %d malformed line(s) in "
-                             "chunks.jsonl; run 'localm rag repair'",
-                             self.name, bad_lines)
+                # Warn-once, same pattern and same process-scoped set as
+                # _note_vector_degrade below: _load() runs from __init__, and
+                # every /api/rag request builds a FRESH Collection, so an
+                # instance-level guard re-arms on every single request - this
+                # fired on essentially every call for a collection with any
+                # corrupt lines at all. self.corrupt is still set
+                # unconditionally above (stats()/the GUI's "needs repair"
+                # state stay exactly as accurate as before); only the
+                # duplicate LOG LINE is suppressed. Keyed on the bad_lines
+                # COUNT (not just the dir), so a fault that changes shape -
+                # more lines corrupt after further damage, or fewer after a
+                # partial repair - still warns again instead of hiding
+                # behind an earlier, now-stale count.
+                key = ("chunks_malformed", str(self.dir), bad_lines)
+                if key not in _WARNED_DEGRADES:
+                    _WARNED_DEGRADES.add(key)
+                    _log.warning("RAG collection %r: skipped %d malformed line(s) in "
+                                 "chunks.jsonl; run 'localm rag repair'",
+                                 self.name, bad_lines)
         self._vectors = None
         self._vec_dim = None
         self.vector_degrade_reason = None
