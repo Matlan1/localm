@@ -55,7 +55,8 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              an optional typed-exception tag
                                              (e.g. "InvalidGrammarError")
     ("chunk", text)                       - one streamed token (chat_stream only)
-    ("done", {finish_reason, grammar_unsupported})  - end of one chat_stream
+    ("done", {finish_reason, grammar_unsupported, chatml_fallback_reason})
+                                          - end of one chat_stream
     ("progress", payload)                 - NON-TERMINAL: the load is still
                                              running. See below.
 
@@ -288,6 +289,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("done", {
                     "finish_reason": worker.last_finish_reason,
                     "grammar_unsupported": worker.grammar_unsupported_this_call,
+                    "chatml_fallback_reason": worker.chatml_fallback_reason,
                 }))
             except InvalidGrammarError as e:
                 # A malformed grammar the native parser safely rejected (a

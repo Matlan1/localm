@@ -93,7 +93,7 @@ def test_create_chat_completion_forwards_seed():
     # NEGATIVE: pre-fix seed lands in **_ignored and is never forwarded.
     llm = _bare_llama()
     with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
-               return_value="hi"), \
+               return_value=("hi", None)), \
          patch.object(llm, "_generate", return_value=iter([])) as gen:
         llm.create_chat_completion(
             [{"role": "user", "content": "x"}], seed=7, stream=False)

@@ -85,6 +85,16 @@ class GgufWorker(VramSizingMixin):
         self.grammar_unsupported_this_call = False
         self.last_finish_reason = "stop"
 
+    @property
+    def chatml_fallback_reason(self) -> Optional[str]:
+        """Non-None once this model's own embedded chat template could not be
+        used (see llama.py's _apply_model_template). Sticky for the life of
+        the loaded model, so unlike grammar_unsupported_this_call this is a
+        passthrough to the LlamaCpp instance's own record rather than a
+        per-call flag - the underlying template never changes between calls.
+        Read by the runner's dispatch loop for the "done" envelope."""
+        return self._llm.chat_template_fallback_reason if self._llm is not None else None
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
@@ -175,7 +185,10 @@ class GgufWorker(VramSizingMixin):
             else:
                 text = content or ""
             text_messages.append({"role": m.get("role", "user"), "content": text})
-        prompt = _apply_model_template(self._llm._model_ptr, text_messages)
+        # Fallback status not propagated from here - this is a token-count-only
+        # call, not a generation request; the real chat_stream() call below
+        # will report the same model's fallback if a generation is ever made.
+        prompt, _fallback_reason = _apply_model_template(self._llm._model_ptr, text_messages)
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
         return len(self._llm.tokenize(prompt, add_bos=add_bos))

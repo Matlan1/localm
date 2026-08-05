@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional
+from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
 
 from . import _api as api
 from ._structs import (
@@ -338,18 +338,28 @@ def _warn_chatml_fallback(reason: str) -> None:
         "understand; chat and vision output quality may be degraded", reason)
 
 
-def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
+def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optional[str]]:
     """
     Format *messages* using the model's own embedded Jinja chat template.
 
     Falls back to :func:`_format_chatml` if:
     * The model has no embedded template (``llama_model_chat_template`` returns None).
     * The template call fails for any reason.
+
+    Returns ``(prompt, fallback_reason)``. *fallback_reason* is ``None`` on a
+    normal templated render, or the reason ChatML was substituted instead
+    (already passed to :func:`_warn_chatml_fallback` for the debug log). This
+    function runs inside the isolated worker process and must never
+    console.print (see check_hygiene.py's child-process list) - a caller that
+    reaches a real generation request is responsible for propagating the
+    reason to a channel visible without ``--debug`` once it is back in the
+    parent process; see GgufBackend's ``_chatml_fallback`` latch in gguf.py.
     """
     tmpl_str = api.llama_model_chat_template(model_ptr)
     if not tmpl_str:
-        _warn_chatml_fallback("model has no embedded chat template")
-        return _format_chatml(messages)
+        reason = "model has no embedded chat template"
+        _warn_chatml_fallback(reason)
+        return _format_chatml(messages), reason
 
     tmpl_bytes = tmpl_str.encode()
 
@@ -368,8 +378,9 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     if needed <= 0:
         # Template not supported (< 0) or it rendered nothing (== 0): an empty
         # prompt would silently generate from thin air - fall back
-        _warn_chatml_fallback("embedded template not recognized/rendered nothing")
-        return _format_chatml(messages)
+        reason = "embedded template not recognized/rendered nothing"
+        _warn_chatml_fallback(reason)
+        return _format_chatml(messages), reason
 
     if needed > buf_size:
         # Reallocate and retry
@@ -377,10 +388,11 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
         needed = api.llama_chat_apply_template(tmpl_bytes, chat_arr, n, True, buf, len(buf))
         if needed <= 0:
             # Same guard as above: a failed or empty render falls back
-            _warn_chatml_fallback("embedded template not recognized/rendered nothing")
-            return _format_chatml(messages)
+            reason = "embedded template not recognized/rendered nothing"
+            _warn_chatml_fallback(reason)
+            return _format_chatml(messages), reason
 
-    return buf.raw[:needed].decode("utf-8", errors="replace")
+    return buf.raw[:needed].decode("utf-8", errors="replace"), None
 
 
 # UTF-8-safe token-bytes -> text stream (R46): a multibyte character is often
@@ -748,6 +760,13 @@ class LlamaCpp:
         # under-charged and wrongly flipped back to VRAM, overflowing and aborting.
         self._offload_kqv   = True
         self._kv_supported: Optional[bool] = None   # lazy llama_memory_* probe
+        # Non-None once _apply_model_template has had to substitute a generic
+        # ChatML prompt because this model's own embedded template could not
+        # be used (RAG-VISION-1). Sticky for the life of this instance - the
+        # underlying template never changes for a loaded model. Read by
+        # GgufWorker (via the "done" envelope) so the PARENT process can
+        # surface the degrade once, outside --debug (see gguf.py).
+        self.chat_template_fallback_reason: Optional[str] = None
 
         # --- load model ---
         mp = api.llama_model_default_params()
@@ -1351,7 +1370,9 @@ class LlamaCpp:
 
             text_messages, images = self._messages_with_markers(
                 messages, self._mtmd.marker)
-            prompt = _apply_model_template(self._model_ptr, text_messages)
+            prompt, fallback_reason = _apply_model_template(self._model_ptr, text_messages)
+            if fallback_reason:
+                self.chat_template_fallback_reason = fallback_reason
             bos_markers = ("<bos>", "<s>", "﻿")
             add_special = not any(prompt.startswith(m) for m in bos_markers)
 
@@ -1633,7 +1654,9 @@ class LlamaCpp:
         """
         # Use the model's embedded chat template when available (Gemma, Llama3,
         # Mistral, etc.) so we don't force ChatML on every model.
-        prompt = _apply_model_template(self._model_ptr, messages)
+        prompt, fallback_reason = _apply_model_template(self._model_ptr, messages)
+        if fallback_reason:
+            self.chat_template_fallback_reason = fallback_reason
 
         # If the template already encodes a BOS marker (e.g. Gemma's "<bos>"),
         # parse_special=True (used inside encode) will convert it to the BOS
