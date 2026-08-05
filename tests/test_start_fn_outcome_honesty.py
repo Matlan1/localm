@@ -120,6 +120,19 @@ class TestMarkOutcomeIsIgnoredOutsideTheExceptPath:
         assert job.status == "failed", (
             "a stale done-mark must not survive a clean False return")
 
+    def test_marked_failed_then_a_clean_true_return_still_succeeds(self):
+        """The symmetric case: a stale failed-mark must not survive an
+        explicit, clean True return either - the marker is inert on the try
+        branch in BOTH directions, not just the one the previous test covers."""
+        def fn(job):
+            job.mark_outcome("failed")
+            return True    # genuinely recovered/succeeded afterward, no exception
+
+        job = gj.JobManager().start_fn("test", fn)
+        _wait_for_terminal(job)
+        assert job.status == "done", (
+            "a stale failed-mark must not survive a clean True return")
+
 
 class TestMarkOutcomeValidation:
     def test_invalid_status_raises_immediately(self):
