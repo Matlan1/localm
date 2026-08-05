@@ -520,6 +520,68 @@ def test_move_anywhere_still_allowed_for_a_host_fs_key(
     assert (dest / fname).is_file()
 
 
+@pytest.mark.parametrize("plugin,subdir,fname,route", _MOVE_CASES,
+                         ids=[c[0] for c in _MOVE_CASES])
+def test_move_dest_alias_does_not_clobber_a_different_real_file(
+        tmp_path, monkeypatch, plugin, subdir, fname, route):
+    """confined_move_dest's own containment check (media.paths._under) has no
+    name-preservation walk, unlike pathsafe.confined_under/
+    confined_absolute_or_under - so an OS-level short-name alias resolving the
+    caller's dest string to a DIFFERENT real directory than it names would
+    defeat containment-by-string the same way #1086/#1091 fixed elsewhere,
+    IF anything downstream trusted the caller's own spelling for the write.
+
+    It does not here, and this proves why: the eventual write target is built
+    from the ALREADY-.resolve()d destination directory (no attacker alias
+    syntax survives that step) joined with the SOURCE artifact's own
+    basename - which reached this handler via pathsafe.confined_file (the
+    #1086-hardened primitive), never from caller text. The exists-check and
+    the move then act on that one concrete object; there is no second,
+    divergent resolution for the check to lie about. So an aliased dest can
+    only relocate the write to a REAL directory inside the confined data
+    dir - it cannot desynchronize the collision check from the write.
+
+    Deterministic simulation (same technique as test_pathsafe_confined_under.py
+    and web.py's alias tests): monkeypatch Path.resolve so a typed alias
+    component substitutes for the real directory's name, exactly as an actual
+    8.3 short name would."""
+    app, home = _media_app(tmp_path, monkeypatch, plugin)
+    art = home / subdir / fname
+    art.parent.mkdir(parents=True, exist_ok=True)
+    art.write_bytes(b"artifact-content")
+
+    real_dir = home / "LongDestinationFolderName"
+    real_dir.mkdir(parents=True, exist_ok=True)
+    victim = real_dir / fname
+    victim.write_bytes(b"VICTIM-DATA-DO-NOT-OVERWRITE")
+
+    alias_name = "LONGDE~1"
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        parts = list(self.parts)
+        if alias_name in parts:
+            parts[parts.index(alias_name)] = real_dir.name
+            return real_resolve(Path(*parts), *a, **k)
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    dest = home / alias_name
+    key = _key([plugin])                        # media scope only, fs_access=none
+    target_path = route.replace("{n}", fname)
+
+    with TestClient(app) as c:
+        r = c.post(target_path, headers=_h(key), json={"dest": str(dest)})
+    # The collision is caught (409) rather than silently clobbered - but the
+    # load-bearing assertion is the victim's content, not the status code:
+    # a regression that reached shutil.move some OTHER way must still show up
+    # here even if it somehow produced a different status.
+    assert victim.read_bytes() == b"VICTIM-DATA-DO-NOT-OVERWRITE", (
+        f"the aliased move clobbered a different real file (status {r.status_code})")
+    if r.status_code == 200:
+        assert art.exists(), "a 200 that never wrote `victim` must not have moved the source either"
+
+
 # --------------------------------------------------------------------------- #
 #  (c) /api/logs/export needs host filesystem access
 # --------------------------------------------------------------------------- #
