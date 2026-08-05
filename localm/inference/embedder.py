@@ -257,6 +257,18 @@ def _embeddings_dir() -> Path:
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+://")
 
 
+def _current_spec() -> str:
+    """The ``embedding_model`` config value, defaulted and stripped - the
+    identity ``resolve_embedding_model_path`` resolves from, and the same
+    identity ``_LOAD_FAILED_SPEC``/``_set_resolve_outcome``/``get_embedder``
+    compare against to tell "still the same broken spec" from "the config
+    changed". Factored out so every one of those derives it identically -
+    two independent copies of this read+default+strip is exactly the kind of
+    derivation that can silently drift the day only one of them changes."""
+    from localm.config import load_config
+    return str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
+
+
 def _nonlocal_spec_reason(spec: str) -> Optional[str]:
     """Why *spec* is not something this module may hand to the filesystem, or
     None if it is fine. Purely LEXICAL - no syscall - so it can run first.
@@ -288,7 +300,7 @@ def _nonlocal_spec_reason(spec: str) -> Optional[str]:
     return None
 
 
-def _set_resolve_outcome(reason: Optional[str]) -> None:
+def _set_resolve_outcome(spec: str, reason: Optional[str]) -> None:
     """The ONE place any RESOLVE-side code may touch ``_LAST_ERROR`` - never
     assigned directly anywhere else in this module below this point. Every
     resolve-side writer (``_record_resolve_failure``, ``_record_resolve_success``,
@@ -302,32 +314,46 @@ def _set_resolve_outcome(reason: Optional[str]) -> None:
     own regression, root-caused live against a real corrupted-then-deleted
     model file).
 
-    While ``_LOAD_FAILED`` is latched, NOTHING here may touch ``_LAST_ERROR``:
-      * A successful resolve proves a file exists - already true before that
-        load attempt failed too, so re-confirming it proves nothing new.
-      * A resolve FAILURE for the SAME spec cannot even happen once
-        ``_LOAD_FAILED`` is true for that spec: reaching a load attempt at all
-        requires the file to have been found first, so a "not found" or
-        "known key not downloaded" verdict for the identical spec is a
-        contradiction, not a real case.
-      * A resolve failure while ``_LOAD_FAILED`` is latched can therefore only
-        be racing a STALE flag left over from a DIFFERENT spec that was never
-        reset (a hand-edited config bypassing the picker route's own
-        ``reset_embedder()``) - and the latched load failure, being the more
-        specific, harder-won fact, still wins over a dangling reason about a
-        spec nobody has actively selected in a while.
-    Only an ACTUAL new load attempt (``get_embedder()``'s own except/success
-    branches, which set ``_LOAD_FAILED`` themselves) or an explicit
-    ``reset_embedder()`` (a real model-selection change) may override this."""
+    *spec* is the ``embedding_model`` config value the CALLER is currently
+    resolving - required, not optional, because a bare "is anything latched"
+    check (the previous ``_LOAD_FAILED: bool``) cannot tell a stale failure
+    for an abandoned spec apart from a live one for the spec actually
+    configured now. That conflation was measured to be a real regression:
+    once ANY load failed, a completely unrelated, ACTIVELY REFUSED spec
+    (e.g. a UNC path just typed into ``embedding_model``) had its own live
+    resolve failure silently swallowed here, and ``last_error()`` kept
+    reporting the old, unrelated reason instead - defeating the whole point
+    of the step-0 UNC/URL refusal that recorded it in the first place.
+
+    Suppression applies ONLY when *spec* matches the latched
+    ``_LOAD_FAILED_SPEC`` exactly:
+      * A successful resolve for the SAME spec proves a file exists - already
+        true before that load attempt failed too, so re-confirming it proves
+        nothing new.
+      * A resolve FAILURE for the SAME spec CAN happen once ``_LOAD_FAILED_SPEC``
+        matches it (the file can be removed, or otherwise stop resolving,
+        between the load attempt and the next poll - verified live, this is
+        not a hypothetical) but is still suppressed: the latched load failure
+        is the more specific, harder-won fact, and a caller who already knows
+        loading this exact spec failed learns nothing new from "and now it
+        cannot even be found."
+      * A resolve outcome for ANY OTHER spec is new, live information about a
+        setting the user has since changed (or a poll racing a config edit)
+        and is never suppressed, regardless of what is latched.
+    Only an ACTUAL new load attempt for a MATCHING spec (``get_embedder()``'s
+    own except/success branches), a load attempt for a DIFFERENT spec (which
+    clears the stale latch itself - see ``get_embedder()``), or an explicit
+    ``reset_embedder()`` may otherwise change what is latched."""
     global _LAST_ERROR
-    if not _LOAD_FAILED:
-        _LAST_ERROR = reason
+    if _LOAD_FAILED_SPEC is not None and _LOAD_FAILED_SPEC == spec:
+        return
+    _LAST_ERROR = reason
 
 
-def _record_resolve_failure(reason: str) -> None:
-    """Record *reason* as the current resolve failure for ``last_error()``
-    (subject to ``_set_resolve_outcome``'s guard), and log it - WARNING the
-    first time this exact reason is seen, DEBUG on repeats of the same one.
+def _record_resolve_failure(spec: str, reason: str) -> None:
+    """Record *reason* as the current resolve failure for *spec* (subject to
+    ``_set_resolve_outcome``'s guard), and log it - WARNING the first time
+    this exact reason is seen, DEBUG on repeats of the same one.
 
     The dedup matters because ``resolve_embedding_model_path`` can run on every
     single ``embed_texts()`` call while no embedder is loaded: ``get_embedder()``
@@ -340,7 +366,7 @@ def _record_resolve_failure(reason: str) -> None:
     carries the reason on every single call regardless of the log level, so the
     GUI is never blind to it even once the log goes quiet."""
     global _LAST_RESOLVE_WARNED
-    _set_resolve_outcome(reason)
+    _set_resolve_outcome(spec, reason)
     if _LAST_RESOLVE_WARNED != reason:
         logger.warning(reason)
         _LAST_RESOLVE_WARNED = reason
@@ -348,14 +374,14 @@ def _record_resolve_failure(reason: str) -> None:
         logger.debug(reason)
 
 
-def _record_resolve_success() -> None:
-    """Clear a prior RESOLVE failure once the spec resolves (subject to
+def _record_resolve_success(spec: str) -> None:
+    """Clear a prior RESOLVE failure once *spec* resolves (subject to
     ``_set_resolve_outcome``'s guard) - a fixed config (or one that never
     needed fixing) must not keep reporting a stale reason via ``last_error()``,
     and a later, DIFFERENT misconfiguration must warn again rather than
     staying silenced by a dedup entry from an unrelated failure."""
     global _LAST_RESOLVE_WARNED
-    _set_resolve_outcome(None)
+    _set_resolve_outcome(spec, None)
     _LAST_RESOLVE_WARNED = None
 
 
@@ -373,8 +399,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     (almost always a HuggingFace-format pull: a directory of safetensors shards,
     not a file), which used to be indistinguishable from "not found at all" and
     surfaced only as a DEBUG log line nobody but the operator could see (#949)."""
-    from localm.config import load_config
-    spec = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
+    spec = _current_spec()
     if not spec:
         return None
 
@@ -391,6 +416,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     bad = _nonlocal_spec_reason(spec)
     if bad:
         _record_resolve_failure(
+            spec,
             # NOT {spec!r}: repr() doubles backslashes in a Windows path, so
             # pathscrub's literal-prefix match (and its regex backstop, which
             # requires exactly one separator after the drive letter) never
@@ -406,7 +432,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
     # 1. An explicit path to a GGUF.
     p = Path(spec).expanduser()
     if p.is_file():
-        _record_resolve_success()
+        _record_resolve_success(spec)
         return str(p)
 
     # 2. A registered model name. A hit that does not resolve to a single FILE is
@@ -438,7 +464,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
             if path and not is_unc_or_device_path(str(path)):
                 p2 = Path(path)
                 if p2.is_file():
-                    _record_resolve_success()
+                    _record_resolve_success(spec)
                     return str(path)
                 try:
                     registered_not_gguf = p2.is_dir()
@@ -475,16 +501,16 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
             reason = (
                 f"embedding_model '{spec}' is not a path, a registered model, or "
                 f"a known key {tuple(KNOWN_EMBEDDING_MODELS)}.")
-        _record_resolve_failure(reason)
+        _record_resolve_failure(spec, reason)
         return None
     repo, filename = known
     dest = _embeddings_dir() / filename
     if dest.is_file():
-        _record_resolve_success()
+        _record_resolve_success(spec)
         return str(dest)
     result = _download_known(spec, repo, filename, dest, allow_download)
     if result:
-        _record_resolve_success()
+        _record_resolve_success(spec)
     return result
 
 
@@ -495,8 +521,10 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     Every failure path also records into ``last_error()`` (like
     ``resolve_embedding_model_path``'s own failure branches - both policy
     branches below route through the SAME ``_set_resolve_outcome`` choke
-    point, so its ``_LOAD_FAILED`` guard applies here too without being
-    re-implemented), so GET /api/rag/embedding's ``error`` field explains a
+    point, so its spec-aware guard applies here too without being
+    re-implemented; *name* is that spec, since this is only ever called with
+    the ``spec`` a caller in ``resolve_embedding_model_path`` was already
+    resolving), so GET /api/rag/embedding's ``error`` field explains a
     policy-gated or failed download too. The log LEVEL for the two
     policy-gated branches stays INFO regardless of whether the write is
     skipped - an unset net_mode or a deliberately offline box is an expected
@@ -512,12 +540,12 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
             f"(net_mode={network_mode()}); run 'localm setup-embeddings' or set "
             "net_mode=allow to enable semantic search (memory/RAG use lexical "
             "BM25 until then)")
-        _set_resolve_outcome(reason)
+        _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None
     if network_mode() == "off":
         reason = f"embedding model {name!r} missing and network is off; lexical-only"
-        _set_resolve_outcome(reason)
+        _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None
     try:
@@ -531,7 +559,8 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
             return str(got_p)
         return str(dest) if dest.is_file() else (str(got_p) if got_p.is_file() else None)
     except Exception as e:
-        _record_resolve_failure(f"embedding model {name!r} download failed ({e}); lexical-only")
+        _record_resolve_failure(
+            name, f"embedding model {name!r} download failed ({e}); lexical-only")
         return None
 
 
@@ -1037,7 +1066,16 @@ _EMBEDDER: Optional[IsolatedEmbedder] = None
 # without a restart. (Regression fixed: the old single `_TRIED` latch cached the
 # "no model" result for the whole process lifetime, so embeddings stayed dead -
 # 422 - until a restart even right after `setup-embeddings`.)
-_LOAD_FAILED = False
+#
+# The ``embedding_model`` config value (stripped) that was current when a LOAD
+# last failed, or None when nothing is latched. NOT a bare bool (that was the
+# bug: a bool has no identity, so it could not tell "still the same broken
+# spec" from "the user already fixed this" - once ANY load failed,
+# get_embedder() stayed permanently dead, even after embedding_model was
+# changed to a perfectly good model, until an explicit reset_embedder(). See
+# get_embedder()'s own use of this for how a changed spec clears the stale
+# latch, and _set_resolve_outcome for the matching resolve-side guard.
+_LOAD_FAILED_SPEC: Optional[str] = None
 _TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode=allow)
 # Why the last LOAD or RESOLVE failed (for the GUI picker) - see last_error(),
 # _record_resolve_failure/_record_resolve_success above resolve_embedding_model_path.
@@ -1206,12 +1244,30 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
     loop) waits on this thread's lock. Confirmed via live reproduction
     (2026-07-14 review) - the event loop stayed blocked for the full
     eviction timeout before either side could proceed."""
-    global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR
+    global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR
+    cur_spec = None   # lazily computed below, only once _EMBEDDER is confirmed unset -
+                       # the hot "already loaded" path stays a free dict lookup, no I/O.
     with _LOCK:
         if _EMBEDDER is not None:
             return _EMBEDDER
-        if _LOAD_FAILED:
-            return None
+        if _LOAD_FAILED_SPEC is not None:
+            # The identity a latched load failure is compared against, so a
+            # caller that changed embedding_model since the failure was
+            # recorded is recognised as asking about something new, not stuck
+            # behind a stale bare-bool "something once failed" flag (the
+            # permanent-breakage bug this replaces - measured live:
+            # get_embedder() returned None forever, never even calling
+            # resolve_embedding_model_path() again, regardless of later
+            # config changes, until an explicit reset_embedder()). Reused
+            # below (not re-derived) for the second, re-check latch test.
+            cur_spec = _current_spec()
+            if _LOAD_FAILED_SPEC == cur_spec:
+                return None
+            # The config has moved on since this was latched - it no longer
+            # describes what we are about to try, so it must not keep
+            # blocking a real attempt at the (different) spec configured now.
+            _LOAD_FAILED_SPEC = None
+            _LAST_ERROR = None
         _emit_stage(on_progress, "Resolving the embedding model...")
         # Cheap filesystem-only re-check every call (NO download): finds a model a
         # user just installed into this running server.
@@ -1252,11 +1308,19 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
 
     with _LOCK:
         # Re-check: another thread may have completed (or failed) the load
-        # while this thread was outside the lock running the swap check.
+        # while this thread was outside the lock running the swap check -
+        # including latching a NEW failure this thread has not seen yet, for
+        # whatever spec is current now (re-derived, not the possibly-unset
+        # local above: another thread could have raced a config change too).
         if _EMBEDDER is not None:
             return _EMBEDDER
-        if _LOAD_FAILED:
-            return None
+        if _LOAD_FAILED_SPEC is not None:
+            if cur_spec is None:
+                cur_spec = _current_spec()
+            if _LOAD_FAILED_SPEC == cur_spec:
+                return None
+            _LOAD_FAILED_SPEC = None
+            _LAST_ERROR = None
         try:
             _emit_stage(on_progress,
                        "Loading into memory (this can take up to a minute)...")
@@ -1277,7 +1341,12 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
             _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
             return _EMBEDDER
         except Exception as e:
-            _LOAD_FAILED = True
+            # Latch by SPEC, not a bare bool: what just failed to load is
+            # whatever embedding_model names right now, and that identity is
+            # what a later call must compare against to tell "still this
+            # exact broken model" from "the user already changed it" - see
+            # this global's own docstring and _set_resolve_outcome.
+            _LOAD_FAILED_SPEC = cur_spec if cur_spec is not None else _current_spec()
             _LAST_ERROR = str(e)
             logger.warning("could not load embedding model %s (%s); lexical-only",
                            path, e)
@@ -1391,13 +1460,13 @@ def reset_embedder(*, force: bool = True) -> bool:
 
     A pinned (``force=False``, busy) embedder is a full no-op, including the
     negative caches: nothing actually changed, so nothing is cleared.
-    Otherwise ``_LOAD_FAILED``/``_TRIED_DOWNLOAD``/``_LAST_ERROR``/
+    Otherwise ``_LOAD_FAILED_SPEC``/``_TRIED_DOWNLOAD``/``_LAST_ERROR``/
     ``_LAST_RESOLVE_WARNED`` are always cleared alongside ``_EMBEDDER`` - even
     when no embedder was loaded at all (only a cached load FAILURE), matching
     the original unconditional behavior: a caller resetting a failed-load state
     expects the next ``get_embedder()`` to retry fresh, not keep returning the
     stale cached failure (or a suppressed re-warn of it)."""
-    global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR, _LAST_RESOLVE_WARNED
+    global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR, _LAST_RESOLVE_WARNED
     with _LOCK:
         if not force and _EMBEDDER is not None and _EMBEDDER.active_requests > 0:
             return False
@@ -1405,7 +1474,7 @@ def reset_embedder(*, force: bool = True) -> bool:
         if cleared:
             _EMBEDDER.close()
         _EMBEDDER = None
-        _LOAD_FAILED = False
+        _LOAD_FAILED_SPEC = None
         _TRIED_DOWNLOAD = False
         _LAST_ERROR = None
         _LAST_RESOLVE_WARNED = None

@@ -213,17 +213,17 @@ def test_download_gated_by_net_policy_records_last_error(monkeypatch):
 
 def test_policy_declined_download_does_not_clobber_a_real_load_failure(monkeypatch):
     """Regression (found live via tests/test_disclosure.py's own scrub test,
-    which poisons _LAST_ERROR + _LOAD_FAILED directly to simulate a genuine
-    load failure): the SAME latched-_LOAD_FAILED protection given to
-    _record_resolve_success() must also cover _download_known's two
-    policy-decline branches. A "not auto-downloading" verdict fires only when
-    the known-key file is ALSO absent from disk - a state that cannot
-    coexist with a REAL load failure for the SAME spec (loading requires the
-    file to have been found first) - so while _LOAD_FAILED is latched, a
-    policy decline is not new evidence and must leave last_error() alone,
-    exactly like a bare resolve success already does."""
+    which poisons _LAST_ERROR + _LOAD_FAILED_SPEC to simulate a genuine load
+    failure): the SAME latched protection given to _record_resolve_success()
+    must also cover _download_known's two policy-decline branches. A "not
+    auto-downloading" verdict fires only when the known-key file is ALSO
+    absent from disk - a state that cannot coexist with a REAL load failure
+    for the SAME spec (loading requires the file to have been found first) -
+    so while a load failure is latched for the CURRENTLY CONFIGURED spec, a
+    policy decline for that same spec is not new evidence and must leave
+    last_error() alone, exactly like a bare resolve success already does."""
     _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="ask")
-    monkeypatch.setattr(emb, "_LOAD_FAILED", True)
+    monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "bge-small-en-v1.5")
     monkeypatch.setattr(
         emb, "_LAST_ERROR",
         "failed to load embedding model: /some/path.gguf: not an embedding model")
@@ -234,19 +234,24 @@ def test_policy_declined_download_does_not_clobber_a_real_load_failure(monkeypat
     assert "not auto-downloading" not in err
 
 
-def test_resolve_failure_also_does_not_clobber_a_real_load_failure(monkeypatch):
+def test_resolve_failure_for_the_same_spec_does_not_clobber_a_real_load_failure(
+        monkeypatch):
     """The unified choke point (_set_resolve_outcome) means the SAME guard now
     covers _record_resolve_failure too, not just _record_resolve_success and
     _download_known's policy branches - added after the coordinator's review
     named this as the third, still-unguarded write site sharing the identical
     "same reason, sibling path, guard not carried across" shape. A resolve
-    FAILURE for a name that matches nothing at all, while _LOAD_FAILED is
-    latched, must leave the more specific load-failure reason in place - it
-    can only be racing a stale flag from an abandoned spec (reaching a real
-    load attempt requires the CURRENT spec to have resolved first), so the
-    latched fact wins."""
+    FAILURE for the SAME spec that already has a latched load failure is
+    suppressed - it CAN happen (the file can vanish between the load and the
+    next poll, verified live 2026-08-05; it is not the contradiction an
+    earlier version of this guard's own docstring claimed - see
+    test_resolve_failure_for_a_different_spec_is_not_suppressed below for the
+    case that IS live information and must NOT be suppressed), but a caller
+    who already knows this exact spec failed to load learns nothing new from
+    "and now it cannot even be found", so the more specific load-failure
+    reason wins."""
     _cfg(monkeypatch, embedding_model="totally-unrelated-typo-xyz")
-    monkeypatch.setattr(emb, "_LOAD_FAILED", True)
+    monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "totally-unrelated-typo-xyz")
     monkeypatch.setattr(
         emb, "_LAST_ERROR",
         "failed to load embedding model: /some/path.gguf: not an embedding model")
@@ -254,7 +259,33 @@ def test_resolve_failure_also_does_not_clobber_a_real_load_failure(monkeypatch):
     assert emb.resolve_embedding_model_path() is None
     err = emb.last_error() or ""
     assert "not an embedding model" in err
-    assert "totally-unrelated-typo-xyz" not in err
+
+
+def test_resolve_failure_for_a_different_spec_is_not_suppressed(monkeypatch):
+    """Regression for the #1026 over-guard (coordinator's audit, 2026-08-04/05):
+    the previous bare-bool ``_LOAD_FAILED`` choke point suppressed ANY
+    resolve-side write while ANY load failure was latched, with no spec
+    identity - so a currently-configured, ACTIVELY REFUSED spec (e.g. a UNC
+    path just typed into embedding_model, or - as tested here - any other
+    live resolve failure) had its own outcome silently swallowed, and
+    last_error() kept reporting an old, unrelated reason instead. Confirmed
+    live before this fix: resolve_embedding_model_path() DID call
+    _record_resolve_failure for the new spec (proven via call-count
+    instrumentation, not just the suppressed value), but last_error() never
+    changed. A latched failure for spec A must never suppress a live resolve
+    outcome for a DIFFERENT, currently-configured spec B."""
+    _cfg(monkeypatch, embedding_model="totally-unrelated-typo-xyz")
+    monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "an-old-abandoned-spec.gguf")
+    monkeypatch.setattr(
+        emb, "_LAST_ERROR",
+        "failed to load embedding model: /some/old-path.gguf: not an embedding model")
+
+    assert emb.resolve_embedding_model_path() is None
+    err = emb.last_error() or ""
+    assert "totally-unrelated-typo-xyz" in err, (
+        f"a live resolve failure for the currently-configured spec was "
+        f"suppressed by a stale latch for a different, abandoned spec: {err!r}")
+    assert "old-path.gguf" not in err
 
 
 def test_resolve_failure_warns_once_then_quiets(monkeypatch, caplog):
@@ -812,6 +843,87 @@ def test_get_embedder_on_progress_reports_load_failure(monkeypatch):
               for m in messages), messages
 
 
+def test_get_embedder_recovers_after_the_config_changes_to_a_good_spec(monkeypatch):
+    """Regression for the permanent-breakage bug (coordinator's audit,
+    2026-08-04/05): the previous bare-bool ``_LOAD_FAILED`` short-circuited at
+    the TOP of get_embedder(), before even calling
+    resolve_embedding_model_path() again - so once ANY load failed, EVERY
+    later call returned None immediately, forever, regardless of the user
+    fixing ``embedding_model`` to point at a perfectly good model, until an
+    explicit reset_embedder(). Confirmed live via call-count instrumentation
+    before this fix: resolve_embedding_model_path was never even called on
+    the second attempt, no matter what embedding_model was changed to.
+
+    ``_LOAD_FAILED_SPEC`` must be compared against the CURRENT config value,
+    so a genuinely different spec clears the stale latch and gets a real
+    attempt - not just a correctly-worded decline."""
+    cfg = {"embedding_model": "broken-model.gguf", "n_gpu_layers": 99,
+           "net_mode": "off"}
+    monkeypatch.setattr("localm.config.load_config", lambda: dict(cfg))
+    paths = {"broken-model.gguf": "/models/broken-model.gguf",
+             "good-model.gguf": "/models/good-model.gguf"}
+    monkeypatch.setattr(
+        emb, "resolve_embedding_model_path",
+        lambda *, allow_download=None: paths.get(cfg["embedding_model"]))
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("corrupt GGUF header")
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Boom)
+    assert emb.get_embedder() is None
+    assert "corrupt GGUF header" in (emb.last_error() or "")
+
+    # The user fixes embedding_model to point at a working model.
+    cfg["embedding_model"] = "good-model.gguf"
+
+    class _Ok:
+        dim = 5
+
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Ok)
+    e = emb.get_embedder()
+    assert e is not None and e.dim == 5, (
+        "get_embedder() stayed permanently dead after the earlier load "
+        "failure, even though embedding_model was changed to a working model")
+    assert emb.last_error() is None
+
+
+def test_get_embedder_does_not_retry_the_load_for_the_same_still_broken_spec(
+        monkeypatch):
+    """The optimization this replaces the bare bool for is still real: a
+    genuinely UNCHANGED spec that already failed to load must not pay for
+    a second (expensive, native) load attempt on every call - only the
+    permanent-breakage bug (a config CHANGE being ignored) was wrong, not
+    the original "stop retrying a known-broken spec" behavior."""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "broken-model.gguf",
+                                 "n_gpu_layers": 99, "net_mode": "off"})
+    monkeypatch.setattr(
+        emb, "resolve_embedding_model_path",
+        lambda *, allow_download=None: "/models/broken-model.gguf")
+
+    attempts = []
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            attempts.append(1)
+            raise RuntimeError("corrupt GGUF header")
+
+    monkeypatch.setattr(emb, "IsolatedEmbedder", _Boom)
+    assert emb.get_embedder() is None
+    assert emb.get_embedder() is None
+    assert emb.get_embedder() is None
+    assert len(attempts) == 1, (
+        f"a still-broken, UNCHANGED spec should only ever attempt the "
+        f"expensive native load once, not on every call: {len(attempts)} attempts")
+
+
 def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
     """The '_emit never aborts a load' contract (mirrors
     managed_comfy_provision._emit): a broken progress sink must not turn a
@@ -895,11 +1007,11 @@ def test_reset_embedder_force_semantics():
     # force=False, nothing loaded, but a cached load failure - must still
     # clear the negative caches (the exact regression this test locks in).
     emb._EMBEDDER = None
-    emb._LOAD_FAILED = True
+    emb._LOAD_FAILED_SPEC = "some-spec.gguf"
     emb._TRIED_DOWNLOAD = True
     emb._LAST_ERROR = "boom"
     assert emb.reset_embedder(force=False) is False
-    assert emb._LOAD_FAILED is False
+    assert emb._LOAD_FAILED_SPEC is None
     assert emb._TRIED_DOWNLOAD is False
     assert emb._LAST_ERROR is None
 
@@ -915,12 +1027,12 @@ def test_reset_embedder_force_semantics():
     fake = _Fake()
     fake.active_requests = 1
     emb._EMBEDDER = fake
-    emb._LOAD_FAILED = True
+    emb._LOAD_FAILED_SPEC = "some-spec.gguf"
     emb._LAST_ERROR = "still cached"
     assert emb.reset_embedder(force=False) is False
     assert fake.closed is False, "a busy embedder must not be closed"
     assert emb._EMBEDDER is fake, "a busy embedder must survive force=False"
-    assert emb._LOAD_FAILED is True, (
+    assert emb._LOAD_FAILED_SPEC == "some-spec.gguf", (
         "a no-op decline (busy, force=False) must not touch the negative "
         "caches either - nothing actually changed")
     assert emb._LAST_ERROR == "still cached"
