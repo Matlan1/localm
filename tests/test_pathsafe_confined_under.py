@@ -204,6 +204,76 @@ class TestConfinedUnder:
         out = confined_under(base, good)
         assert out.name == good.rsplit("/", 1)[-1]
 
+    # ----------------------------------------------------------------------- #
+    #  Short-name alias substitution - same class #1068 fixed for             #
+    #  confined_name; confined_under never got the equivalent until now,      #
+    #  even though its own docstring names the ComfyUI delete call site.      #
+    # ----------------------------------------------------------------------- #
+
+    @staticmethod
+    def _mock_alias_resolve(monkeypatch, alias_name, real_name):
+        """Simulate an NTFS 8.3 short name: whenever a path being resolved has
+        *alias_name* as one of its COMPONENTS - leaf or intermediate - replace
+        that component with *real_name* before resolving for real.
+
+        Path.resolve() is ONE call on the whole joined path (there is no
+        per-component resolve() a monkeypatch could see individually), so a
+        mock keyed only on the final component's name cannot model an alias in
+        an earlier (subfolder) position - it has to inspect .parts. This is
+        what caught its own bug: an earlier version of this helper checked
+        only ``self.name`` and silently never fired for
+        test_alias_intermediate_component_is_rejected below (DID NOT RAISE),
+        because the resolved object's .name is the LEAF ("output.png"), not
+        the aliased subfolder segment. Deterministic, no real 8.3-enabled
+        volume needed - same substitution idea as test_upload.py's alias
+        tests, generalised to nested paths."""
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            parts = list(self.parts)
+            if alias_name in parts:
+                parts[parts.index(alias_name)] = real_name
+                return real_resolve(Path(*parts), *a, **k)
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    def test_alias_leaf_component_is_rejected(self, base, monkeypatch):
+        victim = base / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_text("victim", encoding="utf-8")
+        alias = "LONGMO~1.GGU"
+        self._mock_alias_resolve(monkeypatch, alias, victim.name)
+
+        with pytest.raises(ValueError):
+            confined_under(base, alias)
+
+    def test_alias_intermediate_component_is_rejected(self, base, monkeypatch):
+        """The leaf isn't the only place an alias can hide: `subfolder` is
+        ComfyUI's own nesting feature, and a short name there resolves the
+        same way a filename does. Containment alone (strictly under base)
+        would not catch it - the aliased sibling directory is still under
+        base, just not the one requested."""
+        real_dir = base / "LongSubfolderName"
+        real_dir.mkdir()
+        (real_dir / "output.png").write_text("victim", encoding="utf-8")
+        alias = "LONGSU~1"
+        self._mock_alias_resolve(monkeypatch, alias, real_dir.name)
+
+        with pytest.raises(ValueError):
+            confined_under(base, f"{alias}/output.png")
+
+    def test_alias_rejection_matches_confined_name_wording(self, base, monkeypatch):
+        """Not load-bearing on exact text, just confirms the new branch is what
+        actually fires (not some other rejection) so this test cannot pass for
+        the wrong reason."""
+        victim = base / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_text("victim", encoding="utf-8")
+        alias = "LONGMO~1.GGU"
+        self._mock_alias_resolve(monkeypatch, alias, victim.name)
+
+        with pytest.raises(ValueError, match="short-name alias"):
+            confined_under(base, alias)
+
 
 # --------------------------------------------------------------------------- #
 #  is_unc_or_device_path - the syntax PREDICATE (platform-independent)         #

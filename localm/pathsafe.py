@@ -132,8 +132,16 @@ def confined_under(base: Path, relpath: str) -> Path:
     base entirely under pathlib's join), a drive-qualified component (``C:evil``
     joins to ``C:evil``, outside *base*, and is absolute on Windows only - so it
     is rejected on every platform for uniform behavior), any ``..`` component,
-    and anything whose RESOLVED location is not strictly below *base* (which is
-    what catches a symlink inside *base* pointing out of it).
+    a reserved character (``WINDOWS_RESERVED_NAME_CHARS`` - ':' opens an NTFS
+    Alternate Data Stream rather than failing the write), anything whose
+    RESOLVED location is not strictly below *base* (which is what catches a
+    symlink inside *base* pointing out of it), and - per component, not just
+    the last one - a resolved name that does not match the requested one (an
+    OS-level alias substitution: an NTFS 8.3 short name resolving to a
+    pre-existing, differently-named sibling stays strictly under *base*, so
+    containment alone would not catch it; matches :func:`confined_name`'s own
+    ``resolved.name != name`` check, generalised to every nesting level since a
+    subfolder component can be aliased too).
 
     CONTRACT: *base* itself must ALREADY be trusted before it reaches this
     function. Only *relpath* is lexically validated here - *base* is resolved
@@ -192,6 +200,26 @@ def confined_under(base: Path, relpath: str) -> Path:
     # must not resolve to "delete the output directory").
     if base_resolved not in resolved.parents:
         raise ValueError(f"path escapes {base_resolved}: {relpath!r}")
+    # NAME PRESERVATION, per component, walking back up from the resolved leaf.
+    # confined_name has always had this (resolved.name != name) as a side effect
+    # of its single-component check; confined_under never got the equivalent,
+    # even though its own docstring names "the ComfyUI delete call site" as a
+    # consumer - an 8.3 short name resolving to a pre-existing, differently-named
+    # sibling stays strictly under base (this function's only check until now),
+    # so containment held while the identity silently changed. Live-confirmed
+    # against this exact function: confined_under(base, "LONGMO~1.GGU") returned
+    # a DIFFERENT real file's resolved path with no error, before this loop
+    # existed. Checked at every nesting level, not just the last component - an
+    # aliased INTERMEDIATE directory (`subfolder` in ComfyUI's own reply) would
+    # otherwise still resolve strictly under base while silently descending into
+    # the wrong subdirectory.
+    node = resolved
+    for part in reversed(parts):
+        if node.name != part:
+            raise ValueError(
+                f"path component resolved to a different name than requested, "
+                f"possibly a short-name alias: {relpath!r}")
+        node = node.parent
     return resolved
 
 

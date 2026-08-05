@@ -347,6 +347,42 @@ class TestContainmentRejectsOutOfBoundsNames:
         assert warn == "", f"legitimate nested output warned: {warn!r}"
         assert not (nested / "ComfyUI_00007_.png").exists()
 
+    def test_output_alias_name_does_not_delete_a_different_real_file(
+            self, stub, monkeypatch):
+        """A compromised or malicious ComfyUI (sanitize_comfy_url permits a LAN
+        or public api_url over plaintext http) could report a `filename` that
+        is a short-name-alias for a DIFFERENT, real file already sitting in the
+        same output directory - e.g. an earlier generation's output. That
+        target stays strictly under output/, so the escape checks above cannot
+        see it; only the resolved-name check catches it. This does not need a
+        real 8.3-enabled volume - it simulates the OS-level substitution
+        deterministically, same technique as test_pathsafe_confined_under.py's
+        alias tests."""
+        victim = stub.output_dir / "LongModelNameThatIsVeryLong.png"
+        victim.write_bytes(b"do not delete me")
+        alias = "LONGMO~1.PNG"
+        victim_resolved = victim.resolve()
+
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == alias:
+                return victim_resolved
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+        warn = comfy.contain_comfy_artifacts(
+            stub.base_url, "pidAlias",
+            {"filename": alias, "subfolder": "", "type": "output"},
+            comfy_output_dir=str(stub.output_dir),
+            delete_outputs=True,
+        )
+
+        assert victim.exists(), "alias substitution deleted the wrong file"
+        assert victim.read_bytes() == b"do not delete me"
+        assert "WARNING" in warn, "a refused name must be surfaced, not skipped"
+
     def test_symlinked_subfolder_pointing_outside_is_refused(self, stub, tmp_path):
         """Lexical checks alone are not enough: a symlink INSIDE output/ that
         points out of it turns a perfectly well-formed name into an escape. This
