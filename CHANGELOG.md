@@ -369,6 +369,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Image, music and video generation, and RAG indexing/re-embedding/embedding
+  setup, could report "failed" for a job that actually succeeded.** If VRAM
+  handover back to the chat model (or, for embedding setup, the collection
+  impact report) raised after the real work was already done, the job's
+  background-thread runner read the exception as failure - the same class of
+  bug already fixed for model pulls and managed-ComfyUI setup. Each of these
+  now tells the job runner the true outcome directly, before that risky
+  cleanup step runs, so a crash there can no longer misreport a completed
+  operation.
 - **Setting up or updating localm's managed ComfyUI could report "failed" for an
   install that actually succeeded.** If the final status line crashed after the
   real work (clone, venv, packages) was already done, the GUI read the crashed
