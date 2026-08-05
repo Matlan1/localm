@@ -255,3 +255,61 @@ def test_upload_workflow_route_does_not_write_on_the_event_loop(tmp_path, monkey
     assert r.status_code == 200, r.text
     assert seen.get("on_loop") is False, (
         "POST /api/image/workflows ran save_workflow() ON the event loop")
+
+
+def test_routes_serialize_concurrent_delete_and_list_via_real_http(tmp_path, monkeypatch):
+    """The exact scenario an adversarial review confirmed live (2026-08-05): a
+    concurrent DELETE racing a GET's listing raised an unhandled
+    FileNotFoundError -> 500, because run_in_threadpool let the two requests'
+    bodies genuinely interleave on separate OS threads where before they were
+    atomic relative to each other on the single event loop.
+
+    Drives the REAL router through REAL concurrent HTTP requests (real
+    threads hitting the same TestClient), not a scripted single-threaded
+    interleaving - proving the routes themselves acquire _lock_for, not just
+    that the helper function does when used correctly in isolation."""
+    import threading
+
+    import localm.media_workflows as mw
+
+    app = _media_app(tmp_path, monkeypatch)
+    d = mw.workflows_dir("image")
+    d.mkdir(parents=True, exist_ok=True)
+    names = [f"wf{i}.json" for i in range(15)]
+    for n in names:
+        (d / n).write_bytes(b'{"1": {"class_type": "X"}}')
+
+    statuses = []
+    errors = []
+    lock = threading.Lock()
+
+    def _get(client):
+        try:
+            r = client.get("/api/image/workflows")
+            with lock:
+                statuses.append(r.status_code)
+        except Exception as e:  # noqa: BLE001 - the property under test is "never raises"
+            with lock:
+                errors.append(e)
+
+    def _delete(client, name):
+        try:
+            r = client.delete(f"/api/image/workflows/{name}")
+            with lock:
+                statuses.append(r.status_code)
+        except Exception as e:  # noqa: BLE001
+            with lock:
+                errors.append(e)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        threads = [threading.Thread(target=_get, args=(client,)) for _ in range(15)]
+        threads += [threading.Thread(target=_delete, args=(client, n)) for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+    assert not errors, f"a request raised instead of returning a response: {errors!r}"
+    assert 500 not in statuses, (
+        f"a concurrent delete/list race produced a 500 - the routes are not "
+        f"actually serialized: {statuses}")
