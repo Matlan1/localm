@@ -749,11 +749,6 @@ class LlamaCpp:
         self._offload_kqv   = True
         self._kv_supported: Optional[bool] = None   # lazy llama_memory_* probe
 
-        _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
-
-        with _ctx():
-            api.llama_backend_init()
-
         # --- load model ---
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
@@ -801,11 +796,10 @@ class LlamaCpp:
         # None on success / when n_cpu_moe was never requested - carried out
         # to the parent (GgufWorker.load()'s returned metadata), which is the
         # only process allowed to render it. See _apply_cpu_moe's own
-        # docstring for why this cannot be a console.print here.
+        # docstring for why this cannot be a console.print here. The CALL
+        # itself moved below, inside the merged native-call scope - see that
+        # scope's own comment for why.
         self.moe_skip_reason: Optional[str] = None
-        if n_cpu_moe > 0:
-            self._moe_override_keepalive, self.moe_skip_reason = _apply_cpu_moe(
-                mp, n_cpu_moe, model_path)
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false
@@ -829,21 +823,59 @@ class LlamaCpp:
             self._load_progress_cb = _load_progress
             mp.progress_callback = ctypes.cast(_load_progress, ctypes.c_void_p)
 
-        # Capture native stderr for the load span (non-verbose only) so a NULL
-        # return still carries its cause (OOM / no-backends / bad-quant), and a
-        # successful return still carries llama.cpp's own load_tensors report of
-        # where each backend's share of the weights actually landed (the only
-        # source for that - see _MODEL_BUFFER_RE). Else the only native
-        # diagnostic is discarded to devnull and both are blind (rule 5). Both
-        # reads happen INSIDE the ``with`` block - _capture_stderr unlinks its
-        # temp file the moment the block exits, so reading after exit silently
-        # returns "" / [] (see that function's docstring). Verbose mode leaves
-        # this untouched (nullcontext, captured=None); the native stream already
-        # reaches terminal/debug directly, and there is nothing captured to parse.
+        # ONE CONTIGUOUS scope for the whole native-call span, from backend
+        # init through the model load - llama_backend_init() used to get its
+        # own separate _quiet_stderr() scope that exited before this one
+        # began, leaving a gap (this span's Python-only setup above: GPU
+        # split/main_gpu, and - the concrete bug this closes - _apply_cpu_moe)
+        # where fd 2 was back to whatever the CHILD inherited from the PARENT
+        # at spawn, i.e. the SAME terminal the parent's Rich load spinner
+        # renders to. Merging removes that gap entirely: nothing between
+        # llama_backend_init() and llama_load_model_from_file() can now reach
+        # fd 2 unredirected. Safe to include the Python-only setup calls in
+        # this same scope - none of them write to fd 2 themselves (confirmed:
+        # apply_main_gpu/apply_gpu_split's only native call, llama_max_devices(),
+        # is a compile-time-constant getter, not a device probe).
+        #
+        # THAT ALONE IS NOT ENOUGH, which is why suppress_console_mirror() is
+        # paired with it below. _apply_cpu_moe's own _dbg.info/.warning calls
+        # (kept "for the debug log", per its docstring) go through Python's
+        # logging module, not fd 2 - and in debug mode, debuglog.py's console
+        # mirror is BY DESIGN immune to this exact fd-2 redirect (see
+        # _stable_console_stream's own docstring: "so the console mirror is
+        # immune to the OS-level fd-2 redirection... juggled"), so it still
+        # wrote straight to the terminal from this child process, invisible
+        # to the parent's Rich Live region, desyncing its cursor bookkeeping
+        # and stranding an orphaned "0:00:00" spinner frame on screen -
+        # reported live from a real load with LOCALM_DEBUG on and n_cpu_moe
+        # set, root-caused to this exact call site by tracing the code (no
+        # native fd-2 write was ever unaccounted for; the console mirror's
+        # own documented fd-2 immunity was the missing piece).
+        # Do NOT assume widening this redirect scope on its own would ever
+        # cover that: the mirror's whole point is to survive an fd-2 redirect,
+        # so it needs its OWN, separate gate every time this scope is touched.
+        #
+        # Capture (not just quiet) for the whole span, non-verbose only, so a
+        # NULL return still carries its cause (OOM / no-backends / bad-quant),
+        # and a successful return still carries llama.cpp's own load_tensors
+        # report of where each backend's share of the weights actually landed
+        # (the only source for that - see _MODEL_BUFFER_RE). Both reads happen
+        # INSIDE the ``with`` block - _capture_stderr unlinks its temp file the
+        # moment the block exits, so reading after exit silently returns ""
+        # / [] (see that function's docstring). Verbose mode leaves this
+        # untouched (nullcontext, captured=None; mirror also left alone): the
+        # native stream already reaches terminal/debug directly, and there is
+        # nothing captured to parse.
+        from localm.debuglog import suppress_console_mirror
         _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
+        _mirror_ctx = suppress_console_mirror if not verbose else contextlib.nullcontext
         self.weight_placement: list = []
         _load_failure_detail = ""
-        with _load_ctx() as captured:
+        with _mirror_ctx(), _load_ctx() as captured:
+            api.llama_backend_init()
+            if n_cpu_moe > 0:
+                self._moe_override_keepalive, self.moe_skip_reason = _apply_cpu_moe(
+                    mp, n_cpu_moe, model_path)
             self._model_ptr = api.llama_load_model_from_file(model_path, mp)
             if captured is not None:
                 if self._model_ptr:
@@ -906,6 +938,12 @@ class LlamaCpp:
             cp.n_threads       = n_threads
             cp.n_threads_batch = n_threads
 
+        # A separate, later native call than the merged load scope above (it
+        # needs the just-loaded self._model_ptr) - kept on plain _quiet_stderr,
+        # not the mirror-gated/capture scope: nothing runs here that logs via
+        # the isolated child's console mirror, so there is no equivalent gap
+        # to close, and there is nothing to capture/parse from this call.
+        _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
         with _ctx():
             self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
