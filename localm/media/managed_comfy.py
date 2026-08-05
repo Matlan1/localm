@@ -32,11 +32,27 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from localm.config import home_dir, load_config
+
+# Serializes remove_managed_comfy() against itself: the CLI (`localm comfy
+# remove`) and the GUI's /api/comfy/remove + /api/comfy/repair routes are two
+# independent callers of the SAME rmtree target, and the GUI routes now wrap
+# their call in run_in_threadpool_bounded (a client-side deadline - see
+# localm/inference/_threadpool_timeout.py). That deadline only makes the
+# AWAITING request give up; the real rmtree keeps running on its abandoned
+# worker thread. Without this lock, a user who sees a timeout and retries
+# Remove/Repair would start a SECOND concurrent rmtree against the same
+# directory tree while the first is still deleting files - shutil.rmtree
+# racing itself, the same "offloading without serializing" shape
+# media_workflows.py's _lock_for already fixed for the workflow routes (see
+# its module comment). One lock is enough here (unlike per-media there):
+# there is only ever ONE managed ComfyUI install, not one per media type.
+_remove_lock = threading.Lock()
 
 # Directory names under LOCALM_HOME. Kept as constants so S2/S3 and the CLI all
 # agree on the one layout.
@@ -162,16 +178,22 @@ def remove_managed_comfy(with_models: bool = False) -> tuple:
     rule 5, the ones that could NOT be removed with the reason, so a caller never
     reports success for a delete that failed. Both empty means nothing was installed
     (an honest no-op, not a success). The single source of truth for the removal that
-    ``localm comfy remove`` and the GUI remove route share."""
-    removed = []
-    failed = []
-    for t in managed_comfy_remove_targets(with_models):
-        try:
-            rmtree_robust(t)
-            removed.append(t)
-        except OSError as e:
-            failed.append(f"{t} ({e})")
-    return removed, failed
+    ``localm comfy remove`` and the GUI remove route share.
+
+    Holds ``_remove_lock`` for the whole delete so two concurrent callers (the
+    CLI and a GUI retry, or two GUI clicks) can never rmtree the same tree at
+    once - see the lock's own module-level comment for why this matters more
+    now that the GUI route wraps this call in a client-side timeout."""
+    with _remove_lock:
+        removed = []
+        failed = []
+        for t in managed_comfy_remove_targets(with_models):
+            try:
+                rmtree_robust(t)
+                removed.append(t)
+            except OSError as e:
+                failed.append(f"{t} ({e})")
+        return removed, failed
 
 
 def managed_comfy_api_url() -> str:

@@ -492,8 +492,23 @@ async def session_delete(session_id: str, request: Request):
     # async handler that froze the whole event loop, and every concurrent request
     # with it, for the git duration (REG-594). Offload it, matching the pattern
     # the other potentially-slow routes here already use.
-    from starlette.concurrency import run_in_threadpool
-    if await run_in_threadpool(_sessions(request).remove, session_id) is None:
+    #
+    # Bounded (follow-up to #1057) at a bit over the ~40s worst-case git
+    # budget above. Safe against corruption: SessionManager.remove() pops
+    # session_id from its dict BEFORE close() runs (sessions.py), so an
+    # abandoned close() cannot race a second DELETE of the SAME id - the
+    # retry would see the id already gone and 404 immediately rather than
+    # double-closing; the checkpoint file close() writes is keyed to this
+    # session's own unique id, never shared with another session.
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    try:
+        removed = await run_in_threadpool_bounded(
+            _sessions(request).remove, session_id, timeout=60.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Closing the session timed out: {e}")
+    if removed is None:
         raise HTTPException(404, f"No such session: {session_id}")
     return {"status": "closed"}
 

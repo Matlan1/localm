@@ -595,8 +595,10 @@ def llama_sampler_init_penalties(
     Two live signatures (see ``_abi.penalties_arity`` for how they are told
     apart and why guessing is unsafe):
 
-      <= b10269 / lemonade b1288:  (penalty_last_n, repeat, freq, present)
-      >= 935cad6497e8 / b1307:     (n_vocab, penalty_last_n, repeat, freq, present)
+      upstream <= b10269 / lemonade b1288:
+          (penalty_last_n, repeat, freq, present)
+      >= upstream 935cad6497e8 / lemonade b1307:
+          (n_vocab, penalty_last_n, repeat, freq, present)
 
     *n_vocab* is ignored by the 4-argument form. Callers on the 5-argument form
     must pass the real vocabulary size; upstream uses it to size the sampler's

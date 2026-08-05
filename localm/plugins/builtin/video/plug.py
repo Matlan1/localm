@@ -9,9 +9,11 @@ Routes (mounted by the engine, auto-scoped to the ``video`` capability):
   POST   /api/video/file/{name}/move      - move a clip to a folder
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. REQUIRES the GUI: ``attach_gui`` must have been called on the app
-(it publishes ``request.app.state.jobs`` / ``.self_url``); when it has not, the
-generate route returns a clear 503. The backend is selected per-plugin (default
+SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
+created by ``attach_engine``, so a headless ``localm serve`` can generate too.
+It still needs this server's own address for the chat/media VRAM handover (see
+``resolve_self_url``), and 503s with that specific reason if it cannot be
+determined. The backend is selected per-plugin (default
 ComfyUI Wan) and reads this plugin's own config (see backend.py). Ships DISABLED
 by default.
 """
@@ -32,6 +34,7 @@ from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.pathsafe import confined_file
+from localm.selfclient import resolve_self_url
 from . import backend as _backend
 
 _router = APIRouter()
@@ -77,11 +80,19 @@ async def video(req: VideoRequest, request: Request):
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
 
+    # See the image plugin: the job registry is kernel-level since ADR-0008, so
+    # the real precondition is knowing this server's own address for the VRAM
+    # handover, not the GUI being attached.
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
-        raise HTTPException(503, "Video generation needs the localm GUI server "
-                                 "(the background job manager is unavailable).")
-    self_url = getattr(request.app.state, "self_url", "")
+        raise HTTPException(503, "Video generation needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    self_url = resolve_self_url(request.app)
+    if not self_url:
+        raise HTTPException(503, "Video generation needs this server's own "
+                                 "address to free VRAM first, and it could not "
+                                 "be determined.")
 
     video_dir = _video_dir()
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -264,12 +275,20 @@ async def video_comfy_models():
 
     Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
     timeout), so it runs OFF the event loop: inline it stalled every concurrent
-    request server-wide while ComfyUI was slow (REG-638)."""
-    from fastapi.concurrency import run_in_threadpool
+    request server-wide while ComfyUI was slow (REG-638).
 
+    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
+    urlopen timeout - see the image plugin's identical route for the full
+    rationale."""
     from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
     s = _backend.settings(load_config())
-    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
+    try:
+        slots = await run_in_threadpool_bounded(_backend._comfy_model_slots, s, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
     if slots is None:
         return {"reachable": False, "api_url": s["api_url"], "slots": [],
                 "message": "ComfyUI is not running - launch it to see available models."}
@@ -279,12 +298,24 @@ async def video_comfy_models():
 @_router.post("/api/video/comfy-launch")
 async def video_comfy_launch():
     """Start (or confirm) ComfyUI is up for the video plugin, without running a
-    generation - backs the Workflow panel's "Launch ComfyUI" button."""
-    from fastapi.concurrency import run_in_threadpool
+    generation - backs the Workflow panel's "Launch ComfyUI" button.
 
+    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
+    itself will honour, plus a buffer - see the image plugin's identical
+    route for the full rationale."""
     from localm.config import load_config
-    s = _backend.settings(load_config())
-    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    from localm.media.comfy_client import comfy_launch_wait_seconds
+    cfg = load_config()
+    s = _backend.settings(cfg)
+    budget = comfy_launch_wait_seconds(cfg) + 30.0
+    try:
+        ok, message = await run_in_threadpool_bounded(
+            _backend.ensure_available, s, timeout=budget)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Launching ComfyUI timed out: {e}")
     return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 

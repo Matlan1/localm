@@ -34,8 +34,11 @@ The fingerprint was validated byte-for-byte against the cpu, vulkan, and
 amd-rocm prebuilts localm provisions; offsets for these POD fields are
 commit-determined, not OS-determined (natural alignment is identical on MS-x64 /
 SysV-x64 / arm64), so a given build matches on every OS. Live probes of the
-shipped amd-rocm builds, 2026-08-05: b1288 reports ``ggml_commit() == "7c158fb"``
-/ ggml 0.13.1 and the V1 layout; b1307 reports ``0713275`` / ggml 0.18.1 and V2.
+shipped amd-rocm builds, 2026-08-05: lemonade b1288 reports
+``ggml_commit() == "7c158fb"`` / ggml 0.13.1 and the V1 layout; lemonade b1307
+reports ``0713275`` / ggml 0.18.1 and V2. (Tag namespaces: b1xxx are
+lemonade-sdk/llamacpp-rocm, b10xxx are ggml-org/llama.cpp, and they collide -
+see _structs' docstring.)
 
 Because upstream reordered ``llama_model_params`` IN PLACE at an unchanged
 72-byte size, this module also DECIDES WHICH LAYOUT to bind
@@ -73,11 +76,15 @@ MODEL_PARAMS_V1 = "v1"   # <= 7c158fbb4aec: use_mmap/use_direct_io/use_mlock, ma
 MODEL_PARAMS_V2 = "v2"   # >= the load_mode reorder: load_mode@24, main_gpu@28, load_mtp
 
 # Symbols that appear in llama.h in the same change as the V2 reorder. Probed at
-# 8 upstream tags spanning the flip (b9870, b10000, b10050, b10080, b10090,
-# b10180, b10200, b10276): the struct field and BOTH of these are always all
-# present or all absent. This is the STRUCTURAL half of the layout decision; the
-# value fingerprint below is an independent second opinion, so the decision does
-# not rest on this correlation alone.
+# 8 upstream ggml-org tags spanning the flip (b9870, b10000, b10050, b10080,
+# b10090, b10180, b10200, b10276): the struct field and BOTH of these are always
+# all present or all absent. The flip itself is PINNED to upstream b10105
+# (commit e6dd0e29a675, ggml-org/llama.cpp#20834); b10103 is the last release
+# without it, and b10104 was never tagged.
+#
+# This is the STRUCTURAL half of the layout decision; the value fingerprint below
+# is an independent second opinion, so the decision does not rest on this
+# correlation alone.
 _V2_MARKER_SYMBOLS = ("llama_load_mode_from_str", "llama_load_mode_name")
 
 # Byte offsets/values that llama_model_default_params() must produce for each
@@ -459,6 +466,10 @@ def _mismatch_error(verdict: AbiVerdict, lib_path: str = "") -> AbiMismatch:
     )
 
 
+# The verdict verify_abi actually reached, kept so `localm doctor` can report
+# what HAPPENED rather than re-deriving a fresh one - see abi_report().
+_last_verdict: "Optional[AbiVerdict]" = None
+
 _detected_layout: Optional[str] = None
 # True when _detected_layout is a FALLBACK rather than a determination. Kept
 # separate from the layout itself because "v1" alone cannot express the
@@ -534,7 +545,7 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
 
     * A DETERMINED V1 model_params implies 4 args. The layout reorder landed
       STRICTLY BEFORE the penalties change (measured by bisecting upstream tags:
-      b10180 and b10240 are already V1->V2 flipped while still 4-arg), so no
+      upstream b10105 onward is already V1->V2 flipped while still 4-arg), so no
       build can be V1 and 5-arg. "Determined" is load-bearing: when neither
       layout probe was conclusive, ``detect_model_params_layout`` FALLS BACK to
       V1, and inferring 4-arg from that fallback would be reasoning from an
@@ -583,6 +594,16 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
     return _detected_arity
 
 
+def _remember(verdict: AbiVerdict) -> AbiVerdict:
+    """Store *verdict* as this process's authoritative ABI result and return it.
+
+    Called on EVERY verify_abi outcome, including the one that then raises: a
+    mismatch is exactly what a bug report most needs to carry."""
+    global _last_verdict
+    _last_verdict = verdict
+    return verdict
+
+
 def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     """Verify *lib*'s struct layout matches this build. Raise on proven drift.
 
@@ -618,15 +639,15 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
         _log(f"{SKIP_ENV} is set - skipping the llama ABI self-check. A mismatched "
              "layout can corrupt memory; unset it once the runtime is known good.",
              warn=True)
-        return AbiVerdict(
+        return _remember(AbiVerdict(
             status="skipped", layout=layout,
             diagnostics=notes + ([contradiction] if contradiction else []),
-            detail=f"skipped via {SKIP_ENV}")
+            detail=f"skipped via {SKIP_ENV}"))
 
     if contradiction:
-        verdict = AbiVerdict(
+        verdict = _remember(AbiVerdict(
             status="mismatch", failures=[contradiction], diagnostics=notes,
-            layout=layout, detail="model_params layout probes disagree")
+            layout=layout, detail="model_params layout probes disagree"))
         raise _mismatch_error(verdict, lib_path)
 
     try:
@@ -634,10 +655,10 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     except Exception as e:  # noqa: BLE001 - any mechanism failure must fail open
         _log(f"llama ABI self-check could not run ({e}); continuing unverified.",
              warn=True)
-        return AbiVerdict(status="unchecked", layout=layout,
-                          detail=f"mechanism error: {e}")
+        return _remember(AbiVerdict(status="unchecked", layout=layout,
+                                    detail=f"mechanism error: {e}"))
 
-    verdict = evaluate(mp, cp)
+    verdict = _remember(evaluate(mp, cp))
     verdict.diagnostics = notes + verdict.diagnostics
     if verdict.status == "mismatch":
         _log("llama ABI mismatch: " + "; ".join(verdict.failures), warn=True)
@@ -665,7 +686,22 @@ def abi_report() -> AbiVerdict:
                           detail="struct layout mismatch")
     except Exception as e:  # noqa: BLE001 - not provisioned / not loadable
         return AbiVerdict(status="unchecked", detail=f"runtime not loadable: {e}")
-    # load_lib already verified; re-evaluate for a detailed verdict (lib cached).
+    # Prefer the verdict verify_abi actually reached over re-deriving one.
+    #
+    # Re-deriving loses the two statuses that are not conclusions about the
+    # LIBRARY but about the CHECK: "skipped" (the user set LOCALM_SKIP_ABI_CHECK)
+    # and "unchecked" (the probe itself errored). evaluate() can only return
+    # ok/mismatch, so a bypassed check was being reported to `localm doctor` as
+    # "native ABI: struct layout matches this build" - an affirmative claim that
+    # the layout was VERIFIED, for a check that never ran. That is reporting
+    # success for a step which did not happen (AGENTS.md rule 5), and it made
+    # doctor's own "check skipped" branch unreachable.
+    #
+    # The stored verdict is also strictly more informative: verify_abi's carries
+    # the layout, the probe notes and any contradiction, all of which the
+    # re-derivation drops.
+    if _last_verdict is not None:
+        return _last_verdict
     try:
         layout = model_params_layout(lib)
         mp, cp = _read_default_params(lib, layout)

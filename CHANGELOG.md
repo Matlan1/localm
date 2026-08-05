@@ -88,8 +88,31 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reaching for when something else needs the card, or when a model would
   otherwise not fit at all. It has no effect on a normal (dense) model, and says
   so instead of silently doing nothing.
+- **Background work now runs on a server started without the web interface.**
+  Indexing a Knowledge collection, uploading documents to one, installing the
+  embedding model, and generating images, music or video all used to need
+  `localm gui`: on a bare `localm serve` the first two quietly ran to completion
+  inside the request instead of in the background, and the rest simply refused
+  with a message blaming the missing web interface. They all work now, the same
+  way they do in the browser. See the Changed section for the response-shape
+  break this creates for anyone scripting the first two.
 
 ### Security
+- **A model or vision projector pulled from an untrusted repo could resolve to
+  something other than the plain file it appeared to be.** The filename
+  confinement check for a model download (used by `localm pull`, the same-repo
+  vision-projector auto-attach, and the `--mmproj` flag) verified a downloaded
+  file's destination stayed inside your models folder, but did not reject
+  every Windows filename shape that can still name something other than what
+  it appears to while staying inside that folder: a repo-supplied name
+  containing a colon could open a hidden alternate data stream behind an
+  ordinary-looking, apparently empty file, and a name shaped like a short
+  8.3 alias could resolve to an unrelated file you already had, causing it to
+  be silently registered under the pulled name instead of the file actually
+  being downloaded. Both are now rejected, alongside reserved Windows device
+  names and a trailing dot or space (which Windows silently strips, so two
+  visually distinct names can refer to the same file). No effect on ordinary
+  model filenames.
 - **A bug report can no longer include your actual chat content, and asking for
   help no longer means filing three copies of the same complaint.** Attaching a
   debug log tail to a report could pull in a raw model reply, a snippet of your
@@ -284,7 +307,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   gfx1030 GEMM kernels than the previous build shipped. Run
   `localm setup-llama --force` to pick it up; an existing installation keeps
   working untouched until you do.
-
+- **Breaking, for scripts driving a headless `localm serve` over REST:
+  `POST /api/rag/collections/{name}/add` and `.../upload` now return
+  `{"job_id": ...}` instead of the finished index result, and
+  `POST /api/rag/embedding` starts a job instead of refusing.** On a headless
+  server those routes used to behave differently from the same routes under the
+  GUI, because background jobs only existed when the GUI was attached: add and
+  upload ran to completion inside the request and returned counts, and
+  embedding setup returned an error telling you to run `localm gui`. Background
+  jobs now exist on every server, so all three behave the same way everywhere
+  and you follow progress on the job instead of waiting on one long request.
+  If you parse the response of a headless add or upload, you need to update it.
 - **Settings now shows you which fields you've actually changed.** A field
   still on its shipped default now renders blank with the default shown as a
   greyed placeholder, instead of looking identical to a value you chose
@@ -304,6 +337,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **`localm doctor` no longer claims the native ABI check passed when it was
+  switched off.** With `LOCALM_SKIP_ABI_CHECK` set, doctor reported "native ABI:
+  struct layout matches this build" - stating the layout had been verified for a
+  check that never ran, and making its own "check skipped" line unreachable. It
+  now says the check was skipped, and reports which struct layout the runtime
+  uses either way.
 - **A newer llama.cpp runtime could silently apply the wrong model settings.**
   Upstream rearranged the fields inside one of the structures localm passes to
   the native library, without changing its size, so nothing detected the

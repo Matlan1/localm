@@ -152,8 +152,8 @@ def _reset_layout_cache(monkeypatch):
     symbol lives in ggml-base.dll rather than llama.dll. But it means a fake lib
     constructed WITHOUT a version silently read the machine's actually-installed
     runtime. That made ``(good_model_v2, None) -> 0`` pass for the wrong reason
-    while this box had b1288 (ggml 0.13.1, below every threshold), and it flipped
-    to 5 the moment the box was upgraded to b1307 (ggml 0.18.1). A unit test must
+    while this box had lemonade b1288 (ggml 0.13.1, below every threshold), and it
+    flipped to 5 the moment the box was upgraded to lemonade b1307 (ggml 0.18.1). A unit test must
     not change its answer because someone provisioned a different DLL, so the
     fallback is stubbed out here and "no version" means no version."""
     from localm.inference.backends.llamacpp import _loader
@@ -161,10 +161,12 @@ def _reset_layout_cache(monkeypatch):
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
+    _abi._last_verdict = None
     yield
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
+    _abi._last_verdict = None
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +319,7 @@ def test_anchor_offsets_match_struct():
 
 
 # --------------------------------------------------------------------------- #
-#  llama_model_params layout detection (the b1288 -> b1307 reorder)
+#  llama_model_params layout detection (the lemonade b1288 -> b1307 reorder)
 # --------------------------------------------------------------------------- #
 
 def test_detects_v1_and_v2_layouts():
@@ -328,7 +330,7 @@ def test_detects_v1_and_v2_layouts():
 def test_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now():
     """The exact silent-corruption case this whole split exists for.
 
-    A b1307 build's default-params bytes, forced through the OLD V1 class. Both
+    A lemonade b1307 build's default-params bytes, forced through the OLD V1 class. Both
     structs are 72 bytes so nothing about the size trips, and split_mode at
     offset 20 - previously the ONLY model_params check - is 1 either way. What
     now catches it is that V1's `main_gpu` reads V2's `load_mode`... which is
@@ -666,7 +668,7 @@ def test_assumed_layout_does_not_prove_the_penalties_arity():
 
 
 def test_determined_v1_still_proves_4arg():
-    """The complement, so the guard above cannot silently cost real b1288 users
+    """The complement, so the guard above cannot silently cost real lemonade b1288 users
     their repetition penalty: a genuine pre-reorder build exports no
     llama_load_mode_* symbols and fingerprints cleanly as v1."""
     lib = _FakeLib(good_model_v1(), good_ctx(), ggml_version="0.13.1")
@@ -751,3 +753,62 @@ def test_unparseable_ggml_version_is_unknown_not_guessed():
         assert got in (0, 4, 5), got
         # Specifically: nothing unparseable may be read as >= 0.18.1.
         assert got != 5, f"ggml_version={bogus!r} must not be taken as 5-arg"
+
+
+# --------------------------------------------------------------------------- #
+#  abi_report must report what HAPPENED, not re-derive a fresh verdict
+# --------------------------------------------------------------------------- #
+
+def test_abi_report_preserves_a_skipped_verdict(monkeypatch):
+    """`localm doctor` must not claim a bypassed check succeeded.
+
+    abi_report used to throw away verify_abi's verdict and re-run evaluate(),
+    which can only return ok/mismatch. So with LOCALM_SKIP_ABI_CHECK set, doctor
+    printed "native ABI: struct layout matches this build" - an affirmative claim
+    that the layout was VERIFIED - for a check that never ran, and its own
+    "check skipped" branch was unreachable. Reporting success for a step that did
+    not happen is exactly what AGENTS.md rule 5 forbids."""
+    from localm.inference.backends.llamacpp import _loader
+
+    lib = _FakeLib(good_model_v2(), good_ctx())
+    monkeypatch.setattr(_loader, "load_lib", lambda: lib)
+    monkeypatch.setenv(_abi.SKIP_ENV, "1")
+
+    verify_abi(lib)                      # populates the stored verdict
+    v = _abi.abi_report()
+    assert v.status == "skipped", (
+        f"a bypassed check must not be reported as {v.status!r}")
+    assert _abi.SKIP_ENV in v.detail
+    assert v.layout == MODEL_PARAMS_V2, "the layout is still known and worth showing"
+
+
+def test_abi_report_still_reports_ok_when_the_check_actually_ran(monkeypatch):
+    """The complement: preserving the verdict must not turn every report into
+    'skipped'. A real check still reports ok, with its layout attached."""
+    from localm.inference.backends.llamacpp import _loader
+
+    lib = _FakeLib(good_model_v1(), good_ctx())
+    monkeypatch.setattr(_loader, "load_lib", lambda: lib)
+    monkeypatch.delenv(_abi.SKIP_ENV, raising=False)
+
+    verify_abi(lib)
+    v = _abi.abi_report()
+    assert v.status == "ok"
+    assert v.layout == MODEL_PARAMS_V1
+
+
+def test_abi_report_carries_the_probe_notes_a_re_derivation_would_drop():
+    """The stored verdict is strictly more informative than a re-derived one:
+    it keeps the layout-probe notes, which evaluate() never sees."""
+    # TWO of the three v2 fingerprint checks must break to reach "inconclusive":
+    # the fingerprint is SCORED, so one drifted default still leaves a 2-0
+    # winner. That is the point of the scoring, and it is why breaking a single
+    # field here does NOT produce the note this test is about.
+    mp = good_model_v2()
+    mp.load_mode = 3                # breaks the load_mode@24 check
+    mp.use_extra_bufts = False      # and the use_extra_bufts@66 check
+    lib = _FakeLib(mp, good_ctx())
+    v = verify_abi(lib)
+    assert v.status == "ok"
+    assert any("symbol probe alone" in d for d in v.diagnostics), v.diagnostics
+    assert _abi._last_verdict is v

@@ -91,7 +91,7 @@ struct llama_batch {
 """
 
 # The same header AFTER upstream's in-place reorder of llama_model_params
-# (lemonade b1307 / upstream b10180+) - localm's V2 layout. Note it is still 72
+# (lemonade b1307 / upstream b10105+) - localm's V2 layout. Note it is still 72
 # bytes: load_mode is inserted at 24 and three booleans are replaced by it, which
 # is precisely why a size check cannot detect this and an OFFSET check must.
 _GOOD_HEADER_V2 = _GOOD_HEADER.replace(

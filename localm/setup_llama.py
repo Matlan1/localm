@@ -84,7 +84,9 @@ DEFAULT_URL_SHA256 = (
 # llama.cpp 07132750825a (ggml 0.18.1), which carries the reordered
 # llama_model_params and the 5-argument llama_sampler_init_penalties - see
 # inference/backends/llamacpp/_structs.py and _abi.py, which bind BOTH that
-# layout and the older b1288 one so an already-provisioned runtime keeps working.
+# layout and the older lemonade b1288 one so an already-provisioned runtime
+# keeps working. (b1xxx here are lemonade-sdk tags, NOT ggml-org ones - the two
+# schemes collide; see inference/backends/llamacpp/_structs.py.)
 _ROCM_TAG = "b1307"
 
 # Upstream llama.cpp prebuilts (ggml-org/llama.cpp). We resolve the latest
@@ -293,9 +295,9 @@ def _is_wanted(f: Path) -> bool:
 # files, including gfx1030 kernels) and hipblaslt/library/ - the data was always
 # there, just always dropped on the way in.
 #
-# Re-measured 2026-08-05 on the b1307 gfx103X archive: rocblas/library/ is still
+# Re-measured 2026-08-05 on the lemonade b1307 gfx103X archive: rocblas/library/ is still
 # there and now carries 142 gfx1030 kernel files (up from 88), while
-# hipblaslt/library/ is GONE. That is not a regression to chase - b1288's
+# hipblaslt/library/ is GONE. That is not a regression to chase - lemonade b1288's
 # hipblaslt data contained gfx1100 kernels ONLY, zero gfx1030, so it was never
 # usable by the gfx103X target this archive is built for. Both names stay listed
 # because the same code provisions the gfx110X/gfx120X archives too, and a

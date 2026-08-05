@@ -57,9 +57,16 @@ def _b64(data: bytes) -> str:
 @pytest.fixture
 def api_mode_app(tmp_path, monkeypatch):
     """The rag plugin mounted with NO ``attach_gui`` call - exactly what a bare
-    ``localm serve`` (api-mode) looks like. ``app.state.jobs`` / ``.self_url`` /
-    ``.active_model`` are all absent, unlike every existing rag test fixture
-    (which calls attach_gui and so never exercised this path).
+    ``localm serve`` (api-mode) looks like. ``.self_url`` / ``.active_model``
+    are absent, unlike every existing rag test fixture (which calls attach_gui
+    and so never exercised this path).
+
+    ``app.state.jobs`` IS present, because since ADR-0008 the background-job
+    registry is created by ``attach_engine`` rather than ``attach_gui``, so a
+    headless server has one. This fixture publishes it directly instead of
+    running the whole of attach_engine, which is what makes it api-mode rather
+    than a bare app - see ``api_mode_app_no_jobs`` for the app that genuinely
+    has none.
 
     Pins ``Path.home`` under tmp_path, mirroring test_rag_confinement.py's
     ``home_env`` fixture: rag_add's whitelist confinement only allows paths
@@ -81,9 +88,47 @@ def api_mode_app(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
 
+    from localm.plugins.gui.jobs import JobManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
+    app.state.jobs = JobManager()
+    return app
+
+
+@pytest.fixture
+def api_mode_app_no_jobs(tmp_path, monkeypatch):
+    """An app whose routes were mounted WITHOUT attach_engine, so it has no job
+    registry at all. Not a real serving mode - it is a construction error - but
+    it is the shape audit item 8 was about, and the guard must still turn it
+    into a clean 503 rather than an unguarded AttributeError -> opaque 500."""
+    from localm.plugins.engine import PluginManager
+    home = tmp_path / "userhome"
+    home.mkdir()
+    localm = home / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(localm))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", localm)
+    monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
     app = FastAPI()
     PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
     return app
+
+
+def _await_job(app, job_id, timeout=30.0):
+    """Block until a background job leaves 'running', then return it."""
+    jobs = app.state.jobs
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = jobs.get(job_id)
+        assert job is not None, f"job {job_id} vanished from the registry"
+        if job.status != "running":
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} still running after {timeout}s")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,35 +136,39 @@ def api_mode_app(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 class TestApiModeIndexesHeadless:
-    def test_add_indexes_synchronously_when_no_job_manager(self, api_mode_app):
-        """Headless serve has no background job manager (attach_gui is never
-        called), yet a documented REST client must still be able to index. Pre-fix
-        this 503'd ("run localm gui"); now /add runs the index synchronously on the
-        plugin pool and returns the result directly, so a bare ``localm serve`` can
-        index (memory-audit cluster 24). The doc is really indexed - a query
+    def test_add_runs_as_a_background_job_headless(self, api_mode_app):
+        """A headless ``localm serve`` indexes through the SAME streamed
+        background job the GUI uses (ADR-0008).
+
+        History, because this assertion has now been inverted twice: originally
+        /add 503'd headless ("run localm gui"); then cluster 24 made it index
+        SYNCHRONOUSLY and return the result inline, because no job manager
+        existed outside the GUI; now the registry is kernel-level, so headless
+        gets a job_id like everyone else and can follow progress instead of
+        blocking on one long request. The doc is really indexed - a query
         returns it."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             # Under Path.home() (pinned by the fixture), so the confinement
-            # whitelist check (which runs BEFORE the jobs branch) passes on every
-            # platform and the request reaches the synchronous index under test.
+            # whitelist check (which runs BEFORE this) passes on every platform.
             target = Path.home() / "doc.txt"
             target.write_text("gfx1030 rocm runtime notes", encoding="utf-8")
             r = c.post("/api/rag/collections/kb/add",
                        json={"paths": [str(target)], "embed": False})
             assert r.status_code == 200, r.text
             body = r.json()
-            assert body.get("status") == "done", body
-            assert body["added"] == 1, body
-            assert "job_id" not in body           # synchronous, not a streamed job
+            assert "job_id" in body, f"headless /add must start a job now: {body}"
+            job = _await_job(api_mode_app, body["job_id"])
+            assert job.status == "done", f"job ended {job.status}"
             q = c.post("/api/rag/collections/kb/query",
                        json={"query": "gfx1030", "k": 4})
             assert q.status_code == 200, q.text
             hits = q.json()["hits"]
             assert hits and "gfx1030" in hits[0]["text"].lower()
 
-    def test_upload_indexes_synchronously_when_no_job_manager(self, api_mode_app):
-        """Same for device-file /upload: synchronous index headless, no 503."""
+    def test_upload_runs_as_a_background_job_headless(self, api_mode_app):
+        """Same for device-file /upload: a streamed job headless, not a 503 and
+        no longer a synchronous inline result."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             r = c.post("/api/rag/collections/kb/upload", json={
@@ -128,9 +177,25 @@ class TestApiModeIndexesHeadless:
                 "embed": False})
             assert r.status_code == 200, r.text
             body = r.json()
-            assert body.get("status") == "done", body
-            assert body["added"] == 1, body
-            assert "job_id" not in body
+            assert "job_id" in body, f"headless /upload must start a job now: {body}"
+            job = _await_job(api_mode_app, body["job_id"])
+            assert job.status == "done", f"job ended {job.status}"
+
+    def test_add_without_a_job_registry_is_a_clean_503(self, api_mode_app_no_jobs):
+        """Audit item 8 stays fixed. An app whose routes were mounted without
+        attach_engine has no registry, and that must still be a clean 503 rather
+        than an unguarded AttributeError -> opaque 500. The message must NOT
+        blame the GUI, which stopped being the reason when the registry moved to
+        kernel level."""
+        with TestClient(api_mode_app_no_jobs) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            target = Path.home() / "doc.txt"
+            target.write_text("gfx1030 rocm runtime notes", encoding="utf-8")
+            r = c.post("/api/rag/collections/kb/add",
+                       json={"paths": [str(target)], "embed": False})
+            assert r.status_code == 503, r.text
+            assert "localm gui" not in r.text.lower(), (
+                "the GUI is no longer why a job registry might be missing")
 
     def test_add_logs_embed_degrade_when_headless(self, api_mode_app, caplog):
         """LM-DA-015: a headless /add whose embedder is broken must not silently
@@ -159,11 +224,16 @@ class TestApiModeIndexesHeadless:
             with caplog.at_level("WARNING", logger="localm"):
                 r = c.post("/api/rag/collections/kb/add",
                            json={"paths": [str(target)], "embed": True})
-            # The degrade must not fail the request - it still indexes, lexically.
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body.get("status") == "done", body
-            assert body["added"] == 1, body
+                # The degrade must not fail the request - it still indexes,
+                # lexically. Since ADR-0008 this runs as a job even headless, so
+                # wait for it INSIDE the caplog block or the warning lands after
+                # capture stops and this passes for the wrong reason.
+                assert r.status_code == 200, r.text
+                job = _await_job(api_mode_app, r.json()["job_id"])
+                assert job.status == "done", f"job ended {job.status}"
+        # THE POINT survives the move to the job path: the degrade must still
+        # reach the LOG, not only the job's ephemeral event stream, because the
+        # log is what a bug report carries (LM-DA-015). See plug._job_progress.
         assert "embeddings unavailable" in caplog.text
         assert "indexing lexical-only" in caplog.text
 
@@ -181,17 +251,22 @@ class TestApiModeIndexesHeadless:
             assert r.status_code == 400, r.text
             assert "too many paths" in r.text.lower()
 
-    def test_embedding_set_returns_clean_503_not_500(self, api_mode_app):
+    def test_embedding_set_starts_a_job_headless(self, api_mode_app):
+        """Embedding-model setup needs a job for its download-progress stream,
+        and headless now has one, so it starts the job instead of 503-ing with
+        "run localm gui"."""
         with TestClient(api_mode_app) as c:
             r = c.post("/api/rag/embedding", json={"model": "bge-small-en-v1.5"})
+            assert r.status_code == 200, r.text
+            assert "job_id" in r.json(), r.text
+
+    def test_embedding_set_without_a_job_registry_is_a_clean_503(
+            self, api_mode_app_no_jobs):
+        """The other half of audit item 8: still a 503, never a 500."""
+        with TestClient(api_mode_app_no_jobs) as c:
+            r = c.post("/api/rag/embedding", json={"model": "bge-small-en-v1.5"})
             assert r.status_code == 503, r.text
-            # THE POINT (review finding): the message must name what actually
-            # needs the GUI here (embedding setup), not the indexing wording
-            # used by /add and /upload - _require_jobs's default message would
-            # be misleading on this route if not overridden.
-            assert "embedding model setup" in r.text.lower()
-            assert "background indexing" not in r.text.lower()
-            assert "localm gui" in r.text.lower()
+            assert "localm gui" not in r.text.lower()
 
     def test_query_succeeds_and_degrades_to_lexical_only(self, api_mode_app):
         # THE POINT (finding 1): with no bind coordinates on app.state (this bare

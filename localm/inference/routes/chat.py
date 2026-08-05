@@ -105,9 +105,12 @@ def register(app: FastAPI, ctx) -> None:
                     # backend means the projector FAILED to load (rule 5: report that
                     # honest cause, not "text-only").
                     from localm.model_manager import vision_input_guidance
-                    mmproj_failed = bool(
-                        getattr(getattr(engine, "_backend", None), "mmproj_path", None))
-                    raise HTTPException(400, vision_input_guidance(mmproj_failed=mmproj_failed))
+                    backend = getattr(engine, "_backend", None)
+                    mmproj_failed = bool(getattr(backend, "mmproj_path", None))
+                    active_model_path = getattr(backend, "model_path", None)
+                    raise HTTPException(400, vision_input_guidance(
+                        mmproj_failed=mmproj_failed,
+                        active_model_path=active_model_path))
 
             gen_kwargs = dict(
                 max_tokens=req.max_tokens,

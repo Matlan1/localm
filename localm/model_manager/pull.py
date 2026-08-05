@@ -545,6 +545,67 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
     return dest
 
 
+def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
+    """True when *entry* (a registry entry whose file is *path*) is a
+    plausible target for the #957 mmproj backfill: pulled from an HF repo,
+    a plain LLM registration (never a projector needing its own projector),
+    and not already carrying a recorded ``mmproj``. Pure/no I/O - the network
+    decision lives in ``backfill_mmproj_for_entry`` below, so a caller (e.g.
+    a sync pass counting candidates before deciding whether to spend the
+    per-call budget) can filter cheaply first."""
+    source = str(entry.get("source", ""))
+    if not source.startswith("hf:"):
+        return False
+    if entry.get("model_type") != "llm":
+        return False
+    if entry.get("mmproj"):
+        return False
+    if "mmproj" in path.name.lower():
+        return False
+    return True
+
+
+def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
+    """#957: an LLM pulled BEFORE the auto-attach fix (or from a build that
+    predates it) has no mmproj recorded and never will on its own - the
+    maintainer's ruling on the issue is explicit that a re-pull is not an
+    acceptable fix ("an already pulled vision model must work just as a
+    freshly pulled one, no half measures"). This is the same-repo lookup a
+    fresh pull already does (``_maybe_fetch_repo_mmproj``), reused so an
+    existing registry entry gets exactly the same auto-attach + hard-verify
+    treatment retroactively, driven by the ``source`` this entry ALREADY
+    recorded (``hf:<repo_id>``) - no re-download of the model itself, no
+    user action.
+
+    Returns the fetched/verified projector Path (caller records it), or None
+    when not a candidate, blocked by policy, or nothing was found - never
+    raises (mirrors ``_maybe_fetch_repo_mmproj``'s own contract; a sync pass
+    must not be taken down by one bad entry).
+
+    Network policy: gated on ``network_mode() != "off"`` - deliberately the
+    SAME bar ``_pull_gguf_file``'s own net_mode gate uses for this identical
+    HF-listing-plus-download operation on an explicit pull (see this
+    module's top-level gate), not the stricter "== allow" bar
+    ``embedder.py``'s automatic download uses for ITS background fetch.
+    embedder.py can afford the stricter bar because a working degraded
+    fallback already exists (lexical BM25); vision has none - the feature is
+    simply broken until the projector exists - and the maintainer's ruling
+    is that this must resolve itself under the SAME default configuration a
+    fresh pull already resolves it under, not only for installs that have
+    separately opted into net_mode=allow. Only the one deliberate "off"
+    kill-switch is honoured as a hard stop, matching the fresh-pull path
+    exactly."""
+    if not mmproj_backfill_candidate(entry, path):
+        return None
+    from localm.netpolicy import network_mode
+    if network_mode() == "off":
+        return None
+    repo_id = str(entry["source"])[len("hf:"):]
+    if not repo_id:
+        return None
+    return _maybe_fetch_repo_mmproj(repo_id, path.name, path.parent)
+
+
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
     """Download the user-named --mmproj file (owner/repo:file.gguf) into
     *base_dir* and return its local path, verified as a real vision projector

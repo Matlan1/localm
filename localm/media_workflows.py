@@ -70,6 +70,37 @@ def _lock_for(media: str) -> threading.Lock:
             lock = _media_locks[media] = threading.Lock()
         return lock
 
+
+# Budget for run_in_threadpool_bounded() in make_workflow_router's four
+# routes below (follow-up to #1057) - module-level, not a router-local
+# variable, so a test can monkeypatch it down for a fast timeout simulation.
+#
+# _WORKFLOW_OWN_WORK_TIMEOUT_S is the ceiling for how long a SINGLE holder's
+# own real work (file I/O, update_config's atomic write) should legitimately
+# take - genuinely large workflow uploads on a slow disk are the rare case
+# this is meant to eventually catch, not the common one it should ever fire
+# for.
+#
+# _WORKFLOW_RMW_TIMEOUT_S - the actual value passed to run_in_threadpool_
+# bounded - MUST exceed 2x that ceiling, not just match it. All four routes
+# share ONE _lock_for(media) lock, and the lock acquisition happens INSIDE
+# the bounded closure - so a request's own clock also covers however long it
+# waits behind another holder. If both used the SAME single-holder ceiling,
+# a writer that legitimately finishes just under ITS OWN budget could still
+# push a concurrently-queued, otherwise-instant reader (e.g. the GUI's own
+# list poll) past ITS budget purely from queueing, even though nothing ever
+# hung - CONFIRMED by direct reproduction during review: a writer at 1.3x its
+# budget (not hung, still completes) starved a queued no-op reader sharing
+# the identical constant. Budgeting 2x the single-holder ceiling guarantees
+# any request queued behind exactly one other NON-HUNG worst-case holder
+# still has a full ceiling's worth of margin left for its own (typically
+# trivial) work. A holder that is genuinely stuck well past its own ceiling
+# can still eventually starve a queued request - that residual is accepted,
+# matching _lock_for's own "queues behind it rather than racing it" design;
+# this fix only closes the ORDINARY-slowness case, not a genuine hang.
+_WORKFLOW_OWN_WORK_TIMEOUT_S = 30.0
+_WORKFLOW_RMW_TIMEOUT_S = 2 * _WORKFLOW_OWN_WORK_TIMEOUT_S
+
 # Distinct from None, which is a legitimate VALUE for `active` (no workflow
 # selected) - using None as both "caller did not pass this" and "resolved to
 # no selection" made list_workflows re-resolve selected_name() a second time
@@ -371,7 +402,10 @@ def make_workflow_router(media: str):
     the already-parsed workflow JSON as a body field, so there is no multipart /
     python-multipart dependency."""
     from fastapi import APIRouter, HTTPException
-    from fastapi.concurrency import run_in_threadpool
+
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
 
     router = APIRouter()
 
@@ -387,6 +421,10 @@ def make_workflow_router(media: str):
     # loop) - see the module-level comment on _lock_for for why: offloading
     # alone removed the free serialization these check-then-act sequences
     # depended on, and this restores it.
+    #
+    # Bounded (follow-up to #1057) at _WORKFLOW_RMW_TIMEOUT_S - see that
+    # constant's own comment for why a client-side timeout here is still
+    # safe against corruption.
 
     @router.get(f"/api/{media}/workflows")
     async def _list_workflows():
@@ -394,7 +432,11 @@ def make_workflow_router(media: str):
             with _lock_for(media):
                 return _list_and_selected(media)
 
-        workflows, selected = await run_in_threadpool(_do)
+        try:
+            workflows, selected = await run_in_threadpool_bounded(
+                _do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Listing {media} workflows timed out: {e}")
         return {"workflows": workflows, "selected": selected}
 
     @router.post(f"/api/{media}/workflows")
@@ -414,9 +456,11 @@ def make_workflow_router(media: str):
                 return {"name": saved, "workflows": workflows, "selected": selected}
 
         try:
-            return await run_in_threadpool(_do)
+            return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Uploading the {media} workflow timed out: {e}")
 
     @router.post(f"/api/{media}/workflows/select")
     async def _select_workflow(body: dict):
@@ -426,9 +470,11 @@ def make_workflow_router(media: str):
                 return {"selected": sel, "workflows": list_workflows(media, active=sel)}
 
         try:
-            return await run_in_threadpool(_do)
+            return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Selecting the {media} workflow timed out: {e}")
 
     @router.delete(f"/api/{media}/workflows/{{name}}")
     async def _delete_workflow(name: str):
@@ -439,8 +485,10 @@ def make_workflow_router(media: str):
                 return {"workflows": workflows, "selected": selected}
 
         try:
-            return await run_in_threadpool(_do)
+            return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Deleting the {media} workflow timed out: {e}")
 
     return router

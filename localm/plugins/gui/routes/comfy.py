@@ -28,10 +28,22 @@ Design: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md (decision 8).
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.concurrency import run_in_threadpool
 
 from localm import scopes
+from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
 from localm.inference.http_server import principal_id, require_scope
+
+# remove_managed_comfy() rmtrees a checkout that can include a full venv and
+# ComfyUI's custom_nodes - potentially tens of thousands of files - with no
+# internal timeout of its own (unlike the urlopen-bound comfy-status/model
+# calls elsewhere). 120s is generous for even a large tree on a slow disk;
+# genuinely exceeding it means a file lock held by a dead process or a hung
+# filesystem call, not ordinary deletion time. Safe against a second
+# concurrent rmtree after a client retries past this timeout:
+# remove_managed_comfy() now holds its own lock for the whole delete (see
+# managed_comfy.py's _remove_lock) regardless of whether the caller is still
+# waiting on it.
+_REMOVE_TIMEOUT_S = 120.0
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -130,7 +142,11 @@ def register(app: FastAPI, ctx) -> None:
         if not managed_comfy_paths().root.exists():
             raise HTTPException(409, "No managed ComfyUI install found to repair - "
                                 "use Set up instead.")
-        removed, failed = await run_in_threadpool(remove_managed_comfy, False)
+        try:
+            removed, failed = await run_in_threadpool_bounded(
+                remove_managed_comfy, False, timeout=_REMOVE_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Clearing the incomplete install timed out: {e}")
         if failed:
             raise HTTPException(500, "Could not clear the incomplete install: "
                                 + "; ".join(failed))
@@ -146,7 +162,11 @@ def register(app: FastAPI, ctx) -> None:
         delete that fails is surfaced (500), never reported as success (rule 5); an
         honest no-op is returned when nothing is installed."""
         from localm.media.managed_comfy import remove_managed_comfy
-        removed, failed = await run_in_threadpool(remove_managed_comfy, with_models)
+        try:
+            removed, failed = await run_in_threadpool_bounded(
+                remove_managed_comfy, with_models, timeout=_REMOVE_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Removing the managed ComfyUI timed out: {e}")
         if failed:
             raise HTTPException(500, "Could not remove: " + "; ".join(failed))
         if not removed:
