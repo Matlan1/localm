@@ -352,6 +352,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Vulkan, with no notice. It now uses the same detection the installer and
   first-time setup already use, so an update reprovisions the backend you
   actually have.
+- **Re-provisioning the GPU runtime while localm is running no longer damages the
+  install.** `localm setup-llama` clears the old build before writing the new one,
+  and on Windows a library that is currently loaded cannot be deleted. Those
+  failures were being ignored, so the clear-out could half finish and the new
+  build was then written over the survivors, leaving a runtime mixed from two
+  different versions - or, when the copy failed too, an install missing files
+  with nothing reporting it. Setup now checks whether anything is holding the
+  runtime **before** deleting a single file, and if so it stops with the existing
+  install completely untouched and tells you to close whatever is using it. A
+  locked file also no longer silently switches you to a different backend: your
+  chosen backend was never the problem, so it is no longer swapped out behind
+  your back.
+- **`localm doctor` now catches a GPU runtime whose maths kernels are missing.**
+  On AMD ROCm installs, rocBLAS loads its GPU-specific kernels from a data folder
+  next to the library rather than from the library itself. An install could be
+  missing that folder entirely and still pass every check doctor had - the
+  library was present, the right size, and loaded fine - right up until a
+  workload that uses it (such as generating embeddings) crashed the process
+  outright. Doctor now reports this as a failure with the command to fix it.
+  Backends that do not use rocBLAS are unaffected and are not checked.
 - **A chatty GPU log line no longer floods the console and the activity view.**
   On some workloads the native runtime prints a "CUDA Graph id N reused" line
   many times per second, with the number cycling through a set of values. The
