@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from localm import pathsafe
+
 from .tools import TOOL_REGISTRY, ToolDef, ToolResult
 
 # A skill name is a safe single-segment identifier (used in tool args + paths).
@@ -124,11 +126,21 @@ def discover_skills(cwd: Path) -> List[Skill]:
 
 
 def _confine_skill_file(skill: Skill, rel: str) -> Path:
-    """Resolve *rel* within the skill folder, refusing traversal outside it."""
-    p = (skill.path / rel).resolve()
-    if p != skill.path and skill.path not in p.parents:
-        raise PermissionError(f"path escapes the skill folder: {rel}")
-    return p
+    """Resolve *rel* within the skill folder, refusing traversal outside it.
+
+    A SKILL.md is documented as UNTRUSTED content (module docstring), so a
+    hostile skill's own instructions could steer the model into requesting an
+    unexpected `file=`. Delegates to pathsafe.confined_under - the shared
+    nested-path confinement primitive - instead of re-implementing
+    resolve()+is_relative_to() here: that closes an NTFS Alternate Data
+    Stream / short-name-alias gap this function never had (a hand-rolled
+    check duplicated the escape logic but not the character/alias hardening
+    #1068 and later fixes added), at the cost of translating ValueError to
+    the PermissionError this module's own caller already expects."""
+    try:
+        return pathsafe.confined_under(skill.path, rel)
+    except ValueError as e:
+        raise PermissionError(str(e))
 
 
 # ------------------------------------------------------------------ #

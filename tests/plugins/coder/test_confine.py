@@ -6,6 +6,8 @@ _confine() is the security boundary for all file tools - it must reliably
 reject any path that resolves outside cwd.
 """
 
+from pathlib import Path
+
 import pytest
 
 from localm.plugins.coder.tools import _confine, _verify_syntax
@@ -85,6 +87,68 @@ class TestConfineRejected:
             _confine(tmp_path, "../escape.txt")
         except PermissionError as e:
             assert "escape.txt" in str(e) or "outside" in str(e)
+
+
+# ---------------------------------------------------------------------------
+#  _confine - hardening migrated from pathsafe.confined_absolute_or_under
+#  (previously a hand-rolled resolve()+is_relative_to() with neither check)
+# ---------------------------------------------------------------------------
+
+class TestConfineHardening:
+    @pytest.mark.parametrize("raw", [r"\\192.0.2.1\share\x", "//192.0.2.1/share/x"])
+    def test_unc_path_is_refused(self, tmp_path, raw):
+        """The OLD _confine had no UNC guard at all: Path(raw).is_absolute()
+        is True for a UNC path, so it reached .resolve() unconditionally -
+        the exact SMB-dial-and-hang danger reject_unsafe_path_string exists
+        to prevent, on a sink this function used to share with it."""
+        with pytest.raises(PermissionError):
+            _confine(tmp_path, raw)
+
+    def test_unc_path_reaches_no_filesystem_call(self, tmp_path, monkeypatch):
+        """ORDER, not verdict: the hostile UNC string itself must never reach
+        .resolve() (that syscall is the SMB dial). _confine's own except
+        branch DOES call cwd.resolve() to format the error message - that is
+        the TRUSTED cwd, not attacker data, so it is excluded from the
+        assertion rather than asserting zero resolve() calls of any kind."""
+        seen = []
+        real_resolve = Path.resolve
+        monkeypatch.setattr(
+            Path, "resolve",
+            lambda self, *a, **k: (seen.append(str(self)), real_resolve(self, *a, **k))[1])
+        with pytest.raises(PermissionError):
+            _confine(tmp_path, r"\\192.0.2.1\share\x")
+        assert not any("192.0.2.1" in s for s in seen), (
+            f"the hostile UNC string was resolved: {seen}")
+
+    @pytest.mark.parametrize("bad", [
+        "somefile.exe:hidden.gguf", "src/somefile.exe:hidden.gguf",
+    ])
+    def test_reserved_characters_are_rejected(self, tmp_path, bad):
+        """Same NTFS Alternate Data Stream class #1068 fixed for model
+        filenames - the OLD _confine had no character check, so a colon
+        stayed confined (containment held) while opening a hidden stream
+        behind an apparently-empty sibling."""
+        with pytest.raises(PermissionError):
+            _confine(tmp_path, bad)
+
+    def test_alias_leaf_is_rejected(self, tmp_path, monkeypatch):
+        """An OS-level short-name alias resolving `path` to a DIFFERENT real
+        sibling stays strictly inside cwd - containment alone would not
+        catch it. Deterministic simulation, same technique as
+        test_pathsafe_confined_under.py's alias tests."""
+        victim = tmp_path / "LongModelNameThatIsVeryLong.py"
+        victim.write_text("SECRET", encoding="utf-8")
+        alias = "LONGMO~1.PY"
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == alias:
+                return victim.resolve()
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        with pytest.raises(PermissionError):
+            _confine(tmp_path, alias)
 
 
 # ---------------------------------------------------------------------------

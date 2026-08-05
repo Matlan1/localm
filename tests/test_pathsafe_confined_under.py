@@ -19,8 +19,8 @@ from pathlib import Path, PureWindowsPath
 
 import pytest
 
-from localm.pathsafe import (confined_under, is_unc_or_device_path,
-                             reject_unsafe_path_string)
+from localm.pathsafe import (confined_absolute_or_under, confined_under,
+                             is_unc_or_device_path, reject_unsafe_path_string)
 
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +273,123 @@ class TestConfinedUnder:
 
         with pytest.raises(ValueError, match="short-name alias"):
             confined_under(base, alias)
+
+
+# --------------------------------------------------------------------------- #
+#  confined_absolute_or_under - like confined_under, but an absolute *raw*     #
+#  landing inside base is accepted rather than rejected as an escape.          #
+# --------------------------------------------------------------------------- #
+
+class TestConfinedAbsoluteOrUnder:
+
+    @pytest.fixture
+    def base(self, tmp_path):
+        b = tmp_path / "root"
+        (b / "nest").mkdir(parents=True)
+        return b
+
+    def test_relative_nested_is_permitted(self, base):
+        out = confined_absolute_or_under(base, "nest/a.png")
+        assert out == (base / "nest" / "a.png").resolve()
+
+    def test_absolute_path_inside_base_is_accepted(self, base):
+        target = str(base / "nest" / "a.png")
+        out = confined_absolute_or_under(base, target)
+        assert out == (base / "nest" / "a.png").resolve()
+
+    def test_absolute_path_outside_base_is_refused(self, base, tmp_path):
+        outside = tmp_path / "elsewhere" / "victim.txt"
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, str(outside))
+
+    @pytest.mark.parametrize("bad", [
+        "../../victim.txt", "..", ".", "", "   ",
+    ])
+    def test_rejects_escape_and_collapse(self, base, bad):
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, bad)
+
+    def test_result_never_equals_base_itself(self, base):
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, str(base))
+
+    @pytest.mark.parametrize("raw", [r"\\192.0.2.1\share\x", "//192.0.2.1/share/x"])
+    def test_unc_is_refused(self, base, raw):
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, raw)
+
+    def test_unc_reaches_no_filesystem_call(self, base, monkeypatch):
+        """Same ordering discipline as confined_under's own test: the SMB dial
+        is the vulnerability, so the refusal must come before resolve()."""
+        seen = []
+        real_resolve = Path.resolve
+        monkeypatch.setattr(
+            Path, "resolve",
+            lambda self, *a, **k: (seen.append(1), real_resolve(self, *a, **k))[1])
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, r"\\192.0.2.1\share\x")
+        assert seen == []
+
+    @pytest.mark.parametrize("bad", [
+        "somefile.exe:hidden.gguf",
+        "nest/somefile.exe:hidden.gguf",
+        "n<o>.txt", "p|q.png", "ev\x00il.txt",
+    ])
+    def test_reserved_characters_are_rejected(self, base, bad):
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, bad)
+
+    def test_reserved_character_in_absolute_form_is_also_rejected(self, base):
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, str(base / "note.txt:hidden"))
+
+    @pytest.mark.parametrize("good", ["a.png", "nest/a.png"])
+    def test_ordinary_names_are_unaffected(self, base, good):
+        out = confined_absolute_or_under(base, good)
+        assert out.name == good.rsplit("/", 1)[-1]
+
+    @staticmethod
+    def _mock_alias_resolve(monkeypatch, alias_name, real_name):
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            parts = list(self.parts)
+            if alias_name in parts:
+                parts[parts.index(alias_name)] = real_name
+                return real_resolve(Path(*parts), *a, **k)
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    def test_alias_leaf_relative_is_rejected(self, base, monkeypatch):
+        victim = base / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_text("victim", encoding="utf-8")
+        alias = "LONGMO~1.GGU"
+        self._mock_alias_resolve(monkeypatch, alias, victim.name)
+
+        with pytest.raises(ValueError, match="short-name alias"):
+            confined_absolute_or_under(base, alias)
+
+    def test_alias_leaf_absolute_is_rejected(self, base, monkeypatch):
+        """The same substitution, but *raw* is the ABSOLUTE form - the branch
+        confined_under does not have at all."""
+        victim = base / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_text("victim", encoding="utf-8")
+        alias = "LONGMO~1.GGU"
+        self._mock_alias_resolve(monkeypatch, alias, victim.name)
+
+        with pytest.raises(ValueError, match="short-name alias"):
+            confined_absolute_or_under(base, str(base / alias))
+
+    def test_alias_intermediate_component_is_rejected(self, base, monkeypatch):
+        real_dir = base / "LongSubfolderName"
+        real_dir.mkdir()
+        (real_dir / "output.png").write_text("victim", encoding="utf-8")
+        alias = "LONGSU~1"
+        self._mock_alias_resolve(monkeypatch, alias, real_dir.name)
+
+        with pytest.raises(ValueError):
+            confined_absolute_or_under(base, f"{alias}/output.png")
 
 
 # --------------------------------------------------------------------------- #

@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from localm import pathsafe
 from localm.pathsafe import is_unc_or_device_path
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -880,23 +881,24 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             WRITE targets only. ``input_image`` deliberately does NOT use this:
             confining a READ to the data dir is far too wide, because the data
             dir is the credential store (auth.key is the plaintext owner key,
-            plus auth.json, sessions.json, rag/, coder/). See below."""
-            # BEFORE any syscall: a UNC path is ABSOLUTE on Windows (the one
-            # platform the SMB-dial harm applies to), so without this check it
-            # would skip the `home / p` join below and go straight to
-            # `p.resolve()` unconfined - the same defect as pull_model's `repo`
-            # above, on a different sink. check_input_image (used for
-            # input_image, not this helper) already carries this exact guard;
-            # this helper was the sibling that missed it.
-            if is_unc_or_device_path(raw):
-                raise ValueError(f"{label} must be a local path, not a UNC or device path")
-            p = Path(raw).expanduser()
-            p = p if p.is_absolute() else home / p
-            p = p.resolve()
-            if not p.is_relative_to(home):
+            plus auth.json, sessions.json, rag/, coder/). See below.
+
+            Delegates to ``pathsafe.confined_absolute_or_under`` (the same
+            primitive coder/tools/base.py's ``_confine`` now uses - this
+            closure and that function were two independent copies of the
+            same shape) rather than a hand-rolled resolve()+is_relative_to().
+            The UNC/device guard this closure already carried is now inside
+            the shared primitive; it additionally closes an NTFS Alternate
+            Data Stream / short-name-alias gap this closure never had.
+            Every rejection reason is folded into the SAME message (never
+            echoing the client-supplied string back - matching this
+            closure's existing convention for the plain out-of-home case)."""
+            expanded = str(Path(raw).expanduser())
+            try:
+                return pathsafe.confined_absolute_or_under(home, expanded)
+            except ValueError:
                 raise ValueError(
                     f"{label} must stay within the localm data dir ({home})")
-            return p
 
         try:
             out_arg = args.get("output_path")
