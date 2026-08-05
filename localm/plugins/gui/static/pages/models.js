@@ -97,10 +97,27 @@ export function sortModels(models, sortKey, sortDir) {
   return models.slice().sort((a, b) => _compareModelRows(a, b, col, sortDir));
 }
 
+// Guards refreshModelsPage() against overlapping calls (a rapid double-click
+// on a sortable header, a set-type change or use/alias/rename/remove action
+// firing while a prior refresh's fetch is still in flight, ...):
+// box.replaceChildren() only clears whatever is already in the DOM at the
+// moment IT runs, so two calls racing past their own awaited fetch each clear
+// once and then each append their own table - both survive, rendering the
+// model list duplicated (reproduced live: a rapid double-click on the Name
+// header left two <table class="data-table"> in #models-table). Every call
+// captures this counter BEFORE it awaits anything, then re-checks it
+// immediately before every write into the shared `box` (the clear itself, and
+// every render path - error, empty, AND success): a call superseded by a
+// newer one discards its own render instead of writing stale/duplicate
+// content over (or alongside) the newer call's.
+let _modelsRenderGen = 0;
+
 export async function refreshModelsPage() {
+  const myGen = ++_modelsRenderGen;
   await refreshModels();
 
   const box = $("models-table");
+  if (myGen !== _modelsRenderGen) return;
   box.replaceChildren();
 
   const typeParam = currentTypeFilter === "all" ? "" : "?type=" + currentTypeFilter;
@@ -111,7 +128,9 @@ export async function refreshModelsPage() {
       // Expired/absent session (e.g. a network bind whose loopback key was never
       // seeded): the JSON error body parses fine, so the models=[] fallback below
       // would masquerade as "No models yet". Show the in-page key gate instead,
-      // mirroring the sidebar's refreshModels() (models-sidebar.js).
+      // mirroring the sidebar's refreshModels() (models-sidebar.js). Not
+      // gated on myGen: an expired session is a real, current fact regardless
+      // of which overlapping call happens to observe it first.
       showKeyGate("This LocaLM server requires an API key.");
       return;
     }
@@ -119,17 +138,20 @@ export async function refreshModelsPage() {
       // A non-401 error (403 = key lacks models.read, 500, 503, ...) also returns
       // a body with no `models` array; the empty-list fallback would hide the real
       // failure behind "No models yet". Surface the status instead.
+      if (myGen !== _modelsRenderGen) return;
       box.appendChild(el("div", "sub", `Could not load models (HTTP ${r.status})`));
       return;
     }
     const data = await r.json();
     models = (data && Array.isArray(data.models)) ? data.models : [];
   } catch (e) {
+    if (myGen !== _modelsRenderGen) return;
     box.appendChild(el("div", "sub", "Error loading models: " + e.message));
     return;
   }
 
   if (!models.length) {
+    if (myGen !== _modelsRenderGen) return;
     box.appendChild(emptyState("models", "No models yet",
       "Pull a model above, or search HuggingFace to add your first one."));
     return;
@@ -381,6 +403,7 @@ export async function refreshModelsPage() {
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
+  if (myGen !== _modelsRenderGen) return;
   box.appendChild(table);
 }
 
