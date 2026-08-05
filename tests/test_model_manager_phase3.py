@@ -30,6 +30,26 @@ from localm import model_manager as mm
 from localm.model_manager import pull as pull_mod
 
 
+def _flat(text: str) -> str:
+    """Lowercase captured console output with all whitespace collapsed.
+
+    These messages are rendered through rich, which WRAPS them, and the wrap point
+    moves with the length of values interpolated into the message - notably the dest
+    PATH. So a long --basetemp (an xdist popen-gwN directory, say) can split a phrase
+    like "DIFFERENT model" across a line break and defeat a plain substring match.
+
+    MEASURED: test_plain_name_reuse_across_two_repos_is_refused passes with a short
+    basetemp and FAILS with a long one, same code, same machine, same minute. That is
+    why it looked like an ordering flake under -n auto.
+
+    The negative assertions are the dangerous half: "different model" NOT in out
+    passes trivially once the wrap splits it, so the test goes green without testing
+    anything. Collapsing whitespace makes every assertion here about the MESSAGE
+    rather than about where the terminal happened to break the line.
+    """
+    return " ".join(text.lower().split())
+
+
 @pytest.fixture()
 def fake_registry(tmp_path, monkeypatch):
     """In-memory registry + temp MODELS_DIR wired into model_manager."""
@@ -173,7 +193,7 @@ class TestHfShaIsNotAFacade:
 
         assert ok is False
         assert downloaded == []
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "sha256" in out
 
     def test_pull_model_threads_sha256_into_gguf(
@@ -256,7 +276,7 @@ class TestSnapshotDiskSpaceAndCompleteness:
         assert ok is False
         assert downloaded == []             # refused before any transfer started
         assert "big-repo" not in store
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "not enough disk space" in out
 
     def test_snapshot_pull_retry_does_not_register_incomplete(
@@ -293,7 +313,7 @@ class TestSnapshotDiskSpaceAndCompleteness:
         assert ok is True
         assert downloaded == ["owner/repo"]   # retried instead of short-circuiting
         assert (dest / "model.safetensors").exists()
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "already downloaded" not in out
 
     def test_snapshot_pull_recognizes_genuinely_complete_download(
@@ -324,7 +344,7 @@ class TestSnapshotDiskSpaceAndCompleteness:
         assert ok is True
         assert downloaded == []              # nothing re-downloaded
         assert store["full-repo"]["source"] == "hf:owner/repo"
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "already downloaded" in out
 
 
@@ -403,7 +423,7 @@ class TestSnapshotDestCollision:
         assert store["mymodel"]["source"] == f"hf:{self.REPO_A}"   # A survives
         dest = models_dir / "mymodel"
         assert (dest / "pytorch_model.bin").read_bytes() == b"A-WEIGHTS"
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "different model" in out
         assert "mymodel" in out
 
@@ -451,7 +471,7 @@ class TestSnapshotDestCollision:
         # behavior is unrelated to this fix and is not what this test checks;
         # the point is only that the NEW collision check does not refuse it.
         assert store["mymodel"]["source"] == f"hf:{self.REPO_A}"
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "different model" not in out
 
     def test_resumable_partial_of_the_same_repo_still_works(
@@ -540,7 +560,7 @@ class TestSnapshotDestCollision:
         assert downloaded == [self.REPO_A]          # the download DID run
         assert ok is False                          # but registration was refused
         assert store["mymodel"]["source"] == "hf:owner/old"   # untouched
-        out = capsys.readouterr().out.lower()
+        out = _flat(capsys.readouterr().out)
         assert "could not be registered" in out
         assert "✓" not in out                  # no false success checkmark
 
@@ -849,4 +869,4 @@ class TestSnapshotResumePreflight:
 
         assert ok is False
         assert downloaded == [], "nothing may transfer when the disk is really full"
-        assert "not enough disk space" in capsys.readouterr().out.lower()
+        assert "not enough disk space" in _flat(capsys.readouterr().out)
