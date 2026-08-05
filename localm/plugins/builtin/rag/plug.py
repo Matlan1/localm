@@ -431,7 +431,8 @@ def _log_progress(text: str) -> None:
 
 def _job_progress(job):
     """``on_progress`` for an indexing job: each line goes to the job's event
-    stream AND to the log.
+    stream AND to the log, and any call that also carries done/total (reembed's
+    batch loop) additionally reports it through ``Job.progress`` (ADR-0009 P6).
 
     Both, not either. The stream is what a watching client sees live, but it is
     ephemeral, per-job and bounded; the log is what a bug report carries.
@@ -439,10 +440,17 @@ def _job_progress(job):
     did not log it, so each mode was missing the other's copy. Folding headless
     onto the job path would have dropped the logged copy entirely, which is the
     regression LM-DA-015 exists to prevent - so the job path now does both, and
-    the GUI gains the bug-report copy it never had."""
-    def _cb(text: str) -> None:
+    the GUI gains the bug-report copy it never had.
+
+    The structured branch reuses the SAME ``done``/``total``/``unit`` the text
+    was already formatted from - store.py builds both from one set of numbers
+    in a single call - rather than a second, independent computation here that
+    could drift from the line a viewer reads."""
+    def _cb(text: str, *, phase=None, done=None, total=None, unit=None) -> None:
         job.push({"type": "line", "text": text})
         _log_progress(text)
+        if done is not None or total is not None:
+            job.progress(phase=phase, done=done, total=total, unit=unit)
     return _cb
 
 
@@ -758,6 +766,14 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
         except Exception:
             raise HTTPException(400, f"content_b64 is not valid base64: {item.filename}")
         uploads.append({"filename": item.filename, "data": data})
+    # Known BEFORE any indexing work starts - the whole request is already
+    # decoded at this point - so the job can report a real denominator from its
+    # very first event instead of going quiet until the first file finishes
+    # (ADR-0009 P7). add_uploads itself has no per-file progress signal to hook
+    # (see _job_progress: it only sees the "indexed <name>" line, no index), so
+    # this is a single t=0 report of what is already known, not a fabricated
+    # per-file percentage.
+    upload_bytes_total = sum(len(u["data"]) for u in uploads)
 
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
@@ -767,6 +783,8 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     jobs = _require_jobs(request)
 
     def _index(job):
+        job.progress(phase="uploading", done=0, total=len(uploads), unit="files",
+                     total_bytes=upload_bytes_total)
         try:
             result = coll.add_uploads(
                 uploads, embed_fn=embed_fn, classify_fn=self_classify,
