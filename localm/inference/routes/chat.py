@@ -54,9 +54,30 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
-        if not req.model:
+        # An empty model means "no preference" - exactly what this field's own
+        # default ("localm", see protocol.ChatRequest) means - so resolve it the
+        # same way instead of refusing it up front.
+        #
+        # Refusing here made get_engine's recovery chain UNREACHABLE from this
+        # route. get_engine resolves an unnamed request through
+        # `_active_model_name or _default_model_name` and reloads the result
+        # (http_server.py), and its 503 even documents "the transient window
+        # during an active-model eviction/unload where _active_model_name was
+        # just cleared" - but nothing empty ever got that far, because this line
+        # ran first. So after vram.evict_chat_for_embedder cleared the active
+        # pointer to free VRAM for the embedder, a turn that did not name the
+        # model got an instant 400 and the evicted model was never reloaded:
+        # chat stayed dead until the user loaded it by hand from the Models page.
+        # Live-reproduced on a real server against a real GGUF: post-eviction the
+        # unnamed turn 400'd in 4 ms with no reload, while the named turn
+        # reloaded and answered in 9.7 s.
+        #
+        # Still a 400 when there is genuinely nothing to resolve (started with no
+        # model and none ever loaded): that request really is unserveable and the
+        # caller does have to name one. Only the recoverable case changes.
+        if not req.model and not (_hs._active_model_name or _hs._default_model_name):
             raise HTTPException(400, "Model parameter is required and cannot be empty")
-            
+
         engine = await _hs.get_engine(req.model)
         # Pin the engine the instant we own it - SYNCHRONOUSLY, before the inlet
         # or any other await - so a concurrent model load cannot evict it out from
@@ -382,9 +403,13 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
     async def completions(req: CompletionRequest, request: Request):
-        if not req.model:
+        # Same resolution as /v1/chat/completions above, for the same reason: an
+        # empty model is "no preference", and refusing it here would leave this
+        # route unable to recover an evicted model too. Fixing only the chat
+        # route would leave the identical hole one endpoint over.
+        if not req.model and not (_hs._active_model_name or _hs._default_model_name):
             raise HTTPException(400, "Model parameter is required and cannot be empty")
-            
+
         engine = await _hs.get_engine(req.model)
         # Pin synchronously the instant we own the engine (AUDIT-CRIT-1); released
         # in the finally below, or by _pin_engine at stream end for a streaming

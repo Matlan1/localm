@@ -17,6 +17,12 @@ FIXTURE PREMISE (diff-review-discipline.md item 19): these tests assert that
 in - the complaint was never "no log without --debug", it was "--debug was on
 and STILL said nothing". A fixture that left debug off could not express the
 failing case and would pass no matter what the handler did.
+
+Both an EARLY refusal (before the engine is resolved) and a LATE one (past
+get_engine and past the chat pipeline) are covered. The real 0.1.4 refusal was a
+late one - its log line was preceded by the memory plugin's inlet record, which
+proves the request had already reached the pipeline - so a test that only ever
+exercised an early refusal would miss the shape that actually happened.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import localm.debuglog as debuglog
+from localm.inference import http_server as hs
 from localm.inference.http_server import create_app
 
 
@@ -41,6 +48,14 @@ def _mock_engine():
     return engine
 
 
+def _reset_globals():
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+
+
 @pytest.fixture
 def _debug_on(monkeypatch):
     monkeypatch.setenv("LOCALM_DEBUG", "1")
@@ -49,67 +64,78 @@ def _debug_on(monkeypatch):
 
 @pytest.fixture
 def client():
+    """A server WITH a model, so a request can be served and a late check can
+    be the thing that refuses it."""
+    _reset_globals()
     return TestClient(create_app(_mock_engine()))
+
+
+@pytest.fixture
+def client_no_model(monkeypatch):
+    """A server with nothing loaded and nothing resolvable - where an unnamed
+    request is still refused up front, on the route's first line."""
+    monkeypatch.setattr("localm.config.load_registry", lambda: {})
+    _reset_globals()
+    return TestClient(create_app(None))
 
 
 def _refusal_lines(caplog):
     return [r.getMessage() for r in caplog.records if "refused" in r.getMessage()]
 
 
-def test_chat_400_records_the_reason_not_only_the_status(_debug_on, client, caplog):
-    """The exact shape from the 0.1.4 log: a 400 on the chat path."""
+def _empty_model(client):
+    return client.post("/v1/chat/completions",
+                       json={"model": "",
+                             "messages": [{"role": "user", "content": "hi"}]})
+
+
+def _bad_grammar(client):
+    return client.post("/v1/chat/completions",
+                       json={"model": "test-model", "grammar": "(" * 5000,
+                             "messages": [{"role": "user", "content": "hi"}]})
+
+
+def test_early_refusal_records_the_reason(_debug_on, client_no_model, caplog):
+    """Refused on the route's first line, before the engine is resolved."""
     caplog.set_level(logging.DEBUG, logger="localm")
 
-    r = client.post("/v1/chat/completions",
-                    json={"model": "", "messages": [{"role": "user", "content": "hi"}]})
+    r = _empty_model(client_no_model)
 
     assert r.status_code == 400
     detail = r.json()["detail"]
-    # The reason the CLIENT was given must also be in the log. Asserting the
-    # detail itself (not merely that some line was emitted) is what makes this
-    # fail if the handler logs a placeholder instead of the real cause.
     lines = _refusal_lines(caplog)
     assert lines, "a refused request logged no reason at all"
+    # Assert the DETAIL itself, not merely that some line was emitted: that is
+    # what fails if the handler ever logs a placeholder instead of the cause.
     assert any(detail in line for line in lines), (
         f"the 400's detail {detail!r} never reached the log; got {lines!r}")
     assert any("/v1/chat/completions" in line and "400" in line for line in lines)
 
 
-def test_the_response_itself_is_unchanged(_debug_on, client, caplog):
-    """The handler is a LOGGING seam. It delegates to fastapi's own handler, so
-    the body and status a client sees must be exactly what they were before."""
+def test_late_refusal_records_the_reason(_debug_on, client, caplog):
+    """The shape the 0.1.4 report actually had: refused near the END of the
+    route, past get_engine and past the pipeline inlet."""
     caplog.set_level(logging.DEBUG, logger="localm")
 
-    r = client.post("/v1/chat/completions",
-                    json={"model": "", "messages": [{"role": "user", "content": "hi"}]})
-
-    assert r.status_code == 400
-    assert r.json() == {"detail": "Model parameter is required and cannot be empty"}
-
-
-def test_reason_is_logged_for_refusals_raised_deeper_than_the_first_check(
-        _debug_on, client, caplog):
-    """Generality: the empty-model 400 is raised on the route's FIRST line,
-    before the engine is resolved and before the chat pipeline runs. A handler
-    that only ever saw that one would look correct while missing every refusal
-    that matters.
-
-    This drives the grammar check instead - raised near the END of the route,
-    past get_engine and past the pipeline inlet. That is the region the real
-    0.1.4 refusal came from: its log line was preceded by the memory plugin's
-    inlet record, which proves the request had already got that far."""
-    caplog.set_level(logging.DEBUG, logger="localm")
-
-    r = client.post("/v1/chat/completions",
-                    json={"model": "test-model", "grammar": "(" * 5000,
-                          "messages": [{"role": "user", "content": "hi"}]})
+    r = _bad_grammar(client)
 
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert "Invalid grammar" in detail
     lines = _refusal_lines(caplog)
     assert any(detail[:60] in line for line in lines), (
-        f"a deeper refusal ({r.status_code}) logged no reason; got {lines!r}")
+        f"a late refusal logged no reason; got {lines!r}")
+
+
+def test_the_response_itself_is_unchanged(_debug_on, client_no_model, caplog):
+    """The handler is a LOGGING seam. It delegates to fastapi's own handler, so
+    the body and status a client sees must be exactly what they were before."""
+    caplog.set_level(logging.DEBUG, logger="localm")
+
+    r = _empty_model(client_no_model)
+
+    assert r.status_code == 400
+    assert r.json() == {"detail": "Model parameter is required and cannot be empty"}
 
 
 def test_no_reason_line_when_debug_is_off(client, caplog, monkeypatch):
@@ -119,8 +145,7 @@ def test_no_reason_line_when_debug_is_off(client, caplog, monkeypatch):
     assert not debuglog.debug_enabled(), "test premise: --debug must be OFF"
     caplog.set_level(logging.DEBUG, logger="localm")
 
-    r = client.post("/v1/chat/completions",
-                    json={"model": "", "messages": [{"role": "user", "content": "hi"}]})
+    r = _bad_grammar(client)
 
     assert r.status_code == 400
     assert not _refusal_lines(caplog)

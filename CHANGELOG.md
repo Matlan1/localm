@@ -21,6 +21,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   use. It now excludes itself from that lookup, and when the VRAM really is
   held by one of its own other resident models, says so plainly instead of
   blaming a nonexistent sibling.
+- **Chat now reloads a model that was evicted to make VRAM room for the
+  embedder.** Running an embedding or RAG task frees every loaded chat model,
+  and the server is built to bring it back on the next turn. It could not: a
+  chat request that did not name a model explicitly was refused with
+  "Model parameter is required and cannot be empty" before the server ever got
+  as far as working out which model the request meant, so the model was never
+  reloaded and chat stayed dead until it was loaded by hand from the Models
+  page. An unnamed request now resolves to the model in use, exactly as the
+  documented `"localm"` default already did. A request that genuinely cannot be
+  served (no model loaded and none configured) is still refused the same way.
+- **A refused request now records WHY in the debug log, not just the status.**
+  A failing request logged its status and timing and nothing else, so a chat
+  failure reported with a full debug log still could not be diagnosed. The
+  reason the server gave the client is now written to the log beside it.
 
 ## [0.1.4] - 2026-08-05
 
