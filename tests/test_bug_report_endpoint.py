@@ -156,6 +156,60 @@ def test_blank_description_with_what_happened_still_accepted(monkeypatch):
     assert "it crashed on startup" in body
 
 
+def test_gui_upload_does_not_publish_the_edit_disclaimer(monkeypatch):
+    """LM-DA-PUBTEXT end to end through the REAL route: unlike the other
+    upload tests here, bugreport.upload_report is NOT mocked - only the
+    network transport is, so this exercises the actual strip logic that
+    runs in production. The GUI's report_markdown (for the download button)
+    must KEEP the disclaimer; the bytes that would actually reach GitHub
+    must NOT carry it or the maintainer's email."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    from localm import bugreport
+
+    monkeypatch.setattr(bugreport, "upload_config",
+                        lambda: ("https://proxy.example/report", None))
+
+    captured = {}
+
+    class _FakeResp:
+        status = 201
+        def read(self):
+            return b'{"url": "https://github.com/Matlan1/localm/issues/42"}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_verified_urlopen(req, timeout=None):
+        import json
+        captured["body"] = json.loads(req.data.decode("utf-8"))["body"]
+        return _FakeResp()
+
+    monkeypatch.setattr("localm.http_ssl.verified_urlopen", _fake_verified_urlopen)
+
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "leaks the disclaimer?", "upload": True},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["uploaded"] is True
+
+    # Download copy: disclaimer present (a human can still edit + send it themselves).
+    assert bugreport.MAINTAINER_EMAIL in data["report_markdown"]
+    assert "You can edit anything above before sending" in data["report_markdown"]
+
+    # What actually reached "GitHub" (the mocked transport): disclaimer gone.
+    assert "body" in captured, "upload never reached the transport layer"
+    assert bugreport.MAINTAINER_EMAIL not in captured["body"]
+    assert "You can edit anything above before sending" not in captured["body"]
+    assert "leaks the disclaimer?" in captured["body"]   # real content intact
+
+
 def test_upload_title_prefers_what_happened_over_description(monkeypatch):
     """The uploaded (public GitHub issue) title must match the report body's
     own H1 - both derived from what_happened when present, not the

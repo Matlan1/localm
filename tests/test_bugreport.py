@@ -61,6 +61,42 @@ def test_build_report_has_sections_and_summary():
     assert bugreport.MAINTAINER_EMAIL in text   # contact line, intentionally
 
 
+def test_report_footer_strip_removes_exactly_the_disclaimer_block():
+    """LM-DA-PUBTEXT: the in-app "edit before sending" disclaimer (and the
+    maintainer's email that rides with it) must be removable from a real
+    build_report() output as a single, exact, single-sourced block - not a
+    fuzzy substring match that could also eat real report content."""
+    text = bugreport.build_report("disk on fire", reason="too hot")
+    assert bugreport.MAINTAINER_EMAIL in text
+    assert "You can edit anything above before sending." in text
+
+    stripped = bugreport._strip_report_footer(text)
+    assert bugreport.MAINTAINER_EMAIL not in stripped
+    assert "You can edit anything above before sending." not in stripped
+    # Nothing else was touched - the stripped text is a strict prefix of the
+    # original (only the trailing footer block is gone).
+    assert text.startswith(stripped)
+    assert "disk on fire" in stripped
+    assert "too hot" in stripped
+
+
+def test_report_footer_strip_tolerates_missing_trailing_newline():
+    """A user who re-saves the file in an editor that trims trailing
+    whitespace must still get a clean strip, not a silent no-op."""
+    text = bugreport.build_report("x")
+    without_trailing_newline = text.rstrip("\n")
+    stripped = bugreport._strip_report_footer(without_trailing_newline)
+    assert bugreport.MAINTAINER_EMAIL not in stripped
+
+
+def test_report_footer_strip_is_a_noop_when_footer_absent():
+    """A body that never had the footer (or had it manually edited away) must
+    come back byte-for-byte unchanged - never raise, never eat real content."""
+    plain = "## What happened\nsomething broke, no footer here"
+    assert bugreport._strip_report_footer(plain) == plain
+    assert bugreport._strip_report_footer("") == ""
+
+
 def test_build_report_includes_error_traceback():
     try:
         raise ValueError("boom")

@@ -727,11 +727,43 @@ def build_report(summary: str, reason: str = "",
     parts += [
         "",
         "---",
-        f"Sent to the localm maintainer ({MAINTAINER_EMAIL}). "
-        "You can edit anything above before sending.",
+        _report_footer(),
         "",
     ]
     return "\n".join(parts)
+
+
+def _report_footer() -> str:
+    """The in-app disclaimer build_report() appends: true for a human reading
+    the saved file or a downloaded copy (they genuinely can still edit it),
+    false the instant the SAME text is what actually got sent - see
+    _strip_report_footer(), the single place that fact is acted on."""
+    return (f"Sent to the localm maintainer ({MAINTAINER_EMAIL}). "
+            "You can edit anything above before sending.")
+
+
+def _strip_report_footer(text: str) -> str:
+    """Remove build_report()'s trailing edit-disclaimer block, if present.
+
+    Called ONLY at the upload boundary (upload_report(), the single choke
+    point every uploaded body flows through - the local saved file and the
+    GUI's download-for-manual-send copy are UNCHANGED and keep the footer,
+    since a human reading either of those genuinely can still edit before
+    sending it themselves). Once a body is what actually got sent, "you can
+    edit this before sending" is no longer true, and it re-publishes
+    MAINTAINER_EMAIL into whatever the upload becomes (a PUBLIC GitHub issue).
+
+    Exact-suffix match built from the SAME _report_footer() text
+    build_report() appends, so the append site and the strip site cannot
+    silently drift apart - there is one definition of the footer, not a
+    copy re-typed at each end. Tolerates a missing trailing newline (a
+    manually re-saved file); a body that never had the footer, or had it
+    edited away, is returned unchanged - never raises."""
+    footer = _report_footer()
+    for suffix in (f"\n\n---\n{footer}\n", f"\n\n---\n{footer}"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _ring_activity() -> list:
@@ -1010,6 +1042,15 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     # every uploaded title flows through, so scrubbing here covers all callers - a
     # future one cannot forget (HON-03/HON-15). Idempotent; no-ops on empty text.
     title = _scrub_secrets(title)
+
+    # Same reasoning, for the body's trailing edit-disclaimer: every caller here
+    # (report_failure's auto_send/interactive-upload, inference/routes/admin.py)
+    # gathers *body* from build_report()'s output or the saved file, both of
+    # which legitimately carry "you can edit anything above before sending" -
+    # true right up until this exact call sends it. Strip it here, the one
+    # choke point every uploaded body flows through, so it can never reach a
+    # PUBLIC GitHub issue (LM-DA-PUBTEXT) regardless of which caller forgot.
+    body = _strip_report_footer(body or "")
 
     # Fill each of url/token from config independently when not explicitly passed,
     # so an explicit token does not suppress loading the url from config (and vice
