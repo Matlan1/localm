@@ -268,6 +268,29 @@ _WINDOWS_RESERVED_STEMS = frozenset({
 })
 
 
+# READ THIS BEFORE ADDING ANOTHER CHARACTER TO A DENY LIST HERE (or anywhere
+# else that validates a filename by blacklisting known-bad characters instead
+# of whitelisting known-good ones). Two DIFFERENT, independently-discovered
+# bypasses landed in this one function in a single review pass:
+#   1. ':' - opens an NTFS Alternate Data Stream. Not a member of any
+#      "obviously dangerous" character set anyone would think to blacklist
+#      up front; it only makes sense as a hazard once you already know what
+#      NTFS does with it.
+#   2. an 8.3 short-name-shaped candidate (e.g. "LONGMO~1.GGU") - not a
+#      character at all. No blacklist of individual characters, however
+#      complete, was ever going to catch this: it is a WHOLE-STRING alias
+#      to a different file, closed by re-checking what the resolved
+#      destination actually IS (below), not by rejecting any symbol in it.
+# The pattern is that a blacklist can only reject the hazards its author
+# already knew about. _sanitize_name (registry.py, the sibling chokepoint
+# for registry KEYS, not filenames) sidesteps the whole class with a
+# WHITELIST (only 'A-Za-z0-9._-' survives) - it cannot be caught out by a
+# Windows quirk nobody has thought of yet, because it never enumerates the
+# bad ones. This function still blacklists (a whitelist as strict as
+# _sanitize_name's would reject real HF filenames containing spaces,
+# parentheses, '+', etc. - verified against real-world naming conventions
+# during this review), so treat every future addition here as evidence the
+# list was incomplete again, not as the list now being complete.
 def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Optional[str]:
     """Return a single-component filename confined to *base_dir* (``MODELS_DIR``
     by default).
