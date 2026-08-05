@@ -433,6 +433,113 @@ def test_copy_custom_nodes_returns_warnings_not_silent(tmp_path, monkeypatch):
     assert "disk full" in joined
 
 
+# --------------------------------------------------------------------------- #
+#  ADR-0009 P12: ProgressCb carries a structured ProgressEvent, not just text. #
+#  P13: _copy_custom_nodes threads on_progress through with a per-item emit.   #
+# --------------------------------------------------------------------------- #
+
+def test_progress_event_is_a_string_and_carries_structure():
+    """The widened type IS the human-readable line (every existing sink just prints
+    it, unaffected) and, for a countable step, carries the facts that line was built
+    from directly - so a consumer never has to regex them back out of the text."""
+    from localm.media import managed_comfy_provision as prov
+    ev = prov.ProgressEvent("Cloning your ComfyUI (abc123) into /x ...", phase="clone")
+    assert isinstance(ev, str)
+    assert ev == "Cloning your ComfyUI (abc123) into /x ..."
+    assert ev.phase == "clone"
+    assert ev.done is None and ev.total is None and ev.unit is None
+
+    counted = prov.ProgressEvent("3/9", phase="custom_nodes", done=3, total=9,
+                                 unit="nodes")
+    assert (counted.done, counted.total, counted.unit) == (3, 9, "nodes")
+
+
+def test_emit_wraps_a_plain_string_into_a_bare_progress_event():
+    """_run()'s raw subprocess-line relay (and any other caller with nothing
+    structured to add) still just hands a str to _emit - it must arrive at the sink
+    as a ProgressEvent with every structured field absent, never crash or silently
+    stay a plain str."""
+    from localm.media import managed_comfy_provision as prov
+    seen = []
+    prov._emit(seen.append, "a raw subprocess line")
+    assert len(seen) == 1
+    ev = seen[0]
+    assert isinstance(ev, prov.ProgressEvent)
+    assert ev == "a raw subprocess line"
+    assert ev.phase is None and ev.done is None and ev.total is None
+
+
+def test_emit_raising_sink_is_swallowed_not_raised():
+    """The module contract (:50): a raising progress sink is best-effort and must
+    never propagate out of _emit."""
+    from localm.media import managed_comfy_provision as prov
+
+    def _boom(event):
+        raise RuntimeError("a broken progress sink")
+
+    prov._emit(_boom, "line")   # must not raise
+
+
+def test_copy_custom_nodes_reports_structured_progress_per_node(tmp_path):
+    """P13: each node gets its own progress event with phase/done/total/unit set
+    directly - a listener never has to parse "Copying custom node X (i/n) ..." to
+    learn i, n or the unit."""
+    from localm.media import managed_comfy_provision as prov
+    user = tmp_path / "user"
+    for node in ("Alpha", "Beta", "Gamma"):
+        nd = user / "custom_nodes" / node
+        nd.mkdir(parents=True)
+        (nd / "__init__.py").write_text("", encoding="utf-8")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+
+    events = []
+    count, warnings = prov._copy_custom_nodes(user, managed, on_progress=events.append)
+
+    assert count == 3 and not warnings
+    assert all(isinstance(e, prov.ProgressEvent) for e in events)
+    assert [e.phase for e in events] == ["custom_nodes"] * 3
+    assert [e.done for e in events] == [1, 2, 3]
+    assert all(e.total == 3 for e in events)
+    assert all(e.unit == "nodes" for e in events)
+
+
+def test_copy_custom_nodes_raising_sink_does_not_abort_the_copy(tmp_path):
+    """DONE bar: a raising sink must not abort the copy it is merely reporting on."""
+    from localm.media import managed_comfy_provision as prov
+    user = tmp_path / "user"
+    (user / "custom_nodes" / "NodeA").mkdir(parents=True)
+    (user / "custom_nodes" / "NodeA" / "__init__.py").write_text("", encoding="utf-8")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+
+    def _raising_sink(event):
+        raise RuntimeError("a broken progress sink")
+
+    count, warnings = prov._copy_custom_nodes(user, managed, on_progress=_raising_sink)
+    assert count == 1 and not warnings
+    assert (managed / "custom_nodes" / "NodeA").is_dir()
+
+
+def test_provision_survives_a_raising_progress_sink(home, fake_user_comfy, monkeypatch):
+    """End to end (DONE bar, "test that explicitly"): a raising on_progress sink must
+    not abort a real provision that would otherwise succeed - covers both the
+    per-step narration (_say) and the per-node emit (_copy_custom_nodes) a real copy
+    exercises."""
+    from localm.media import managed_comfy_provision as prov
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+
+    def _raising_sink(event):
+        raise RuntimeError("a broken progress sink")
+
+    stack = prov.discover_user_comfy()
+    result = prov.provision_by_copy(stack, copy_custom_nodes=True,
+                                    on_progress=_raising_sink)
+    assert result.ok, result.message
+    assert mc.is_managed_comfy_installed() is True
+
+
 def test_provision_copy_node_failures_land_in_result(home, fake_user_comfy, monkeypatch):
     """End to end: a non-fatal custom-node copy failure must SURVIVE into the result,
     not only the live progress stream. It lands in ProvisionResult.log and its count is
