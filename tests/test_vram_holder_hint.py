@@ -81,14 +81,18 @@ class TestVramHolderHint:
     def test_self_and_peer_both_present_names_the_peer(self, tmp_path, monkeypatch):
         """Self plus a genuine peer both hold entries on this GPU: the peer
         must win the attribution (it is the one a POST-unload can actually
-        reach usefully), not a coincidental dict-ordering artifact."""
+        reach usefully). instance_id is chosen so the SELF entry sorts
+        FIRST alphabetically (list_entries() reads entries in sorted
+        filename order) - without pid-based exclusion, self would be the
+        first match and would wrongly win the attribution instead of the
+        real peer, so this is not a coincidental pass either way."""
         d = _stub_registry(monkeypatch, tmp_path)
         gpu_registry.write_entry(
-            d, instance_id="self-iid", pid=os.getpid(), port=8642,
+            d, instance_id="aaa-self", pid=os.getpid(), port=8642,
             host="127.0.0.1", scheme="http", model="my-own-model",
             vram_estimate_bytes=None, gpu_index=0, coordination_token="t")
         gpu_registry.write_entry(
-            d, instance_id="peer-iid", pid=os.getpid() + 1, port=9222,
+            d, instance_id="zzz-peer", pid=os.getpid() + 1, port=9222,
             host="127.0.0.1", scheme="http", model="peer-model",
             vram_estimate_bytes=None, gpu_index=0, coordination_token="t")
 
