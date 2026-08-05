@@ -43,6 +43,8 @@ from localm.media.comfy_client import (
     _upload_image,
     _with_warning,
     apply_model_overrides,
+    comfy_console_tail_start,
+    comfy_console_warnings_since,
     comfy_exec_error_message,
     comfy_fetch_output,
     comfy_http_error_detail,
@@ -214,12 +216,22 @@ def _write_video_sidecar(
     cfg: Optional[float],
     input_image: Optional[Path],
     start_time: float,
+    comfy_console_warning: Optional[str] = None,
+    comfy_console_checked: bool = False,
 ) -> Optional[str]:
     """Write the ``<output>.json`` reproducibility sidecar next to the clip.
 
     The clip is already saved; a failed sidecar must not fail the whole
     generation - returns a note string on failure (surfaced, not swallowed),
-    else None."""
+    else None.
+
+    ``comfy_console_warning``/``comfy_console_checked`` mirror
+    image_gen.comfy._write_image_sidecar's fields - see
+    NEW-COMFY-SILENT-PARTIAL-APPLY there for the full rationale. In short:
+    ComfyUI can silently under-apply a mismatched checkpoint's weights and
+    still report success, and the pair exists so "checked, found nothing" is
+    never collapsed with "could not check at all" (a remote/already-running
+    ComfyUI localm did not launch)."""
     try:
         sidecar = {
             "prompt": prompt,
@@ -232,6 +244,8 @@ def _write_video_sidecar(
             "seed": seed,
             "steps": steps,
             "cfg": cfg,
+            "comfy_console_warning": comfy_console_warning,
+            "comfy_console_checked": comfy_console_checked,
             "input_image": str(input_image) if input_image else None,
             "elapsed_seconds": round(time.time() - start_time, 1),
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -405,7 +419,13 @@ def generate_video(
             if "could not place" in _note:
                 _say(_note)
 
-    # Queue
+    # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
+    # so any silent partial-apply warning it prints while running THIS prompt (a
+    # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
+    # generation and not an earlier one - see NEW-COMFY-SILENT-PARTIAL-APPLY in
+    # image_gen/comfy.py (#1033). None when localm did not launch this ComfyUI
+    # itself; comfy_console_warnings_since() then always reports checked=False.
+    console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:
         return False, (
@@ -462,7 +482,25 @@ def generate_video(
             msg += f" Last poll error: {payload}"
         return False, msg
 
-    # status == POLL_FINISHED
+    # status == POLL_FINISHED means ComfyUI reported no execution_error - but a
+    # node whose weights only partly matched (a mismatched checkpoint's UNet/CLIP
+    # keys, ...) is not an execution_error to ComfyUI, only a console warning, and
+    # the run still "succeeds" with that component silently under-applied. Check
+    # for any KNOWN warning of that shape printed while THIS prompt ran (see
+    # NEW-COMFY-SILENT-PARTIAL-APPLY in image_gen/comfy.py). console_checked
+    # reflects whether a real read actually happened just now, not whether
+    # console_tail_start found a process before the prompt was even submitted.
+    console_checked, comfy_console_warnings = comfy_console_warnings_since(
+        api_url, console_tail_start)
+    comfy_console_warning_text = ("; ".join(comfy_console_warnings)
+                                  if comfy_console_warnings else None)
+    comfy_console_msg = (
+        "WARNING: ComfyUI's own console reported: "
+        + comfy_console_warning_text
+        + ". The generation still completed, but the requested model weights "
+          "may not have fully applied - see comfy-launch.log."
+    ) if comfy_console_warning_text else ""
+
     video_info = select_output_info(payload, _OUTPUT_KEYS)
 
     if not video_info:
@@ -497,11 +535,15 @@ def generate_video(
 
     # Sidecar JSON - everything needed to reproduce or tweak the clip.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
-    # never touches disk.
+    # never touches disk. The console warning (a real quality issue with THIS
+    # clip) is still reported in the message either way - only the sidecar's
+    # record of it is what privacy mode suppresses.
     if not write_sidecar:
         return True, _with_warning(
-            f"Clip saved to {output_path} "
-            f"(seed {seed} - reuse it to reproduce)", contain_warning)
+            _with_warning(
+                f"Clip saved to {output_path} "
+                f"(seed {seed} - reuse it to reproduce)", contain_warning),
+            comfy_console_msg)
 
     sidecar_warning = _write_video_sidecar(
         output_path,
@@ -516,10 +558,14 @@ def generate_video(
         cfg=cfg,
         input_image=input_image,
         start_time=start_time,
+        comfy_console_warning=comfy_console_warning_text,
+        comfy_console_checked=console_checked,
     )
 
     return True, _with_warning(
         _with_warning(
-            f"Clip saved to {output_path} "
-            f"(seed {seed} - reuse it to reproduce)", contain_warning),
+            _with_warning(
+                f"Clip saved to {output_path} "
+                f"(seed {seed} - reuse it to reproduce)", contain_warning),
+            comfy_console_msg),
         sidecar_warning)

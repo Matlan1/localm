@@ -25,6 +25,8 @@ import pytest
 
 from localm.image_gen import comfy
 from localm.media import comfy_client as cc
+from localm.music_gen import comfy as music_comfy
+from localm.video_gen import comfy as video_comfy
 
 
 def _minimal_png(width: int, height: int) -> bytes:
@@ -379,5 +381,209 @@ class TestComfyConsoleWarningWiring:
         assert ok, msg
         assert "ComfyUI's own console reported" not in msg
         sidecar = json.loads((tmp_path / "art3.png.json").read_text(encoding="utf-8"))
+        assert "comfy_console_warning" not in sidecar
+        assert sidecar["comfy_console_checked"] is False
+
+
+def _fake_music_urlopen(log_path, extra_on_prompt=""):
+    """Mirrors TestComfyConsoleWarningWiring._fake_urlopen, shaped for
+    generate_music's /history outputs (an 'audio' entry, not 'images')."""
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        if "/prompt" in url:
+            if extra_on_prompt:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(extra_on_prompt)
+            m = MagicMock()
+            m.read.return_value = b'{"prompt_id": "p1"}'
+            m.__enter__ = lambda s=m: s
+            m.__exit__ = MagicMock(return_value=False)
+            return m
+        m = MagicMock()
+        m.__enter__ = lambda s=m: s
+        m.__exit__ = MagicMock(return_value=False)
+        if "/history/" in url:
+            m.read.return_value = json.dumps({"p1": {"outputs": {
+                "8": {"audio": [{"filename": "t.flac", "subfolder": "", "type": "output"}]}
+            }}}).encode()
+        elif "/view" in url:
+            m.read.return_value = b"FAKE-FLAC-BYTES"
+        else:
+            m.read.return_value = b"{}"
+        return m
+    return fake_urlopen
+
+
+class TestMusicConsoleWarningWiring:
+    """generate_music() consumes the SAME shared comfy_console_tail_start /
+    comfy_console_warnings_since as generate_image() (#1033) - image/music/
+    video share the exact submit -> poll -> fetch transport. Mirrors
+    TestComfyConsoleWarningWiring above, adapted to music's inline sidecar
+    dict (no separate _write_music_sidecar function)."""
+
+    def test_warning_surfaces_in_message_and_sidecar(self, tmp_path, monkeypatch, spawned):
+        out = tmp_path / "t.flac"
+        log = cc.comfy_launch_log_path(spawned)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        fake = _fake_music_urlopen(
+            log, extra_on_prompt="WARNING:root:unet missing: some.weight\n" * 3)
+
+        with patch.object(music_comfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(music_comfy, "_localm_unload"), \
+             patch.object(music_comfy.urllib.request, "urlopen", fake), \
+             patch.object(music_comfy.time, "sleep"):
+            ok, msg = music_comfy.generate_music("synthwave", out, seed=1)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" in msg
+        assert "UNet weights were not found" in msg
+        assert "(x3)" in msg
+
+        sidecar = json.loads(out.with_suffix(".flac.json").read_text(encoding="utf-8"))
+        assert "were not found" in sidecar["comfy_console_warning"]
+        assert sidecar["comfy_console_checked"] is True
+
+    def test_clean_run_checked_true_no_warning(self, tmp_path, monkeypatch, spawned):
+        out = tmp_path / "t2.flac"
+        log = cc.comfy_launch_log_path(spawned)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        fake = _fake_music_urlopen(log, extra_on_prompt="")
+
+        with patch.object(music_comfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(music_comfy, "_localm_unload"), \
+             patch.object(music_comfy.urllib.request, "urlopen", fake), \
+             patch.object(music_comfy.time, "sleep"):
+            ok, msg = music_comfy.generate_music("synthwave", out, seed=2)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" not in msg
+        sidecar = json.loads(out.with_suffix(".flac.json").read_text(encoding="utf-8"))
+        assert "comfy_console_warning" not in sidecar
+        assert sidecar["comfy_console_checked"] is True
+
+    def test_remote_comfy_never_claims_to_have_checked(self, tmp_path, monkeypatch):
+        # No spawned/_remember_spawned registration - the "localm did not
+        # launch this ComfyUI" case.
+        out = tmp_path / "t3.flac"
+        fake = _fake_music_urlopen(tmp_path / "unused.log", extra_on_prompt="")
+
+        assert cc.spawned_pid(URL) is None
+        with patch.object(music_comfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(music_comfy, "_localm_unload"), \
+             patch.object(music_comfy.urllib.request, "urlopen", fake), \
+             patch.object(music_comfy.time, "sleep"):
+            ok, msg = music_comfy.generate_music("synthwave", out, seed=3)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" not in msg
+        sidecar = json.loads(out.with_suffix(".flac.json").read_text(encoding="utf-8"))
+        assert "comfy_console_warning" not in sidecar
+        assert sidecar["comfy_console_checked"] is False
+
+
+def _fake_video_urlopen(log_path, extra_on_prompt=""):
+    """Mirrors _fake_music_urlopen, shaped for generate_video's /history
+    outputs (an 'images' entry with animated=True, per test_video_gen.py)."""
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        if "/prompt" in url:
+            if extra_on_prompt:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(extra_on_prompt)
+            m = MagicMock()
+            m.read.return_value = b'{"prompt_id": "p1"}'
+            m.__enter__ = lambda s=m: s
+            m.__exit__ = MagicMock(return_value=False)
+            return m
+        m = MagicMock()
+        m.__enter__ = lambda s=m: s
+        m.__exit__ = MagicMock(return_value=False)
+        if "/history/" in url:
+            m.read.return_value = json.dumps({"p1": {"outputs": {
+                "11": {"images": [{"filename": "c.mp4", "subfolder": "", "type": "output"}],
+                       "animated": [True]}
+            }}}).encode()
+        elif "/view" in url:
+            m.read.return_value = b"FAKE-MP4-BYTES"
+        else:
+            m.read.return_value = b"{}"
+        return m
+    return fake_urlopen
+
+
+class TestVideoConsoleWarningWiring:
+    """generate_video() consumes the same shared machinery - see
+    TestMusicConsoleWarningWiring's docstring. Also confirms video_gen's
+    submit path genuinely reaches comfy_submit_prompt/comfy_poll_until_done
+    (not just importing them), which was verified by inspection before this
+    unit and is exercised for real here."""
+
+    def test_warning_surfaces_in_message_and_sidecar(self, tmp_path, monkeypatch, spawned):
+        import os
+        out = tmp_path / "c.mp4"
+        log = cc.comfy_launch_log_path(spawned)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        fake = _fake_video_urlopen(
+            log, extra_on_prompt="WARNING:root:clip missing: text_projection.weight\n" * 2)
+
+        comfy_out = tmp_path / "comfy_out"
+        with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(video_comfy, "_localm_unload"), \
+             patch.object(video_comfy.urllib.request, "urlopen", fake), \
+             patch.object(video_comfy.time, "sleep"), \
+             patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
+            ok, msg = video_comfy.generate_video("a red fox running", out, seed=1)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" in msg
+        assert "CLIP/text-encoder weights" in msg
+        assert "(x2)" in msg
+
+        sidecar = json.loads(out.with_suffix(".mp4.json").read_text(encoding="utf-8"))
+        assert "were not found" in sidecar["comfy_console_warning"]
+        assert sidecar["comfy_console_checked"] is True
+
+    def test_clean_run_checked_true_no_warning(self, tmp_path, monkeypatch, spawned):
+        import os
+        out = tmp_path / "c2.mp4"
+        log = cc.comfy_launch_log_path(spawned)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(b"")
+        fake = _fake_video_urlopen(log, extra_on_prompt="")
+
+        comfy_out = tmp_path / "comfy_out2"
+        with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(video_comfy, "_localm_unload"), \
+             patch.object(video_comfy.urllib.request, "urlopen", fake), \
+             patch.object(video_comfy.time, "sleep"), \
+             patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
+            ok, msg = video_comfy.generate_video("a red fox running", out, seed=2)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" not in msg
+        sidecar = json.loads(out.with_suffix(".mp4.json").read_text(encoding="utf-8"))
+        assert "comfy_console_warning" not in sidecar
+        assert sidecar["comfy_console_checked"] is True
+
+    def test_remote_comfy_never_claims_to_have_checked(self, tmp_path, monkeypatch):
+        import os
+        out = tmp_path / "c3.mp4"
+        fake = _fake_video_urlopen(tmp_path / "unused.log", extra_on_prompt="")
+
+        assert cc.spawned_pid(URL) is None
+        comfy_out = tmp_path / "comfy_out3"
+        with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(video_comfy, "_localm_unload"), \
+             patch.object(video_comfy.urllib.request, "urlopen", fake), \
+             patch.object(video_comfy.time, "sleep"), \
+             patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
+            ok, msg = video_comfy.generate_video("a red fox running", out, seed=3)
+
+        assert ok, msg
+        assert "ComfyUI's own console reported" not in msg
+        sidecar = json.loads(out.with_suffix(".mp4.json").read_text(encoding="utf-8"))
         assert "comfy_console_warning" not in sidecar
         assert sidecar["comfy_console_checked"] is False

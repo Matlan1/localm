@@ -35,6 +35,8 @@ from localm.media.comfy_client import (
     _localm_unload,
     _with_warning,
     apply_model_overrides,
+    comfy_console_tail_start,
+    comfy_console_warnings_since,
     comfy_exec_error_message,
     comfy_fetch_output,
     comfy_http_error_detail,
@@ -283,7 +285,13 @@ def generate_music(
             if "could not place" in _note:
                 _say(_note)
 
-    # Queue
+    # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
+    # so any silent partial-apply warning it prints while running THIS prompt (a
+    # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
+    # generation and not an earlier one - see NEW-COMFY-SILENT-PARTIAL-APPLY in
+    # image_gen/comfy.py (#1033). None when localm did not launch this ComfyUI
+    # itself; comfy_console_warnings_since() then always reports checked=False.
+    console_tail_start = comfy_console_tail_start(api_url)
     kind, value = comfy_submit_prompt(api_url, workflow)
     if kind == SUBMIT_NO_ID:
         return False, (
@@ -339,6 +347,25 @@ def generate_music(
             )
         return False, timeout_msg
 
+    # status == POLL_FINISHED means ComfyUI reported no execution_error - but a
+    # node whose weights only partly matched (a mismatched checkpoint's UNet/CLIP
+    # keys, ...) is not an execution_error to ComfyUI, only a console warning, and
+    # the run still "succeeds" with that component silently under-applied. Check
+    # for any KNOWN warning of that shape printed while THIS prompt ran (see
+    # NEW-COMFY-SILENT-PARTIAL-APPLY in image_gen/comfy.py). console_checked
+    # reflects whether a real read actually happened just now, not whether
+    # console_tail_start found a process before the prompt was even submitted.
+    console_checked, comfy_console_warnings = comfy_console_warnings_since(
+        api_url, console_tail_start)
+    comfy_console_warning_text = ("; ".join(comfy_console_warnings)
+                                  if comfy_console_warnings else None)
+    comfy_console_msg = (
+        "WARNING: ComfyUI's own console reported: "
+        + comfy_console_warning_text
+        + ". The generation still completed, but the requested model weights "
+          "may not have fully applied - see comfy-launch.log."
+    ) if comfy_console_warning_text else ""
+
     # status == POLL_FINISHED: find the rendered track (presence-based, matching
     # the original loop - the first node carrying an "audio" entry wins).
     audio_info = None
@@ -376,11 +403,15 @@ def generate_music(
 
     # Sidecar JSON - everything needed to reproduce or tweak the track.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
-    # and lyrics never touch disk.
+    # and lyrics never touch disk. The console warning (a real quality issue
+    # with THIS track) is still reported in the message either way - only the
+    # sidecar's record of it is what privacy mode suppresses.
     if not write_sidecar:
         return True, _with_warning(
-            f"Track saved to {output_path} "
-            f"(seed {seed} - reuse it to reproduce)", contain_warning)
+            _with_warning(
+                f"Track saved to {output_path} "
+                f"(seed {seed} - reuse it to reproduce)", contain_warning),
+            comfy_console_msg)
     try:
         sidecar = {
             "tags": tags,
@@ -390,6 +421,8 @@ def generate_music(
             "steps": steps,
             "cfg": cfg,
             "lyrics_strength": lyrics_strength,
+            "comfy_console_warning": comfy_console_warning_text,
+            "comfy_console_checked": console_checked,
             "elapsed_seconds": round(time.time() - start_time, 1),
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
@@ -406,5 +439,7 @@ def generate_music(
             f"({e}); the track itself was saved.", contain_warning)
 
     return True, _with_warning(
-        f"Track saved to {output_path} "
-        f"(seed {seed} - reuse it to reproduce)", contain_warning)
+        _with_warning(
+            f"Track saved to {output_path} "
+            f"(seed {seed} - reuse it to reproduce)", contain_warning),
+        comfy_console_msg)
