@@ -107,7 +107,14 @@ def register(app: FastAPI, ctx) -> None:
             if pipeline is not None:
                 from localm.inference.http_server import caller_scopes, principal_id
                 ctx = ChatHookContext(
-                    model_id=req.model, stream=req.stream,
+                    # reported_model, not req.model: a chat hook that reads
+                    # model_id to decide behaviour (chat/plug.py's thinking
+                    # inlet does) must see the model actually in use. An
+                    # unnamed request could not reach a hook at all before,
+                    # so passing the raw empty string here would silently
+                    # disable that handling on exactly the recovery path this
+                    # change opened. "localm" still passes through unchanged.
+                    model_id=reported_model, stream=req.stream,
                     request_id=make_chunk_id(),
                     principal=principal_id(request),
                     scopes=tuple(caller_scopes(request) or ()),
@@ -440,7 +447,14 @@ def register(app: FastAPI, ctx) -> None:
             if pipeline is not None:
                 from localm.inference.http_server import caller_scopes, principal_id
                 ctx = ChatHookContext(
-                    model_id=req.model, stream=req.stream,
+                    # reported_model, not req.model: a chat hook that reads
+                    # model_id to decide behaviour (chat/plug.py's thinking
+                    # inlet does) must see the model actually in use. An
+                    # unnamed request could not reach a hook at all before,
+                    # so passing the raw empty string here would silently
+                    # disable that handling on exactly the recovery path this
+                    # change opened. "localm" still passes through unchanged.
+                    model_id=reported_model, stream=req.stream,
                     request_id=make_chunk_id(),
                     principal=principal_id(request),
                     scopes=tuple(caller_scopes(request) or ()),

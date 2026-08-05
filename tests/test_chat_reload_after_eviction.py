@@ -186,6 +186,43 @@ def test_completions_route_recovers_too(server):
         f'unnamed completion reported model {r.json()["model"]!r}')
 
 
+def test_a_chat_hook_sees_the_model_actually_in_use(server):
+    """A plugin hook that branches on ctx.model_id must not be handed "".
+
+    chat/plug.py's thinking inlet does exactly that
+    (`is_thinking_model(getattr(ctx, "model_id", "") or "")`). Before this
+    change an unnamed request could not reach a hook at all, so letting one
+    through with the raw empty string would have silently disabled that
+    handling on the very recovery path being added here - a capability lost
+    with nothing reporting it."""
+    client, engines = server
+    _evict()
+
+    seen = {}
+
+    def _record_inlet(messages, ctx):
+        # RECORD, never assert, in here: run_inlet wraps every hook in
+        # `except Exception` and logs, so an assertion raised inside a hook is
+        # swallowed by the code under test and the test passes either way
+        # (diff-review-discipline.md item 13).
+        seen["model_id"] = getattr(ctx, "model_id", None)
+        return None
+
+    pipeline = client.app.state.chat_pipeline
+    pipeline.add_hook("inlet", _record_inlet, plugin="_test_probe")
+    try:
+        r = client.post("/v1/chat/completions",
+                        json={"model": "", "stream": False,
+                              "messages": [{"role": "user", "content": "hi"}]})
+    finally:
+        pipeline.remove_plugin("_test_probe")
+
+    assert r.status_code == 200, r.text
+    assert seen, "the inlet never ran, so this test proves nothing"
+    assert seen["model_id"] == "model-a", (
+        f"the inlet saw model_id={seen['model_id']!r}")
+
+
 def test_empty_model_is_still_400_when_nothing_can_be_resolved(monkeypatch):
     """The contract that must NOT change: with no model loaded and none ever
     configured, an unnamed request is genuinely unserveable and the caller does
