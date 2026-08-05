@@ -239,7 +239,11 @@ class TestShellTokenInjection:
     def test_loopback_open_mode_injects_token(self, gui_app):
         gui_app.state.bind_host = "127.0.0.1"
         with TestClient(gui_app) as c:
-            html = c.get("/").text
+            # Host set to a real loopback literal: TestClient's own default
+            # Host ("testserver") is a harness artifact a real browser
+            # navigating to 127.0.0.1 never sends, and is deliberately not
+            # trusted by the no-Origin branch's DNS-rebinding guard.
+            html = c.get("/", headers={"Host": "127.0.0.1"}).text
         # The SPA receives the shell token as its apiKey, so app.js sends it as
         # the bearer and the loopback GUI can do management in open mode.
         assert gui_app.state.shell_token in html

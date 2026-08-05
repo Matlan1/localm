@@ -92,8 +92,12 @@ class TestShellRoute:
     def test_loopback_open_mode_seeds_shell_token_global(self, monkeypatch):
         # Open mode + loopback: the per-process shell token is injected as a JS
         # global (header-based management), not localStorage, and no auth cookie.
+        # Host set to a real loopback literal - a real browser navigating to
+        # 127.0.0.1 sends exactly this; TestClient's own default Host
+        # ("testserver") is a test-harness artifact, not a case this route
+        # needs to serve the token to.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
-        r = TestClient(_app("127.0.0.1")).get("/")
+        r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200
         assert SHELL_GLOBAL in r.text
         assert "SHELLTOK123" in r.text
@@ -150,6 +154,38 @@ class TestShellRoute:
         assert r.status_code == 200
         assert SHELL_GLOBAL in r.text
         assert "SHELLTOK123" in r.text
+
+    def test_dns_rebind_no_origin_attacker_host_does_not_leak_shell_token(
+            self, monkeypatch):
+        # Confirmed gap in the item-28 fix (fresh-context review, 2026-08-05):
+        # a DNS-rebinding attack makes a follow-up navigation the BROWSER
+        # considers same-origin with the attacker's already-open page (Same-
+        # Origin Policy is computed from the URL string navigated to, never
+        # the resolved IP), so it carries NO Origin header at all - exactly
+        # the header shape the no-Origin branch was trusting unconditionally.
+        # The request still lands on this real loopback server (the attacker
+        # repointed their own domain's DNS to it) but Host reflects the
+        # ATTACKER's domain, never a loopback literal, regardless of
+        # resolution. That must refuse the token even with no Origin present.
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        r = TestClient(_app("127.0.0.1")).get(
+            "/", headers={"Host": "evil.example:8642"})
+        assert r.status_code == 200
+        assert SHELL_GLOBAL not in r.text
+        assert "SHELLTOK123" not in r.text
+
+    def test_no_origin_loopback_literal_host_still_seeds_shell_token(
+            self, monkeypatch):
+        # Not an overcorrection: a real loopback literal Host (127.0.0.1,
+        # localhost, or bracketed IPv6) with no Origin - what an actual local
+        # browser navigation sends - still gets the token.
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        for host in ("127.0.0.1", "127.0.0.1:8642", "localhost",
+                     "localhost:8642", "[::1]:8642"):
+            r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": host})
+            assert r.status_code == 200
+            assert SHELL_GLOBAL in r.text, host
+            assert "SHELLTOK123" in r.text, host
 
 
 class TestLaunchGrantHandoff:

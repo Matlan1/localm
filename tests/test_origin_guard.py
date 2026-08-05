@@ -7,6 +7,9 @@ browser even on a keyless install. State-changing methods must be same-origin
 (or an explicitly configured cors origin); non-browser clients send no Origin.
 """
 
+import json
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -262,31 +265,50 @@ class TestShellTokenNotDisclosedByIndexRoute:
         assert real_token not in r.text
         assert "__LOCALM_SHELL_TOKEN__" not in r.text
 
+    def _extract_shell_token(self, html):
+        # The real extraction logic an attacker's script would run - proves
+        # the chain by actually attempting it, not by asserting a substring.
+        m = re.search(r'__LOCALM_SHELL_TOKEN__=("(?:[^"\\]|\\.)*")', html)
+        return json.loads(m.group(1)) if m else None
+
     def test_wildcard_cors_full_steal_then_mint_chain_fails(
             self, tmp_path, monkeypatch):
-        # Completes the chain the finding reproduced: previously, step 2's
-        # disclosed token satisfied step 3's POST /v1/keys identically to a
-        # real credential. With nothing disclosed, the attacker has nothing to
-        # present, and the mint attempt is refused like any other unauthenticated
-        # open-mode caller.
+        # Completes the chain the finding reproduced: extract whatever token
+        # (if any) a cross-origin GET / actually discloses using the same
+        # extraction an attacker's script would run, then attempt to replay
+        # it exactly as the original exploit did. Fixed: nothing is
+        # extractable, so there is nothing to replay and the mint request
+        # carries no credential at all - this assertion is reached and means
+        # something only because extraction was genuinely attempted, not
+        # skipped (a prior version of this test asserted the mint fails
+        # without ever trying to extract or present a token, so its
+        # assertion held regardless of whether the fix existed).
         app = self._mounted_app(tmp_path, monkeypatch, "*")
         client = TestClient(app)
         stolen_page = client.get(
             "/", headers={"Origin": "https://evil.example"}).text
-        assert "__LOCALM_SHELL_TOKEN__" not in stolen_page
+        stolen_token = self._extract_shell_token(stolen_page)
+        assert stolen_token is None
+        headers = {"Origin": "https://evil.example"}
+        if stolen_token:
+            headers["Authorization"] = f"Bearer {stolen_token}"
         mint = client.post(
             "/v1/keys", json={"name": "stolen", "scopes": ["models:read"]},
-            headers={"Origin": "https://evil.example"})
+            headers=headers)
         assert mint.status_code == 403
 
     def test_wildcard_cors_legitimate_loopback_gui_still_receives_token(
             self, tmp_path, monkeypatch):
         # Must not ship a fix that breaks the product: the real GUI shell (an
         # ordinary top-level navigation - no Origin header) still boots with
-        # its management token, exactly as before this fix.
+        # its management token, exactly as before this fix. Host set to a
+        # real loopback literal - TestClient's own default Host ("testserver")
+        # is a harness artifact a real browser navigating to 127.0.0.1 never
+        # sends, and is deliberately NOT what the no-Origin branch trusts
+        # (see TestDnsRebindingNotDisclosedByIndexRoute below).
         app = self._mounted_app(tmp_path, monkeypatch, "*")
         client = TestClient(app)
-        r = client.get("/")
+        r = client.get("/", headers={"Host": "127.0.0.1:8642"})
         assert r.status_code == 200
         assert app.state.shell_token in r.text
         assert "__LOCALM_SHELL_TOKEN__" in r.text
@@ -299,6 +321,78 @@ class TestShellTokenNotDisclosedByIndexRoute:
         client = TestClient(app)
         r = client.get("/", headers={"Origin": "http://testserver",
                                      "Host": "testserver"})
+        assert r.status_code == 200
+        assert app.state.shell_token in r.text
+
+
+class TestDnsRebindingNotDisclosedByIndexRoute:
+    """Confirmed by a fresh-context adversarial review of the item-28 fix
+    (2026-08-05): _is_same_origin_document_request's no-Origin branch used to
+    trust ANY no-Origin request unconditionally, which is exactly the header
+    shape a DNS-rebinding attack produces (the browser considers a follow-up
+    navigation same-origin with an attacker's already-open page - Same-Origin
+    Policy is computed from the URL STRING navigated to, never the resolved
+    IP - so it sends no Origin header even though it lands on this real
+    server under the attacker's own domain in Host). This reproduces that
+    exact chain end to end against the full create_app()+mount_gui_surface()
+    wiring, on the DEFAULT cors_origins config (no wildcard needed - this gap
+    does not depend on CORS config at all)."""
+
+    def _mounted_app(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.inference.http_server import mount_gui_surface
+        app = create_app(None)
+        app.state.instance_id = "iid-test"
+        app.state.instance_token = "inst-secret-token"
+        app.state.instance_mode = "api"
+        app.state.instance_port = 8642
+        app.state.instance_scheme = "http"
+        app.state.bind_host = "127.0.0.1"
+        assert mount_gui_surface(app) is True
+        return app
+
+    def _extract_shell_token(self, html):
+        m = re.search(r'__LOCALM_SHELL_TOKEN__=("(?:[^"\\]|\\.)*")', html)
+        return json.loads(m.group(1)) if m else None
+
+    def test_rebound_host_no_origin_does_not_disclose_token(
+            self, tmp_path, monkeypatch):
+        app = self._mounted_app(tmp_path, monkeypatch)
+        client = TestClient(app)
+        r = client.get("/", headers={"Host": "evil.example:8642"})
+        assert r.status_code == 200
+        assert app.state.shell_token not in r.text
+        assert "__LOCALM_SHELL_TOKEN__" not in r.text
+
+    def test_rebound_host_full_steal_then_mint_chain_fails(
+            self, tmp_path, monkeypatch):
+        app = self._mounted_app(tmp_path, monkeypatch)
+        client = TestClient(app)
+        stolen_page = client.get(
+            "/", headers={"Host": "evil.example:8642"}).text
+        stolen_token = self._extract_shell_token(stolen_page)
+        assert stolen_token is None
+        headers = {"Host": "evil.example:8642"}
+        if stolen_token:
+            headers["Authorization"] = f"Bearer {stolen_token}"
+        mint = client.post(
+            "/v1/keys", json={"name": "stolen", "scopes": ["models:read"]},
+            headers=headers)
+        assert mint.status_code == 403
+
+    def test_loopback_literal_host_no_origin_still_receives_token(
+            self, tmp_path, monkeypatch):
+        # Not an overcorrection: a real loopback-literal Host with no Origin
+        # - what an actual local browser navigation sends - still works.
+        app = self._mounted_app(tmp_path, monkeypatch)
+        client = TestClient(app)
+        r = client.get("/", headers={"Host": "127.0.0.1:8642"})
         assert r.status_code == 200
         assert app.state.shell_token in r.text
 
