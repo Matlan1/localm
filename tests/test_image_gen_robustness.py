@@ -188,6 +188,88 @@ class TestSidecarContent:
         assert sidecar["guidance"] == 3.0
 
 
+class TestRenderHeartbeat:
+    """ADR-0009 P8: imagine's render tick must reach on_progress (the job
+    stream / GUI's SSE feed), throttled every 15s, matching
+    generate_music/generate_video's ``_tick`` shape byte-for-byte - not just
+    the local Rich console spinner, which lives only inside this function's
+    own Console() and never reaches a GUI-triggered job. Before this, an
+    image job pushed via ``on_progress=lambda t: job.push(...)`` (see
+    plugins/builtin/image/plug.py) sat silent on the wire for as long as
+    max_poll_seconds, indistinguishable from a hang."""
+
+    def _capture_tick(self, tmp_path, monkeypatch, on_progress):
+        """Drive generate_image to the poll step for real (workflow load,
+        preflight, submit) and hand back the actual ``_tick`` closure it
+        built, by intercepting comfy_poll_until_done's ``on_tick`` kwarg.
+        POLL_FINISHED is returned immediately so generate_image completes
+        without the real poll loop's timing/sleep ever running; the tick is
+        then driven directly with synthetic elapsed values, matching how the
+        real loop would call it."""
+        monkeypatch.setattr(comfy, "workflow_path",
+                            lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+        out = tmp_path / "art.png"
+        captured = {}
+
+        def fake_poll(*args, **kwargs):
+            captured["on_tick"] = kwargs["on_tick"]
+            return comfy.POLL_FINISHED, {"outputs": {"9": {"images": [
+                {"filename": "f.png", "subfolder": "", "type": "output"}]}}}
+
+        responses = {
+            "/system_stats": b"{}",
+            "/object_info": b"{}",
+            "/prompt": b'{"prompt_id": "p1"}',
+            "/view": _minimal_png(8, 8),
+        }
+
+        def fake_urlopen(req, timeout=None):
+            url = req if isinstance(req, str) else req.full_url
+            for key, body in responses.items():
+                if key in url:
+                    m = MagicMock()
+                    m.read.return_value = body
+                    m.__enter__ = lambda s=m: s
+                    m.__exit__ = MagicMock(return_value=False)
+                    return m
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             patch.object(comfy, "_localm_unload"), \
+             patch.object(comfy, "comfy_poll_until_done", side_effect=fake_poll):
+            ok, msg = comfy.generate_image(
+                "a fox", out, seed=1, on_progress=on_progress)
+        assert ok, msg
+        assert "on_tick" in captured
+        return captured["on_tick"]
+
+    def test_heartbeat_fires_every_15s_on_the_job_stream(self, tmp_path, monkeypatch):
+        events = []
+        tick = self._capture_tick(tmp_path, monkeypatch, on_progress=events.append)
+        for elapsed in (2, 8, 14, 15, 16, 29, 30, 31, 44, 45, 59):
+            tick(elapsed)
+        # Fires at 15/30/45 - not on every tick, and not again inside a window
+        # that has not yet advanced 15s past the last one said.
+        assert events == [
+            "Rendering… (15s elapsed)",
+            "Rendering… (30s elapsed)",
+            "Rendering… (45s elapsed)",
+        ]
+
+    def test_no_progress_sink_is_a_silent_noop(self, tmp_path, monkeypatch):
+        # A caller with no progress sink (e.g. a bare CLI call) must not crash.
+        tick = self._capture_tick(tmp_path, monkeypatch, on_progress=None)
+        tick(20)
+
+    def test_broken_progress_sink_does_not_abort_the_render(self, tmp_path, monkeypatch):
+        # generate_music/generate_video's _say swallows on_progress exceptions
+        # for the same reason: a broken UI sink must never fail the render.
+        def boom(_text):
+            raise RuntimeError("sink is down")
+        tick = self._capture_tick(tmp_path, monkeypatch, on_progress=boom)
+        tick(20)   # must not raise
+
+
 class TestSafeLoraName:
     """is_safe_lora_name is the ONE shared predicate every entry point that can
     supply lora_name relies on (the HTTP image route's plug.py, this module's
