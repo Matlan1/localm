@@ -36,6 +36,14 @@ from typing import Optional
 
 MEDIA_TYPES = ("image", "music", "video")
 
+# Distinct from None, which is a legitimate VALUE for `active` (no workflow
+# selected) - using None as both "caller did not pass this" and "resolved to
+# no selection" made list_workflows re-resolve selected_name() a second time
+# whenever nothing was selected, defeating the single-config-load point of
+# passing `active` through at all (caught by
+# test_list_workflows_route_only_loads_config_once).
+_UNSET = object()
+
 
 def workflows_dir(media: str) -> Path:
     """The per-media workflows directory (created on first write)."""
@@ -80,16 +88,17 @@ def is_workflow_json(data) -> bool:
     return any(isinstance(v, dict) and "class_type" in v for v in data.values())
 
 
-def list_workflows(media: str, *, active: Optional[str] = None) -> list:
+def list_workflows(media: str, *, active=_UNSET) -> list:
     """Every uploaded workflow for *media*, newest first, with active/default
     flags so the page can show which one is in use.
 
-    *active*: pass an already-resolved ``selected_name(media)`` to skip this
-    function's own config load - see ``_list_and_selected`` below, the shape
-    every caller that needs both actually wants. None (the default) resolves
+    *active*: pass an already-resolved ``selected_name(media)`` (None is a
+    valid value here - "nothing selected") to skip this function's own config
+    load - see ``_list_and_selected`` below, the shape every caller that needs
+    both actually wants. Omit it (the default, the _UNSET sentinel) to resolve
     it internally, unchanged for a caller that only wants the list."""
     d = workflows_dir(media)
-    if active is None:
+    if active is _UNSET:
         active = selected_name(media)
     items = []
     if d.is_dir():
