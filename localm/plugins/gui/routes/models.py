@@ -422,7 +422,19 @@ def register(app: FastAPI, ctx) -> None:
         # except OSError, which would NOT catch the AttributeError / TypeError such
         # an entry raises; routing through _entry_path keeps a corrupt entry from
         # 500ing the VRAM readout (model_bytes stays 0 -> still a valid estimate).
-        epath = _entry_path(load_registry().get(name))
+        entry = load_registry().get(name)
+        epath = _entry_path(entry)
+        # F8-PERSIST-ARCH-AND-EXPERT-COUNT persists expert_count on the entry at
+        # registration time. expert_count == 0 is a CONFIRMED fact (the header
+        # was read and resolved to a known-dense architecture - see
+        # gguf_registry_metadata's own docstring), so a dense model with
+        # n_cpu_moe left over from an earlier MoE model can skip the ~200ms
+        # tensor-info re-parse below entirely: _apply_cpu_moe's own dense-model
+        # guard means it would find nothing anyway. None (not yet backfilled,
+        # or the header could not be read) and any non-zero count both still
+        # need the real read: a count alone is not the BYTE size this estimate
+        # needs, only whether it is worth asking for one at all.
+        known_dense = isinstance(entry, dict) and entry.get("expert_count") == 0
         if epath is not None:
             # Off the event loop, for the same reason as /api/models and
             # /v1/models/{id}: the path comes out of registry.json, not from this
@@ -449,7 +461,7 @@ def register(app: FastAPI, ctx) -> None:
                                 "estimate falls back to the size-class heuristic",
                                 type(exc).__name__, ep)
                         moe_pinned = 0
-                        if n_cpu_moe > 0:
+                        if n_cpu_moe > 0 and not known_dense:
                             try:
                                 moe_pinned = int(gguf_moe_pinned_expert_bytes(
                                     p, n_cpu_moe) or 0)

@@ -930,6 +930,82 @@ class TestVramEstimate:
         assert with_moe["weights"] == without["weights"] - pinned
         assert with_moe["weights"] < without["weights"]
 
+    def test_estimate_skips_moe_probe_when_registry_confirms_dense(
+            self, gui_app, tmp_path):
+        """F8-PERSIST-ARCH-AND-EXPERT-COUNT (#1042) persists expert_count on a
+        registry entry at registration time. expert_count == 0 is a CONFIRMED
+        fact (the header was read and resolved to a known-dense architecture),
+        so with n_cpu_moe left over from an earlier MoE model, this dense
+        entry should skip gguf_moe_pinned_expert_bytes entirely - it would
+        find nothing (no expert tensors match the pinning pattern) at the
+        cost of a real ~200ms-class tensor-info re-parse for nothing.
+
+        Asserted via call count, NOT a raising side_effect: the route's own
+        MoE-probe call is wrapped in `except Exception: log and continue`
+        (a deliberate contract - see the route's own comment - so a probe
+        failure never breaks the whole estimate), which would silently
+        swallow a side_effect=AssertionError and pass this test whether or
+        not the shortcut actually fired. Caught live: an earlier draft of
+        this test used exactly that pattern and stayed green with the
+        shortcut reverted."""
+        from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
+        from unittest.mock import MagicMock
+        app, _ = gui_app
+        # A genuinely dense model - no expert tensors at all - so a real call
+        # to the probe would harmlessly return 0 anyway; the test proves the
+        # SHORTCUT fires, not merely that the answer comes out right either way.
+        tensors = [("blk.0.attn_q.weight", [4], 0, 2_000)]
+        kv = [("general.architecture", _T_STRING, "testdense")]
+        model_file = _gguf_with_tensors(tmp_path / "dense.gguf", kv, tensors)
+        reg = {"m": {"path": str(model_file), "source": "local", "expert_count": 0}}
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        probe = MagicMock(return_value=0)
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.config.load_config",
+                   return_value={**base_cfg, "n_cpu_moe": 1}), \
+             patch("localm.model_manager.gguf.gguf_moe_pinned_expert_bytes", probe), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                r = client.get("/api/vram-estimate",
+                               params={"model": "m", "n_ctx": 0})
+        assert r.status_code == 200
+        probe.assert_not_called()
+        import os
+        assert r.json()["weights"] == os.path.getsize(model_file)
+
+    def test_estimate_still_probes_when_expert_count_unknown(
+            self, gui_app, tmp_path):
+        """expert_count absent (never backfilled, or the header could not be
+        read at registration time) must NOT be treated as "confirmed dense" -
+        the real probe still runs, same as before F8. A missing key is a
+        different fact from a confirmed 0 (see gguf_registry_metadata's own
+        docstring: 0 is only ever set once architecture actually resolved)."""
+        from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
+        from localm.model_manager.gguf import gguf_moe_pinned_expert_bytes
+        app, _ = gui_app
+        tensors = [
+            ("blk.0.attn_q.weight", [4], 0, 2_000),
+            ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
+        ]
+        kv = [("general.architecture", _T_STRING, "testmoe")]
+        model_file = _gguf_with_tensors(tmp_path / "moe.gguf", kv, tensors)
+        pinned = gguf_moe_pinned_expert_bytes(model_file, 1)
+        assert pinned == 900_000
+        reg = {"m": {"path": str(model_file), "source": "local"}}   # no expert_count key
+        base_cfg = __import__("localm.config", fromlist=["load_config"]).load_config()
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.config.load_config",
+                   return_value={**base_cfg, "n_cpu_moe": 1}), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 0}).json()
+        import os
+        assert data["weights"] == os.path.getsize(model_file) - pinned
+
     def test_estimate_n_cpu_moe_zero_is_a_no_op(self, gui_app, tmp_path):
         """The default (n_cpu_moe=0, no setting configured) must be BYTE
         IDENTICAL to a caller that never knew this parameter existed - the
