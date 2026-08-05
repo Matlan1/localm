@@ -311,9 +311,16 @@ class EngineCache:
                 # Aggregate free can clear the bar while one device of a
                 # configured split is short - see gpu_split_shortfall.
                 shortfall = gpu_split_shortfall(required + DEFAULT_HEADROOM_BYTES)
+            # PROCESS-scoped readings are blind to every OTHER resident model
+            # (each lives in its own isolated worker subprocess), so they can
+            # only over-report free space - never trusted for the PERMIT
+            # decision, exactly like the HTTP server's own admission gate. See
+            # residency.fits_alongside_residents's is_process_scoped docstring.
             return fits_alongside_residents(
                 free_vram=v_info.get("free"), vram_required=required,
-                probe_ok=probe_ok, shortfall=shortfall)
+                probe_ok=probe_ok, shortfall=shortfall,
+                is_process_scoped=(
+                    v_info.get("free_scope") == discover.FREE_SCOPE_PROCESS))
         except Exception as e:
             # A failed probe must not be read as headroom.
             _log(f"warning: VRAM probe failed ({e}) - loading {name} "

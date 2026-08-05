@@ -17,10 +17,12 @@ lands in one place and both servers get it.
 The policy is deliberately conservative in the PERMIT direction. Stacking a
 second model on top of a resident one is only allowed on a reading that was
 actually taken (``probe_ok``), that the box can actually produce (``free_vram is
-not None``), and that clears the model's requirement plus a fixed headroom, with
-no per-device split shortfall. Anything else falls back to single-resident. See
-``fits_alongside_residents`` for why each of those is load-bearing: the failure
-mode of a wrong PERMIT is a native OOM or a driver TDR, not a graceful error.
+not None``), that counts every process's VRAM rather than just the caller's own
+(``not is_process_scoped``), and that clears the model's requirement plus a fixed
+headroom, with no per-device split shortfall. Anything else falls back to
+single-resident. See ``fits_alongside_residents`` for why each of those is
+load-bearing: the failure mode of a wrong PERMIT is a native OOM or a driver TDR,
+not a graceful error.
 
 Two optional knobs sit on top of the VRAM arithmetic, both OFF by default so a
 tight-VRAM box behaves exactly as it did before this module existed:
@@ -110,6 +112,7 @@ def fits_alongside_residents(
     probe_ok: bool,
     headroom: int = DEFAULT_HEADROOM_BYTES,
     shortfall: Sequence = (),
+    is_process_scoped: bool = False,
 ) -> bool:
     """
     True when the model may load with ZERO eviction, alongside resident peers.
@@ -125,17 +128,27 @@ def fits_alongside_residents(
     ``free_vram``     is not None: the box can report free VRAM at all. A
                       CPU-only / GGUF-only box reports nothing, and "nothing"
                       must never read as "plenty".
+    ``is_process_scoped`` the reading counts only the CALLING process's own
+                      VRAM allocations, not the whole device (see
+                      ``discover.FREE_SCOPE_PROCESS``). Every resident model
+                      lives in its OWN isolated worker subprocess
+                      (backends/gguf.py) - so a process-scoped reading is blind
+                      to exactly the VRAM this check exists to account for, and
+                      can only ever OVER-report free space, never under. Treated
+                      the same as "cannot measure": a number that is
+                      structurally incapable of seeing a resident peer's memory
+                      is not evidence the model fits alongside it.
     ``+ headroom``    the requirement alone is not enough of a margin.
     ``not shortfall`` aggregate free can clear the bar while ONE device of a
                       configured split is short, because the GGUF backend
                       divides a model by a static ratio with no live per-device
                       check of its own. See ``discover.gpu_split_shortfall``.
 
-    Callers that cannot measure, or whose probe was inconclusive, get False and
-    should fall back to single-resident rather than stacking until the driver
-    OOMs.
+    Callers that cannot measure, whose probe was inconclusive, or whose reading
+    is process-scoped, get False and should fall back to single-resident rather
+    than stacking until the driver OOMs.
     """
-    if not probe_ok or free_vram is None:
+    if not probe_ok or free_vram is None or is_process_scoped:
         return False
     if shortfall:
         return False
