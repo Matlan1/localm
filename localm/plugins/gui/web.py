@@ -83,6 +83,26 @@ def _index_html_with_shell_token(token: str) -> str:
     return snippet + html
 
 
+def _is_same_origin_document_request(request: Request) -> bool:
+    """True when *request* carries no ``Origin`` header (an ordinary top-level
+    browser navigation/reload never sends one - the legitimate loopback GUI
+    shell case) or an ``Origin`` whose authority matches ``Host`` (a same-
+    origin fetch/reload). False for any cross-origin fetch()/XHR.
+
+    Checked WITHOUT regard to the server's CORS config (``cors_origins``,
+    including ``"*"``): CORS decides whether a cross-origin caller may READ a
+    response body, it says nothing about whether embedding the shell token in
+    that body was safe to begin with. A wildcard or allow-listed
+    ``cors_origins`` must not change this answer - the token must never ride
+    on a response reachable from another origin, independent of what that
+    origin is later permitted to read."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    host = request.headers.get("host", "")
+    return origin.split("://", 1)[-1] == host
+
+
 # sw.js's own fetch() handler regex (self.addEventListener("fetch", ...)) for
 # API-shaped paths that are NEVER cache-first. Nothing under STATIC_DIR is
 # actually named this today (these are server routes, not static files), so
@@ -751,11 +771,15 @@ def attach_gui(
             if not (existing and _sessions.lookup(existing) is not None):
                 _set_session_cookies(resp, key, secure=request.url.scheme == "https")
             return resp
-        if not key and loopback:
+        if not key and loopback and _is_same_origin_document_request(request):
             # Open mode on loopback: seed the per-process shell token as a JS
             # global so the loopback SPA can still manage. app.js sends it
             # as a bearer HEADER (the open-mode gate is header-based); it is
-            # never persisted.
+            # never persisted. Gated on same-origin (item 28): "loopback"
+            # describes what the SERVER BOUND TO, not who is asking, so
+            # without the origin check a cross-origin GET / (any website the
+            # user visits, regardless of "cors_origins") would receive the
+            # real management credential in plain HTML.
             token = getattr(request.app.state, "shell_token", "") or ""
             return HTMLResponse(_index_html_with_shell_token(token), headers=headers)
         return HTMLResponse(_index_html_with_shell_token(""), headers=headers)

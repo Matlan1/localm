@@ -155,7 +155,10 @@ get cut off.
   network.
 - If remote machines need different origins in the browser, set
   `cors_origins` in `<data dir>/config.json` to an explicit list. Never use
-  `"*"` on an exposed bind.
+  `"*"` at all - not only on an exposed bind. In open (keyless) mode, `"*"`
+  lets any website the user's browser visits steal the management shell
+  token and take over the instance; the loopback bind does not protect
+  against this, since the browser making the request is already local.
 - Firewall the localm port (8642-8741) so only the machines you intend can reach
   it.
 

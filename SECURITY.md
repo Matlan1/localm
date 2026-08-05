@@ -61,9 +61,13 @@ require a per-process **shell token** that only the loopback GUI shell carries. 
 local non-browser client (curl, a script) cannot mint a key, change config, install
 a plugin, load a model, drive the coder agent, or index files in open mode: manage
 through the loopback GUI, or set a key (`localm key generate`). Reads and the
-inference API stay open. A configured `cors_origins` is trusted for cross-origin
-*reads*, but state changes still need a key or the shell token, so a forged `Origin`
-header cannot be used as a management credential.
+inference API stay open. A configured `cors_origins` (including `"*"`) is trusted for
+cross-origin *reads* of ordinary API responses, but state changes still need a key or
+the shell token, so a forged `Origin` header cannot be used as a management
+credential. **The one exception is `GET /` itself**: the page that carries the shell
+token is served to same-origin requests only, regardless of `cors_origins` - CORS
+governs whether another origin may read a response, not whether the token was safe to
+put in one, so the token's own delivery is never covered by that trust.
 
 ### Management/metadata reads (open mode)
 

@@ -122,6 +122,35 @@ class TestShellRoute:
         assert "localm_session=" not in _set_cookies(r)
         assert SHELL_GLOBAL not in r.text
 
+    def test_cross_origin_open_mode_does_not_leak_shell_token(self, monkeypatch):
+        # Item 28 (release blocker): "loopback" describes what the SERVER BOUND
+        # TO, not who is asking. Before this gate, ANY cross-origin GET / on a
+        # loopback, open-mode bind got the real per-process shell token in
+        # plain HTML - any website the user's browser visited could read it
+        # (subject only to CORS, which this bare attach_gui setup has none of -
+        # the fix must not depend on the server's CORS config at all). A
+        # mismatched Origin must get the same empty-token page as the
+        # protected-mode and non-loopback branches.
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        r = TestClient(_app("127.0.0.1")).get(
+            "/", headers={"Origin": "https://evil.example"})
+        assert r.status_code == 200
+        assert SHELL_GLOBAL not in r.text
+        assert "SHELLTOK123" not in r.text
+
+    def test_same_origin_explicit_origin_open_mode_still_seeds_shell_token(
+            self, monkeypatch):
+        # Must not overcorrect: an Origin header that DOES match Host (a real
+        # browser fetch/reload, which - unlike a bare top-level navigation -
+        # does send Origin) still gets the token. Only a MISMATCHED Origin is
+        # refused.
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        r = TestClient(_app("127.0.0.1")).get(
+            "/", headers={"Origin": "http://testserver", "Host": "testserver"})
+        assert r.status_code == 200
+        assert SHELL_GLOBAL in r.text
+        assert "SHELLTOK123" in r.text
+
 
 class TestLaunchGrantHandoff:
     """One-time ?localm_token= handoff: the launcher opens the browser at a fresh

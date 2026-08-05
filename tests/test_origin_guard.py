@@ -217,6 +217,92 @@ class TestShellTokenMetadataGetOriginGate:
         assert refused.status_code == 403
 
 
+class TestShellTokenNotDisclosedByIndexRoute:
+    """Item 28 (release blocker), dev-notes finding
+    'finding-origin-guard-dns-rebinding-2026-08-05.md' section 6: GET / (the
+    route that carries the shell_token) sits OUTSIDE _CROSS_ORIGIN_GET_REFUSED
+    entirely, and _cross_origin_refused itself short-circuits to "not refused"
+    under "cors_origins": "*" (http_server.py:3355). So neither of those two
+    checks - the ones test_wildcard_cors_metadata_get_with_token_still_allowed
+    above proves for /v1/keys - ever runs for GET /. That test proves the
+    token stays REQUIRED; it never asks whether the token can be OBTAINED, and
+    under wildcard CORS it could be, live, end to end, before this fix. The
+    negative here is the actual regression test for the release blocker."""
+
+    def _mounted_app(self, tmp_path, monkeypatch, cors_origins):
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.config import save_config
+        save_config({"cors_origins": cors_origins})
+        from localm.inference.http_server import mount_gui_surface
+        app = create_app(None)
+        app.state.instance_id = "iid-test"
+        app.state.instance_token = "inst-secret-token"
+        app.state.instance_mode = "api"
+        app.state.instance_port = 8642
+        app.state.instance_scheme = "http"
+        app.state.bind_host = "127.0.0.1"
+        assert mount_gui_surface(app) is True
+        return app
+
+    def test_wildcard_cors_cross_origin_get_index_does_not_disclose_token(
+            self, tmp_path, monkeypatch):
+        # The live exploit from the dev-notes finding: a plain cross-origin
+        # fetch("/") under "cors_origins": "*", no DNS rebinding needed.
+        app = self._mounted_app(tmp_path, monkeypatch, "*")
+        client = TestClient(app)
+        real_token = app.state.shell_token
+        r = client.get("/", headers={"Origin": "https://evil.example"})
+        assert r.status_code == 200
+        assert real_token not in r.text
+        assert "__LOCALM_SHELL_TOKEN__" not in r.text
+
+    def test_wildcard_cors_full_steal_then_mint_chain_fails(
+            self, tmp_path, monkeypatch):
+        # Completes the chain the finding reproduced: previously, step 2's
+        # disclosed token satisfied step 3's POST /v1/keys identically to a
+        # real credential. With nothing disclosed, the attacker has nothing to
+        # present, and the mint attempt is refused like any other unauthenticated
+        # open-mode caller.
+        app = self._mounted_app(tmp_path, monkeypatch, "*")
+        client = TestClient(app)
+        stolen_page = client.get(
+            "/", headers={"Origin": "https://evil.example"}).text
+        assert "__LOCALM_SHELL_TOKEN__" not in stolen_page
+        mint = client.post(
+            "/v1/keys", json={"name": "stolen", "scopes": ["models:read"]},
+            headers={"Origin": "https://evil.example"})
+        assert mint.status_code == 403
+
+    def test_wildcard_cors_legitimate_loopback_gui_still_receives_token(
+            self, tmp_path, monkeypatch):
+        # Must not ship a fix that breaks the product: the real GUI shell (an
+        # ordinary top-level navigation - no Origin header) still boots with
+        # its management token, exactly as before this fix.
+        app = self._mounted_app(tmp_path, monkeypatch, "*")
+        client = TestClient(app)
+        r = client.get("/")
+        assert r.status_code == 200
+        assert app.state.shell_token in r.text
+        assert "__LOCALM_SHELL_TOKEN__" in r.text
+
+    def test_wildcard_cors_same_origin_explicit_origin_still_receives_token(
+            self, tmp_path, monkeypatch):
+        # And not an overcorrection either: an explicit Origin that DOES match
+        # Host (a real same-origin fetch/reload) still gets the token.
+        app = self._mounted_app(tmp_path, monkeypatch, "*")
+        client = TestClient(app)
+        r = client.get("/", headers={"Origin": "http://testserver",
+                                     "Host": "testserver"})
+        assert r.status_code == 200
+        assert app.state.shell_token in r.text
+
+
 class TestSensitiveGetCrossOriginRefused:
     """LM-PT-002 (CWE-200): /whoami (root_dir -> the OS username on a loopback
     bind) and /debug/stacks (thread stacks) are UNAUTHENTICATED GETs. The default
