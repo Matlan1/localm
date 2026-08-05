@@ -447,18 +447,68 @@ export async function cancelJob(jobId) {
   } catch (e) { /* best-effort - the stream will still end */ }
 }
 
+// Reconnect tuning for streamJob, below - overridable by a test so it does not
+// have to wait out the real delay. Same 1500ms shape as coder.js's
+// streamSession, the proven precedent for this exact reconnect pattern.
+export let JOB_RECONNECT_DELAY_MS = 1500;
+export let JOB_RECONNECT_MAX_ATTEMPTS = 20;   // ~30s of reconnect budget
+
 export async function streamJob(jobId, onLine, onProgress) {
-  const r = await fetch(`/api/jobs/${jobId}/events`, { headers: authHeaders() });
-  if (!r.ok) throw new Error(r.statusText);
-  let endEvent = null;
-  await readSSE(r, (payload) => {
-    let ev;
-    try { ev = JSON.parse(payload); } catch { return; }
-    if (ev.type === "line" && onLine) onLine(ev.text);
-    if (ev.type === "progress" && onProgress) onProgress(ev);
-    if (ev.type === "end") endEvent = ev;
-  });
-  return endEvent || { status: "failed" };
+  // GET /api/jobs/{id}/events can end WITHOUT an "end" frame (a network
+  // blip, laptop sleep/wake, a backgrounded tab) while the job keeps running
+  // server-side regardless of whether anyone is subscribed (JobManager.Job.
+  // push() fans out to whoever is listening; it does not know or care).
+  // Verified live 2026-08-05: aborting the SSE connection ~5ms after opening
+  // it produced exactly this - the reader either threw (AbortError) or
+  // resolved {done:true} with no "end" event - while the job went on to
+  // finish successfully several seconds later. The OLD code here returned
+  // {status:"failed"} (or let the exception propagate to the caller's own
+  // try/catch, which renders "Pull failed: <message>") for BOTH shapes,
+  // telling the user their model download failed when it had not - a
+  // transport-level disconnect rendered as an application-level outcome.
+  //
+  // Reconnect instead, matching coder.js's streamSession (the proven shape
+  // for exactly this problem: 1500ms backoff, retry until the operation is
+  // confirmed over). GET /api/jobs/{id}/events has no "since"/replay=false
+  // mode (unlike the coder session route) - job.subscribe() always replays
+  // the FULL history - so `seen` tracks how many events this call has
+  // already delivered to onLine/onProgress and skips that many on every
+  // reconnect, or a resumed stream would double-print every line already
+  // shown. Only a genuinely exhausted retry budget, or a 404 (the job is
+  // provably gone, not just unreachable), returns a distinct "disconnected"
+  // status - never "failed", which must stay reserved for the job's OWN
+  // end event saying so.
+  let seen = 0;
+  for (let attempt = 0; attempt < JOB_RECONNECT_MAX_ATTEMPTS; attempt++) {
+    let endEvent = null;
+    try {
+      const r = await fetch(`/api/jobs/${jobId}/events`, { headers: authHeaders() });
+      if (r.status === 404) return { status: "disconnected", reason: "job not found" };
+      if (!r.ok) throw new Error(r.statusText);
+      let indexThisAttempt = 0;
+      await readSSE(r, (payload) => {
+        let ev;
+        try { ev = JSON.parse(payload); } catch { return; }
+        const isNew = indexThisAttempt >= seen;
+        indexThisAttempt++;
+        if (isNew) seen++;
+        if (!isNew) return;
+        if (ev.type === "line" && onLine) onLine(ev.text);
+        if (ev.type === "progress" && onProgress) onProgress(ev);
+        if (ev.type === "end") endEvent = ev;
+      });
+      if (endEvent) return endEvent;
+      // Stream ended with no "end" frame - lost connection, not a job
+      // outcome. Fall through to retry below.
+    } catch (e) {
+      // Thrown network/abort error - the other shape of the same lost
+      // connection. Same treatment: retry rather than claim failure.
+    }
+    if (attempt < JOB_RECONNECT_MAX_ATTEMPTS - 1) {
+      await new Promise((res) => setTimeout(res, JOB_RECONNECT_DELAY_MS));
+    }
+  }
+  return { status: "disconnected" };
 }
 
 // Sizes are shown in binary units (GiB/MiB/KiB) but labelled GB/MB/KB - the
