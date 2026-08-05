@@ -58,9 +58,16 @@ GB = 1024 ** 3
 # --------------------------------------------------------------------------- #
 
 class TestResolveAutoSplitRatios:
+    # free_scope=device on every entry: this class's fixtures represent a
+    # TRUSTED reading throughout (the normal/healthy case every OTHER test
+    # here builds on) - the untrusted-scope cases get their own dedicated
+    # tests below (TestScopeTrust), which build their own fixtures instead
+    # of mutating this shared one.
     _GPUS = [
-        {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB},
-        {"index": 1, "name": "B", "total": 16 * GB, "free": 4 * GB},
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 4 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
     ]
 
     def _no_vulkan(self, monkeypatch):
@@ -127,7 +134,8 @@ class TestResolveAutoSplitRatios:
         overload it. All-or-nothing, mirroring vram_capacity's 'free' key."""
         self._no_vulkan(monkeypatch)
         gpus = [
-            {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB},
+            {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB,
+             "free_scope": discover.FREE_SCOPE_DEVICE},
             {"index": 1, "name": "B", "total": 16 * GB},   # no "free" key
         ]
         monkeypatch.setattr(discover, "list_gpus", probe_double(gpus))
@@ -171,8 +179,10 @@ class TestResolveAutoSplitRatios:
         invalidate the list."""
         self._no_vulkan(monkeypatch)
         gpus = [
-            {"index": 0, "name": "A", "total": 16 * GB, "free": 8 * GB},
-            {"index": 1, "name": "B", "total": 16 * GB, "free": 0},
+            {"index": 0, "name": "A", "total": 16 * GB, "free": 8 * GB,
+             "free_scope": discover.FREE_SCOPE_DEVICE},
+            {"index": 1, "name": "B", "total": 16 * GB, "free": 0,
+             "free_scope": discover.FREE_SCOPE_DEVICE},
         ]
         monkeypatch.setattr(discover, "list_gpus", probe_double(gpus))
         ratios = resolve_auto_split_ratios(
@@ -227,6 +237,96 @@ class TestResolveAutoSplitRatios:
             resolve_auto_split_ratios(
                 {"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
         assert any("equal" in r.message for r in caplog.records)
+
+
+class TestScopeTrust:
+    """The scope half of this function's trustworthiness audit (see its
+    docstring's TRUSTWORTHINESS section): unlike gpu_split_shortfall's
+    refuse-only use of the same reading, a PROPORTIONAL split cannot accept
+    a PROCESS-scoped (or untagged) free-VRAM figure on the list_gpus()
+    branch - a reading equally blind on every device makes an empty card and
+    a nearly-full one look equally free, silently steering too much of a
+    real split onto the full one. This is a materially wrong allocation, not
+    merely an imprecise refusal, so it fails toward the safe equal-split
+    fallback rather than trusting an unverifiable ratio (AGENTS.md rule 5)."""
+
+    def _no_vulkan(self, monkeypatch):
+        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
+
+    _GPUS_DEVICE = [
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 4 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
+    ]
+
+    def test_one_process_scoped_device_disables_auto(self, monkeypatch):
+        """A SINGLE process-scoped device corrupts the WHOLE proportional
+        comparison (ratios are computed by comparing devices against each
+        other), so any one failing scope must decline the entire split, not
+        just that device's share."""
+        self._no_vulkan(monkeypatch)
+        gpus = [
+            self._GPUS_DEVICE[0],
+            {**self._GPUS_DEVICE[1], "free_scope": discover.FREE_SCOPE_PROCESS},
+        ]
+        monkeypatch.setattr(discover, "list_gpus", probe_double(gpus))
+        assert resolve_auto_split_ratios(
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) is None
+
+    def test_untagged_free_scope_disables_auto(self, monkeypatch):
+        """No free_scope key at all never happens from real list_gpus()
+        (_apply_device_global_free tags every entry, every platform) - it is
+        what a synthetic/legacy double looks like, and must be rejected the
+        same as an explicit PROCESS tag rather than silently trusted."""
+        self._no_vulkan(monkeypatch)
+        gpus = [dict(self._GPUS_DEVICE[0]), dict(self._GPUS_DEVICE[1])]
+        del gpus[1]["free_scope"]
+        monkeypatch.setattr(discover, "list_gpus", probe_double(gpus))
+        assert resolve_auto_split_ratios(
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) is None
+
+    def test_both_device_scoped_succeeds(self, monkeypatch):
+        """The trusted case succeeds exactly as before this check existed -
+        this fix must not regress the healthy path."""
+        self._no_vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS_DEVICE))
+        ratios = resolve_auto_split_ratios(
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
+        assert ratios == pytest.approx([0.75, 0.25])
+
+    def test_scope_decline_logged_at_info(self, monkeypatch, caplog):
+        self._no_vulkan(monkeypatch)
+        gpus = [
+            self._GPUS_DEVICE[0],
+            {**self._GPUS_DEVICE[1], "free_scope": discover.FREE_SCOPE_PROCESS},
+        ]
+        monkeypatch.setattr(discover, "list_gpus", probe_double(gpus))
+        with caplog.at_level("INFO"):
+            resolve_auto_split_ratios(
+                {"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
+        assert any("equal" in r.message for r in caplog.records)
+        assert any("device-global" in r.message for r in caplog.records)
+
+    def test_vulkan_branch_is_not_scope_gated(self, monkeypatch):
+        """Deliberate asymmetry, not an oversight (see the docstring's
+        TRUSTWORTHINESS section): no measurement in this codebase shows
+        ggml-vulkan's own ggml_backend_dev_memory query is cross-process
+        blind the way torch's mem_get_info / llama.cpp's bundled HIP runtime
+        are - the confirmed comparison was HIP-vs-HIP, not HIP-vs-Vulkan.
+        So a platform gpu_usage flags as HIP-blind must NOT stop the vulkan
+        branch from computing real ratios - asserting an unmeasured
+        blindness would itself be a rule-5 violation in the other direction."""
+        monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: True)
+        monkeypatch.setattr(discover, "native_gpu_devices", lambda: [
+            {"index": 0, "name": "Radeon", "total": 16 * GB, "free": 8 * GB},
+            {"index": 1, "name": "llvmpipe", "total": 32 * GB, "free": 24 * GB},
+        ])
+        monkeypatch.setattr(
+            "localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
+        ratios = resolve_auto_split_ratios(
+            {"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
+        assert ratios == pytest.approx([0.25, 0.75])
 
 
 class TestResolveAutoSplitRatiosVulkan:
@@ -359,8 +459,10 @@ class TestShortfallAutoShares:
     feature makes possible."""
 
     _GPUS = [
-        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
-        {"index": 1, "name": "B", "total": 16 * GB, "free": 14 * GB},
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 14 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
     ]
 
     def _no_vulkan(self, monkeypatch):
@@ -422,8 +524,10 @@ class TestShortfallSharesAdaptiveFlag:
     live) - the confirmed review finding on this feature's first cut."""
 
     _GPUS = [
-        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
-        {"index": 1, "name": "B", "total": 16 * GB, "free": 14 * GB},
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 14 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
     ]
 
     def _no_vulkan(self, monkeypatch):
@@ -498,8 +602,10 @@ class TestWaitForInflightForwarding:
 
         def fake(*a, return_status=False, wait_for_inflight=False, **k):
             seen["wfi"] = wait_for_inflight
-            gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB},
-                    {"index": 1, "free": 6 * GB, "total": 8 * GB}]
+            gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB,
+                     "free_scope": discover.FREE_SCOPE_DEVICE},
+                    {"index": 1, "free": 6 * GB, "total": 8 * GB,
+                     "free_scope": discover.FREE_SCOPE_DEVICE}]
             return (gpus, discover.GPU_PROBE_OK) if return_status else gpus
 
         monkeypatch.setattr(discover, "list_gpus", fake)
@@ -516,8 +622,10 @@ class TestWaitForInflightForwarding:
         monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
 
         def fake(*a, return_status=False):
-            gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB},
-                    {"index": 1, "free": 6 * GB, "total": 8 * GB}]
+            gpus = [{"index": 0, "free": 2 * GB, "total": 4 * GB,
+                     "free_scope": discover.FREE_SCOPE_DEVICE},
+                    {"index": 1, "free": 6 * GB, "total": 8 * GB,
+                     "free_scope": discover.FREE_SCOPE_DEVICE}]
             return (gpus, discover.GPU_PROBE_OK) if return_status else gpus
 
         monkeypatch.setattr(discover, "list_gpus", fake)
@@ -715,8 +823,10 @@ class TestSwitchEngineAutoDefer:
     # Unregistered-on-disk model file -> the documented 4 GB default size, so
     # vram_required ~= 5.15 GiB and the aggregate threshold ~= 6.15 GiB.
     _TIGHT_GPUS = [
-        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
-        {"index": 1, "name": "B", "total": 16 * GB, "free": 3 * GB},
+        {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
+        {"index": 1, "name": "B", "total": 16 * GB, "free": 3 * GB,
+         "free_scope": discover.FREE_SCOPE_DEVICE},
     ]
 
     def test_auto_combined_short_defers_to_backend(self, monkeypatch, tmp_path):
@@ -772,8 +882,10 @@ class TestSwitchEngineAutoDefer:
         effect: here they were not, so the pre-feature refusal fires, naming
         the short device."""
         gpus = [
-            {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
-            {"index": 1, "name": "B", "total": 32 * GB, "free": 30 * GB},
+            {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
+             "free_scope": discover.FREE_SCOPE_DEVICE},
+            {"index": 1, "name": "B", "total": 32 * GB, "free": 30 * GB,
+             "free_scope": discover.FREE_SCOPE_DEVICE},
         ]
         self._install(monkeypatch, tmp_path, gpus=gpus,
                       gpu_split_indices=(0, 1, 2))   # device 2 vanished
