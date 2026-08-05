@@ -21,6 +21,34 @@ from typing import Optional
 import requests
 
 
+def resolve_self_url(app) -> Optional[str]:
+    """This server's own ``/v1`` base URL, or None if it cannot be determined.
+
+    ``app.state.self_url`` is published by ``attach_gui`` only, so before
+    ADR-0008 every self-call (the chat/media VRAM swap, RAG self-embedding) was
+    reachable in GUI mode alone. Now that the background-job registry lives at
+    kernel level, those same paths run under a headless ``localm serve`` too and
+    need an address there.
+
+    The fallback rebuilds it from what ``instances.advertise()`` publishes
+    (``instance_scheme`` / ``instance_port``, both set before uvicorn accepts
+    connections), which is the same shape the GUI launcher computes.
+
+    Returns None rather than "" when it genuinely cannot tell, so a caller
+    reports an honest "this server cannot determine its own address" instead of
+    handing an empty string to self_request(), which raises a bare ValueError
+    from deep inside a background job.
+    """
+    url = getattr(app.state, "self_url", "") or ""
+    if url:
+        return url
+    scheme = getattr(app.state, "instance_scheme", None)
+    port = getattr(app.state, "instance_port", None)
+    if scheme and port:
+        return f"{scheme}://127.0.0.1:{port}/v1"
+    return None
+
+
 def self_request(method: str, path: str, *, json: Optional[dict] = None,
                   timeout: float = 30, base_url: Optional[str] = None) -> requests.Response:
     """Call this server's own API: ``method`` *path* against *base_url*, with

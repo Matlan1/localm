@@ -15,12 +15,17 @@ import json
 from fastapi import Depends, FastAPI
 from fastapi.responses import StreamingResponse
 
-import localm.plugins.gui.web as _web
 from localm.inference.http_server import _require_auth, require_owner
 
 
-def register(app: FastAPI, ctx) -> None:
-    jobs = ctx.jobs
+def register(app: FastAPI, jobs) -> None:
+    """Mount the job SSE + cancel routes over *jobs* (a JobManager).
+
+    Takes the manager DIRECTLY rather than the GUI's ``ctx`` namespace, unlike
+    the sibling route groups in this package: since ADR-0008 these routes are
+    registered from ``attach_engine`` so they exist on a headless ``localm
+    serve`` too, and the kernel has no ctx to hand over.
+    """
 
     def _resolve_job(job_id: str):
         """require_owner() resolver: the GUI-tracked job named by the job_id
@@ -41,6 +46,10 @@ def register(app: FastAPI, ctx) -> None:
             # plus every event pushed from here on) so concurrent viewers of the
             # same job each see the complete stream, instead of racing to drain
             # one shared queue between them.
+            # Imported lazily, not at module scope: these routes are now mounted
+            # from attach_engine, and a top-level import would drag the whole GUI
+            # web module into a headless `localm serve` that never attaches a GUI.
+            import localm.plugins.gui.web as _web
             q = job.subscribe()
             try:
                 while True:

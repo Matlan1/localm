@@ -10,10 +10,13 @@ Routes (mounted by the engine, auto-scoped to the ``image`` capability):
   POST   /api/imagine/file/{name}/rename    - rename an image in place
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. REQUIRES the GUI: ``attach_gui`` must have been called on the app
-(it publishes ``request.app.state.jobs`` / ``.self_url``); when it has not, the
-generate route returns a clear 503 rather than failing obscurely. The backend is
-selected per-plugin (default ComfyUI) and reads this plugin's own config -
+SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
+created by ``attach_engine``, so a headless ``localm serve`` can generate too.
+The one thing it still needs is this server's OWN address, for the chat/media
+VRAM handover; ``resolve_self_url`` derives that from the advertised bind
+coordinates when the GUI never published ``.self_url``, and the generate route
+503s with that specific reason if it genuinely cannot be determined. The backend
+is selected per-plugin (default ComfyUI) and reads this plugin's own config -
 see backend.py. Ships DISABLED by default.
 """
 
@@ -34,6 +37,7 @@ from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.pathsafe import confined_file, confined_name
+from localm.selfclient import resolve_self_url
 from . import backend as _backend
 
 _router = APIRouter()
@@ -93,11 +97,27 @@ async def imagine(req: ImagineRequest, request: Request):
         input_image = media_paths.confined_input_image(req.input_image)
     lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
 
+    # The background-job registry is kernel-level since ADR-0008, so this no
+    # longer needs the GUI. The guard stays, but it now guards a CONSTRUCTION
+    # error rather than a mode: any app built through attach_engine has one, so
+    # reaching this branch means the router was mounted on an app that never ran
+    # it. Keep it a clean 503 rather than the unguarded AttributeError -> opaque
+    # 500 that was audit item 8, and do NOT blame the GUI, which stopped being
+    # the reason.
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
-        raise HTTPException(503, "Image generation needs the localm GUI server "
-                                 "(the background job manager is unavailable).")
-    self_url = getattr(request.app.state, "self_url", "")
+        raise HTTPException(503, "Image generation needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    # What a headless server genuinely may not know is its OWN address, which
+    # the VRAM handover below needs (self_request raises on an empty base_url).
+    # Gate on that, and say so - the old message blamed the GUI's absence, which
+    # stopped being the reason.
+    self_url = resolve_self_url(request.app)
+    if not self_url:
+        raise HTTPException(503, "Image generation needs this server's own "
+                                 "address to free VRAM first, and it could not "
+                                 "be determined.")
 
     images_dir = _images_dir()
     images_dir.mkdir(parents=True, exist_ok=True)
