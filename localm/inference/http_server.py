@@ -591,17 +591,33 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 #    caution on a PROCESS reading (prefer single-resident) is POSSIBLE -
                 #    left out here deliberately, not because the signal is unusable. See
                 #    dev-notes/pr697-followup-review.md.
-                # Residual permit-on-PROCESS OOM risk, and why it is small and accepted:
-                # when this gate STARTS the probe (no concurrent heartbeat), deadline=
-                # _GPU_PROBE_CLI_DEADLINE funds #697's cold device-global source, so
-                # `free` is DEVICE-scoped and correct. When it JOINS a concurrent probe
-                # (the 2500ms /api/stats heartbeat, wait_for_inflight below), it
-                # inherits the STARTER's thinner 4s budget, under which the cold ADL
-                # source is skipped - so for ONE cold cycle the joined reading can be
-                # PROCESS-scoped and the gate may permit on a blind number. It self-
-                # heals: once the ADL source is warm every later reading is DEVICE. This
-                # one-cycle window is an accepted transient (surfaced as a known gap in
-                # the PR), not silently assumed away.
+                # Residual permit-on-PROCESS OOM risk: HISTORICAL, CORRECTED
+                # 2026-08-05 (verified, not assumed - see tests/test_discover.py's
+                # test_no_production_caller_passes_a_short_gpu_probe_deadline). This
+                # paragraph originally said joining a concurrent probe (the 2500ms
+                # /api/stats heartbeat, wait_for_inflight below) inherited the
+                # STARTER's "thinner 4s budget", under which the cold device-global
+                # (ADL) source was skipped, so for one cold cycle the joined reading
+                # could be PROCESS-scoped and the gate might permit on a blind number.
+                # That was accurate when #697/#700/#701 wrote it (2026-07-16), but
+                # #725 (2026-07-17) retired the 4.0s _GPU_PROBE_DEADLINE default in
+                # favour of a single 15.0s value used everywhere - it corrected the
+                # neighbouring paragraph above (about _GPU_PROBE_CLI_DEADLINE's own
+                # history) but never touched this one, though its premise depends on
+                # the exact cap #725 removed. /api/stats's own probe
+                # (localm/sysstats.py's _vram(), the "STARTER" above) calls
+                # vram_capacity() with no explicit deadline, so it now gets the SAME
+                # unified 15.0s default this gate's own _GPU_PROBE_CLI_DEADLINE
+                # resolves to - there is no more "thinner" budget for a join to
+                # inherit, and discover.py's own cold-source-skip guard
+                # (_apply_device_global_free) now matters only to a caller that passes
+                # a deliberately short deadline - no production call site does. So
+                # under real operation a joined reading is DEVICE-scoped just like a
+                # fresh one, and the one-cycle PROCESS-scoped-permit window this used
+                # to describe does not currently occur. The underlying discover.py
+                # guard is untouched and still exists for a future short-deadline
+                # caller, which would reopen this exact gap - the pinned test above
+                # exists so that reintroduction cannot happen silently.
                 # Two states that master conflated under one `measurable` flag, and
                 # they want OPPOSITE handling (AGENTS.md rule 5 - do not collapse a
                 # benign case into an unknown one):
