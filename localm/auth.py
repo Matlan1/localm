@@ -198,6 +198,36 @@ def get_api_key() -> Optional[str]:
     return _read_key_file()
 
 
+def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
+    """The ``Authorization`` header (if any) a self-call or management client
+    should send: the owner key (env, else the persisted ``auth.key``) if one
+    is configured, else *instance_token* in OPEN (keyless) mode, else none.
+
+    This is the precedence every self-authenticated caller of localm's own
+    HTTP surface needs and none may skip: ``_origin_guard``'s open-mode gate
+    (``http_server.py``) requires proof of a local process - a key when one
+    exists, or the per-instance attach token (the 0600 registry file) when it
+    does not - for any unsafe method or metadata GET not listed in
+    ``_CROSS_ORIGIN_OK``. *instance_token* is used ONLY when no key is
+    configured, matching the server's own condition for requiring one at all;
+    a protected-mode server always keeps using the real key.
+
+    Hoisted out of five independent copies of this exact two-line precedence
+    (``selfclient.read_activity``/``self_request``, ``cli/models.py``'s
+    ``unload_cmd``/``stop_cmd``, ``media/comfy_client.py``'s
+    ``_localm_unload``) so there is exactly one place it is written. Returns
+    a plain ``dict`` (empty when neither credential is available) rather than
+    mutating a caller-supplied one, so every call site stays a simple
+    ``headers = resolve_bearer_headers(...)``.
+    """
+    key = get_api_key()
+    if key:
+        return {"Authorization": f"Bearer {key}"}
+    if instance_token:
+        return {"Authorization": f"Bearer {instance_token}"}
+    return {}
+
+
 def set_api_key(key: Optional[str]) -> None:
     """Persist *key* to ``auth.key`` (atomic write, owner-only perms). An empty
     or None *key* clears it, returning the server to open mode.

@@ -539,6 +539,7 @@ def generate_image(
     input_image: Optional[Path] = None,
     denoise: Optional[float] = None,
     localm_url: Optional[str] = None,
+    instance_token: Optional[str] = None,
     max_poll_seconds: int = 600,
     write_sidecar: bool = True,
     launch_cmd: Optional[str] = None,
@@ -621,6 +622,11 @@ def generate_image(
         localm server URL (e.g. ``http://127.0.0.1:8642/v1``) to unload
         before generation so FLUX gets the full VRAM budget.
         Reads ``LOCALM_URL`` env var if None.  Skipped silently when unset.
+    instance_token
+        This server's own attach token, forwarded to the ``localm_url``
+        unload call so it authenticates on a keyless (open-mode) server too -
+        see ``selfclient.self_request``'s docstring. Only used as a fallback
+        when no owner API key is configured.
     max_poll_seconds
         Timeout waiting for ComfyUI to finish (default 10 minutes).
     write_sidecar
@@ -710,7 +716,7 @@ def generate_image(
     # Skipped when the caller decided the media model fits alongside the chat model
     # (swap=False), so the chat model stays hot.
     if swap:
-        _localm_unload(localm_url)
+        _localm_unload(localm_url, instance_token)
 
     # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
     # FIRST (comfy_console_tail_start), so any silent partial-apply warning it

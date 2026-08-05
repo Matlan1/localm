@@ -91,6 +91,28 @@ class TestGenerateMusic:
         assert sidecar["seed"] == 42
         assert sidecar["duration_seconds"] == 90.0
 
+    def test_instance_token_reaches_localm_unload(self, tmp_path):
+        """The music route's instance_token (its own attach token, for
+        keyless-mode auth on the localm_url unload call) must reach
+        _localm_unload, not be silently dropped somewhere between the
+        plug.py route and comfy.py's call site - the fifth site of the
+        credential-precedence class fixed alongside cli/models.py (#1121)
+        and self_request (#1114): generate_music did not even accept an
+        instance_token parameter before this fix."""
+        captured = {}
+        fake = _fake_comfy(captured)
+        unload_spy = MagicMock(return_value=None)
+        with patch.object(comfy, "ensure_comfy",
+                          return_value=(True, "ComfyUI is running.")), \
+             patch.object(comfy, "_localm_unload", unload_spy), \
+             patch.object(comfy.urllib.request, "urlopen", fake), \
+             patch.object(comfy.time, "sleep"):
+            ok, msg = comfy.generate_music(
+                "synthwave, 80s", tmp_path / "out.flac",
+                localm_url="http://127.0.0.1:9/v1", instance_token="tok-abc")
+        assert ok, msg
+        unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
+
     def test_no_lyrics_uses_instrumental_marker(self, tmp_path):
         ok, _, captured = self._run(tmp_path, seed=1)
         assert ok

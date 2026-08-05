@@ -182,6 +182,7 @@ async def imagine(req: ImagineRequest, request: Request):
         ok, message = _backend.generate(
             s, req.prompt, out_path,
             self_url=self_url,
+            instance_token=instance_token,
             # privacy mode: the prompt never touches disk
             write_sidecar=not is_privacy,
             guidance=req.guidance,

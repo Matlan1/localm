@@ -53,19 +53,10 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None) -> tu
     a protected-mode server keeps using the real key, unaffected.
     """
     from localm import tls as _tls
-    from localm.auth import get_api_key
+    from localm.auth import resolve_bearer_headers
 
     url = f"{scheme}://127.0.0.1:{port}/api/activity"
-    headers = {}
-    # env var, else the persisted <home>/auth.key. Reading the env ONLY is the
-    # bug `localm unload` and `localm stop` still carry: a `localm key generate`
-    # or launcher-keyed server keeps its key in auth.key, so an env-only client
-    # 401s against exactly the servers a user is most likely to be running.
-    key = get_api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    elif instance_token:
-        headers["Authorization"] = f"Bearer {instance_token}"
+    headers = resolve_bearer_headers(instance_token)
     try:
         r = requests.get(url, headers=headers, timeout=5,
                          verify=_tls.requests_verify(url))
@@ -149,13 +140,8 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     """
     if not base_url:
         raise ValueError("self_request: base_url is required")
-    headers = {}
-    from localm.auth import get_api_key
-    key = get_api_key()          # env var, else the persisted <home>/auth.key
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    elif instance_token:
-        headers["Authorization"] = f"Bearer {instance_token}"
+    from localm.auth import resolve_bearer_headers
+    headers = resolve_bearer_headers(instance_token)
     from localm import tls as _tls
     url = f"{base_url}{path}"
     return requests.request(method, url, json=json, headers=headers,

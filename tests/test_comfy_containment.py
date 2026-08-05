@@ -28,6 +28,7 @@ import threading
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -531,6 +532,31 @@ def test_generate_image_default_keeps_comfy_copy(stub, tmp_path, monkeypatch):
     assert list(stub.output_dir.glob("ComfyUI_*"))        # ComfyUI copy KEPT
     assert not stub.history_deleted                       # history NOT cleared
     assert "WARNING" not in msg
+
+
+def test_generate_image_threads_instance_token_to_unload(stub, tmp_path, monkeypatch):
+    """The instance_token the image route resolved from its own app state (for
+    keyless-mode auth on the localm_url unload call) must actually reach
+    _localm_unload, not be silently dropped somewhere between the plug.py
+    route and comfy.py's call site - the fifth site of the credential-
+    precedence class fixed alongside cli/models.py (#1121) and self_request
+    (#1114): generate_image did not even accept an instance_token parameter
+    before this fix, so the fallback was unreachable no matter what the route
+    resolved."""
+    monkeypatch.setattr(comfy, "workflow_path",
+                        lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    unload_spy = MagicMock(return_value=None)
+    out = tmp_path / "saved" / "img.png"
+
+    with patch.object(comfy, "_localm_unload", unload_spy):
+        ok, msg = comfy.generate_image(
+            "a cat", out, api_url=stub.base_url,
+            comfy_output_dir=str(stub.output_dir), write_sidecar=False,
+            localm_url="http://127.0.0.1:9/v1", instance_token="tok-abc",
+        )
+
+    assert ok, msg
+    unload_spy.assert_called_once_with("http://127.0.0.1:9/v1", "tok-abc")
 
 
 def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):

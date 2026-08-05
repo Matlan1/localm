@@ -8,11 +8,27 @@ and on a built-in-TLS (https) loopback self-call it must trust the install's
 own CA. An earlier version used a bare ``urllib`` POST with neither, so the
 unload silently 401'd / SSL-failed, the chat model stayed resident, and the
 media model loaded on top of it and hung the GPU driver (AMD TDR).
+
+Also covers the OPEN-MODE (keyless) fallback: this was the fifth site of the
+credential-precedence class fixed alongside self_request (#1114) and
+cli/models.py's unload_cmd/stop_cmd (#1121) - _localm_unload read only
+LOCALM_API_KEY from the environment and had no instance_token parameter at
+all, so a genuinely open server's own fallback unload could never
+authenticate. TestUnloadRealHttpOpenMode drives the real _origin_guard gate,
+mirroring tests/test_vram_handover_open_mode_auth.py's proof for the primary
+(vram.unload_chat_for_media) path.
 """
 
+import asyncio
+import socket as _socket
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
+import uvicorn
+
 from localm.image_gen import comfy
+from localm.inference.http_server import create_app
 
 
 def _resp(ok=True, payload=None):
@@ -69,3 +85,107 @@ def test_unload_swallows_failure(monkeypatch):
     with patch("requests.post", side_effect=RuntimeError("boom")), \
          patch("localm.tls.requests_verify", return_value=True):
         assert comfy._localm_unload("http://127.0.0.1:8642/v1") is None
+
+
+def test_unload_uses_instance_token_when_no_key_configured(monkeypatch):
+    """#1121-class fix: in open (keyless) mode, the caller's own instance
+    token is sent in place of a key - mirrors self_request's
+    test_open_mode_uses_instance_token_when_no_key_configured."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    captured = {}
+
+    def fake_post(url, headers=None, timeout=None, verify=None):
+        captured.update(headers=headers or {})
+        return _resp()
+
+    with patch("requests.post", side_effect=fake_post), \
+         patch("localm.tls.requests_verify", return_value=True):
+        comfy._localm_unload("http://127.0.0.1:8642/v1", "inst-token-abc")
+
+    assert captured["headers"]["Authorization"] == "Bearer inst-token-abc"
+
+
+def test_unload_owner_key_still_wins_over_instance_token(monkeypatch):
+    monkeypatch.setenv("LOCALM_API_KEY", "secret-key")
+    captured = {}
+
+    def fake_post(url, headers=None, timeout=None, verify=None):
+        captured.update(headers=headers or {})
+        return _resp()
+
+    with patch("requests.post", side_effect=fake_post), \
+         patch("localm.tls.requests_verify", return_value=True):
+        comfy._localm_unload("http://127.0.0.1:8642/v1", "inst-token-abc")
+
+    assert captured["headers"]["Authorization"] == "Bearer secret-key"
+
+
+# --------------------------------------------------------------------------- #
+#  Real HTTP: the actual _origin_guard gate, open (keyless) mode              #
+# --------------------------------------------------------------------------- #
+
+def _wait_sync(cond, want=True, timeout: float = 6.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if bool(cond()) == want:
+            return True
+        time.sleep(0.02)
+    return bool(cond()) == want
+
+
+def _real_open_mode_server():
+    """A real uvicorn instance, open (keyless) mode, with app.state.instance_token
+    set the way instances.advertise() sets it in production - mirrors
+    test_vram_handover_open_mode_auth.py's helper for the primary VRAM-handover
+    path, applied here to the fallback unload."""
+    app = create_app(None)
+    app.state.instance_token = "test-instance-token-abcdef123456"
+
+    lsock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    lsock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    lsock.bind(("127.0.0.1", 0))
+    port = lsock.getsockname()[1]
+
+    config = uvicorn.Config(app, log_level="warning", lifespan="on")
+    server = uvicorn.Server(config)
+
+    def _serve():
+        asyncio.run(server.serve(sockets=[lsock]))
+
+    th = threading.Thread(target=_serve, daemon=True)
+    th.start()
+    assert _wait_sync(lambda: server.started, True, 10.0), "uvicorn did not start"
+    return app, port, server, th
+
+
+def _shutdown(server, th):
+    server.should_exit = True
+    th.join(timeout=5.0)
+
+
+class TestUnloadRealHttpOpenMode:
+    def test_instance_token_gets_past_origin_guard(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        app, port, server, th = _real_open_mode_server()
+        try:
+            url = f"http://127.0.0.1:{port}/v1"
+            out = comfy._localm_unload(url, app.state.instance_token)
+            assert out is not None, (
+                "the real open-mode server refused the unload call despite "
+                "a valid instance_token - the fallback credential never "
+                "reached the wire")
+        finally:
+            _shutdown(server, th)
+
+    def test_no_token_still_403s_and_returns_none(self, monkeypatch):
+        """Sanity/negative: the gate is not bypassable by omitting the
+        credential either - proves the previous test's success is really
+        about the instance_token, not the gate being permissive."""
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        app, port, server, th = _real_open_mode_server()
+        try:
+            url = f"http://127.0.0.1:{port}/v1"
+            out = comfy._localm_unload(url, None)
+            assert out is None
+        finally:
+            _shutdown(server, th)

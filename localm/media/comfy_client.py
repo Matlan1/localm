@@ -656,19 +656,27 @@ def describe_missing_models(workflow: dict, api_url: str) -> list:
 #  VRAM management
 # ---------------------------------------------------------------------------
 
-def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
+def _localm_unload(localm_url: Optional[str] = None,
+                    instance_token: Optional[str] = None) -> Optional[dict]:
     """
     Ask a localm server to release its model from GPU memory.
 
     Reads LOCALM_URL from the environment if *localm_url* is not given, and
-    authenticates with the LOCALM_API_KEY bearer token when one is set. The
-    ``/v1/models/unload`` endpoint requires the models-write scope, so an
+    authenticates via ``auth.resolve_bearer_headers`` (the owner key - env,
+    else the persisted ``auth.key`` - or, in open/keyless mode, *instance_token*).
+    The ``/v1/models/unload`` endpoint requires the models-write scope, so an
     UNAUTHENTICATED POST is rejected with 401 and the chat model stays resident
     in VRAM - the media model then loads on top of it, exceeds total VRAM and
     hangs the GPU driver (the AMD TDR the user hit). For the same reason the
     built-in TLS cert of a loopback ``https`` self-call must be trusted, exactly
     as the media-job model reload does (``localm.tls.requests_verify``); plain
     ``urllib`` would reject the self-signed cert and silently skip the unload.
+
+    *instance_token*: this is a FALLBACK path, reached only when the primary,
+    already-authenticated ``vram.unload_chat_for_media`` call (which threads
+    the same instance token) reported failure. A genuinely open (keyless)
+    server still needs a credential here for the same reason it needs one on
+    the primary path - see ``selfclient.self_request``'s docstring.
 
     Silent no-op when the URL is unset. Returns the server's JSON result
     (``status``, plus ``vram_freed`` / ``vram_before_bytes`` /
@@ -688,10 +696,8 @@ def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
         import requests as _rq
 
         from localm import tls as _tls
-        headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+        from localm.auth import resolve_bearer_headers
+        headers = resolve_bearer_headers(instance_token)
         # Unload waits for any in-flight generation to finish AND for VRAM to be
         # actually reclaimed before it returns (it must not free the context
         # mid-decode), so give it time.
