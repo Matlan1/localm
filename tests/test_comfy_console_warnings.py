@@ -5,6 +5,17 @@ execution_error - ComfyUI logs a console warning and the run still "succeeds".
 Covers the pure capture mechanism in comfy_client.py (comfy_launch_log_path /
 comfy_console_tail_start / comfy_console_warnings_since) and its wiring into
 generate_image()'s returned message + reproducibility sidecar.
+
+Also covers three defects an adversarial review found in the first version of
+this mechanism, all fixed here: (1) comfy_launch_log_path() was one path
+shared by every localm-launched ComfyUI instance, corrupting/misattributing
+across independently-configured image/video/music instances; (2) the
+liveness-only spawned_pid() guard could not tell "still the same process" from
+"died and got relaunched under the same api_url", silently reading a truncated
+or wrong-generation log; (3) comfy_console_checked was derived from whether an
+offset was captured before submission, not from whether the read after
+polling actually happened, reintroducing the exact "checked vs could not
+check" ambiguity the field exists to eliminate.
 """
 
 import json
@@ -35,17 +46,38 @@ class _FakeProc:
         return None if self._alive else 0
 
 
+URL = "http://127.0.0.1:8188"
+URL_2 = "http://127.0.0.1:8288"  # a DIFFERENT localm-launched ComfyUI instance
+
+
 @pytest.fixture
 def spawned():
     """Register a fake localm-launched ComfyUI process so spawned_pid() /
     comfy_console_tail_start() treat it as ours, and drop the registration
     afterwards - _spawned_procs is module-level global state shared across
     the whole test session (see test_stopcomfy_2026_07_01.py), so a test
-    that forgets to clean up leaks into whichever test runs next."""
-    url = "http://127.0.0.1:8188"
-    cc._remember_spawned(url, _FakeProc())
-    yield url
-    cc._take_spawned(url)
+    that forgets to clean up leaks into whichever test runs next. Yields the
+    url."""
+    cc._remember_spawned(URL, _FakeProc(pid=4321))
+    yield URL
+    cc._take_spawned(URL)
+
+
+class TestLaunchLogPathScoping:
+    """The HIGH-severity finding: one shared log path corrupts/misattributes
+    across independently self-launched ComfyUI instances (image/video/music
+    can each point at a different api_url)."""
+
+    def test_different_urls_get_different_paths(self):
+        p1 = cc.comfy_launch_log_path(URL)
+        p2 = cc.comfy_launch_log_path(URL_2)
+        assert p1 != p2
+
+    def test_same_url_is_deterministic(self):
+        assert cc.comfy_launch_log_path(URL) == cc.comfy_launch_log_path(URL)
+
+    def test_trailing_slash_does_not_change_the_path(self):
+        assert cc.comfy_launch_log_path(URL) == cc.comfy_launch_log_path(URL + "/")
 
 
 class TestConsoleTailStart:
@@ -54,89 +86,155 @@ class TestConsoleTailStart:
         # offset should be trusted as meaningful.
         assert cc.comfy_console_tail_start("http://127.0.0.1:19999") is None
 
-    def test_offset_is_current_log_size(self, spawned):
-        log = cc.comfy_launch_log_path()
+    def test_offset_and_pid_captured(self, spawned):
+        log = cc.comfy_launch_log_path(spawned)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(b"already here\n")
-        assert cc.comfy_console_tail_start(spawned) == len(b"already here\n")
+        tail = cc.comfy_console_tail_start(spawned)
+        assert tail.offset == len(b"already here\n")
+        assert tail.pid == 4321
 
     def test_none_when_log_file_absent(self, spawned):
         # spawned but nothing has ever been logged (fresh LOCALM_HOME) -
-        # .stat() raises FileNotFoundError; must fail closed to None, not 0
-        # (0 would look like a valid, empty-so-far log).
-        assert not cc.comfy_launch_log_path().exists()
+        # .stat() raises FileNotFoundError; must fail closed to None, not an
+        # offset of 0 (0 would look like a valid, empty-so-far log).
+        assert not cc.comfy_launch_log_path(spawned).exists()
         assert cc.comfy_console_tail_start(spawned) is None
 
 
 class TestConsoleWarningsSince:
-    def test_no_offset_short_circuits(self, spawned):
-        assert cc.comfy_console_warnings_since(spawned, None) == []
-
-    def test_not_localm_launched_short_circuits(self):
-        # Even given a real-looking offset, no spawned_pid means there is no
-        # process localm can attribute that offset to.
-        assert cc.comfy_console_warnings_since("http://127.0.0.1:19999", 0) == []
-
-    def test_matches_known_pattern_with_count(self, spawned):
-        log = cc.comfy_launch_log_path()
+    @staticmethod
+    def _fresh_log(url):
+        log = cc.comfy_launch_log_path(url)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(b"")
-        offset = cc.comfy_console_tail_start(spawned)
-        with open(log, "a", encoding="utf-8") as f:
+
+    def test_no_tail_short_circuits(self, spawned):
+        assert cc.comfy_console_warnings_since(spawned, None) == (False, [])
+
+    def test_not_localm_launched_short_circuits(self):
+        # Even given a real-looking tail token, no spawned_pid means there is
+        # no process localm can attribute it to.
+        fake_tail = cc.ComfyConsoleTail(offset=0, pid=999999)
+        assert cc.comfy_console_warnings_since(
+            "http://127.0.0.1:19999", fake_tail) == (False, [])
+
+    def test_matches_known_pattern_with_count(self, spawned):
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
             for _ in range(3):
                 f.write("WARNING:root:lora key not loaded: lora_unet_x\n")
-        result = cc.comfy_console_warnings_since(spawned, offset)
-        assert result == [
+        checked, warnings = cc.comfy_console_warnings_since(spawned, tail)
+        assert checked is True
+        assert warnings == [
             "a LoRA patch key did not match the model and was skipped (x3)"]
 
     def test_ignores_content_before_the_offset(self, spawned):
         """The exact scenario the offset exists for: a PRIOR generation's own
         warning must not bleed into the NEXT generation's report."""
-        log = cc.comfy_launch_log_path()
+        log = cc.comfy_launch_log_path(spawned)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("lora key not loaded: pre-existing noise\n", encoding="utf-8")
-        offset = cc.comfy_console_tail_start(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
         with open(log, "a", encoding="utf-8") as f:
             f.write("nothing interesting here\n")
-        assert cc.comfy_console_warnings_since(spawned, offset) == []
+        assert cc.comfy_console_warnings_since(spawned, tail) == (True, [])
 
     def test_multiple_distinct_patterns(self, spawned):
-        log = cc.comfy_launch_log_path()
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_bytes(b"")
-        offset = cc.comfy_console_tail_start(spawned)
-        with open(log, "a", encoding="utf-8") as f:
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
             f.write("lora key not loaded: a\n")
             f.write("Missing VAE keys ['x', 'y']\n")
             f.write("Missing VAE keys ['z']\n")
-        result = cc.comfy_console_warnings_since(spawned, offset)
-        assert "a LoRA patch key did not match the model and was skipped" in result
-        assert "some VAE weights were not found in the checkpoint (x2)" in result
+        checked, warnings = cc.comfy_console_warnings_since(spawned, tail)
+        assert checked is True
+        assert "a LoRA patch key did not match the model and was skipped" in warnings
+        assert "some VAE weights were not found in the checkpoint (x2)" in warnings
 
-    def test_no_match_returns_empty(self, spawned):
+    def test_pattern_must_not_straddle_two_lines(self, spawned):
+        """The LOW-severity anchoring fix: a pattern split across a line
+        break (an artifact of byte-offset slicing, not a real single-line
+        console message) must not count as a match."""
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
+            f.write("lora key not loaded\n")  # deliberately NOT "unet missing:"
+            f.write("unet missing")            # split across the line break
+            f.write("\n: on the next line, should not match\n")
+        checked, warnings = cc.comfy_console_warnings_since(spawned, tail)
+        assert checked is True
+        assert warnings == [
+            "a LoRA patch key did not match the model and was skipped"]
+
+    def test_no_match_returns_empty_but_checked(self, spawned):
         """The fires-control for every test above: ordinary ComfyUI startup
-        chatter must never be mistaken for a silent-partial-apply warning."""
-        log = cc.comfy_launch_log_path()
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_bytes(b"")
-        offset = cc.comfy_console_tail_start(spawned)
-        with open(log, "a", encoding="utf-8") as f:
+        chatter must never be mistaken for a silent-partial-apply warning -
+        but the read DID happen, so checked must be True."""
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
             f.write("Total VRAM 24576 MB, total RAM 65536 MB\n")
             f.write("got prompt\n")
-        assert cc.comfy_console_warnings_since(spawned, offset) == []
+        assert cc.comfy_console_warnings_since(spawned, tail) == (True, [])
 
-    def test_process_gone_before_check_yields_empty(self, spawned):
-        """If the process we were tailing was stopped/replaced mid-window,
-        whatever the log holds past the offset is no longer attributable to
-        the generation being asked about - must not report it anyway."""
-        log = cc.comfy_launch_log_path()
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_bytes(b"")
-        offset = cc.comfy_console_tail_start(spawned)
-        with open(log, "a", encoding="utf-8") as f:
+    def test_process_gone_before_check_yields_unchecked(self, spawned):
+        """If the process we were tailing was stopped and never replaced,
+        checked must be False - the window was never actually read."""
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
             f.write("lora key not loaded: a\n")
         cc._take_spawned(spawned)
-        assert cc.comfy_console_warnings_since(spawned, offset) == []
+        assert cc.comfy_console_warnings_since(spawned, tail) == (False, [])
+
+    def test_relaunch_with_new_pid_yields_unchecked_not_a_false_clean(self, spawned):
+        """The MEDIUM-severity identity-check fix: the ORIGINAL process dies
+        and a DIFFERENT one gets launched for the SAME api_url before the
+        read happens (ensure_comfy's fresh "w" open truncates the log and
+        re-registers a new pid under the same _spawned_procs[api_url] key).
+        A liveness-only check ("is spawned_pid() not None") would wrongly
+        pass here and either silently under-report (seek past a truncated
+        file) or misattribute the new process's own output. The identity
+        check (tail.pid == the CURRENT spawned_pid) must catch it and report
+        unchecked, not a false all-clear."""
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        assert tail.pid == 4321
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
+            f.write("lora key not loaded: a genuine warning about to be lost\n")
+        # Simulate ensure_comfy relaunching for the SAME api_url: a fresh
+        # spawn re-registers a NEW pid and (in real code) truncates the log.
+        cc._remember_spawned(spawned, _FakeProc(pid=9999))
+        cc.comfy_launch_log_path(spawned).write_bytes(b"")  # the real "w" reopen
+        assert cc.comfy_console_warnings_since(spawned, tail) == (False, [])
+        cc._take_spawned(spawned)  # extra cleanup: this test re-registered mid-run
+
+    def test_independent_instances_do_not_cross_contaminate(self, spawned):
+        """Companion to TestLaunchLogPathScoping: two DIFFERENT api_urls
+        (e.g. image on :8188, video on :8288) must read from - and only
+        from - their own log file."""
+        cc._remember_spawned(URL_2, _FakeProc(pid=5555))
+        try:
+            self._fresh_log(spawned)
+            self._fresh_log(URL_2)
+            tail_1 = cc.comfy_console_tail_start(spawned)
+            tail_2 = cc.comfy_console_tail_start(URL_2)
+            with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
+                f.write("lora key not loaded: from instance 1\n")
+            with open(cc.comfy_launch_log_path(URL_2), "a", encoding="utf-8") as f:
+                f.write("Missing VAE keys ['from instance 2']\n")
+            checked_1, warnings_1 = cc.comfy_console_warnings_since(spawned, tail_1)
+            checked_2, warnings_2 = cc.comfy_console_warnings_since(URL_2, tail_2)
+            assert checked_1 is True
+            assert warnings_1 == [
+                "a LoRA patch key did not match the model and was skipped"]
+            assert checked_2 is True
+            assert warnings_2 == [
+                "some VAE weights were not found in the checkpoint"]
+        finally:
+            cc._take_spawned(URL_2)
 
 
 class TestComfyConsoleWarningWiring:
@@ -165,7 +263,7 @@ class TestComfyConsoleWarningWiring:
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art.png"
-        log = cc.comfy_launch_log_path()
+        log = cc.comfy_launch_log_path(spawned)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(b"")
 
@@ -211,7 +309,7 @@ class TestComfyConsoleWarningWiring:
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art2.png"
-        log = cc.comfy_launch_log_path()
+        log = cc.comfy_launch_log_path(spawned)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(b"")
 

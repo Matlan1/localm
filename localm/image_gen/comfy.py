@@ -771,11 +771,15 @@ def generate_image(
     # VAE/UNet keys, ...) is not an execution_error to ComfyUI, only a console
     # warning, and the run still "succeeds" with that component silently
     # under-applied. Check for any KNOWN warning of that shape printed while
-    # THIS prompt ran (see NEW-COMFY-SILENT-PARTIAL-APPLY); [] both when none
-    # occurred and when localm has no process to check (remote/pre-existing
-    # ComfyUI) - that ambiguity is real and is spelled out in the sidecar
-    # field's own docstring below, not papered over here.
-    comfy_console_warnings = comfy_console_warnings_since(api_url, console_tail_start)
+    # THIS prompt ran (see NEW-COMFY-SILENT-PARTIAL-APPLY). console_checked
+    # reflects whether a real read actually happened just now - NOT whether
+    # console_tail_start found a process before the prompt was even submitted
+    # - because the process can die/be replaced for the same api_url in
+    # between, which comfy_console_warnings_since detects and refuses to read
+    # past. Only console_checked, not console_tail_start's mere presence, may
+    # drive the sidecar's comfy_console_checked below.
+    console_checked, comfy_console_warnings = comfy_console_warnings_since(
+        api_url, console_tail_start)
 
     # status == POLL_FINISHED: find the first SaveImage output (presence-based,
     # matching the original loop - the first node carrying an "images" entry wins).
@@ -819,6 +823,9 @@ def generate_image(
         # (write_sidecar=False) - the prompt then never touches disk. A write
         # failure is surfaced (not silent): the success message promises the
         # reproducibility the sidecar provides.
+        comfy_console_warning_text = ("; ".join(comfy_console_warnings)
+                                      if comfy_console_warnings else None)
+
         sidecar_warning = ""
         if write_sidecar:
             sidecar_warning = _write_image_sidecar(
@@ -836,17 +843,16 @@ def generate_image(
                 clip_name1=clip_name1,
                 clip_name2=clip_name2,
                 start_time=start_time,
-                comfy_console_warning=("; ".join(comfy_console_warnings)
-                                       if comfy_console_warnings else None),
-                comfy_console_checked=console_tail_start is not None,
+                comfy_console_warning=comfy_console_warning_text,
+                comfy_console_checked=console_checked,
             )
 
         comfy_warning = (
             "WARNING: ComfyUI's own console reported: "
-            + "; ".join(comfy_console_warnings)
+            + comfy_console_warning_text
             + ". The generation still completed, but the requested LoRA/model "
               "weights may not have fully applied - see comfy-launch.log."
-        ) if comfy_console_warnings else ""
+        ) if comfy_console_warning_text else ""
 
         combined = "\n".join(w for w in (strip_warning, contain_warning, comfy_warning,
                                          sidecar_warning) if w)
