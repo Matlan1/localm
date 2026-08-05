@@ -611,7 +611,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         from localm.config import home_dir
         from localm.selfclient import read_activity
 
-        rows = instances.snapshot(home_dir())
+        # include_token=True: this call ASKS each discovered instance over HTTP
+        # (an internal, non-display use), so it needs the attach token a
+        # genuinely open (keyless) instance's middleware requires (#953) - never
+        # do this for anything a human reads (e.g. `localm ps`, which keeps the
+        # default-stripped snapshot()).
+        rows = instances.snapshot(home_dir(), include_token=True)
         if not rows:
             return _text_result(
                 "No localm server is running on this machine, so there is "
@@ -624,7 +629,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 lines.append(f"{where}: registered but not responding; "
                              f"its activity is unknown.")
                 continue
-            state, payload = read_activity(e.get("scheme", "http"), e.get("port"))
+            state, payload = read_activity(
+                e.get("scheme", "http"), e.get("port"), e.get("token"))
             if state == "unreachable":
                 lines.append(f"{where}: could not be reached ({payload}); "
                              f"its activity is unknown.")

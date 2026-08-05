@@ -36,6 +36,17 @@ def test_snapshot_empty(tmp_path):
     assert instances.snapshot(tmp_path, reap=False) == []
 
 
+def test_snapshot_include_token_keeps_it(tmp_path):
+    """#953: an INTERNAL caller (the MCP server_activity tool) needs the attach
+    token to authenticate its own request to a genuinely open instance - the
+    opt-in companion to the strip-by-default case above. Never used for
+    anything a human reads."""
+    _register(tmp_path, port=8642, root=str(tmp_path / "a"), iid="aaaa1111")
+    rows = instances.snapshot(tmp_path, reap=False, include_token=True)
+    assert len(rows) == 1
+    assert rows[0]["token"] == "secret-aaaa1111"
+
+
 def test_ps_empty(monkeypatch):
     monkeypatch.setattr(instances, "snapshot", lambda *a, **k: [])
     res = CliRunner().invoke(main, ["ps"])
@@ -71,6 +82,25 @@ def test_status_found(monkeypatch):
     assert res.exit_code == 0
     assert "8642" in res.output
     assert "full" in res.output
+
+
+def test_status_passes_the_registry_token_to_activity(monkeypatch):
+    """#953: `localm status` must thread the instance's own attach token
+    through to read_activity, or a genuinely open server has no way to prove
+    this is a local process and 403s the activity read."""
+    monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: {
+        "scheme": "http", "host": "127.0.0.1", "port": 8642, "mode": "full",
+        "pid": 4321, "version": "0.1.0", "token": "the-attach-token"})
+    captured = {}
+
+    def _fake_read_activity(scheme, port, instance_token=None):
+        captured["instance_token"] = instance_token
+        return "ok", {"now": 1.0, "operations": []}
+
+    monkeypatch.setattr("localm.cli.models.read_activity", _fake_read_activity)
+    res = CliRunner().invoke(main, ["status"])
+    assert res.exit_code == 0
+    assert captured["instance_token"] == "the-attach-token"
 
 
 # ------------------------------------------------------------------ #

@@ -534,9 +534,9 @@ def _fmt_age(seconds) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
-def _print_activity(scheme: str, port) -> None:
+def _print_activity(scheme: str, port, instance_token=None) -> None:
     """Render what the server is doing, or why that could not be determined."""
-    state, payload = read_activity(scheme, port)
+    state, payload = read_activity(scheme, port, instance_token)
     console.print()
     if state == "unreachable":
         console.print("[yellow]![/yellow]  Could not ask this server what it is "
@@ -607,7 +607,7 @@ def status_cmd(project):
     # fixed at process start; none of it can tell you a model pull is halfway
     # through. Printed last so the identity block still renders when the server
     # cannot be reached.
-    _print_activity(scheme, entry.get("port"))
+    _print_activity(scheme, entry.get("port"), entry.get("token"))
     console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 

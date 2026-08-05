@@ -90,6 +90,56 @@ def test_an_empty_list_is_a_real_answer(monkeypatch):
     assert body["operations"] == []
 
 
+# --------------------------------------------------------- #953 attach token
+
+def test_instance_token_used_when_no_api_key(monkeypatch):
+    """A genuinely open server has no API key to send, so the caller's only
+    proof of being a local process is the instance's own attach token (the
+    0600 registry file's 'token' field) - without it, #953's B1/B2/E3 defect
+    reappears (a wrong "needs a key" 403 on the default, keyless install)."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    captured = {}
+
+    def _get(url, headers=None, **kw):
+        captured["headers"] = headers
+        return _Resp(200, {"now": 1.0, "operations": []})
+    monkeypatch.setattr(requests, "get", _get)
+
+    state, _ = read_activity("http", 1234, "the-instance-token")
+    assert state == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer the-instance-token"
+
+
+def test_api_key_still_wins_over_instance_token(monkeypatch):
+    """A protected (keyed) server keeps using the real owner key - the instance
+    token is a fallback for open mode only, never a competing credential."""
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-secret")
+    captured = {}
+
+    def _get(url, headers=None, **kw):
+        captured["headers"] = headers
+        return _Resp(200, {"now": 1.0, "operations": []})
+    monkeypatch.setattr(requests, "get", _get)
+
+    read_activity("http", 1234, "the-instance-token")
+    assert captured["headers"]["Authorization"] == "Bearer owner-secret"
+
+
+def test_no_instance_token_and_no_key_sends_no_auth_header(monkeypatch):
+    """Unchanged pre-fix behaviour when the caller genuinely has neither (e.g.
+    an older client, or a direct-path run with no registry entry)."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    captured = {}
+
+    def _get(url, headers=None, **kw):
+        captured["headers"] = headers
+        return _Resp(200, {"now": 1.0, "operations": []})
+    monkeypatch.setattr(requests, "get", _get)
+
+    read_activity("http", 1234)
+    assert "Authorization" not in captured["headers"]
+
+
 # ------------------------------------------------------------- what prints
 
 def _out(capsys):
