@@ -1,10 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI job routes: the SSE event stream and cancel for background jobs.
+"""Background-job routes: discover what is running, stream one, cancel one.
 
-Extracted verbatim from attach_gui(); behavior unchanged. The background
-``JobManager`` is unpacked from the register ``ctx`` into ``jobs`` once at the top
-of register(), so each handler body is identical to the original. These stay in
-the kernel GUI so every plugin's jobs stream through the one shared manager.
+  GET  /api/activity              - what this server is doing (no id needed)
+  GET  /api/jobs/{id}/events      - stream one job (SSE)
+  POST /api/jobs/{id}/cancel      - cancel one job
+
+KERNEL routes, despite the path this module still sits at. They are registered
+from ``attach_engine``, not ``attach_gui``, so a headless ``localm serve``
+answers them too (ADR-0008); the package location is historical and moving it
+would churn six test modules for no behaviour change. ``register()`` therefore
+takes the ``JobManager`` directly rather than the GUI's ``ctx`` namespace,
+unlike the sibling route groups here.
+
+/api/activity is the only one that does not need an id the caller already
+holds, which is the whole reason it exists: a job id is handed out once, in the
+body of the POST that started the job, so a second client or a reloaded tab had
+no way to reach state the server was recording all along.
 """
 
 from __future__ import annotations
