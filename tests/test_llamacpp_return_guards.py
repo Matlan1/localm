@@ -76,22 +76,25 @@ class TestApplyTemplateEmptyRenderGuard:
     def test_zero_render_first_call_falls_back_to_chatml(self):
         mock_api = self._mock_api([0])
         with patch(_LLAMA_API, mock_api):
-            out = _apply_model_template(1, self._MSGS)
+            out, reason = _apply_model_template(1, self._MSGS)
         assert out == _format_chatml(self._MSGS)
+        assert reason
 
     def test_negative_first_call_still_falls_back(self):
         mock_api = self._mock_api([-1])
         with patch(_LLAMA_API, mock_api):
-            out = _apply_model_template(1, self._MSGS)
+            out, reason = _apply_model_template(1, self._MSGS)
         assert out == _format_chatml(self._MSGS)
+        assert reason
 
     def test_zero_render_after_realloc_falls_back_to_chatml(self):
         # First call: needed (10000) exceeds the initial buffer, forcing the
         # realloc + retry; the retry then renders nothing.
         mock_api = self._mock_api([10000, 0])
         with patch(_LLAMA_API, mock_api):
-            out = _apply_model_template(1, self._MSGS)
+            out, reason = _apply_model_template(1, self._MSGS)
         assert out == _format_chatml(self._MSGS)
+        assert reason
         assert mock_api.llama_chat_apply_template.call_count == 2
 
     def test_realloc_success_unchanged(self):
@@ -109,15 +112,17 @@ class TestApplyTemplateEmptyRenderGuard:
 
         mock_api.llama_chat_apply_template.side_effect = fake_apply
         with patch(_LLAMA_API, mock_api):
-            out = _apply_model_template(1, self._MSGS)
+            out, reason = _apply_model_template(1, self._MSGS)
         assert out == "RENDERED PROMPT"
+        assert reason is None
 
     def test_no_embedded_template_falls_back(self):
         mock_api = MagicMock()
         mock_api.llama_model_chat_template.return_value = None
         with patch(_LLAMA_API, mock_api):
-            out = _apply_model_template(1, self._MSGS)
+            out, reason = _apply_model_template(1, self._MSGS)
         assert out == _format_chatml(self._MSGS)
+        assert reason
         mock_api.llama_chat_apply_template.assert_not_called()
 
 
@@ -129,7 +134,15 @@ class TestApplyTemplateFallbackIsSurfaced:
     no log, no error - so a model fed an out-of-distribution prompt it was
     never fine-tuned on gave no signal why its output degenerated. Confirmed
     root cause of moondream2 producing garbage/hallucinated RAG image
-    descriptions during a RELEASE.md verification pass."""
+    descriptions during a RELEASE.md verification pass.
+
+    The debug-log assertions below were the ORIGINAL, and only, test for this
+    fix (PR #705) - and they were insufficient: debuglog.logger's file handler
+    only exists under --debug, so a real user never saw this warning despite
+    it "logging a warning" here successfully. The fix now also RETURNS the
+    reason (asserted below) so a caller can propagate it to a channel visible
+    without --debug; see tests/test_chatml_fallback_visibility.py for the
+    full worker -> runner -> backend -> console path this return value feeds."""
 
     _MSGS = [{"role": "user", "content": "hi"}]
 
@@ -138,8 +151,9 @@ class TestApplyTemplateFallbackIsSurfaced:
         mock_api.llama_model_chat_template.return_value = None
         with caplog.at_level("WARNING", logger="localm"):
             with patch(_LLAMA_API, mock_api):
-                _apply_model_template(1, self._MSGS)
+                _prompt, reason = _apply_model_template(1, self._MSGS)
         assert any("chat template not recognized" in r.message for r in caplog.records)
+        assert reason, "the reason must also be RETURNED, not only logged"
 
     def test_unrecognized_template_logs_a_warning(self, caplog):
         mock_api = MagicMock()
@@ -147,8 +161,9 @@ class TestApplyTemplateFallbackIsSurfaced:
         mock_api.llama_chat_apply_template.return_value = -1
         with caplog.at_level("WARNING", logger="localm"):
             with patch(_LLAMA_API, mock_api):
-                _apply_model_template(1, self._MSGS)
+                _prompt, reason = _apply_model_template(1, self._MSGS)
         assert any("chat template not recognized" in r.message for r in caplog.records)
+        assert reason, "the reason must also be RETURNED, not only logged"
 
     def test_a_recognized_template_logs_nothing(self, caplog):
         mock_api = MagicMock()
@@ -162,6 +177,7 @@ class TestApplyTemplateFallbackIsSurfaced:
         mock_api.llama_chat_apply_template.side_effect = fake_apply
         with caplog.at_level("WARNING", logger="localm"):
             with patch(_LLAMA_API, mock_api):
-                out = _apply_model_template(1, self._MSGS)
+                out, reason = _apply_model_template(1, self._MSGS)
         assert out == "RENDERED PROMPT"
+        assert reason is None
         assert not any("chat template not recognized" in r.message for r in caplog.records)

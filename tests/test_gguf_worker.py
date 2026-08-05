@@ -140,7 +140,7 @@ class TestTokenisation:
         w = _worker(str(tmp_path / "m.gguf"))
         w._llm = _StubLlm(tokens=[1, 2, 3])
         with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
-                   return_value="<|im_start|>user\nhi<|im_end|>\n") as fake_template:
+                   return_value=("<|im_start|>user\nhi<|im_end|>\n", None)) as fake_template:
             count = w.count_messages_tokens([{"role": "user", "content": "hi"}])
         assert count == 3
         args, _ = fake_template.call_args
@@ -156,7 +156,7 @@ class TestTokenisation:
             {"type": "text", "text": "part two"},
         ]}]
         with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
-                   return_value="prompt") as fake_template:
+                   return_value=("prompt", None)) as fake_template:
             w.count_messages_tokens(messages)
         args, _ = fake_template.call_args
         assert args[1] == [{"role": "user", "content": "part one part two"}]
@@ -184,7 +184,7 @@ class TestTokenisation:
 
         w._llm = _TypeCheckedLlm(tokens=[1, 2, 3])
         with patch("localm.inference.backends.llamacpp.llama._apply_model_template",
-                   return_value="<|im_start|>user\nhi<|im_end|>\n"):
+                   return_value=("<|im_start|>user\nhi<|im_end|>\n", None)):
             count = w.count_messages_tokens([{"role": "user", "content": "hi"}])
         assert count == 3
 
