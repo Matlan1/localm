@@ -116,6 +116,65 @@ class Job:
         for q, loop in subs:
             loop.call_soon_threadsafe(_safe_put, q, event)
 
+    def progress(self, *, phase: Optional[str] = None,
+                 done: Optional[int] = None, total: Optional[int] = None,
+                 unit: Optional[str] = None, **extra) -> None:
+        """Report structured progress from an IN-PROCESS (``start_fn``) job.
+
+        Only ``start_cli``'s stdout reader ever PRODUCED a
+        ``{"type": "progress"}`` event, keyed on PROGRESS_SENTINEL, so no
+        in-thread job ever reported a percentage - not the three RAG kinds, the
+        three media kinds, embed-setup or embedding-warmup. ``rag-reembed``
+        computes a true ``n/total`` and could only ever print it as prose.
+
+        ``push`` itself was never the obstacle: it is public and latches any
+        progress-typed dict, so a hand-rolled one always reached ``summary()``.
+        What was missing is this affordance, and that matters because
+        ``done * 100 / total`` with no total either raises or - after the guard
+        most people reach for - reports a fabricated 0%. Deriving it in ONE
+        place is the point; four call sites deriving it independently is four
+        chances to reintroduce exactly the defect ADR-0008 removed.
+
+        ``pct`` is derived here rather than accepted from the caller so the two
+        producers cannot drift: it is computed exactly as
+        ``model_manager.pull._emit_progress`` does, and is **null whenever there
+        is no total**. An operation that has not established a denominator is at
+        an UNKNOWN percentage, never at 0% (ADR-0008 R1). Pass ``done`` without
+        ``total`` for an honest indeterminate count.
+
+        ``unit`` names what ``done``/``total`` are counted in ("bytes",
+        "files", "chunks") so a surface can render "412 MB of 1.9 GB" or
+        "37 of 128 files" rather than a bare percentage. ``done``, ``total`` and
+        ``unit`` are OMITTED when unknown rather than sent as zero.
+        """
+        pct = None
+        if total and done is not None:
+            pct = round(done * 100 / total, 1)
+            if done > total:
+                # Not clamped: a numerator past its denominator is a bug in the
+                # CALLER, and silently pinning it to 100% would hide the bug
+                # while also making a false completion claim (AGENTS.md rule 5).
+                # Surfaced here so it is attributable, and left visible upstream.
+                # Local import matching _HostAnnouncer._say below: debuglog is
+                # imported inside the call site throughout this module.
+                try:
+                    from localm.debuglog import logger
+                    logger.debug("job %s reported %s of %s %s (over 100%%)",
+                                 self.id, done, total, unit or "units")
+                except Exception:
+                    pass
+        event: dict = {"type": "progress", "pct": pct}
+        if phase:
+            event["phase"] = phase
+        if done is not None:
+            event["done"] = done
+        if total:
+            event["total"] = total
+        if unit:
+            event["unit"] = unit
+        event.update(extra)
+        self.push(event)
+
     def subscribe(self) -> asyncio.Queue:
         """Register an independent event stream for one SSE connection: an
         asyncio.Queue pre-loaded with every event pushed so far (so a viewer
@@ -378,8 +437,12 @@ class JobManager:
         Run a Python callable as a job in a worker thread.
 
         ``fn`` receives the job and should return True on success. It may call
-        ``job.push({"type": "line", ...})`` to report progress and may update
-        ``job.result``. owner, when given, binds the job to the creating key's
+        ``job.push({"type": "line", ...})`` for log output, ``job.progress(...)``
+        for a structured percentage or count that a listing can render without
+        replaying the stream, and may update ``job.result``. Prefer
+        ``job.progress`` over formatting numbers into a line: a fraction that
+        only exists inside prose is invisible to ``/api/activity``, to the CLI
+        and to MCP. owner, when given, binds the job to the creating key's
         principal id so only that key (or an admin/owner) may stream/cancel it.
         label, when given, is the human-readable operation name a listing shows
         (the start_cli equivalent is host_label, which doubles as the host
