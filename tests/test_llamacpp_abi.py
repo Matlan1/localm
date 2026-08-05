@@ -527,3 +527,122 @@ def test_unknown_arity_warns_once_not_per_request(monkeypatch, caplog):
             if "llama_sampler_init_penalties" in r.getMessage()]
     assert len(hits) == 1, (
         f"expected exactly one warning across 20 requests, got {len(hits)}")
+
+
+def _reinterpret(src, cls):
+    """The same 72 native bytes, read through the other layout's class."""
+    dst = cls()
+    ctypes.memmove(ctypes.byref(dst), ctypes.byref(src), 72)
+    return dst
+
+
+def test_evaluate_cannot_discriminate_the_two_layouts():
+    """Pins a LIMIT, not a capability - so the overstated claim cannot creep back.
+
+    evaluate()'s model_params checks catch a MISALIGNED read. They cannot tell
+    V1 from V2 on plausible defaults, because every value involved is legal in
+    both: V2's load_mode=1 read as V1's main_gpu is a valid device index, and
+    V1's main_gpu=0 read as V2's load_mode is a valid LLAMA_LOAD_MODE_NONE.
+
+    That is why the layout DECISION lives in detect_model_params_layout and why
+    the probe contradiction, not evaluate(), is what catches a wrong choice. If
+    someone later strengthens evaluate() into a real discriminator, this test
+    should be REPLACED deliberately, not deleted quietly."""
+    as_v1 = _reinterpret(good_model_v2(), LlamaModelParamsV1)
+    assert evaluate(as_v1, good_ctx()).status == "ok"
+    as_v2 = _reinterpret(good_model_v1(), LlamaModelParamsV2)
+    assert evaluate(as_v2, good_ctx()).status == "ok"
+
+
+def test_evaluate_does_catch_a_misaligned_read():
+    """The capability the checks above DO have: a pointer low-word or a -1
+    landing in these fields is refused, in either layout."""
+    mp = good_model_v2()
+    mp.load_mode = -1                     # e.g. an UNSPECIFIED enum shifted in
+    assert evaluate(mp, good_ctx()).status == "mismatch"
+    mp = good_model_v1()
+    mp.main_gpu = 0x6F2A1000              # a pointer low-word
+    assert evaluate(mp, good_ctx()).status == "mismatch"
+
+
+def test_skip_env_still_surfaces_a_probe_contradiction():
+    """The escape hatch suppresses the REFUSAL, never the FINDING.
+
+    _mismatch_error's text tells users to set this variable when they think the
+    refusal is a false alarm, so the skip path is exactly where a real
+    contradiction most needs to be readable - and it is the one case where the
+    layout localm picked may be the wrong one."""
+    import logging
+
+    lib = _FakeLib(good_model_v2(), good_ctx(), markers=False)   # v2 bytes, v1 symbols
+    _, _, contradiction, _ = _abi.detect_model_params_layout(lib)
+    assert contradiction, "fixture no longer produces a contradiction"
+
+    recs = []
+
+    class _H(logging.Handler):
+        def emit(self, r):
+            recs.append(r.getMessage())
+
+    lg = logging.getLogger("localm")
+    h = _H()
+    lg.addHandler(h)
+    old = lg.level
+    lg.setLevel(logging.WARNING)
+    try:
+        import os
+        os.environ[_abi.SKIP_ENV] = "1"
+        try:
+            v = verify_abi(lib)
+        finally:
+            os.environ.pop(_abi.SKIP_ENV, None)
+    finally:
+        lg.removeHandler(h)
+        lg.setLevel(old)
+
+    assert v.status == "skipped"
+    assert any("bytes say" in d for d in v.diagnostics), (
+        f"the contradiction must reach the verdict; got {v.diagnostics}")
+    assert any("DISAGREE" in m for m in recs), (
+        f"the contradiction must be logged even when skipping; got {recs}")
+
+
+def test_assumed_layout_does_not_prove_the_penalties_arity():
+    """An ASSUMED v1 is not a determined v1.
+
+    detect_model_params_layout falls back to v1 when neither probe is
+    conclusive. The "v1 implies 4-arg" inference rests on the measured upstream
+    ORDERING of two changes, which says nothing about a build whose layout was
+    never actually determined - so reasoning onward from the fallback would be
+    treating an assumption as evidence, and could produce exactly the
+    mis-marshalled 4-arg call this module exists to avoid."""
+    # Partially-present markers + a fingerprint matching NEITHER layout is the
+    # state that forces the fallback.
+    mp = good_model_v2()
+    mp.load_mode = 3            # breaks the v2 fingerprint (which expects 1)
+    mp.use_extra_bufts = False  # and the v1 one too
+    lib = _FakeLib(mp, good_ctx(), markers=False, ggml_version="0.13.1")
+    lib.llama_load_mode_from_str = _FakeFn(0)   # ONE marker only -> inconclusive
+
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert contradiction is None
+    assert assumed is True, "this fixture must exercise the fallback"
+    assert layout == MODEL_PARAMS_V1
+    assert any("neither layout probe" in n for n in notes)
+
+    _abi._detected_layout = None
+    _abi._layout_assumed = False
+    _abi._detected_arity = None
+    assert _abi.model_params_layout(lib) == MODEL_PARAMS_V1
+    assert _abi.penalties_arity(lib) == 0, (
+        "an assumed layout must yield UNKNOWN, never 4")
+
+
+def test_determined_v1_still_proves_4arg():
+    """The complement, so the guard above cannot silently cost real b1288 users
+    their repetition penalty: a genuine pre-reorder build exports no
+    llama_load_mode_* symbols and fingerprints cleanly as v1."""
+    lib = _FakeLib(good_model_v1(), good_ctx(), ggml_version="0.13.1")
+    layout, _notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V1, None, False)
+    assert _abi.penalties_arity(lib) == 4

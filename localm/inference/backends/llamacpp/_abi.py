@@ -185,12 +185,16 @@ def _fingerprint_layout(raw: bytes) -> Optional[str]:
 
 def detect_model_params_layout(
     lib: ctypes.CDLL,
-) -> Tuple[str, List[str], Optional[str]]:
+) -> Tuple[str, List[str], Optional[str], bool]:
     """Decide which ``llama_model_params`` layout *lib* uses.
 
-    Returns ``(layout, notes, contradiction)``. Never raises: a mechanism
-    failure yields the historical V1 layout plus a note, because refusing to
-    load over a failed probe would be a worse outcome than the status quo.
+    Returns ``(layout, notes, contradiction, assumed)``. ``assumed`` is True
+    when NEITHER probe was conclusive and the historical V1 layout was taken as
+    a fallback - callers must not treat that as a determination (see
+    :func:`penalties_arity`, which downgrades to "unknown" rather than reasoning
+    from an assumption). Never raises: a mechanism failure yields the fallback
+    plus a note, because refusing to load over a failed probe would be a worse
+    outcome than the status quo.
 
     Two INDEPENDENT signals:
 
@@ -226,10 +230,11 @@ def detect_model_params_layout(
     if by_symbol and by_value and by_symbol != by_value:
         return by_symbol, notes, (
             f"the llama_load_mode symbols say {by_symbol} but "
-            f"llama_model_default_params()'s bytes say {by_value}")
+            f"llama_model_default_params()'s bytes say {by_value}"), False
 
     layout = by_symbol or by_value
-    if layout is None:
+    assumed = layout is None
+    if assumed:
         layout = MODEL_PARAMS_V1
         notes.append(
             "neither layout probe was conclusive; assuming the historical "
@@ -238,7 +243,7 @@ def detect_model_params_layout(
         notes.append(
             f"model_params layout {layout} rests on the symbol probe alone "
             "(the default-value fingerprint was inconclusive)")
-    return layout, notes, None
+    return layout, notes, None, assumed
 
 
 def model_params_class(layout: str):
@@ -302,13 +307,25 @@ def evaluate(mp, cp: LlamaContextParams) -> AbiVerdict:
             "(expected a valid LLAMA_SPLIT_MODE: 0, 1, 2 or 3)"
         )
     # model_params used to be checked ONLY by split_mode, at offset 20 - which is
-    # exactly the offset the V1 -> V2 reorder did NOT move, so the reorder passed
-    # this function with a single non-fatal diagnostic while `main_gpu` writes
-    # went into `load_mode`. These two close that hole: they read fields whose
-    # offsets DO differ between the layouts (load_mode/main_gpu at 24/28 vs
-    # main_gpu/pad at 24), so binding the wrong class now fails structurally
-    # instead of corrupting a load. Both are enum-range / bounds invariants that
-    # hold for any correctly aligned build, not default values.
+    # exactly the offset the V1 -> V2 reorder did NOT move. These two widen the
+    # check to the fields around it.
+    #
+    # BE PRECISE ABOUT WHAT THEY DO AND DO NOT CATCH, because an overstated guard
+    # is worse than none: they catch a MISALIGNED read (a pointer, a -1, or
+    # garbage landing in these fields), which is what an unknown future reorder
+    # or a shifted struct looks like. They CANNOT detect this build's V1-vs-V2
+    # confusion on plausible defaults, and it is not an oversight that they do
+    # not - MEASURED: V2's real defaults read through the V1 class give
+    # main_gpu = 1 (actually load_mode), which is a legal device index; V1's read
+    # through V2 give load_mode = 0, a legal LLAMA_LOAD_MODE_NONE. Both directions
+    # return status ok with two soft diagnostics. There is no discriminator
+    # available here, because every value involved is valid in both layouts.
+    #
+    # Choosing the RIGHT class is therefore detect_model_params_layout's job, not
+    # this function's, and the thing that actually catches a wrong choice is the
+    # probe CONTRADICTION (symbols vs value fingerprint). See
+    # test_evaluate_cannot_discriminate_the_two_layouts, which pins this so the
+    # stronger claim cannot creep back in.
     if is_v2 and mp.load_mode not in _VALID_LOAD_MODES:
         failures.append(
             f"model_params.load_mode = {mp.load_mode} "
@@ -411,6 +428,11 @@ def _mismatch_error(verdict: AbiVerdict, lib_path: str = "") -> AbiMismatch:
 
 
 _detected_layout: Optional[str] = None
+# True when _detected_layout is a FALLBACK rather than a determination. Kept
+# separate from the layout itself because "v1" alone cannot express the
+# difference, and reasoning onward from an assumption as if it were proof is
+# exactly what penalties_arity must not do.
+_layout_assumed: bool = False
 
 
 def model_params_layout(lib: Optional[ctypes.CDLL] = None) -> str:
@@ -420,12 +442,13 @@ def model_params_layout(lib: Optional[ctypes.CDLL] = None) -> str:
     :func:`verify_abi` (including on the SKIP path, since which layout to bind
     is not a safety CHECK - binding the wrong one is exactly what the escape
     hatch must not cause)."""
-    global _detected_layout
+    global _detected_layout, _layout_assumed
     if _detected_layout is None:
         if lib is None:
             from ._loader import load_lib
             lib = load_lib()
-        _detected_layout = detect_model_params_layout(lib)[0]
+        layout, _notes, _contra, assumed = detect_model_params_layout(lib)
+        _detected_layout, _layout_assumed = layout, assumed
     return _detected_layout
 
 
@@ -477,10 +500,14 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
 
     What it can prove:
 
-    * V1 model_params implies 4 args. The layout reorder landed STRICTLY BEFORE
-      the penalties change (measured by bisecting upstream tags: b10180 and
-      b10240 are already V1->V2 flipped while still 4-arg), so no build can be
-      V1 and 5-arg.
+    * A DETERMINED V1 model_params implies 4 args. The layout reorder landed
+      STRICTLY BEFORE the penalties change (measured by bisecting upstream tags:
+      b10180 and b10240 are already V1->V2 flipped while still 4-arg), so no
+      build can be V1 and 5-arg. "Determined" is load-bearing: when neither
+      layout probe was conclusive, ``detect_model_params_layout`` FALLS BACK to
+      V1, and inferring 4-arg from that fallback would be reasoning from an
+      assumption as if it were evidence - the exact thing this function exists
+      not to do. An assumed layout therefore yields 0, not 4.
     * ggml >= 0.18.1 implies 5 args. That bump (``15831f579a70``, 08:54Z) came
       AFTER the penalties change the same day. Sufficient, not necessary.
 
@@ -499,7 +526,12 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
     if lib is None:
         from ._loader import load_lib
         lib = load_lib()
-    if model_params_layout(lib) == MODEL_PARAMS_V1:
+    layout = model_params_layout(lib)
+    if _layout_assumed:
+        # The layout is a fallback, not a determination, so the "V1 implies
+        # 4-arg" inference has nothing under it. Report unknown.
+        _detected_arity = 0
+    elif layout == MODEL_PARAMS_V1:
         _detected_arity = 4
     else:
         ver = _ggml_version(lib)
@@ -515,30 +547,43 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     :class:`AbiMismatch` only when the structural fingerprint is broken. Called
     once per process from ``load_lib`` (cached with the lib handle), so it adds
     no per-call overhead."""
-    global _detected_layout
+    global _detected_layout, _layout_assumed
 
     # Detection runs BEFORE the skip check and never raises. Which layout to
     # bind is not part of the safety CHECK: the escape hatch exists to let a
     # user past a false alarm, and it must not silently downgrade them to the
     # wrong struct class, which is the very corruption it is meant to work
     # around. `contradiction` is the one detection outcome that IS a refusal.
-    layout, notes, contradiction = detect_model_params_layout(lib)
+    layout, notes, contradiction, assumed = detect_model_params_layout(lib)
     _detected_layout = layout
+    _layout_assumed = assumed
     for note in notes:
         _log(f"llama model_params layout probe: {note}", warn=True)
+
+    # Log the contradiction BEFORE the skip check, and carry it into the skipped
+    # verdict. The escape hatch suppresses the REFUSAL, and it must not also
+    # suppress the finding: _mismatch_error's own text invites the user to set
+    # this env var when they believe the refusal is a false alarm, so the skip
+    # path is exactly where a genuine contradiction is most likely to be read -
+    # and it is the one case where the layout localm picked may be the wrong one.
+    if contradiction:
+        _log("llama model_params layout probes DISAGREE: " + contradiction
+             + f"; proceeding with {layout} - if the model loads on the wrong "
+               "GPU or memory behaviour looks wrong, this is why.", warn=True)
 
     if os.environ.get(SKIP_ENV):
         _log(f"{SKIP_ENV} is set - skipping the llama ABI self-check. A mismatched "
              "layout can corrupt memory; unset it once the runtime is known good.",
              warn=True)
-        return AbiVerdict(status="skipped", layout=layout,
-                          detail=f"skipped via {SKIP_ENV}")
+        return AbiVerdict(
+            status="skipped", layout=layout,
+            diagnostics=notes + ([contradiction] if contradiction else []),
+            detail=f"skipped via {SKIP_ENV}")
 
     if contradiction:
         verdict = AbiVerdict(
             status="mismatch", failures=[contradiction], diagnostics=notes,
             layout=layout, detail="model_params layout probes disagree")
-        _log("llama ABI mismatch: " + contradiction, warn=True)
         raise _mismatch_error(verdict, lib_path)
 
     try:
