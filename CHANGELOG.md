@@ -356,6 +356,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Setting up or updating localm's managed ComfyUI could report "failed" for an
+  install that actually succeeded.** If the final status line crashed after the
+  real work (clone, venv, packages) was already done, the GUI read the crashed
+  subprocess's non-zero exit code as failure - the same class of bug already
+  fixed for model pulls. The CLI now tells the GUI the true outcome directly,
+  before that risky display step runs, so a crash there can no longer
+  misreport a completed install.
 - **`localm doctor` no longer invents a reason when its native-ABI check cannot
   run.** If that probe timed out or crashed, doctor still reported the cause as
   "runtime not loadable" - a specific diagnosis it had not made, pointing at a
