@@ -406,7 +406,8 @@ class TestFenceBodyCapGivesUp:
         assert elapsed < 2.0, f"took {elapsed:.3f}s - too slow"
         assert shown.startswith("```aaa")
 
-    def test_cap_fires_mid_stream_against_a_genuinely_infinite_generator(self):
+    def test_cap_fires_mid_stream_against_a_genuinely_infinite_generator(
+            self, monkeypatch):
         """The earlier adversarial tests all feed a FINITE (if huge) piece
         list, so a cap that never actually fires and instead relies on "the
         generator eventually runs out" would still pass them - the trailing
@@ -420,12 +421,26 @@ class TestFenceBodyCapGivesUp:
             while True:
                 yield '"a": 1,'
 
+        # Shrink the cap (same idiom as the sibling adversarial test above)
+        # rather than timing a real 2,000,000-char accumulation. The property
+        # here is that the cap FIRES against a generator that never ends - a
+        # broken cap HANGS, it does not run slowly - and that property is just
+        # as well proven at 50 chars as at two million, in microseconds instead
+        # of seconds.
+        #
+        # The wall-clock bound below is now a HANG DETECTOR, not a latency gate.
+        # At the real cap this took 0.6s on an idle dev box but 7.5s (ubuntu) and
+        # 8.3s (windows) on shared CI runners under -n auto, so the old 3.0s had
+        # roughly 5x headroom locally and none at all where it actually gates a
+        # merge. Timing a proxy for "does not hang" is what made it flaky; the
+        # real boundedness assertion is the len(chunk) check below.
+        monkeypatch.setattr(_ContextMixin, "_MAX_PENDING_FENCE_BODY", 50)
         gen = _ContextMixin._stream_hiding_tool_calls(
             infinite_filler(), tool_names={"run_tests"})
         t0 = time.monotonic()
         chunk, hidden = next(gen)
         elapsed = time.monotonic() - t0
-        assert elapsed < 3.0, f"took {elapsed:.3f}s - too slow"
+        assert elapsed < 60.0, f"took {elapsed:.3f}s - the cap did not fire"
         assert not hidden
         assert len(chunk) < _ContextMixin._MAX_PENDING_FENCE_BODY + 100, (
             f"released chunk is {len(chunk)} chars - cap did not bound it")
