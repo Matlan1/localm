@@ -38,6 +38,29 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
             "single load.")
 
 
+def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
+                              is_registered: bool, engine) -> None:
+    """VIS-2: an explicit --mmproj that just PROVED it works (the backend
+    confirmed supports_images for this load, not merely a well-formed path)
+    gets recorded onto the registry entry, so a future `localm run model` -
+    including the one vision_input_guidance itself suggests - keeps seeing
+    it, instead of losing it the moment the flag is left off. Gated on
+    is_registered because there is no entry to write to for a bare direct-path
+    run, and on the CONFIRMED load (not just the flag being present) so a
+    projector that failed to load can never get recorded as working - see
+    persist_cli_mmproj's own docstring for why that would be a NEW
+    false-positive surface."""
+    if not (mmproj and is_registered):
+        return
+    backend = getattr(engine, "_backend", None)
+    if not getattr(backend, "supports_images", False):
+        return
+    from ..model_manager import persist_cli_mmproj
+    note = persist_cli_mmproj(model, mmproj)
+    if note:
+        console.print(f"[dim]{note}[/dim]")
+
+
 
 
 # ------------------------------------------------------------------ #
@@ -120,6 +143,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     # copy of the model, mirroring `localm gui`. Default is to attach when a verified
     # server exists; --no-server forces an in-process load.
     engine = None
+    is_registered = False
     attach_error: Optional[BaseException] = None
     if not no_server:
         from .. import instances
@@ -242,7 +266,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         from ..model_manager import load_registry as _reg
 
         # Priority: registered alias > Ollama manifest hint > engine auto-derive
-        if model in _reg():
+        is_registered = model in _reg()
+        if is_registered:
             display_name = model
         else:
             display_name = _display_hint  # None or Ollama suggested name
@@ -282,6 +307,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
 
     try:
         with engine:
+            _maybe_persist_cli_mmproj(model, mmproj, is_registered, engine)
             if prompt is not None:
                 messages = []
                 if system:

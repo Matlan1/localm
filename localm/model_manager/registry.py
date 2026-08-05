@@ -596,6 +596,63 @@ def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
     return None
 
 
+def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
+    """Record a CLI ``--mmproj`` override onto *name*'s registry entry, once the
+    caller has already confirmed it genuinely loaded for this run (the backend
+    reported ``supports_images=True``) - this function never checks that itself
+    and must never be called on an unconfirmed load, or a broken projector could
+    get recorded as working, making vision_capable_models() list a model whose
+    vision does not actually load: a NEW false-positive surface in the exact
+    area #1073 just fixed.
+
+    Every other mmproj-discovery path persists (pull.py's auto-attach, the
+    registry's own recorded field) - the CLI override was the one path that
+    never wired up to the same persistence, which is what this closes. Returns
+    a one-line status to print to the user, or None when there is nothing worth
+    saying (already recorded with this exact path, or the entry is not a GGUF
+    chat model this field means anything for).
+
+    Never silently overwrites a DIFFERENT already-recorded mmproj (hard-won
+    rule: never override a user's prior explicit choice without informing
+    them) - a differing recorded value returns an explanatory note instead of
+    writing, since a one-off --mmproj may be a deliberate experiment the user
+    does not want to make permanent."""
+    reg = _mm.load_registry()
+    entry = reg.get(name)
+    if not isinstance(entry, dict):
+        return None
+    epath = _entry_path(entry)
+    if epath is None:
+        return None
+    try:
+        p = Path(epath)
+    except (TypeError, ValueError):
+        return None
+    if p.is_dir() or entry.get("model_type") != "llm":
+        return None   # mmproj means nothing on an HF dir / non-chat entry
+    try:
+        resolved = str(Path(mmproj_path).resolve())
+    except (TypeError, ValueError, OSError):
+        return None
+    recorded = _entry_path(entry, "mmproj")
+    if recorded == resolved:
+        return None
+    if recorded:
+        return (f"Note: this run used a different vision projector than the "
+                f"one already recorded for '{name}' ({recorded}) - not "
+                f"overwriting it. Pass the same --mmproj again next time, or "
+                f"`localm rm {name}` and re-add it to replace the recorded "
+                f"projector.")
+
+    def _mutator(r):
+        e = r.get(name)
+        if isinstance(e, dict):
+            e["mmproj"] = resolved
+    _mm.update_registry(_mutator)
+    return (f"Recorded this vision projector for '{name}' - future runs of "
+            f"{name} will use it automatically, no --mmproj needed.")
+
+
 def vision_input_guidance(mmproj_failed: bool = False,
                           active_model_path: Optional[str] = None) -> str:
     """Capability-aware, install-specific message for when an image is attached
