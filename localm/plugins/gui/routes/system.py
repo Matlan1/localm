@@ -21,6 +21,47 @@ from localm.inference.http_server import (_require_auth, caller_scopes,
 from localm.executor import get_plugin_executor
 
 
+def _probe_available(what: str, fn) -> bool:
+    """Best-effort "is this optional feature configured" probe, isolated per
+    feature.
+
+    ONE probe per try block, deliberately. These checks were previously bundled,
+    so an exception in the FIRST left the others at their fail-closed default
+    even though their own functions had never been called - a raise inside
+    ``issue_tracker.available()`` silently withdrew the UPDATE banner, a feature
+    it has nothing to do with (the two read independent endpoints). Collapsing
+    independent outcomes into one is the bug; isolating them is the fix.
+
+    Failing CLOSED stays correct - hiding a control that might not work beats
+    offering one that errors - but failing closed SILENTLY is not, so the reason
+    is logged. DEBUG rather than WARNING because this runs on every GUI capability
+    fetch: a broken probe would flood at warning level, and log flood is how a
+    real warning gets ignored. The user-visible consequence (a missing button) is
+    the signal at the right altitude; this line is the detail behind it."""
+    try:
+        return bool(fn())
+    except Exception:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("gui capabilities: the %s probe failed; reporting it "
+                   "unavailable for this request", what, exc_info=True)
+        return False
+
+
+def _bugreport_upload_available() -> bool:
+    from localm import bugreport
+    return bugreport.upload_available()
+
+
+def _issues_available() -> bool:
+    from localm import issue_tracker
+    return issue_tracker.available()
+
+
+def _update_available() -> bool:
+    from localm import updater
+    return updater.available()
+
+
 def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/stats", dependencies=[Depends(_require_auth)])
@@ -85,22 +126,14 @@ def register(app: FastAPI, ctx) -> None:
             for p in state.get("plugins", []):
                 if granted(p.get("scope") or p.get("name") or ""):
                     plugins.append(p)
-        # Whether the in-app "Send to maintainer" upload channel is configured, so
-        # the GUI shows that button only when it will actually work (otherwise the
-        # report is saved-to-file and emailed, as before).
-        try:
-            from localm import bugreport
-            bug_upload = bugreport.upload_available()
-        except Exception:
-            bug_upload = False
-        # Whether the read-only issues view and the update banner should be shown
-        # (both ride the same proxy; hidden when not configured).
-        try:
-            from localm import issue_tracker, updater
-            issues_avail = issue_tracker.available()
-            update_avail = updater.available()
-        except Exception:
-            issues_avail = update_avail = False
+        # Three INDEPENDENT optional features, probed independently - see
+        # _probe_available for why they no longer share a try block. Each shows
+        # its control only when it will actually work; a probe that raises
+        # reports only ITS OWN feature unavailable, and says so in the debug log.
+        bug_upload = _probe_available("bug-report upload",
+                                      _bugreport_upload_available)
+        issues_avail = _probe_available("issues view", _issues_available)
+        update_avail = _probe_available("update channel", _update_available)
         return {"scopes": sorted(held) if held else [], "open": held is None,
                 "core": core, "plugins": plugins, "suggest_plugins": suggest,
                 "bugreport_upload": bug_upload,
