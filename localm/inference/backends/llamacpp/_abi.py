@@ -169,18 +169,30 @@ def _read_raw(lib: ctypes.CDLL, fn_name: str) -> bytes:
 def _fingerprint_layout(raw: bytes) -> Optional[str]:
     """Which layout the default-params BYTES are consistent with, or None.
 
-    None means inconclusive - zero matches (a default drifted) or, in principle,
-    both. Inconclusive is a legitimate answer and must not be upgraded into a
-    refusal: see the module docstring's never-false-positive priority."""
-    hits = []
+    SCORED, not all-or-nothing. Requiring all three checks to match would make a
+    single drifted default collapse the whole probe to "inconclusive", and
+    inconclusive is the state in which localm binds a layout on the symbol probe
+    alone with nothing to corroborate or contradict it. Scoring keeps a partial
+    signal useful: on real bytes the wrong layout scores 0/3 while the right one
+    scores 3/3, so one drifted default still leaves a 2-0 winner.
+
+    Inconclusive (None) remains a legitimate answer for a genuine tie or a weak
+    winner, and must never be upgraded into a refusal on its own - see the
+    module docstring's never-false-positive priority. It is only ever combined
+    with the symbol probe.
+    """
+    scores = {}
     for layout, checks in _FINGERPRINT.items():
         try:
-            if all(struct.unpack_from("<" + fmt, raw, off)[0] == want
-                   for off, fmt, want in checks):
-                hits.append(layout)
+            scores[layout] = sum(
+                struct.unpack_from("<" + fmt, raw, off)[0] == want
+                for off, fmt, want in checks)
         except struct.error:
             return None
-    return hits[0] if len(hits) == 1 else None
+    best, runner = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
+    # A majority of this layout's checks AND strictly ahead of the other. On the
+    # measured real builds this is 3-0 in both directions.
+    return best[0] if best[1] >= 2 and best[1] > runner[1] else None
 
 
 def detect_model_params_layout(

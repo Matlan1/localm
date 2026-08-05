@@ -143,9 +143,11 @@ def _reset_layout_cache():
     assert against an earlier test's build."""
     _abi._detected_layout = None
     _abi._detected_arity = None
+    _abi._layout_assumed = False
     yield
     _abi._detected_layout = None
     _abi._detected_arity = None
+    _abi._layout_assumed = False
 
 
 # --------------------------------------------------------------------------- #
@@ -646,3 +648,50 @@ def test_determined_v1_still_proves_4arg():
     layout, _notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
     assert (layout, contradiction, assumed) == (MODEL_PARAMS_V1, None, False)
     assert _abi.penalties_arity(lib) == 4
+
+
+# --------------------------------------------------------------------------- #
+#  The value fingerprint is SCORED, so one drifted default does not blind it
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("builder,want", [
+    (good_model_v1, MODEL_PARAMS_V1), (good_model_v2, MODEL_PARAMS_V2)])
+def test_fingerprint_survives_one_drifted_default(builder, want):
+    """Inconclusive is the state where localm binds on the symbol probe alone,
+    with nothing able to corroborate OR contradict it - so it must be rare. A
+    single changed default used to collapse the whole probe; now the wrong
+    layout still scores 0 and the right one 2, leaving a clear winner."""
+    mp = builder()
+    mp.use_extra_bufts = False          # drift one long-stable default
+    raw = bytes(bytearray(
+        (ctypes.c_uint8 * ctypes.sizeof(mp)).from_buffer_copy(mp)))[:72]
+    assert _abi._fingerprint_layout(raw) == want
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_model_v1, MODEL_PARAMS_V1), (good_model_v2, MODEL_PARAMS_V2)])
+def test_fingerprint_is_unambiguous_on_the_real_builds(builder, want):
+    """The measured baseline the scoring rests on: 3-0, both directions."""
+    mp = builder()
+    raw = bytes(bytearray(
+        (ctypes.c_uint8 * ctypes.sizeof(mp)).from_buffer_copy(mp)))[:72]
+    assert _abi._fingerprint_layout(raw) == want
+
+
+def test_fingerprint_still_says_inconclusive_when_it_genuinely_is():
+    """Scoring must not manufacture confidence: bytes that support neither
+    layout stay inconclusive rather than picking a weak winner, because a wrong
+    'conclusive' answer would trigger a false contradiction and refuse a build
+    that is actually fine."""
+    assert _abi._fingerprint_layout(b"\x00" * 72) is None
+
+
+def test_fingerprint_drift_no_longer_forces_the_symbol_probe_to_stand_alone():
+    """End to end: a V2 build with a drifted default is now CORROBORATED rather
+    than resting on symbols alone, so it carries no 'symbol probe alone' note."""
+    mp = good_model_v2()
+    mp.use_extra_bufts = False
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(
+        _FakeLib(mp, good_ctx()))
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False)
+    assert not any("symbol probe alone" in n for n in notes), notes
