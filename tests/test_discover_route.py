@@ -192,6 +192,51 @@ def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
     assert "fit" not in by_id["org/unknown"]       # no size -> no fit (GUI: unknown)
 
 
+def test_vram_free_withheld_when_reading_is_untrusted(gui_app, monkeypatch):
+    """_vram_total() must gate `vram.free` on sysstats._vram_reading_trusted()
+    (fresh AND device-global) exactly like /api/vram-estimate and /api/stats
+    already do - forwarding an untrusted free verbatim would let this route's
+    own API contract present the same wrong-number-as-fact this repo already
+    fixed on the CLI/GUI VRAM surfaces (AGENTS.md rule 5). `total` is a static
+    hardware fact and stands regardless."""
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        return []
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    # A PROCESS-scoped reading: total stands, free must be withheld.
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub(
+        {"total": 16_000_000_000, "free": 15_000_000_000,
+         "free_scope": disc.FREE_SCOPE_PROCESS}))
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 200, r.text
+    vram = r.json()["vram"]
+    assert vram["total"] == 16_000_000_000
+    assert "free" not in vram
+
+
+def test_vram_free_shown_when_reading_is_trusted(gui_app, monkeypatch):
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        return []
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub(
+        {"total": 16_000_000_000, "free": 15_000_000_000,
+         "free_scope": disc.FREE_SCOPE_DEVICE}))
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x", headers=_hdr())
+    assert r.status_code == 200, r.text
+    vram = r.json()["vram"]
+    assert vram["total"] == 16_000_000_000
+    assert vram["free"] == 15_000_000_000
+
+
 def _configure_split(monkeypatch, gpu_split_indices):
     """Overlay gpu_split_indices onto the REAL (test-isolated) config rather
     than replacing load_config() outright - other GUI routes read other config

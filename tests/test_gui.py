@@ -2543,6 +2543,22 @@ class TestDiscoverEndpoints:
         assert data["vram"]["total"] == 24_000_000_000
         assert data["files"][0]["fit"] == "fits"
 
+    def test_files_vram_free_withheld_when_untrusted(self, gui_app, monkeypatch):
+        """/api/discover/files shares _vram_total() with /api/discover/search -
+        a PROCESS-scoped reading must withhold `free` there too."""
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.discover.hf_gguf_files",
+            lambda repo: [{"file": "m-Q4_K_M.gguf", "quant": "Q4_K_M",
+                           "size_bytes": 4_000_000_000, "n_parts": 1}])
+        monkeypatch.setattr("localm.discover.vram_info", _vram_info_double(
+            {"total": 16_000_000_000, "free": 15_000_000_000,
+             "free_scope": "process"}))
+        with TestClient(app) as client:
+            data = client.get("/api/discover/files?repo=org/m").json()
+        assert data["vram"]["total"] == 16_000_000_000
+        assert "free" not in data["vram"]
+
     def test_net_off_is_403(self, gui_app, monkeypatch):
         from localm.discover import DiscoverError
         app, _ = gui_app
