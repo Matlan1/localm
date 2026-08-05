@@ -360,6 +360,13 @@ cuda = _Cuda()
         assert proc.returncode == 0
 
     def test_child_emits_one_json_line_and_nothing_else(self):
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            pytest.skip("llama.cpp's native runtime is already loaded in this "
+                         "process (a real compute-device probe ran earlier in "
+                         "this same pytest worker) - a fresh torch import here "
+                         "is the known-doomed DLL-identity conflict, not this "
+                         "test's own subject")
         torch = pytest.importorskip("torch")
         from localm._mp_spawn import interpreter_for_localm_children
         proc = subprocess.run(

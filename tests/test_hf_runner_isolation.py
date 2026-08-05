@@ -491,6 +491,13 @@ class TestCancelCriteriaUnit:
     break under its `|` reduction), but no model and no subprocess."""
 
     def test_cleared_event_reports_all_false(self):
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            pytest.skip("llama.cpp's native runtime is already loaded in this "
+                         "process (a real compute-device probe ran earlier in "
+                         "this same pytest worker) - a fresh torch import here "
+                         "is the known-doomed DLL-identity conflict, not this "
+                         "test's own subject")
         torch = pytest.importorskip("torch")
         from localm.inference.backends._hf_worker import _CancelCriteria
 
@@ -504,6 +511,13 @@ class TestCancelCriteriaUnit:
         assert not bool(result.any())
 
     def test_set_event_reports_all_true(self):
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            pytest.skip("llama.cpp's native runtime is already loaded in this "
+                         "process (a real compute-device probe ran earlier in "
+                         "this same pytest worker) - a fresh torch import here "
+                         "is the known-doomed DLL-identity conflict, not this "
+                         "test's own subject")
         torch = pytest.importorskip("torch")
         from localm.inference.backends._hf_worker import _CancelCriteria
 
@@ -524,6 +538,13 @@ class TestCancelCriteriaUnit:
         StoppingCriteriaList (not just _CancelCriteria in isolation), so a
         future change to the class that technically returns "a tensor" but
         breaks under `|` (e.g. wrong dtype) is still caught."""
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            pytest.skip("llama.cpp's native runtime is already loaded in this "
+                         "process (a real compute-device probe ran earlier in "
+                         "this same pytest worker) - a fresh torch import here "
+                         "is the known-doomed DLL-identity conflict, not this "
+                         "test's own subject")
         torch = pytest.importorskip("torch")
         transformers = pytest.importorskip("transformers")
         from localm.inference.backends._hf_worker import _CancelCriteria
