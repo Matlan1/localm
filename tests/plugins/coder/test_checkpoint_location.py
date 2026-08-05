@@ -79,7 +79,7 @@ def test_checkpoint_info_probe_without_an_agent(tmp_path, monkeypatch):
 
     assert checkpoint_info(proj) is None        # nothing saved yet
 
-    cp = _checkpoint_path_for(proj)
+    cp = _checkpoint_path_for(proj, "abc123")
     cp.parent.mkdir(parents=True, exist_ok=True)
     cp.write_text(json.dumps({
         "version": 1, "turns": 1, "total_tokens": 7,
@@ -91,13 +91,27 @@ def test_checkpoint_info_probe_without_an_agent(tmp_path, monkeypatch):
     info = checkpoint_info(proj)
     assert info["turns"] == 1 and info["messages"] == 2 and info["total_tokens"] == 7
     assert info["interrupted_at"] == "2026-06-22T10:00:00"
+    assert info["id"] == "abc123"
 
 
-def test_distinct_projects_get_distinct_checkpoints(tmp_path, monkeypatch):
+def test_distinct_projects_get_distinct_checkpoint_dirs(tmp_path, monkeypatch):
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    from localm.plugins.coder.agent.checkpoint import _project_dir_for
+    p1 = tmp_path / "one"; p1.mkdir()
+    p2 = tmp_path / "two"; p2.mkdir()
+    assert _project_dir_for(p1) != _project_dir_for(p2)
+    assert _project_dir_for(p1) == _project_dir_for(p1)   # stable per project
+
+
+def test_distinct_sessions_in_one_project_get_distinct_checkpoint_files(
+        tmp_path, monkeypatch):
+    """NEW-CODER-RESUME-DESTROYS-SESSIONS: two sessions in the SAME project
+    must land in two different files, not the one file every session used to
+    share (and silently overwrite)."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     from localm.plugins.coder.agent import _checkpoint_path_for
-    p1 = tmp_path / "one"; p1.mkdir()
-    p2 = tmp_path / "two"; p2.mkdir()
-    assert _checkpoint_path_for(p1) != _checkpoint_path_for(p2)
-    assert _checkpoint_path_for(p1) == _checkpoint_path_for(p1)   # stable per project
+    proj = tmp_path / "proj"; proj.mkdir()
+    assert _checkpoint_path_for(proj, "session-a") != _checkpoint_path_for(proj, "session-b")
+    assert _checkpoint_path_for(proj, "session-a") == _checkpoint_path_for(proj, "session-a")

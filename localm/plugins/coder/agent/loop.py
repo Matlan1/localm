@@ -31,6 +31,8 @@ class _LoopMixin:
             self._episode_task = task
         if not self._review_task:
             self._review_task = task   # remembered for the pre-done diff review
+        if not self._session_title:
+            self._session_title = task   # resume-listing display title (item 3)
         self._add_user(self._with_episodes(task))
         return self._loop(interactive=False)
 
@@ -53,6 +55,11 @@ class _LoopMixin:
         History is preserved between calls.
         Returns the agent's final text response for this turn.
         """
+        if not self._session_title:
+            # Captured from the RAW input, before _with_episodes below can
+            # prepend a "relevant past lessons" preamble - a resume listing
+            # must show what the user asked for, not that boilerplate.
+            self._session_title = user_input
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         if self._episodic and not self._episode_task:

@@ -49,8 +49,8 @@ def _read_multiline() -> str:
 _SLASH_COMMANDS = (
     "/help", "/exit", "/quit", "/clear", "/model", "/mode", "/cwd", "/cd",
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
-    "/compact", "/memory", "/remember", "/forget", "/save", "/export",
-    "/scope", "/changes", "/diff", "/bg", "/verify",
+    "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
+    "/export", "/scope", "/changes", "/diff", "/bg", "/verify",
 )
 
 
@@ -212,16 +212,44 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             f"Map: {agent._project_map.file_count()} files[/dim]"
         )
 
+    elif cmd == "sessions":
+        from ..agent.checkpoint import list_checkpoints
+        entries = list_checkpoints(agent.cwd)
+        if not entries:
+            print_info("No saved sessions for this project.")
+        else:
+            console.print(
+                f"[dim]{len(entries)} saved session(s) for this project "
+                "(newest first) - /resume <id> to continue one:[/dim]")
+            for e in entries:
+                changed = (f", {e['changed_files']} file(s) changed"
+                          if e["changed_files"] else "")
+                when = e["interrupted_at"] or "unknown time"
+                console.print(
+                    f"  [bold]{e['id']}[/bold]  {e['title']}  "
+                    f"[dim]({e['turns']} turns{changed}, {when})[/dim]")
+
     elif cmd == "resume":
-        ckpt = agent.load_checkpoint()
+        # No id -> the most recent (unchanged zero-argument default); an id
+        # from /sessions resumes that SPECIFIC one instead - several
+        # interrupted sessions can now coexist in one project rather than the
+        # newer one silently having erased the others (NEW-CODER-RESUME-
+        # DESTROYS-SESSIONS).
+        ckpt = agent.load_checkpoint(arg or None)
         if ckpt is None:
-            print_info("No interrupted session found.")
+            if arg:
+                print_info(f"No saved session with id '{arg}'. Try /sessions "
+                          "to list what is available.")
+            else:
+                print_info("No interrupted session found.")
         else:
             agent.resume_checkpoint(ckpt)
             agent.clear_checkpoint()
             ts    = ckpt.get("interrupted_at", "unknown time")
             turns = ckpt.get("turns", "?")
-            print_success(f"Resumed session ({turns} turns, interrupted {ts}).")
+            title = ckpt.get("title")
+            label = f' "{title}"' if title else ""
+            print_success(f"Resumed session{label} ({turns} turns, interrupted {ts}).")
             try:
                 agent.chat("Continue from where we left off.")
             except KeyboardInterrupt:

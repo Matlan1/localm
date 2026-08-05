@@ -273,7 +273,9 @@ HELP_TEXT = """\
   [bold]/changes[/bold]              list every file this session has changed
   [bold]/diff [path][/bold]          cumulative diff of session changes (all or one file)
   [bold]/undo[/bold]                 revert the last file write or edit
-  [bold]/resume[/bold]               resume an interrupted session
+  [bold]/sessions[/bold]             list this project's saved (interrupted) sessions
+  [bold]/resume [id][/bold]          resume the most recent interrupted session, or a
+                        specific one by id from /sessions
   [bold]/compact[/bold]              summarise old turns to free context space
   [bold]/memory[/bold]               show current project memory
   [bold]/remember <text>[/bold]      append a note to LOCALCODER.md

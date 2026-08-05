@@ -163,6 +163,23 @@ class Agent(
         self._stop_requested = False
         self.gen_kwargs     = gen_kwargs
 
+        # Stable identity for THIS conversation's resume checkpoint (NEW-CODER-
+        # RESUME-DESTROYS-SESSIONS): generated fresh per Agent so two sessions
+        # in the same project never write the same file, then overwritten by
+        # load_checkpoint() the moment this agent resumes an existing one, so
+        # a later save_checkpoint() lands back in the SAME file rather than
+        # minting a new one every turn. See checkpoint.py's
+        # _checkpoint_path_for for why the project alone was not enough.
+        import uuid
+        self._checkpoint_id: str = uuid.uuid4().hex[:12]
+        # The raw, pre-episodic-preamble text of this session's first task/
+        # message - captured once in loop.py's run_task/chat, restored by
+        # resume_checkpoint() so it survives a pause/resume. save_checkpoint()
+        # turns it into a short display title (checkpoint._derive_title) for
+        # a resume listing; kept RAW here rather than pre-truncated so a
+        # future consumer wanting more than 80 chars is not stuck with less.
+        self._session_title: str = ""
+
         self._messages: list[dict] = []
         self._turns: int = 0
         self._total_tokens: int = 0
