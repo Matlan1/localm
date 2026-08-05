@@ -35,6 +35,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   A failing request logged its status and timing and nothing else, so a chat
   failure reported with a full debug log still could not be diagnosed. The
   reason the server gave the client is now written to the log beside it.
+- **An unnamed request after switching models could silently reload the
+  wrong one.** The model an unnamed chat turn falls back to was only ever
+  updated at server startup, not on a later model switch, so start model A,
+  switch to model B, then trigger an eviction (e.g. the embedder freeing VRAM)
+  and the next unnamed turn silently came back as A instead of B. It now
+  tracks the model actually last in use.
+- **`GET /health` reported a plain 503 for a model that was about to reload
+  itself.** After an eviction the server keeps the model on hand to reload on
+  the next request, but health had no way to say so and just reported "no
+  engine" - a likely reason to reach for a manual reload instead of just
+  sending another chat turn. It now reports the recoverable model instead,
+  and still 503s when there genuinely is nothing to recover.
 
 ## [0.1.4] - 2026-08-05
 
