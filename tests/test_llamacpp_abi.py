@@ -137,10 +137,27 @@ class _FakeLib:
 
 
 @pytest.fixture(autouse=True)
-def _reset_layout_cache():
-    """The detected layout is cached per process; these tests hand verify_abi a
+def _reset_layout_cache(monkeypatch):
+    """Reset the per-process caches, and CUT THE TEST OFF FROM THE REAL RUNTIME.
+
+    Both halves matter.
+
+    The layout/arity are cached per process; these tests hand verify_abi a
     different fake library each time, so a leaked cache would make later tests
-    assert against an earlier test's build."""
+    assert against an earlier test's build.
+
+    The second half is a bug this file already shipped once. ``_ggml_version``
+    correctly falls back to the loader's ggml handles when the passed lib does
+    not export ``ggml_version`` - in production that is REQUIRED, because the
+    symbol lives in ggml-base.dll rather than llama.dll. But it means a fake lib
+    constructed WITHOUT a version silently read the machine's actually-installed
+    runtime. That made ``(good_model_v2, None) -> 0`` pass for the wrong reason
+    while this box had b1288 (ggml 0.13.1, below every threshold), and it flipped
+    to 5 the moment the box was upgraded to b1307 (ggml 0.18.1). A unit test must
+    not change its answer because someone provisioned a different DLL, so the
+    fallback is stubbed out here and "no version" means no version."""
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [], raising=False)
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
@@ -385,8 +402,16 @@ def test_v2_detection_survives_a_drifted_default():
     # V2 + ggml >= 0.18.1 proves 5-arg (that bump came after the signature change).
     (good_model_v2, "0.18.1", 5),
     (good_model_v2, "0.19.0", 5),
-    # V2 + ggml 0.18.0 is the genuinely ambiguous window (upstream ~b10180..b10269):
-    # report UNKNOWN rather than guess, because either wrong call mis-marshals.
+    # V2 + ggml < 0.18.0 proves 4-arg: the 0.17.0 -> 0.18.0 bump landed at
+    # upstream b10192, five days BEFORE the signature change, so these predate
+    # it. This is the ~87-release window b10105..b10191 - post-reorder but still
+    # 4-arg - which would otherwise be called unknown and lose its repetition
+    # penalty for no reason. MEASURED: zero sampled builds below 0.18.0 are 5-arg.
+    (good_model_v2, "0.17.0", 4),
+    (good_model_v2, "0.16.3", 4),
+    # V2 + ggml == 0.18.0 is the ONLY genuinely ambiguous window (upstream
+    # b10192..~b10264): report UNKNOWN rather than guess, because either wrong
+    # call mis-marshals every argument.
     (good_model_v2, "0.18.0", 0),
     (good_model_v2, None,     0),
 ])
@@ -695,3 +720,34 @@ def test_fingerprint_drift_no_longer_forces_the_symbol_probe_to_stand_alone():
         _FakeLib(mp, good_ctx()))
     assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False)
     assert not any("symbol probe alone" in n for n in notes), notes
+
+
+def test_penalties_arity_boundary_is_exact():
+    """The two ggml bounds are load-bearing and adjacent, so pin the exact edges
+    rather than only sampling the middle of each band. 0.18.0 is the one version
+    that must stay undecidable; the versions either side of it must not."""
+    def arity(v):
+        _abi._detected_layout = None
+        _abi._layout_assumed = False
+        _abi._detected_arity = None
+        return _abi.penalties_arity(
+            _FakeLib(good_model_v2(), good_ctx(), ggml_version=v))
+
+    assert arity("0.17.99") == 4, "anything below 0.18.0 predates the change"
+    assert arity("0.18.0") == 0, "0.18.0 straddles the change - must stay unknown"
+    assert arity("0.18.1") == 5, "0.18.1 came after the change"
+
+
+def test_unparseable_ggml_version_is_unknown_not_guessed():
+    """A version string localm cannot parse must not fall through to a bound.
+    Guessing here produces a mis-marshalled call, which is the whole thing this
+    function exists to avoid."""
+    for bogus in ("", "not-a-version", "0", "v0.18"):
+        _abi._detected_layout = None
+        _abi._layout_assumed = False
+        _abi._detected_arity = None
+        got = _abi.penalties_arity(
+            _FakeLib(good_model_v2(), good_ctx(), ggml_version=bogus))
+        assert got in (0, 4, 5), got
+        # Specifically: nothing unparseable may be read as >= 0.18.1.
+        assert got != 5, f"ggml_version={bogus!r} must not be taken as 5-arg"

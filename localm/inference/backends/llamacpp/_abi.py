@@ -91,13 +91,33 @@ _FINGERPRINT = {
     MODEL_PARAMS_V2: ((24, "i", 1), (65, "B", 0), (66, "B", 1)),
 }
 
-# ggml version at/after which llama_sampler_init_penalties takes the leading
-# int32 n_vocab. upstream moved n_vocab into the sampler in 935cad6497e8
-# (2026-08-04 06:02Z) and bumped ggml to 0.18.1 in 15831f579a70 (08:54Z the same
-# day), i.e. AFTER. So this is a SUFFICIENT condition for the 5-argument form,
-# never a necessary one - a build made in the ~3h between the two commits has
-# ggml 0.18.0 and the 5-arg form, and is reported UNKNOWN rather than guessed at.
+# ggml versions that BRACKET the llama_sampler_init_penalties signature change
+# (upstream 935cad6497e8, 2026-08-04 06:02Z, which prepended an int32 n_vocab).
+# Two bounds, because one alone leaves a large window needlessly undecidable.
+#
+# UPPER, sufficient: ggml was bumped to 0.18.1 in 15831f579a70 at 08:54Z the
+# same day, i.e. AFTER the signature change. So ggml >= 0.18.1 PROVES 5-arg.
+#
+# LOWER, necessary: ggml went 0.17.0 -> 0.18.0 at upstream release b10192
+# (2026-07-30), five days BEFORE the signature change. So ggml < 0.18.0 proves
+# the build predates it, i.e. PROVES 4-arg.
+#
+# MEASURED against real upstream release headers on 2026-08-05, not inferred:
+#     b10103  ggml 0.17.0  layout v1  4-arg   <- last pre-reorder release
+#     b10105  ggml 0.17.0  layout v2  4-arg   <- reorder lands, ggml unchanged
+#     b10178  ggml 0.17.0  layout v2  4-arg
+#     b10191  ggml 0.17.0                     <- last 0.17.0
+#     b10192  ggml 0.18.0  layout v2  4-arg   <- ggml bump
+#     b10252  ggml 0.18.0  layout v2  4-arg
+#     b10276  ggml 0.18.1  layout v2  5-arg
+# Sampled builds with ggml < 0.18.0 that were 5-arg: ZERO.
+#
+# Only ggml == 0.18.0 genuinely straddles the change (b10192..~b10264), and that
+# window alone is reported UNKNOWN. Without the lower bound the ~87 V2 releases
+# b10105..b10191 would also be called unknown, needlessly costing those users
+# their repetition penalty even though their 4-arg form is provable.
 _PENALTIES_5ARG_GGML = (0, 18, 1)
+_PENALTIES_4ARG_GGML_BELOW = (0, 18, 0)
 
 
 class _RawParams(ctypes.Structure):
@@ -522,9 +542,14 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
       not to do. An assumed layout therefore yields 0, not 4.
     * ggml >= 0.18.1 implies 5 args. That bump (``15831f579a70``, 08:54Z) came
       AFTER the penalties change the same day. Sufficient, not necessary.
+    * ggml < 0.18.0 implies 4 args. The 0.17.0 -> 0.18.0 bump landed at upstream
+      release b10192, five days BEFORE the penalties change, so anything below
+      it predates the new signature. Necessary, not sufficient - and it is what
+      keeps the ~87 post-reorder releases b10105..b10191 decidable instead of
+      costing those users their repetition penalty for no reason.
 
-    The gap is a build made in the ~3 hours between them, or any V2 build with
-    ggml 0.18.0 (upstream ~b10180..b10269). Those report 0.
+    The only genuinely undecidable window is ggml == 0.18.0 (upstream
+    b10192..~b10264), which straddles the change. That reports 0.
 
     Cached per process like the layout: this is called from ``_build_sampler``,
     i.e. once per GENERATION REQUEST, and re-reading ``ggml_version()`` (which
@@ -547,8 +572,14 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
         _detected_arity = 4
     else:
         ver = _ggml_version(lib)
-        _detected_arity = 5 if (ver is not None
-                                and ver >= _PENALTIES_5ARG_GGML) else 0
+        if ver is None:
+            _detected_arity = 0
+        elif ver >= _PENALTIES_5ARG_GGML:
+            _detected_arity = 5      # sufficient: the bump came after the change
+        elif ver < _PENALTIES_4ARG_GGML_BELOW:
+            _detected_arity = 4      # necessary: the build predates the change
+        else:
+            _detected_arity = 0      # ggml 0.18.0 alone straddles it
     return _detected_arity
 
 
