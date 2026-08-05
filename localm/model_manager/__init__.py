@@ -34,7 +34,7 @@ from ..config import (
     save_registry,
     update_registry,
 )
-from ._shared import PROGRESS_SENTINEL, _emit_progress, _verify_digest, console
+from ._shared import PROGRESS_SENTINEL, _emit_outcome, _emit_progress, _verify_digest, console
 from .gguf import (
     _GGUF_MIN_BYTES,
     _HASH_BLOCK_BYTES,
@@ -156,7 +156,7 @@ __all__ = [
     "_prompt_predownload_dup", "_resolve_ollama_manifest", "MODEL_TYPES",
     "_store_into_models_dir", "_store_loose_gguf_dir",
     # pull
-    "_emit_progress", "_progress_file_info", "_download_progress",
+    "_emit_outcome", "_emit_progress", "_progress_file_info", "_download_progress",
     "_snapshot_progress", "_verify_digest", "pull_model", "_stem_from_url",
     "_check_disk_space",
     "_hf_file_sha256", "_pull_gguf_file", "_pull_hf_snapshot", "_pull_url",

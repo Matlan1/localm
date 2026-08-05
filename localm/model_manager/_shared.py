@@ -77,6 +77,35 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
     sys.stdout.flush()
 
 
+def _emit_outcome(status: str) -> None:
+    """Write a terminal OUTCOME frame on the sentinel channel: this command's
+    real work has definitively finished with *status* ("done" or "failed"),
+    decided BEFORE any later display step that could itself crash.
+
+    GUI mode only (LOCALM_PROGRESS_JSON=1), same gate as ``_emit_progress``:
+    interactive CLI use has no consumer for this frame and must not print raw
+    sentinel JSON to a real terminal.
+
+    The GUI job runner (``localm/plugins/gui/jobs.py``) otherwise infers a
+    job's outcome from the subprocess exit code alone, so an exception raised
+    by a display step AFTER the real work already succeeded - the exact class
+    of bug ``pull.py``'s ``_report_success`` exists to guard against - reports
+    a completed operation as failed. Call this BEFORE that risky step, once
+    real work (download, install, registry write, ...) is verifiably done: a
+    crash afterwards can no longer un-say what already happened. Emitting it
+    any later than that defeats the point.
+
+    This is an internal producer -> job-runner signal, not a progress update:
+    ``jobs.py`` consumes it to correct its own status decision and does not
+    forward it to SSE subscribers.
+    """
+    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+        return
+    sys.stdout.write(
+        PROGRESS_SENTINEL + json.dumps({"type": "outcome", "status": status}) + "\n")
+    sys.stdout.flush()
+
+
 # How often the verify phase may emit. Matches _download_progress's 0.7s poll so
 # both phases tick at the same visible rate, and so a large file cannot turn one
 # emit per 4 MiB block into hundreds of events a second: _sha256_file calls back
