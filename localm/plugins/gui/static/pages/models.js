@@ -360,8 +360,17 @@ export async function refreshModelsPage() {
               const data = await r.json().catch(() => ({}));
               if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
               const end = await streamJob(data.job_id, null);
-              toast(end.status === "done" ? `Removed '${m.name}'` : "Remove failed",
-                    end.status !== "done");
+              // "disconnected" (streamJob gave up reconnecting, or the job was
+              // already gone) is NOT the same fact as the remove having
+              // failed - do not claim it did. refreshModelsPage() below shows
+              // the real current state regardless.
+              if (end.status === "done") {
+                toast(`Removed '${m.name}'`);
+              } else if (end.status === "disconnected") {
+                toast("Lost connection - check the list below for the current state", true);
+              } else {
+                toast("Remove failed", true);
+              }
               refreshModelsPage();
             });
         };
