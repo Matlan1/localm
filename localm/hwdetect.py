@@ -118,11 +118,6 @@ def detect() -> Detection:
                      gpu_names=names)
 
 
-def recommended_backend(det: "Detection | None" = None) -> str:
-    """Convenience: the default backend for the current machine."""
-    return (det or detect()).recommended
-
-
 def _amd_known_non_gfx103x(names: str) -> bool:
     """True when the AMD adapter name CLEARLY indicates a family the self-contained
     gfx103X (RDNA2 / RX 6000) ROCm build does NOT cover: RDNA1 (RX 5000), RDNA3

@@ -180,8 +180,12 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         # installer's actual policy for it is cuda (#765) and the box was in fact
         # running the CUDA runtime. A diagnostics field that contradicts what the
         # installer would provision sends triage after the wrong thing; it did
-        # exactly that on #833. det.recommended keeps its own meaning for its
-        # other callers (updater, release_verify) and is untouched.
+        # exactly that on #833. CORRECTED: updater._installed_backend() and
+        # release_verify._default_backend() were NOT a legitimate narrower meaning
+        # for det.recommended, as this comment used to claim - they were the same
+        # #833-class bug, unfixed at the time this was written. Both now call
+        # recommended_install_backend() too; det.recommended has no known-correct
+        # caller left, only its own construction/contract tests.
         diag["recommended_backend"] = hwdetect.recommended_install_backend(det)
         diag["detect_source"] = det.source
     except Exception:
