@@ -80,11 +80,17 @@ def is_workflow_json(data) -> bool:
     return any(isinstance(v, dict) and "class_type" in v for v in data.values())
 
 
-def list_workflows(media: str) -> list:
+def list_workflows(media: str, *, active: Optional[str] = None) -> list:
     """Every uploaded workflow for *media*, newest first, with active/default
-    flags so the page can show which one is in use."""
+    flags so the page can show which one is in use.
+
+    *active*: pass an already-resolved ``selected_name(media)`` to skip this
+    function's own config load - see ``_list_and_selected`` below, the shape
+    every caller that needs both actually wants. None (the default) resolves
+    it internally, unchanged for a caller that only wants the list."""
     d = workflows_dir(media)
-    active = selected_name(media)
+    if active is None:
+        active = selected_name(media)
     items = []
     if d.is_dir():
         files = [p for p in d.glob("*.json") if p.is_file()]
@@ -93,6 +99,16 @@ def list_workflows(media: str) -> list:
                           "size_bytes": p.stat().st_size,
                           "mtime": p.stat().st_mtime})
     return items
+
+
+def _list_and_selected(media: str) -> tuple:
+    """(list_workflows(media), selected_name(media)) from ONE config load.
+    Every route in make_workflow_router needs both together; calling them
+    independently (the previous shape) loaded config.json TWICE per request -
+    real cost on Windows, where a config read can hit the documented ~1s
+    antivirus/indexer retry (config.py's _replace_atomic doc)."""
+    active = selected_name(media)
+    return list_workflows(media, active=active), active
 
 
 def save_workflow(media: str, name: str, content: bytes) -> str:
@@ -301,12 +317,21 @@ def make_workflow_router(media: str):
     the already-parsed workflow JSON as a body field, so there is no multipart /
     python-multipart dependency."""
     from fastapi import APIRouter, HTTPException
+    from fastapi.concurrency import run_in_threadpool
 
     router = APIRouter()
 
+    # Off the event loop, all four routes: list_workflows/selected_name do
+    # synchronous filesystem I/O (a directory glob + a stat per file, a
+    # config.json read) that inline blocked the WHOLE server for the duration -
+    # worst on GET, which the GUI polls on its own timer, so this was a
+    # repeating, self-inflicted stall for as long as the page was open. Same
+    # REG-638 shape as the already-offloaded comfy-model-slots route.
+
     @router.get(f"/api/{media}/workflows")
     async def _list_workflows():
-        return {"workflows": list_workflows(media), "selected": selected_name(media)}
+        workflows, selected = await run_in_threadpool(_list_and_selected, media)
+        return {"workflows": workflows, "selected": selected}
 
     @router.post(f"/api/{media}/workflows")
     async def _upload_workflow(body: dict):
@@ -315,29 +340,40 @@ def make_workflow_router(media: str):
             raise HTTPException(400, "missing 'workflow' object (the ComfyUI "
                                      "API-format JSON)")
         name = str(body.get("name") or "workflow.json")
-        try:
+
+        def _do() -> dict:
             saved = save_workflow(media, name, json.dumps(wf).encode("utf-8"))
+            if body.get("activate"):
+                select_workflow(media, saved)
+            workflows, selected = _list_and_selected(media)
+            return {"name": saved, "workflows": workflows, "selected": selected}
+
+        try:
+            return await run_in_threadpool(_do)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        if body.get("activate"):
-            select_workflow(media, saved)
-        return {"name": saved, "workflows": list_workflows(media),
-                "selected": selected_name(media)}
 
     @router.post(f"/api/{media}/workflows/select")
     async def _select_workflow(body: dict):
-        try:
+        def _do() -> dict:
             sel = select_workflow(media, body.get("name"))
+            return {"selected": sel, "workflows": list_workflows(media, active=sel)}
+
+        try:
+            return await run_in_threadpool(_do)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"selected": sel, "workflows": list_workflows(media)}
 
     @router.delete(f"/api/{media}/workflows/{{name}}")
     async def _delete_workflow(name: str):
-        try:
+        def _do() -> dict:
             delete_workflow(media, name)
+            workflows, selected = _list_and_selected(media)
+            return {"workflows": workflows, "selected": selected}
+
+        try:
+            return await run_in_threadpool(_do)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"workflows": list_workflows(media), "selected": selected_name(media)}
 
     return router
