@@ -339,6 +339,77 @@ def _is_wanted(f: Path) -> bool:
 # missing directory is already a no-op here.
 _BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt")
 
+# Of those, the ones whose kernel data is genuinely REQUIRED by an install that
+# ships the matching vendor library. Only rocblas, and the asymmetry is measured,
+# not assumed:
+#   * rocblas WITHOUT its Tensile data hard-crashes the native process on the
+#     first GEMM dispatched through it (the embedder's batch encode) - the
+#     uncatchable crash documented above.
+#   * hipblaslt is present as a library and has NO kernel directory at all on the
+#     b1307 gfx103X archive we ship, and that install is healthy (verified
+#     2026-08-05: a real model generating and the embedder producing correct
+#     cosines). Its b1288 data held gfx1100 kernels only, zero gfx1030, so this
+#     target never had usable data to lose.
+# So requiring a hipblaslt directory would fire on every healthy gfx103X install:
+# a check that cries wolf on the normal case is worse than no check, because it
+# trains people to ignore it. If a gfx110X/gfx120X user ever reports a hipblaslt
+# Tensile crash, add it here with that evidence.
+_BLAS_DIRS_REQUIRING_KERNELS = ("rocblas",)
+
+
+def _has_vendor_library(target: Path, name: str) -> bool:
+    """True when *target* holds the shared library for BLAS vendor *name*.
+
+    Matches both naming conventions because the archives use both, on the same
+    platform: the b1307 Windows build ships `rocblas.dll` AND `libhipblaslt.dll`.
+    Covers `.so` version suffixes (librocblas.so.4) the same way _is_wanted does."""
+    for f in target.iterdir():
+        if not f.is_file():
+            continue
+        stem = f.name.lower()
+        if stem.startswith("lib"):
+            stem = stem[3:]
+        if stem.startswith(name + "."):
+            return True
+    return False
+
+
+def blas_kernel_problems(target: Path) -> "list[str]":
+    """Human-readable problems with the BLAS kernel data in a provisioned runtime.
+
+    Empty list means nothing to report, INCLUDING for every non-ROCm backend: the
+    check is keyed on whether the install actually ships the vendor library, so a
+    vulkan / cuda / cpu / metal install has nothing to match and is silently fine.
+    No platform test and no backend marker is consulted - the marker is written
+    last during a provision, so a half-finished install can be missing it exactly
+    when this check matters most.
+
+    Scope, deliberately: this catches "the library is installed but its runtime
+    kernel data is not", which is the SILENT failure - provisioning succeeds, chat
+    works, and the crash arrives later on the first Tensile GEMM. It does not try
+    to catch a missing library, because that one already fails loudly at load."""
+    problems: "list[str]" = []
+    try:
+        if not target.is_dir():
+            return problems
+        for name in _BLAS_DIRS_REQUIRING_KERNELS:
+            if not _has_vendor_library(target, name):
+                continue
+            d = target / name
+            if not d.is_dir():
+                problems.append(f"{name} is installed but its {name}/ kernel "
+                                f"directory is missing entirely")
+                continue
+            n = sum(1 for p in d.rglob("*") if p.is_file())
+            if n == 0:
+                problems.append(f"{name} is installed but its {name}/ kernel "
+                                f"directory is empty")
+    except OSError as e:
+        # Cannot read the install: say so rather than returning "no problems",
+        # which is what an unreadable directory would otherwise look like.
+        problems.append(f"could not inspect BLAS kernel data: {e}")
+    return problems
+
 
 def _copy_blas_library_dirs(src_dir: Path, target: Path) -> int:
     """Copy any of ``_BLAS_LIBRARY_DIRS`` found under *src_dir* into *target*,
@@ -1177,12 +1248,91 @@ def _fetch_and_place(url: str, target: Path, sha256: Optional[str] = None) -> in
 _PRESERVED_TARGET_FILES = (".gitignore", ".gitkeep")
 
 
-def _clear_target(target: Path) -> None:
+class RuntimeInUseError(Exception):
+    """Something has the installed runtime open, so it cannot be replaced.
+
+    Deliberately NOT an ArtifactError and not a load failure. Those two mean a
+    build is bad; this one means both builds are fine and a process is merely
+    holding the files. That difference decides the response: a build that will
+    not load earns the Vulkan fallback, this earns "close it and retry" with the
+    existing install left completely intact."""
+
+    def __init__(self, locked: "list[Path]", partial: bool = False):
+        self.locked = list(locked)
+        # True only when files were already deleted before the lock was hit (the
+        # probe-to-unlink race). The install is then half cleared, and saying
+        # "nothing was changed" would be a lie - so the two cases are tracked
+        # apart and reported apart.
+        self.partial = partial
+        shown = ", ".join(sorted(p.name for p in self.locked[:6]))
+        more = f" (+{len(self.locked) - 6} more)" if len(self.locked) > 6 else ""
+        super().__init__(f"{len(self.locked)} runtime file(s) in use: {shown}{more}")
+
+
+def _clearable_files(target: Path) -> "list[Path]":
+    """The files _clear_target WOULD delete, in deletion order."""
+    out: "list[Path]" = []
+    try:
+        for f in target.iterdir():
+            if f.is_file():
+                if f.name in _PRESERVED_TARGET_FILES:
+                    continue
+                out.append(f)
+            elif f.is_dir() and f.name in _BLAS_LIBRARY_DIRS:
+                out.extend(p for p in f.rglob("*") if p.is_file())
+    except OSError:
+        pass
+    return out
+
+
+def _files_in_use(target: Path) -> "list[Path]":
+    """Of the files a provision would delete, those that cannot be replaced now.
+
+    Probed with ``open(..., "r+b")``: it writes no bytes and creates nothing, and
+    it asks the OS the exact question deletion asks. MEASURED on this codebase's
+    own runtime: a DLL reports WRITABLE before ``ctypes.CDLL`` and PermissionError
+    errno 13 after, which is the IDENTICAL error ``unlink()`` raises on the same
+    handle - so the probe predicts the deletion rather than merely correlating
+    with it.
+
+    Naturally platform-correct with no platform test. Windows maps a loaded DLL
+    without FILE_SHARE_WRITE/DELETE, so the probe refuses exactly when deletion
+    would. POSIX has no mandatory locking and unlinking an open file SUCCEEDS
+    (the directory entry goes, the inode lives until the last close), so there is
+    no half-state to prevent there and the probe correctly finds nothing.
+
+    An unprobeable file counts as NOT in use. This gate exists to prevent a
+    destructive half-state, so an inconclusive answer must not become a new way
+    to block a legitimate install."""
+    locked: "list[Path]" = []
+    for f in _clearable_files(target):
+        try:
+            with open(f, "r+b"):
+                pass
+        except PermissionError:
+            locked.append(f)
+        except OSError:
+            # Not a "someone holds it" answer (gone, unreadable, a device). Let
+            # the delete itself deal with it; _clear_target reports what remains.
+            pass
+    return locked
+
+
+def _clear_target(target: Path) -> "list[Path]":
     """Remove previously provisioned library files so a re-provision (or a
     fallback to a different backend) never mixes DLLs from two builds. Only
     touches files in the dir, plus the _BLAS_LIBRARY_DIRS subdirectories
     _copy_blas_library_dirs may have created (never any OTHER subdirectory) -
-    and never _PRESERVED_TARGET_FILES, the tracked git sentinels."""
+    and never _PRESERVED_TARGET_FILES, the tracked git sentinels.
+
+    RETURNS THE FILES IT COULD NOT REMOVE, and the return value is load-bearing:
+    every caller must treat a non-empty result as a failed provision. This
+    function used to swallow every OSError and return None, so a locked file left
+    it silently reporting success on a directory it had only half cleared - the
+    caller then copied a new build over the survivors and produced exactly the
+    mixed-build state this docstring promises to prevent (AGENTS.md rule 5: a
+    step that fails must never report success)."""
+    left: "list[Path]" = []
     try:
         for f in target.iterdir():
             if f.is_file():
@@ -1191,11 +1341,57 @@ def _clear_target(target: Path) -> None:
                 try:
                     f.unlink()
                 except OSError:
-                    pass
+                    left.append(f)
             elif f.is_dir() and f.name in _BLAS_LIBRARY_DIRS:
+                # ignore_errors keeps rmtree from raising part-way and stranding
+                # the rest of the sweep; whatever survives is reported instead.
                 shutil.rmtree(f, ignore_errors=True)
+                if f.exists():
+                    left.extend(p for p in f.rglob("*") if p.is_file())
     except OSError:
         pass
+    return left
+
+
+def _clear_target_or_refuse(target: Path) -> None:
+    """Clear *target*, but REFUSE BEFORE DELETING ANYTHING if the runtime is in
+    use. Raises RuntimeInUseError with the existing install untouched.
+
+    Checking first is what makes the half-state unreachable rather than merely
+    reported. Reporting alone (returning what could not be removed) is a real
+    improvement over silence, but by the time it can report, it has already
+    deleted everything it could - an honest error plus a runtime missing half its
+    files. Probing first turns that into "could not update, something is using
+    the runtime" with nothing lost.
+
+    The post-clear check is not redundant: a process can open a file in the
+    window between the probe and the unlink. That race leaves a half-state, which
+    is why it raises the same error rather than continuing - it cannot be
+    prevented here, but it must never be silent."""
+    in_use = _files_in_use(target)
+    if in_use:
+        raise RuntimeInUseError(in_use, partial=False)
+    left = _clear_target(target)
+    if left:
+        raise RuntimeInUseError(left, partial=True)
+
+
+def _exit_runtime_in_use(e: RuntimeInUseError) -> None:
+    """Report a refused provision and exit non-zero. Never falls back to another
+    backend: the user's chosen backend is not the problem, so silently installing
+    a different one would be exactly the never-override-the-user's-choice
+    mistake, dressed as a recovery."""
+    console.print(f"[red]Cannot replace the installed runtime: it is in use.[/red] {e}")
+    if e.partial:
+        console.print("[yellow]Some files were already removed before the lock "
+                      "appeared, so this install is now incomplete - re-run the "
+                      "same command once nothing is using it.[/yellow]")
+    else:
+        console.print("[green]Your existing install was left untouched.[/green]")
+    console.print("[dim]Close anything using the runtime (a running `localm serve` "
+                  "or `localm gui`, a Python session that imported localm, another "
+                  "setup-llama) and run the same command again.[/dim]")
+    sys.exit(1)
 
 
 def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "release asset") -> None:
@@ -1501,7 +1697,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     lib_name = _lib_name()
 
     def _try(backend: str, cudart: bool) -> None:
-        _clear_target(target)
+        _clear_target_or_refuse(target)
         _provision_backend(backend, target, sha256 if backend == chosen else None,
                            cudart, cuda_line)
         if not (target / lib_name).exists():
@@ -1522,6 +1718,14 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     provisioned = True
     try:
         _try(chosen, with_cudart)
+    except RuntimeInUseError as e:
+        # MUST precede the handlers below, and must NOT fall through to the
+        # Vulkan fallback. Falling back is right when the CHOSEN BUILD cannot
+        # run here; it is wrong when the chosen build is fine and a process is
+        # merely holding a file. Swapping the user's backend for that reason
+        # would answer a question nobody asked, and the honest fix (close it and
+        # retry) is one the user can actually act on.
+        _exit_runtime_in_use(e)
     except click.ClickException as e:
         console.print(f"[red]{e.message}[/red]")
         provisioned = False
@@ -1688,7 +1892,10 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     if from_dir:
         src = Path(from_dir)
         console.print(f"Copying binaries from [bold]{src}[/bold] ...")
-        _clear_target(target)
+        try:
+            _clear_target_or_refuse(target)
+        except RuntimeInUseError as e:
+            _exit_runtime_in_use(e)
         n = _copy_binaries(src, target)
         if not (target / lib_name).exists():
             console.print(f"[red]No {lib_name} found in the source directory.[/red] "
@@ -1713,8 +1920,13 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
         console.print(f"[dim]Fetching:[/dim] {url}")
         try:
-            _clear_target(target)
+            _clear_target_or_refuse(target)
             _fetch_and_place(url, target, sha256)
+        except RuntimeInUseError as e:
+            # Ahead of the broad handlers below, which would otherwise report a
+            # locked file as "Download failed" - a cause the user would go and
+            # investigate instead of the one that is true.
+            _exit_runtime_in_use(e)
         except ArtifactError as e:
             console.print(f"[red]Refusing to install:[/red] {e}")
             console.print("Provide a local build with --from instead, or a different "

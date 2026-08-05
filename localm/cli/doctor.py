@@ -77,7 +77,34 @@ def _check_llama_lib(find_binary_dir) -> bool:
         )
         return False
     console.print(f"  {_OK_SYM}  {found_dll.name} found in {binary_dir}")
-    return True
+    return _check_blas_kernels(binary_dir)
+
+
+def _check_blas_kernels(binary_dir) -> bool:
+    """Report a ROCm/HIP install whose BLAS kernel data is missing; return health.
+
+    A found-and-loadable llama.dll is NOT the same as a usable install. rocBLAS
+    resolves its GPU-arch GEMM kernels at runtime from a data directory next to
+    the DLL, so an install can pass every check above with ZERO kernels and then
+    hard-crash the native process (uncatchable from Python) the first time a
+    workload dispatches through Tensile - the embedder's batch encode.
+
+    That state is reachable two ways, and this catches both: the original defect
+    where the provision copied the library and dropped its data, and a provision
+    interrupted part-way (a locked file on a machine with the runtime open).
+
+    FAIL rather than WARN, because the failure it predicts is a hard process
+    crash, and because the remedy is one command."""
+    from localm.setup_llama import blas_kernel_problems
+    problems = blas_kernel_problems(binary_dir)
+    if not problems:
+        return True
+    for p in problems:
+        console.print(
+            f"  {_FAIL_SYM}  {p} - GPU matrix ops will crash the native "
+            f"process; re-run 'localm setup-llama --force'"
+        )
+    return False
 
 
 def _check_native_abi() -> None:
