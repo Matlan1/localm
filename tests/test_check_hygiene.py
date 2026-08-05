@@ -820,16 +820,12 @@ def test_release_manifest_gate_warns_but_passes_by_default_and_strict_escalates(
     monkeypatch.setattr(ch, "_sw_cache_derivation_violations", lambda: [])
     monkeypatch.setattr(ch, "_import_cycle_violations", lambda: [])
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
-    # Isolate the RELEASE-MANIFEST gate too, not just the file scans. It reads
-    # scripts/ next to check_hygiene.py on real disk, which the REPO monkeypatch
-    # above deliberately does not redirect - so on a checkout WITHOUT the gitignored
-    # scripts/check_manifest.py (CI, every external clone) it emits a warning that
-    # --strict escalates into an extra failure, moving these exit codes and issue
-    # counts for a reason that has nothing to do with the changelog gate under test.
-    # Unstubbed, these tests passed only on a machine that happens to have a
-    # gitignored file, and could never pass on the one environment that gates a merge.
-    monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
+    # This test EXERCISES the release-manifest gate rather than isolating it: it
+    # stubs the gate to WARN, then asserts the warn-vs-strict escalation. Do not
+    # add a neutral ([], []) stub above this line - it is dead (overridden here)
+    # and it reads as though the gate were being suppressed, which is the opposite
+    # of what this test does.
     monkeypatch.setattr(ch, "_release_manifest_gate",
                         lambda: ([], ["release-manifest gate SKIPPED: ..."]))
 
