@@ -7,12 +7,20 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "./chat.js";
-import { $, GIB, authHeaders, el, instanceCacheTrusted, toast } from "./helpers.js";
+import { $, GIB, authHeaders, el, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
 export const modelSelect = $("model-select");
 
+// ADR-0008 U4: tracks whether the dot is CURRENTLY showing a caller's deliberate
+// busy state (e.g. switchModel's "loading X…"), so refreshModels()'s periodic
+// "ok" write does not clobber it - the pre-existing race this fix closes.
+// Generic on purpose (any future busy-setter is covered), not tied to one
+// specific caller.
+let _statusBusy = false;
+
 export function setStatus(state, text) {
+  _statusBusy = state === "busy";
   $("status-dot").className = "dot " + state;
   $("status-text").textContent = text;
 }
@@ -76,11 +84,152 @@ export async function pollHwStats() {
 export let _hwStatsTimer = null;
 export function startHwStats(intervalMs = 2500) {
   pollHwStats();
+  pollActivity();   // ADR-0008 U4: folded into this existing poll, not a new timer
   if (_hwStatsTimer) clearInterval(_hwStatsTimer);
-  _hwStatsTimer = setInterval(pollHwStats, intervalMs);
+  _hwStatsTimer = setInterval(() => { pollHwStats(); pollActivity(); }, intervalMs);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) pollHwStats();   // refresh promptly on tab focus
+    if (!document.hidden) { pollHwStats(); pollActivity(); }   // refresh promptly on tab focus
   });
+}
+
+// --------------------------------------------------------------------------- //
+//  ADR-0008 U4: cross-session/cross-tab activity. A persistent status-bar     //
+//  affordance for background operations this tab did not necessarily start   //
+//  (another browser session, or this same tab before a reload) - the         //
+//  maintainer's own reported case. Polled on the SAME tick as pollHwStats     //
+//  above (no new timer) and reattached at boot, mirroring coder.js's         //
+//  reattachSessions()/streamSession(). Deliberately does NOT drive the       //
+//  status DOT (setStatus) - only the pill below - to avoid inventing new,    //
+//  unrequested semantics about which kinds of background work should read as
+//  "the model is busy"; the _statusBusy fix above is what lets a future
+//  caller do that safely, not a decision this unit makes for every op kind.
+// --------------------------------------------------------------------------- //
+
+// job_id -> {lines: string[]} - lines accumulated from a background streamJob()
+// reattach, so the details modal can show "the output it missed" even for an
+// operation whose page-specific progress UI was never open in this tab.
+const _activityLogs = new Map();
+let _activityOps = [];   // the last successfully-read /api/activity list
+
+export function isActivityBusy() {
+  return _activityOps.some((op) => op.status === "running");
+}
+
+function activityLabel(op) {
+  return (op && (op.label || op.kind)) || "operation";
+}
+
+export function renderActivityPill(ops) {
+  const pill = $("activity-pill");
+  if (!pill) return;
+  const running = ops.filter((op) => op.status === "running");
+  if (!running.length) {
+    pill.style.display = "none";
+    return;
+  }
+  pill.style.display = "";
+  if (running.length === 1) {
+    const op = running[0];
+    const pct = typeof op.pct === "number" ? ` ${Math.round(op.pct)}%` : "";
+    pill.textContent = activityLabel(op) + pct;
+  } else {
+    pill.textContent = `${running.length} running`;
+  }
+}
+
+export function showActivityDetails() {
+  openModal("Activity", (body) => {
+    if (!_activityOps.length) {
+      body.appendChild(el("p", "sub", "Nothing running."));
+      return;
+    }
+    for (const op of _activityOps) {
+      const row = el("div", "job-row");
+      const head = el("div", "job-head");
+      head.appendChild(el("span", "job-name", activityLabel(op)));
+      head.appendChild(el("span", "job-state st-" + op.status, op.status));
+      row.appendChild(head);
+      if (typeof op.pct === "number") {
+        const dl = el("div", "dl-progress");
+        const bar = el("div", "dl-bar");
+        const fill = el("div", "dl-fill");
+        fill.style.width = Math.max(0, Math.min(100, op.pct)) + "%";
+        bar.appendChild(fill);
+        dl.appendChild(bar);
+        row.appendChild(dl);
+      }
+      const entry = _activityLogs.get(op.id);
+      if (entry && entry.lines.length) {
+        const log = el("pre", "job-log");
+        log.textContent = entry.lines.join("\n");
+        row.appendChild(log);
+      }
+      body.appendChild(row);
+    }
+  });
+}
+if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
+
+export async function pollActivity() {
+  if (typeof document !== "undefined" && document.hidden) return;
+  try {
+    const r = await fetch("/api/activity", { headers: authHeaders() });
+    // R1 (ADR-0008 Part 3): an unreadable state must never render as "nothing
+    // running" - keep the last known rendering (matching pollHwStats' own
+    // "transient - keep the last reading" precedent) rather than hiding the
+    // pill and falsely implying activity was confirmed absent.
+    if (!r.ok) return;
+    const data = await r.json();
+    const ops = Array.isArray(data.operations) ? data.operations : [];
+    _activityOps = ops;
+    renderActivityPill(ops);
+  } catch (e) { /* transient - keep the last reading */ }
+}
+
+// Boot-time reattach, mirroring coder.js's reattachSessions(): ask the server
+// what is running, reattach a live stream to anything found (fire-and-forget -
+// an operation can run far longer than boot should wait), and toast once.
+// streamJob() already handles reconnect + replay dedup internally (see
+// dev-notes/streamJob-reconnect-contract.md) - this needs no dedup logic of
+// its own, it only needs to call streamJob() once per running operation.
+export async function reattachActivity() {
+  try {
+    const r = await fetch("/api/activity", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    const ops = Array.isArray(data.operations) ? data.operations : [];
+    _activityOps = ops;
+    renderActivityPill(ops);
+    const running = ops.filter((op) => op.status === "running");
+    if (!running.length) return;
+    for (const op of running) {
+      _activityLogs.set(op.id, { lines: [] });
+      streamJob(op.id, (line) => {
+        const entry = _activityLogs.get(op.id);
+        if (entry) entry.lines.push(line);
+      }, (ev) => {
+        const idx = _activityOps.findIndex((o) => o.id === op.id);
+        if (idx !== -1 && typeof ev.pct === "number") {
+          _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct };
+          renderActivityPill(_activityOps);
+        }
+      }).then((end) => {
+        // "disconnected" is a CLIENT-only concept (streamJob gave up
+        // reconnecting) - it is not a real job outcome, so it must never
+        // overwrite the last known SERVER-reported status; the job may well
+        // still be running, we have just lost our own update channel to it.
+        if (end.status === "disconnected") return;
+        const idx = _activityOps.findIndex((o) => o.id === op.id);
+        if (idx !== -1) {
+          _activityOps[idx] = { ..._activityOps[idx], status: end.status };
+          renderActivityPill(_activityOps);
+        }
+      });
+    }
+    toast(running.length === 1
+      ? `Reattached to a running ${activityLabel(running[0])}`
+      : `Reattached to ${running.length} running operations`);
+  } catch (e) { /* server unreachable at boot - same as reattachSessions() */ }
 }
 
 // In-page API-key gate. Shown when an authed boot returns 401 and this browser
@@ -466,7 +615,10 @@ export async function refreshModels() {
         modelSelect.appendChild(opt);
       }
     }
-    setStatus("ok", data.active || "no model");
+    // ADR-0008 U4: do not clobber a deliberate busy state (e.g. a model load
+    // still in flight) - this 30s poll has no idea one is running and used to
+    // overwrite it unconditionally every time it landed mid-load.
+    if (!_statusBusy) setStatus("ok", data.active || "no model");
     renderModelSplitLine(data.active_gpu_split);
     // The active model can change from OUTSIDE this tab too - another tab,
     // another device, the CLI, an MCP client - while Settings is already open. A
