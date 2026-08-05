@@ -1579,7 +1579,8 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
         import check_manifest as cm
-    except ImportError:
+    except ModuleNotFoundError:
+        # The file is genuinely ABSENT. Expected, and the common case.
         return [], [
             "release-manifest gate SKIPPED: scripts/check_manifest.py is not present "
             "in this checkout. Expected on CI and most external clones - it is "
@@ -1587,6 +1588,20 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
             "pass does NOT mean the release-manifest classification is clean; run "
             "'python scripts/check_manifest.py' by hand on a checkout that has it "
             "(e.g. the maintainer's own) before cutting a release."]
+    except ImportError as e:
+        # The file IS present but failed to import (a broken internal import, a
+        # syntax-level import error, a half-finished edit). A bare `except ImportError`
+        # used to fold this into the branch above, so the gate announced
+        # "is not present in this checkout" about a file sitting right there - a
+        # FALSE reason for a real failure, which is precisely what rule 5 forbids.
+        # These two states need different words: one is expected and benign, the
+        # other means the gate CANNOT RUN on the one machine that has the checker.
+        return [], [
+            "release-manifest gate COULD NOT RUN: scripts/check_manifest.py IS "
+            f"present but failed to import ({type(e).__name__}: {e}). This is NOT "
+            "the expected gitignored-and-absent case - the checker is there and "
+            "broken, so the release-manifest classification is UNCHECKED. Fix the "
+            "import before cutting a release."]
     return list(cm.check_manifest()), []
 
 
