@@ -24,7 +24,9 @@ Optional flags used by the setup wiring:
   --summary TEXT    one-line title (else you are prompted)
   --detail  TEXT    prefilled "what happened" (e.g. the failing setup step)
   --log     PATH    a specific log file to attach the tail of (else newest found)
-  --yes             skip the confirm prompt (still previews); for scripted sends
+  --yes             SEND immediately, skipping the confirm prompt (the preview
+                    still prints to the console first, but does not gate the
+                    send); for scripted/automated sends
 """
 
 from __future__ import annotations

@@ -202,6 +202,25 @@ def test_main_yes_no_endpoint_configured_saves_and_returns_1(tmp_path, monkeypat
     assert "No bug-report endpoint" in out
 
 
+def test_yes_help_text_says_it_sends_not_preview_only(capsys):
+    """Regression for #1100: the old --yes help text read "skip the confirm
+    prompt (still previews)" - a session skimming it took "still previews" to
+    mean "preview only, does not send", ran it expecting a dry run, and filed a
+    real GitHub issue with test content. --yes genuinely sends (see
+    test_main_yes_send_success_returns_0 above); the help text must say so
+    plainly rather than rely on "still previews" being read the right way."""
+    with pytest.raises(SystemExit):
+        ri.main(["--help"])
+    out = capsys.readouterr().out
+    assert "--yes" in out
+    # argparse re-flows the whole docstring and can wrap a line anywhere
+    # (including between two words of the flag's own description), so compare
+    # against whitespace-collapsed text rather than a literal substring.
+    flat = " ".join(out.split())
+    assert "skip the confirm prompt (still previews)" not in flat
+    assert "SEND immediately" in flat
+
+
 def test_main_scrubs_home_path_in_uploaded_title(tmp_path, monkeypatch, capsys):
     """HON-03: the issue TITLE lands on a PUBLIC GitHub issue, so it must be
     scrubbed like the body/preview. A home path (username) in --summary must not
