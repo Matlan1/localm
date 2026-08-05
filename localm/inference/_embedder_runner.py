@@ -59,6 +59,23 @@ def _simulate_fault(mode: str) -> None:
     os.abort()                                    # genuine uncatchable native abort
 
 
+# How long the "embed" dedup_native_stderr scope (see _runner_main below) may
+# sit open with nothing pending before it is closed on idle. A bursty caller
+# (one RAG index pass, many embed() calls back to back with no real gap)
+# stays inside ONE scope, so genuinely repeated native lines actually get
+# grouped; a quiet server between bursts still flushes within this bound
+# instead of holding output until the next embed() (minutes/hours away, or
+# never) or process shutdown - #963's adversarial follow-up measured that
+# BOTH extremes are real failures: wrapping per-call groups nothing (a
+# single-line scope has nothing to collapse), wrapping the whole child
+# lifetime can silence the live view indefinitely (debuglog.py's
+# _LineGrouper only flushes early once 8 OTHER distinct lines evict the
+# pending one - a small, low-variety repeat like this one may never reach
+# that). Single-digit seconds, matching the existing load-wrap's own
+# "however long the bounded operation takes" order of magnitude.
+_EMBED_STDERR_IDLE_CLOSE_SECS = 5.0
+
+
 # --------------------------------------------------------------------------- #
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
@@ -66,7 +83,7 @@ def _simulate_fault(mode: str) -> None:
 def _runner_main(req_q, resp_q) -> None:
     """Long-lived child: owns one GGUFEmbedder (one loaded model) for its
     whole process lifetime, dispatching one request at a time."""
-    from localm.debuglog import attach_child_logging
+    from localm.debuglog import attach_child_logging, dedup_native_stderr
     attach_child_logging()   # native load-failure diagnostics land in the
                               # shared debug log from this process too.
 
@@ -85,9 +102,45 @@ def _runner_main(req_q, resp_q) -> None:
 
     embedder = None
 
+    # Lazily entered on the FIRST "embed" command and held open across every
+    # "embed" that follows with no real gap between them - never re-entered
+    # per call, and closed on idle (see _EMBED_STDERR_IDLE_CLOSE_SECS above)
+    # rather than held for the child's whole remaining lifetime. Every
+    # llama_decode call (embedder.py's embed()) writes a native line like
+    # "decode: cannot decode batches with this context (calling encode()
+    # instead)" to raw stderr, and #963's adversarial follow-up measured
+    # that a RAG/memory workload fires it once per embed() RPC - many small,
+    # separate calls, not one big loop. dedup_native_stderr's grouper only
+    # collapses lines seen WITHIN one open scope, so wrapping each embed()
+    # call individually (measured, then reverted - see embedder.py's
+    # embed() docstring) collapses nothing: a single-text call feeds the
+    # grouper exactly one line, which flushes raw the moment that call's own
+    # scope closes. "load" is deliberately excluded - GGUFEmbedder.__init__
+    # already wraps the model load in its own dedup_native_stderr scope
+    # (#993), and nesting two scopes would dup2 fd 2 onto the OUTER scope's
+    # pipe instead of the real stderr (see that context manager's own
+    # docstring on why that hangs).
+    embed_stderr_ctx = None
+
+    def _close_embed_stderr_ctx() -> None:
+        nonlocal embed_stderr_ctx
+        if embed_stderr_ctx is not None:
+            embed_stderr_ctx.__exit__(None, None, None)
+            embed_stderr_ctx = None
+
     while True:
-        cmd = req_q.get()
+        # Block indefinitely while no embed scope is open (nothing pending
+        # to flush, so no reason to wake up on our own). Once a scope IS
+        # open, poll with the idle bound instead, so a quiet stretch closes
+        # it and flushes promptly rather than waiting on the next command.
+        get_timeout = _EMBED_STDERR_IDLE_CLOSE_SECS if embed_stderr_ctx is not None else None
+        try:
+            cmd = req_q.get(timeout=get_timeout)
+        except _queue.Empty:
+            _close_embed_stderr_ctx()
+            continue
         if cmd is None:
+            _close_embed_stderr_ctx()
             return
         name = cmd[0]
         payload = cmd[1] if len(cmd) > 1 else None
@@ -97,6 +150,7 @@ def _runner_main(req_q, resp_q) -> None:
             _simulate_fault(fault)   # test-only; never returns cleanly
 
         if name == "shutdown":
+            _close_embed_stderr_ctx()
             if embedder is not None:
                 embedder.close()
             return
@@ -151,12 +205,18 @@ def _runner_main(req_q, resp_q) -> None:
             continue
 
         if name == "embed":
+            if embed_stderr_ctx is None:
+                embed_stderr_ctx = dedup_native_stderr()
+                embed_stderr_ctx.__enter__()
             try:
                 resp_q.put(("ok", embedder.embed(payload)))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # Same as above: a native abort during llama_decode propagates
-            # out of this whole function, uncaught, on purpose.
+            # out of this whole function, uncaught, on purpose - the open
+            # dedup_native_stderr scope is simply never closed, which is
+            # fine (the process is dying anyway; nothing pending needs to
+            # be flushed to a stderr no reader will ever see again).
             continue
 
         # An unrecognized command is a bug in this module's own parent-side
