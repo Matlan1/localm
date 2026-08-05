@@ -356,6 +356,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **`localm doctor` no longer shows a green tick for a GPU driver that is
+  broken.** It read whatever `nvidia-smi` or `rocm-smi` printed without checking
+  whether the tool had actually succeeded, so a driver that fails to initialise -
+  the usual state after a driver update with no reboot - was reported as a
+  working GPU, with the error message itself shown as the graphics card's name.
+  Worse, that false positive also suppressed the "No GPU detected ... CPU mode
+  only" warning, so nothing anywhere told you something was wrong. doctor now
+  counts only a tool that exits cleanly, and reports one that is installed but
+  failing as its own warning with what the tool actually said. A tool that is
+  simply not installed stays silent, exactly as before - localm's default GPU
+  paths never need it.
 - **Re-running `setup-llama` on an AMD box now tells you it is an upgrade, and
   from which build.** It records the build tag it installed, so a genuine move
   between llama.cpp builds says "Upgrading the amd-rocm build: b1288 -> b1307"
