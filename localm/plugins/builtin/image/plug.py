@@ -203,6 +203,13 @@ async def imagine(req: ImagineRequest, request: Request):
         if ok:
             job.result = out_path.name
             gallery.stamp_owner("image", out_path.name, owner)
+        # The real deliverable is decided right here - mark it before the VRAM
+        # handover below, which is best-effort cleanup that can itself raise
+        # (e.g. a non-comfy backend's free_vram()) and must never be able to
+        # turn a genuinely successful generation into a reported failure (jobs.py
+        # start_fn's mark_outcome contract - the in-process sibling of #1126's
+        # CLI-side outcome sentinel).
+        job.mark_outcome("done" if ok else "failed")
         # Restore VRAM on EVERY exit path once we have unloaded the chat model -
         # success, failure, OR cancel. The old code reloaded only on success, so
         # hitting Stop mid-generation left the chat model unloaded AND ComfyUI's

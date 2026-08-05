@@ -97,6 +97,13 @@ class Job:
     # pct/phase without replaying the whole history. Written under _sub_lock in
     # push(), alongside the history append it is derived from.
     _last_progress: Optional[dict] = None
+    # Set by mark_outcome() - see that method's docstring. None (never marked)
+    # and "failed" both fall through to start_fn's unchanged except-branch
+    # behavior; only "done" ever overrides it. Read/written from the single
+    # worker thread running this job's callback, same as status/result/
+    # returncode above - no lock needed, unlike _history/_subscribers which
+    # are also read cross-thread by SSE subscribers.
+    _outcome: Optional[str] = None
 
     @property
     def cancel_requested(self) -> bool:
@@ -211,6 +218,25 @@ class Job:
         the timestamp forward and give the job a second lease on the TTL."""
         if self.finished_at is None:
             self.finished_at = time.time()
+
+    def mark_outcome(self, status: str) -> None:
+        """Record that THIS job's own real work has verifiably finished with
+        *status*, for a ``start_fn`` (in-process) callback to call once its
+        actual deliverable is complete and BEFORE any risky tail cleanup (a
+        VRAM handover, a bookkeeping call) that could still raise.
+
+        start_fn's worker trusts this over inferring the outcome from an
+        exception, but ONLY for an exception that happens AFTER this was
+        called - a callback that never calls it keeps today's rule unchanged
+        (an exception anywhere in ``fn`` means failed). Mirrors start_cli's
+        own ``{"type": "outcome"}`` sentinel-frame contract (#1126) for the
+        in-process job path, which has no subprocess/stdout boundary to carry
+        a sentinel frame across, so the signal has to be an ordinary method
+        call on the same in-memory object instead."""
+        if status not in ("done", "failed"):
+            raise ValueError(
+                f"mark_outcome status must be 'done' or 'failed', got {status!r}")
+        self._outcome = status
 
     def summary(self) -> dict:
         """This job as a listing row: enough for a client to render and then
@@ -466,7 +492,11 @@ class JobManager:
         replaying the stream, and may update ``job.result``. Prefer
         ``job.progress`` over formatting numbers into a line: a fraction that
         only exists inside prose is invisible to ``/api/activity``, to the CLI
-        and to MCP. owner, when given, binds the job to the creating key's
+        and to MCP. If ``fn``'s own real work is done but it still runs risky
+        tail cleanup afterward (a VRAM handover, a bookkeeping call), call
+        ``job.mark_outcome("done")`` first - see that method's docstring - so a
+        later exception in the tail cannot misreport a completed operation as
+        failed. owner, when given, binds the job to the creating key's
         principal id so only that key (or an admin/owner) may stream/cancel it.
         label, when given, is the human-readable operation name a listing shows
         (the start_cli equivalent is host_label, which doubles as the host
@@ -484,8 +514,22 @@ class JobManager:
                 if job.status != "cancelled":
                     job.status = "done" if ok else "failed"
             except Exception as e:
-                job.status = "failed"
-                job.push({"type": "line", "text": f"job error: {e}"})
+                if job._outcome == "done":
+                    # The callback already called mark_outcome("done") before
+                    # this raised, so its real deliverable is verifiably
+                    # complete - this exception happened in tail cleanup, not
+                    # in the work itself. Trust the mark over the blind
+                    # except, exactly as start_cli's outcome-sentinel does
+                    # (#1126). None (never marked) and "failed" both fall
+                    # through to the else branch below, byte-identical to
+                    # before this existed - never a new way to invent success
+                    # out of silence.
+                    job.status = "done"
+                    job.push({"type": "line",
+                              "text": f"(cleanup after success failed: {e})"})
+                else:
+                    job.status = "failed"
+                    job.push({"type": "line", "text": f"job error: {e}"})
             finally:
                 # See the start_cli equivalent: stamp before "end" is emitted.
                 job.mark_finished()

@@ -711,6 +711,13 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
             # there, not just in a log (AGENTS rule 5).
             job.push({"type": "line", "text": f"error: {e}"})
             return False
+        # add_paths already returned successfully - the indexing work itself is
+        # done. Mark it before the reporting tail below (formatting + a push
+        # loop over its own result dict), so a defect there can no longer
+        # misreport a completed index as failed (jobs.py start_fn's
+        # mark_outcome contract - the in-process sibling of #1126's CLI-side
+        # outcome sentinel).
+        job.mark_outcome("done")
         summary = (f"done: {result['added']} added, "
                    f"{result['updated']} updated, "
                    f"{result['skipped']} unchanged, "
@@ -796,6 +803,9 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
             # writing this collection. Reported on the stream, not a crash.
             job.push({"type": "line", "text": f"error: {e}"})
             return False
+        # add_uploads already returned successfully - see rag_add's _index for
+        # why this is marked here, before the reporting tail below.
+        job.mark_outcome("done")
         summary = (f"done: {result['added']} added, "
                    f"{result['updated']} updated, "
                    f"{result['skipped']} unchanged, "
@@ -870,6 +880,9 @@ async def rag_reembed(name: str, request: Request):
             job.push({"type": "line",
                       "text": f"error: {e} - the previous index was left untouched"})
             return False
+        # reembed already returned successfully (the new index is swapped in) -
+        # see rag_add's _index for why this is marked before the reporting tail.
+        job.mark_outcome("done")
         job.push({"type": "line",
                   "text": (f"done: {result['chunks']} chunks re-embedded at "
                            f"{result['dim']} dimensions with {model}")})
@@ -1012,6 +1025,14 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "(bge-small-en-v1.5).")
             return False
         line(f"Ready: {model} ({dim}-dim). Semantic search is on.")
+        # The switch itself is done and verified (config written, embedder
+        # loaded, self-test passed) - mark it before the impact report below,
+        # which reads every existing collection off disk (_collection_dim_report
+        # -> collection_names()/Collection()) and must never be able to turn an
+        # already-successful model switch into a reported failure (jobs.py
+        # start_fn's mark_outcome contract - the in-process sibling of #1126's
+        # CLI-side outcome sentinel).
+        job.mark_outcome("done")
         # Name exactly what this switch just invalidated, rather than a generic
         # pointer to a button (NEW-RAG-DIM-NO-REEMBED item 3) - reported, not
         # confirmed up front: the config write and embedder reset above already

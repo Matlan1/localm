@@ -8,6 +8,7 @@ model, loading chat". The reload must run on the cancel path too.
 """
 
 import asyncio
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,9 +21,17 @@ class _FakeJob:
         self.cancel_requested = cancelled
         self.lines = []
         self.result = None
+        self.outcomes = []
 
     def push(self, ev):
         self.lines.append(ev)
+
+    def mark_outcome(self, status):
+        # Board item #27 follow-up: _generate now calls this once its real
+        # deliverable is decided, before the VRAM-reload tail. Recorded (not a
+        # no-op stub) so tests below can assert it fires at the right point -
+        # see test_start_fn_outcome_honesty.py for the jobs.py mechanism itself.
+        self.outcomes.append(status)
 
 
 def _run_generate(monkeypatch, *, gen_result, cancelled):
@@ -81,9 +90,10 @@ def _run_generate(monkeypatch, *, gen_result, cancelled):
     ids=["cancel", "failure"],
 )
 def test_reload_runs_on_cancel_or_failure(monkeypatch, gen_message, cancelled):
-    reloaded, _ = _run_generate(
+    reloaded, job = _run_generate(
         monkeypatch, gen_result=(False, gen_message), cancelled=cancelled)
     assert reloaded, "chat model must be reloaded after a cancelled or failed generation"
+    assert job.outcomes == ["failed"]
 
 
 def test_reload_runs_on_success(monkeypatch):
@@ -92,3 +102,66 @@ def test_reload_runs_on_success(monkeypatch):
         cancelled=False)
     assert reloaded
     assert job.result is not None       # success still records the artifact
+    assert job.outcomes == ["done"]
+
+
+def _wait_for_terminal(job, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if job.status != "running":
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"job never left 'running': {job.status}")
+
+
+def test_generate_reports_done_when_reload_raises_after_success(monkeypatch):
+    """The concrete, originally-flagged bug (board item #27's follow-up,
+    dev-notes/FIX-2026-08-05-start-fn-outcome-honesty.md): a successful
+    generation whose VRAM handover then raises (e.g. a non-comfy backend's
+    free_vram()) must still land on job.status == "done", not "failed".
+
+    Drives the REAL JobManager.start_fn (unlike the fake-job tests above), so
+    the interaction between _generate's mark_outcome call and jobs.py's own
+    except handler is exercised for real, not just _generate's return value in
+    isolation."""
+    s = {"reload_after": True, "warning": "", "api_url": "http://127.0.0.1:8188"}
+    monkeypatch.setattr(plug._backend, "settings", lambda cfg: s)
+    monkeypatch.setattr(plug._backend, "ensure_available",
+                        lambda s, on_progress=None: (True, "ComfyUI is up."))
+    monkeypatch.setattr(plug._backend, "generate",
+                        lambda *a, **k: (True, "Image saved to out.png (seed 1)"))
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
+    monkeypatch.setattr("localm.vram.unload_chat_for_media",
+                        lambda job, url, label, instance_token=None: True)
+
+    def _raising_reload(job, url, s, backend, label, instance_token=None):
+        raise RuntimeError("a non-comfy backend's free_vram() blew up")
+
+    monkeypatch.setattr("localm.vram.reload_chat_after_media", _raising_reload)
+
+    captured = {}
+
+    class _FakeJobs:
+        def start_fn(self, kind, fn, result_path=None, owner=None):
+            captured["fn"] = fn
+            return MagicMock(id="job1")
+
+    request = MagicMock()
+    request.app.state.jobs = _FakeJobs()
+    request.app.state.self_url = "http://127.0.0.1:8642/v1"
+    request.headers = {}
+    request.cookies = {}
+
+    req = plug.ImagineRequest(prompt="a cat")
+    asyncio.run(plug.imagine(req, request))
+
+    from localm.plugins.gui.jobs import JobManager
+    real_job = JobManager().start_fn("imagine", captured["fn"])
+    _wait_for_terminal(real_job)
+
+    assert real_job.status == "done", (
+        f"a successful generation whose VRAM reload then raised must still "
+        f"report done, not {real_job.status!r}")
+    assert real_job.result is not None, "the generated artifact is still recorded"
+    lines = [e.get("text", "") for e in real_job._history if e.get("type") == "line"]
+    assert any("cleanup after success failed" in t for t in lines), lines
