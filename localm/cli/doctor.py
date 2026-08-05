@@ -258,8 +258,35 @@ def _check_venv_creation() -> None:
 
 
 def _check_gpu_driver() -> bool:
-    """Probe nvidia-smi / rocm-smi; return True if a GPU driver was found."""
+    """Probe nvidia-smi / rocm-smi; return True if a GPU driver was found.
+
+    ONLY A CLEAN EXIT COUNTS AS A GPU. This used to read ``.stdout`` and never
+    look at the return code, so ANY non-empty stdout became both a green tick and
+    the device NAME - and these tools report a broken driver by printing an error
+    and exiting non-zero. The reported nvidia-smi form of that ("Failed to
+    initialize NVML: Driver/library version mismatch", the usual state after a
+    driver update with no reboot) would have rendered as:
+
+        [green]OK[/green]  NVIDIA GPU: Failed to initialize NVML: ...
+
+    a tick on an error string. That is the check answering "did the tool print
+    something" while the reader hears "you have a working GPU driver", which is
+    the one case worth reporting.
+
+    It got worse downstream: this return value feeds ``smi_or_torch_gpu``, and
+    ``_check_gpu_verdict``'s step (3) RETURNS EARLY when it is True. So a broken
+    driver also SUPPRESSED the "No GPU detected ... CPU mode only" line - the
+    check that would have told the user something is wrong.
+
+    A tool that is absent stays silent (that is the normal case on nearly every
+    box and is not a fault). A tool that is PRESENT AND FAILING is surfaced as a
+    warning naming what it said, because "not installed" and "installed but
+    broken" need opposite responses from the user, and only the second is
+    actionable. Neither counts as a GPU: the real verdict comes from
+    _check_gpu_verdict's device probe, so a miss here costs a supplementary
+    detail line, while a false positive costs the whole warning."""
     import subprocess
+    from localm.debuglog import logger as _dbg
     for cmd, label in [
         (["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
          "NVIDIA"),
@@ -267,15 +294,30 @@ def _check_gpu_driver() -> bool:
          "AMD ROCm"),
     ]:
         try:
-            out = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=5
-            ).stdout.strip()
-            if out:
-                first_line = out.splitlines()[0]
-                console.print(f"  {_OK_SYM}  {label} GPU: {first_line}")
-                return True
-        except Exception:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        except FileNotFoundError:
+            continue          # not installed: the normal case, never a fault
+        except Exception as e:
+            # A timeout or an OS-level spawn failure is NOT the same as absent -
+            # the tool is there and did not answer. Nothing here should escalate
+            # a supplementary line into a doctor failure, but it must not vanish
+            # without trace either.
+            _dbg.debug("doctor: %s probe (%s) did not complete: %r",
+                       label, cmd[0], e)
             continue
+        out = (r.stdout or "").strip()
+        if r.returncode != 0:
+            said = (out or (r.stderr or "").strip() or "no output")
+            _dbg.debug("doctor: %s probe (%s) exited %d: %s",
+                       label, cmd[0], r.returncode, said)
+            console.print(
+                f"  {_WARN_SYM}  {cmd[0]} is installed but failed "
+                f"(exit {r.returncode}): {said.splitlines()[0]}")
+            continue
+        if out:
+            first_line = out.splitlines()[0]
+            console.print(f"  {_OK_SYM}  {label} GPU: {first_line}")
+            return True
     return False
 
 
