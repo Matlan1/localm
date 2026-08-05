@@ -1874,4 +1874,25 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     from localm.plugins.deps_routes import register_dep_routes
     register_dep_routes(app, manager)
 
+    # Background-job registry (ADR-0008). KERNEL-level, i.e. here rather than in
+    # attach_gui, so a headless ``localm serve`` has one too. It used to be
+    # created in attach_gui, which had two consequences: a bare API server could
+    # not run a background job AT ALL (RAG indexing degraded to a synchronous
+    # in-request call, media generation returned 503), and an operation was
+    # discoverable only in GUI mode. register_dep_routes immediately above is the
+    # precedent - that in-flight registry has always lived at this altitude.
+    #
+    # Every consumer reads app.state.jobs PER REQUEST, so registration order
+    # inside attach_engine does not matter; what matters is that any app with
+    # plugin routes mounted got them from THIS manager, hence also has this
+    # attribute by the time it serves anything.
+    #
+    # The module still lives under plugins/gui/ for historical reasons only. Its
+    # contents are kernel infrastructure; moving the file would churn six test
+    # modules for no behaviour change, so it stays put with this note instead.
+    from localm.plugins.gui.jobs import JobManager
+    from localm.plugins.gui.routes import jobs as _job_routes
+    app.state.jobs = JobManager()
+    _job_routes.register(app, app.state.jobs)
+
     return manager

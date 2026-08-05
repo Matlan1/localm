@@ -17,19 +17,21 @@ session mode, like generated images. /api/rag/extract is the exception: it
 converts an uploaded attachment to text entirely in memory, so privacy-mode
 chats can use documents without leaving traces.
 
-Background indexing and self-embedding use the kernel's shared services
-(``request.app.state.jobs`` / ``.self_url`` / ``.active_model``), published by
-``attach_gui``. Under a bare ``localm serve`` (api-mode) ``jobs`` is never set, so
-indexing/upload run SYNCHRONOUSLY on the plugin pool instead of as a streamed
-background job (``_index_sync``), and self-embedding is derived from the kernel's
-own advertised bind coordinates + live engine (``_kernel_self_services``) - so a
-headless server can actually index, not just fail cleanly (memory-audit cluster
-24). Embedding-model SETUP still needs a job for its download-progress stream, so
-it degrades to a clean 503 ("run `localm gui`"), mirroring the coder plugin's
-``_sessions`` guard. Query never needed a job; with no embedder reachable it falls
-back to lexical-only search (embed_fn=None), the same degrade path used when
-embed=False or the embedder itself is unavailable. The background job stream is
-served by the kernel's /api/jobs/* endpoints.
+Background indexing uses the kernel's background-job registry
+(``request.app.state.jobs``), which since ADR-0008 is created by ``attach_engine``
+rather than ``attach_gui`` - so a bare ``localm serve`` has one too, and indexing,
+upload and embedding-model setup all run as streamed background jobs there exactly
+as they do under the GUI. They previously did not: ``jobs`` was absent headless, so
+add/upload ran synchronously on the plugin pool and setup returned a 503 telling
+the caller to "run `localm gui`". Both of those are gone, and the headless response
+shape for add/upload is now ``{"job_id": ...}`` like the GUI's.
+
+Self-embedding still derives its URL from the kernel's own advertised bind
+coordinates + live engine (``_kernel_self_services``) when the GUI never published
+``.self_url`` / ``.active_model``. Query never needed a job; with no embedder
+reachable it falls back to lexical-only search (embed_fn=None), the same degrade
+path used when embed=False or the embedder itself is unavailable. The background
+job stream is served by the kernel's /api/jobs/* endpoints.
 """
 
 from __future__ import annotations
@@ -321,17 +323,23 @@ def _collection_dim_report(target_dim: int) -> dict:
     return {"degrades": degrades, "unknown": unknown, "unaffected": unaffected}
 
 
-def _require_jobs(request: Request, *, needs: str = "Background indexing"):
-    """The background job manager, or a clean 503 when the GUI server isn't
-    running. api-mode (``localm serve`` without the GUI) never calls
-    ``attach_gui``, so ``app.state.jobs`` is absent - mirrors the coder plugin's
-    ``_sessions`` guard rather than crashing with an AttributeError. *needs*
-    names what actually requires the GUI (indexing vs. embedding-model setup)
-    so the message stays accurate at every call site."""
+def _require_jobs(request: Request):
+    """The background job manager.
+
+    Present on any app built through ``attach_engine``, which since ADR-0008
+    creates it - including a bare ``localm serve``. It used to be created by
+    ``attach_gui`` alone, so this raised a 503 telling the caller that indexing
+    "needs the localm GUI server (run `localm gui`)"; that sentence stopped
+    being true the moment the registry moved to kernel level, so it is gone
+    rather than reworded, along with its *needs* parameter.
+
+    The guard itself stays, because it now catches a CONSTRUCTION error (a
+    router mounted on an app that never ran attach_engine) and a clean 503
+    still beats the unguarded AttributeError -> opaque 500 of audit item 8."""
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
-        raise HTTPException(503, f"{needs} needs the localm GUI "
-                                 "server (run `localm gui`).")
+        raise HTTPException(503, "This server has no background job registry, "
+                                 "so indexing cannot be started.")
     return jobs
 
 
@@ -388,18 +396,36 @@ def _self_services(request: Request):
 
 
 def _log_progress(text: str) -> None:
-    """``on_progress`` for the headless-api-mode sync indexing calls (LM-DA-015).
+    """Route an indexing progress line to the debug logger (LM-DA-015).
 
-    A GUI/job-manager add streams every progress line, including the
-    "embeddings unavailable ... indexing lexical-only" degrade warning
-    (store.py add_paths/add_uploads), into the job log. Headless api-mode has
-    no job, so without an on_progress callback that warning was passed to
-    ``on_progress or (lambda _t: None)`` in store.py and silently discarded -
-    a doc that fell back to lexical-only looked like an ordinary success.
-    Routing it to the debug logger surfaces it: printed when ``--debug`` is
-    on, and always captured in the always-on in-memory activity ring buffer
-    (see debuglog.py) so it shows up in a bug report even without --debug."""
-    logger.warning("rag index (headless): %s", text)
+    The line that matters is the "embeddings unavailable ... indexing
+    lexical-only" degrade warning (store.py add_paths/add_uploads): a doc that
+    fell back to lexical-only otherwise looks like an ordinary success. The
+    logger surfaces it - printed when ``--debug`` is on, and always captured in
+    the always-on in-memory activity ring buffer (see debuglog.py) so it shows
+    up in a bug report even without --debug.
+
+    Was headless-only, when headless indexed synchronously with no job to stream
+    into. Since ADR-0008 every mode indexes through a job, so this is paired
+    with the stream push instead of replaced by it - see ``_job_progress``."""
+    logger.warning("rag index: %s", text)
+
+
+def _job_progress(job):
+    """``on_progress`` for an indexing job: each line goes to the job's event
+    stream AND to the log.
+
+    Both, not either. The stream is what a watching client sees live, but it is
+    ephemeral, per-job and bounded; the log is what a bug report carries.
+    Headless used to log the degrade and not stream it, the GUI streamed it and
+    did not log it, so each mode was missing the other's copy. Folding headless
+    onto the job path would have dropped the logged copy entirely, which is the
+    regression LM-DA-015 exists to prevent - so the job path now does both, and
+    the GUI gains the bug-report copy it never had."""
+    def _cb(text: str) -> None:
+        job.push({"type": "line", "text": text})
+        _log_progress(text)
+    return _cb
 
 
 async def _write_off_loop(call):
@@ -419,30 +445,6 @@ async def _write_off_loop(call):
         return await loop.run_in_executor(get_plugin_executor(), call)
     except CollectionLockedError as e:
         raise HTTPException(409, str(e))
-
-
-async def _index_sync(index_call):
-    """Run a blocking ``coll.add_*`` index on the plugin pool (off the single-worker
-    event loop, exactly like /extract) and return its result as the HTTP response.
-
-    Used in headless api-mode, where no background job manager is attached, so a
-    bare ``localm serve`` can index instead of 503-ing (memory-audit cluster 24 -
-    "headless API users cannot index at all"). The pool is the plugin executor, kept
-    off the inference pool so a slow index never starves chat completions; a
-    concurrent self-embed HTTP call back to /v1/embeddings is handled by the event
-    loop while this runs, the same threading model the background-job path uses."""
-    try:
-        result = await _write_off_loop(index_call)
-    except ValueError as e:
-        # e.g. an embedding-model dimension change (C3): a clean 400, not a crash -
-        # mirrors the background path's "error" line, surfaced synchronously here.
-        raise HTTPException(400, str(e))
-    return {"status": "done",
-            "added": result["added"],
-            "updated": result["updated"],
-            "skipped": result["skipped"],
-            "failed": result["failed"],
-            "chunks": result["chunks"]}
 
 
 @_router.get("/api/rag/collections")
@@ -638,16 +640,14 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
-    jobs = getattr(request.app.state, "jobs", None)
-    if jobs is None:
-        # Headless api-mode: no background job manager (attach_gui was never
-        # called). Index synchronously and return the result directly, so a bare
-        # `localm serve` can index (was a 503 before; memory-audit cluster 24). The
-        # GUI always attaches a job manager, so it keeps the streamed-job path below.
-        return await _index_sync(lambda: coll.add_paths(
-            paths, embed_fn=embed_fn, classify_fn=self_classify,
-            describe_image_fn=self_describe, policy=policy, force=req.reindex,
-            on_progress=_log_progress))
+    # Kernel-level since ADR-0008, so a bare `localm serve` has one too. This
+    # used to branch on "jobs is None" and index SYNCHRONOUSLY for a headless
+    # server; that server now gets the same streamed background job the GUI
+    # does, so the branch is deleted rather than left as unreachable code.
+    # NOTE this changes the headless response shape from the inline index result
+    # to {"job_id": ...}, which is the point: headless callers can now follow
+    # progress instead of blocking on one long request.
+    jobs = _require_jobs(request)
 
     def _index(job):
         try:
@@ -655,7 +655,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
                 paths, embed_fn=embed_fn, classify_fn=self_classify,
                 describe_image_fn=self_describe,
                 policy=policy, force=req.reindex,
-                on_progress=lambda t: job.push({"type": "line", "text": t}))
+                on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:
             # e.g. an embedding-model dimension change (C3), or another process
             # still writing this collection - report, don't crash. The stream is
@@ -722,13 +722,9 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
-    jobs = getattr(request.app.state, "jobs", None)
-    if jobs is None:
-        # Headless api-mode: index the uploaded bytes synchronously (see rag_add).
-        return await _index_sync(lambda: coll.add_uploads(
-            uploads, embed_fn=embed_fn, classify_fn=self_classify,
-            describe_image_fn=self_describe, force=req.reindex,
-            on_progress=_log_progress))
+    # See rag_add: kernel-level job registry, so the headless synchronous branch
+    # is gone and an upload streams as a background job here too.
+    jobs = _require_jobs(request)
 
     def _index(job):
         try:
@@ -736,7 +732,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
                 uploads, embed_fn=embed_fn, classify_fn=self_classify,
                 describe_image_fn=self_describe,
                 force=req.reindex,
-                on_progress=lambda t: job.push({"type": "line", "text": t}))
+                on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:
             # As in rag_add's _index: a dimension change, or another process still
             # writing this collection. Reported on the stream, not a crash.
@@ -791,7 +787,7 @@ async def rag_reembed(name: str, request: Request):
     model work, so it streams progress rather than blocking the request.
     """
     coll = _get_collection(name)
-    jobs = _require_jobs(request, needs="Re-embedding")
+    jobs = _require_jobs(request)
     self_embed, _, _ = _self_services(request)
     if self_embed is None:
         raise HTTPException(
@@ -808,7 +804,7 @@ async def rag_reembed(name: str, request: Request):
         try:
             result = coll.reembed(
                 embed_fn=self_embed, model_name=model,
-                on_progress=lambda t: job.push({"type": "line", "text": t}))
+                on_progress=_job_progress(job))
         except (ValueError, RuntimeError, CollectionLockedError) as e:
             # reembed only swaps the index in after the whole set is computed and
             # validated, so the previous one is intact - say so, because the user's
@@ -904,7 +900,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
             403, "Changing the embedding model requires an owner (admin) key: it "
             "selects a file this process loads, so it widens a trust boundary. "
             "The rag scope alone is not enough.")
-    jobs = _require_jobs(request, needs="Embedding model setup")
+    jobs = _require_jobs(request)
 
     def _setup(job):
         from localm.config import update_config

@@ -9,9 +9,11 @@ Routes (mounted by the engine, auto-scoped to the ``video`` capability):
   POST   /api/video/file/{name}/move      - move a clip to a folder
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. REQUIRES the GUI: ``attach_gui`` must have been called on the app
-(it publishes ``request.app.state.jobs`` / ``.self_url``); when it has not, the
-generate route returns a clear 503. The backend is selected per-plugin (default
+SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
+created by ``attach_engine``, so a headless ``localm serve`` can generate too.
+It still needs this server's own address for the chat/media VRAM handover (see
+``resolve_self_url``), and 503s with that specific reason if it cannot be
+determined. The backend is selected per-plugin (default
 ComfyUI Wan) and reads this plugin's own config (see backend.py). Ships DISABLED
 by default.
 """
@@ -32,6 +34,7 @@ from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.pathsafe import confined_file
+from localm.selfclient import resolve_self_url
 from . import backend as _backend
 
 _router = APIRouter()
@@ -77,11 +80,19 @@ async def video(req: VideoRequest, request: Request):
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
 
+    # See the image plugin: the job registry is kernel-level since ADR-0008, so
+    # the real precondition is knowing this server's own address for the VRAM
+    # handover, not the GUI being attached.
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
-        raise HTTPException(503, "Video generation needs the localm GUI server "
-                                 "(the background job manager is unavailable).")
-    self_url = getattr(request.app.state, "self_url", "")
+        raise HTTPException(503, "Video generation needs this server's "
+                                 "background job registry, which is "
+                                 "unavailable.")
+    self_url = resolve_self_url(request.app)
+    if not self_url:
+        raise HTTPException(503, "Video generation needs this server's own "
+                                 "address to free VRAM first, and it could not "
+                                 "be determined.")
 
     video_dir = _video_dir()
     video_dir.mkdir(parents=True, exist_ok=True)

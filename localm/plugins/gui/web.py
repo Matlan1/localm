@@ -590,14 +590,25 @@ def attach_gui(
     """
     manager = SessionManager()
 
-    from .jobs import JobManager
-    jobs = JobManager()
+    # The background-job manager is created by attach_engine now (kernel level,
+    # ADR-0008), so a headless `localm serve` has one too. REUSE it rather than
+    # constructing a second one: mount_gui_surface() attaches a GUI to an app
+    # that is already serving, and creating a fresh manager here silently
+    # replaced the one any in-flight jobs were registered in, orphaning them.
+    #
+    # The fallback exists for an app that never went through attach_engine,
+    # which in practice means a test calling attach_gui() on a bare FastAPI().
+    # In that case this call also owns registering the job routes, since the
+    # kernel never did - tracked so the routes are not mounted twice.
+    jobs = getattr(app.state, "jobs", None)
+    _job_routes_unregistered = jobs is None
+    if jobs is None:
+        from .jobs import JobManager
+        jobs = JobManager()
 
     # Shared services that converted plugins (rag/image/music/video) reach via
     # request.app.state: the background-job manager, this server's own /v1 base
-    # URL (for self-embedding), and the active-model accessor. The /api/jobs/*
-    # SSE endpoints stay in the kernel GUI (routes/jobs.py) so every plugin's
-    # jobs stream through the one manager.
+    # URL (for self-embedding), and the active-model accessor.
     app.state.jobs = jobs
     app.state.self_url = self_url
     app.state.active_model = active_model
@@ -628,8 +639,12 @@ def attach_gui(
     _routes_pairing.register(app, ctx)
     from .routes import admin as _routes_admin
     _routes_admin.register(app, ctx)
-    from .routes import jobs as _routes_jobs
-    _routes_jobs.register(app, ctx)
+    if _job_routes_unregistered:
+        # Only when attach_engine did not run (see the manager fallback above);
+        # otherwise the kernel already mounted these and a second register()
+        # would put duplicate paths on the router.
+        from .routes import jobs as _routes_jobs
+        _routes_jobs.register(app, jobs)
     from .routes import share as _routes_share
     _routes_share.register(app, ctx)
     from .routes import uploads as _routes_uploads
