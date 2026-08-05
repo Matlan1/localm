@@ -544,15 +544,17 @@ class VramSizingMixin:
         unavailable or the lookup itself fails; this is purely a nicer
         diagnostic (never load-blocking either way).
 
-        Best-effort self-reference note: this does not exclude THIS process's
-        own registry entry (the backend layer has no reliable handle on "my
-        own instance_id" without importing the HTTP server module, which
-        would be a backwards layering dependency). In the rare case this
-        model load is itself running inside an advertised server mid model-
-        switch, the entry named here could be this same instance's own
-        previous state - cosmetically odd but still an accurate snapshot of
-        what was last recorded, and never a safety issue since this text is
-        advisory-only."""
+        ``gpu_registry.list_gpu_peers()`` always excludes THIS process
+        (matched by pid - see its docstring), so ``holder`` below is
+        guaranteed to be a genuinely different instance; it can no longer
+        name this same server as "another localm instance" holding VRAM it
+        is itself using - a real low-VRAM warning once told a user to POST
+        an unload to their own server's own port for exactly this reason.
+        When no external holder is found, :func:`gpu_registry.own_entry`
+        checks whether THIS process's own registry entry explains it (e.g.
+        this server has another model resident while loading a second one)
+        and says so plainly - more honest and more useful than the fully
+        generic fallback."""
         try:
             from localm.config import load_config
             from localm.discover import resolve_main_gpu_index
@@ -571,6 +573,13 @@ class VramSizingMixin:
                     f"another localm instance (port {holder.get('port')}) is "
                     f"running '{holder.get('model')}' (active {age_txt}) - "
                     f"POST /v1/models/unload on port {holder.get('port')} to free it."
+                )
+            self_entry = gpu_registry.own_entry()
+            if (self_entry is not None and self_entry.get("model")
+                    and int(self_entry.get("gpu_index", 0) or 0) == idx):
+                return (
+                    f"this server's own currently-loaded model "
+                    f"'{self_entry.get('model')}' is holding it."
                 )
         except Exception:
             pass  # advisory only - fall through to the generic hint

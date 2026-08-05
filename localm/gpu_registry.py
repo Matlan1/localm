@@ -230,7 +230,21 @@ def reap_stale(directory, *, self_id: Optional[str] = None) -> list:
 
 def list_gpu_peers(directory=None, *, exclude_self_id: Optional[str] = None,
                     timeout: float = 0.7) -> list:
-    """Live, identity-verified peer instances (excluding *exclude_self_id*).
+    """Live, identity-verified peer instances (excluding *exclude_self_id*
+    and, unconditionally, THIS process).
+
+    Self-exclusion is by PID, not only by *exclude_self_id*: two different
+    processes can never share a pid at the same instant, so a registry entry
+    whose pid equals ``os.getpid()`` is unambiguously this process's own,
+    regardless of whether the caller has an instance_id to pass. This
+    matters because at least one caller (the backend's VRAM-sizing layer,
+    ``llamacpp/_sizing.py::_vram_holder_hint``) has no reliable handle on its
+    own instance_id without a backwards layering dependency on the HTTP
+    server module, but every caller trivially knows its own pid. Without
+    this, a "peer" that turned out to be the caller itself produced a
+    low-VRAM warning blaming "another localm instance" for VRAM this same
+    process was using - see :func:`own_entry` for finding that self entry
+    back when the caller needs to name it (e.g. for a more honest message).
 
     A registry entry is NEVER trusted on file contents alone: a candidate must
     pass BOTH a process-liveness check (:func:`localm.instances.pid_alive`) AND
@@ -248,6 +262,7 @@ def list_gpu_peers(directory=None, *, exclude_self_id: Optional[str] = None,
         logger.debug("gpu_registry: failed to list peers under %s: %s", d, e)
         return []
 
+    self_pid = os.getpid()
     peers = []
     for entry in entries:
         iid = entry.get("instance_id")
@@ -256,6 +271,8 @@ def list_gpu_peers(directory=None, *, exclude_self_id: Optional[str] = None,
         try:
             pid = int(entry.get("pid", -1) or -1)
         except (TypeError, ValueError):
+            continue
+        if pid == self_pid:
             continue
         if not pid_alive(pid):
             continue
@@ -271,6 +288,38 @@ def list_gpu_peers(directory=None, *, exclude_self_id: Optional[str] = None,
         if verified:
             peers.append(entry)
     return peers
+
+
+def own_entry(directory=None) -> Optional[dict]:
+    """This process's own registry entry, matched by pid (never by
+    instance_id - a caller may not have one at hand; see
+    :func:`list_gpu_peers`'s docstring), or None if this process has not
+    registered one or the directory cannot be read.
+
+    Unlike :func:`list_gpu_peers`, no liveness or ``/whoami`` check is
+    needed: a pid equal to ``os.getpid()`` is this process, by definition,
+    so nothing here needs corroborating. Exists so a caller that fails to
+    find an external peer (e.g. ``llamacpp/_sizing.py::_vram_holder_hint``)
+    can still tell the user their OWN model is what is holding the VRAM,
+    rather than falling through to a fully generic guess.
+
+    Best-effort: mirrors :func:`list_entries` - a read failure yields None
+    rather than raising (logged at debug, not silenced)."""
+    d = Path(directory) if directory is not None else registry_dir()
+    try:
+        entries = list_entries(d)
+    except Exception as e:
+        logger.debug("gpu_registry: failed to read own entry under %s: %s", d, e)
+        return None
+    self_pid = os.getpid()
+    for entry in entries:
+        try:
+            pid = int(entry.get("pid", -1) or -1)
+        except (TypeError, ValueError):
+            continue
+        if pid == self_pid:
+            return entry
+    return None
 
 
 # ------------------------------------------------------------------ #
