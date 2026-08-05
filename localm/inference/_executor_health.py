@@ -13,20 +13,46 @@ inventing a hard gate that could reject legitimate load: this is an
 observability signal, not a new failure mode.
 
 **THIS MODULE BUYS OBSERVABILITY, NOT RECOVERY - state this explicitly so it
-is never assumed.** A wedged worker in any of the three pools below still
-hangs FOREVER after this module reports it: nothing here cancels the stuck
-call, nothing frees the token/slot it holds, and the one HTTP request
-depending on it never returns. Confirmed for the anyio pool specifically: no
-call site wraps its ``run_in_threadpool`` call in a timeout, uvicorn is
-started with no ``timeout_keep_alive``/request-level timeout at all, and the
-hang watchdog is scoped by design to a STALLED EVENT LOOP - a genuinely
-different failure mode, since a hung anyio worker does NOT stall the loop
-(every other request keeps being served normally; only the one relying on
-that worker hangs). So for anyio's pool, this module is not one signal among
-several - it is the only one, and "anyio pool monitored" must never be read
-as "anyio pool protected". A timeout/cancellation mechanism is a genuinely
-separate design question (per-site or global, what happens to a
-half-finished write) and is deliberately NOT this module's job.
+is never assumed.** A wedged worker in the ``default``/``plugin`` pools below
+still hangs FOREVER after this module reports it: nothing here cancels the
+stuck call, nothing frees the token/slot it holds, and the one HTTP request
+depending on it never returns. Neither pool has any timeout/cancellation
+mechanism as of this writing - that remains a genuinely separate, unresolved
+design question for them (per-site or global, what happens to a
+half-finished write).
+
+**UPDATE (follow-up to this module's own original anyio gap): the anyio pool
+specifically is now PARTIALLY covered.** All ~21 ``run_in_threadpool`` call
+sites (config updates, media workflow management, comfy management, coder
+session deletion) now go through
+``localm.inference._threadpool_timeout.run_in_threadpool_bounded`` instead of
+calling ``fastapi.concurrency.run_in_threadpool`` directly, which bounds how
+long the HTTP request depending on a wedged call waits - see that module's
+docstring for the mechanism (calling ``anyio.to_thread.run_sync`` directly
+with ``abandon_on_cancel=True``, since wrapping ``run_in_threadpool`` itself
+in a deadline does nothing - confirmed by direct test, starlette never sets
+that flag). uvicorn is still started with no ``timeout_keep_alive``/
+request-level timeout of its own, and the hang watchdog remains scoped by
+design to a STALLED EVENT LOOP - a genuinely different failure mode, since a
+hung anyio worker does NOT stall the loop - so ``run_in_threadpool_bounded``
+is still the only thing standing between a wedged anyio worker and a
+permanently-hung request, just no longer an absent one.
+
+**This interacts with the saturation watch below in a way worth stating
+explicitly, confirmed by direct test:** abandoning a call via
+``run_in_threadpool_bounded`` releases its anyio ``CapacityLimiter`` token
+IMMEDIATELY, not when the real (still-running) worker thread eventually
+returns - so a single wedged call bounded by that module will never hold
+``anyio_pool_health()``'s ``borrowed_tokens`` at the ceiling long enough to
+trip this module's own sustained-streak WARNING once ITS OWN timeout has
+fired. The two mechanisms are complementary, not redundant: this module
+still catches genuine concurrent BURSTS (many legitimate slow calls at once)
+and anything ``run_in_threadpool_bounded`` does not wrap; the residual,
+truly unrecoverable leak after a bounded call abandons is one permanently-
+stuck OS thread (Python cannot forcibly stop a thread), not a permanently-
+reduced pool capacity - "anyio pool monitored" must still never be read as
+"anyio pool fully protected", but it is no longer "anyio pool unprotected"
+either.
 
 THREE pools are watched, symmetrically, for the same blast-radius reason
 ``localm/executor.py``'s own docstring already gives for splitting the first

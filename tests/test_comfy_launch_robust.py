@@ -93,6 +93,85 @@ def test_ensure_comfy_uses_configured_timeout(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+#  comfy_launch_wait_seconds - extracted so a route-level timeout budget can  #
+#  read the SAME number ensure_comfy will actually honour (follow-up to      #
+#  #1057's run_in_threadpool_bounded).                                       #
+# --------------------------------------------------------------------------- #
+
+def test_launch_wait_seconds_reads_configured_timeout():
+    assert comfy_client.comfy_launch_wait_seconds({"comfy_launch_timeout": 120}) == 120
+
+
+def test_launch_wait_seconds_defaults_to_300_when_unset():
+    assert comfy_client.comfy_launch_wait_seconds({}) == 300
+
+
+def test_launch_wait_seconds_floors_at_30():
+    assert comfy_client.comfy_launch_wait_seconds({"comfy_launch_timeout": 5}) == 30
+
+
+def test_launch_wait_seconds_falls_back_to_300_on_a_malformed_value():
+    assert comfy_client.comfy_launch_wait_seconds({"comfy_launch_timeout": "not-a-number"}) == 300
+
+
+def test_launch_wait_seconds_loads_config_when_none_given(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"comfy_launch_timeout": 90})
+    assert comfy_client.comfy_launch_wait_seconds() == 90
+
+
+def test_ensure_comfy_delegates_to_the_shared_helper(monkeypatch, tmp_path):
+    """ensure_comfy's own wait_seconds resolution must actually CALL
+    comfy_launch_wait_seconds() rather than re-implement the same logic
+    separately - a route computing its timeout budget from the helper is
+    only safe if ensure_comfy is PROVABLY calling the same code, not just
+    producing the same number today by coincidence that could silently
+    drift apart on a future edit to either side."""
+    import time as _time_mod
+
+    # A URL unused by any other test in this file/process - _comfy_alive
+    # results are cached module-globally (mark_comfy_alive/_confirmed_alive),
+    # so a shared URL could let an earlier test's confirmation short-circuit
+    # this one before it ever reaches the code path under test.
+    url = "http://127.0.0.1:8199"
+
+    calls = []
+    real_helper = comfy_client.comfy_launch_wait_seconds
+
+    def _spy(cfg=None):
+        calls.append(cfg)
+        return real_helper(cfg)
+
+    monkeypatch.setattr(comfy_client, "comfy_launch_wait_seconds", _spy)
+
+    # False on the pre-launch check, True once inside the post-launch poll
+    # loop - so it succeeds on the loop's first iteration with no real wait.
+    alive_calls = {"n": 0}
+
+    def _alive(api_url, timeout=3.0):
+        alive_calls["n"] += 1
+        return alive_calls["n"] > 1
+
+    monkeypatch.setattr(comfy_client, "_comfy_alive", _alive)
+    monkeypatch.setattr(_time_mod, "sleep", lambda s: None)
+
+    class _Proc:
+        returncode = 0
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: _Proc())
+
+    cfg = {"comfy_launch_timeout": 45}
+    with patch("localm.config.load_config", return_value=cfg):
+        ok, msg = comfy.ensure_comfy(url, launch_cmd="echo hi", workdir=str(tmp_path))
+    assert ok is True, msg
+    assert calls, "ensure_comfy did not call comfy_launch_wait_seconds at all"
+    assert calls[0] == cfg
+
+
+# --------------------------------------------------------------------------- #
 #  Launcher auto-discovery from the ComfyUI folder (work with the user's setup) #
 # --------------------------------------------------------------------------- #
 

@@ -130,6 +130,40 @@ def test_router_endpoints_list_upload_select_delete():
     assert c.get("/api/image/workflows").json()["workflows"] == []
 
 
+def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
+    """Follow-up to #1057: before this fix, a wedged save_workflow() call left
+    the HTTP request hanging forever. Now it returns a clear 504 within the
+    configured budget - proven end to end through the real route, not just
+    the underlying wrapper (see test_threadpool_timeout.py for that)."""
+    import time as _time
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(mw, "_WORKFLOW_RMW_TIMEOUT_S", 0.2)
+
+    def _hangs(media, name, content):
+        _time.sleep(2.0)
+        return "should never get here in time"
+
+    monkeypatch.setattr(mw, "save_workflow", _hangs)
+
+    app = FastAPI()
+    app.include_router(mw.make_workflow_router("image"))
+    c = TestClient(app)
+
+    start = _time.monotonic()
+    r = c.post("/api/image/workflows",
+              json={"name": "x", "workflow": {"3": {"class_type": "K"}}})
+    elapsed = _time.monotonic() - start
+
+    assert r.status_code == 504, r.text
+    assert "timed out" in r.json()["detail"].lower()
+    assert elapsed < 1.5, (
+        f"the route waited {elapsed:.2f}s despite a 0.2s budget - the "
+        "timeout did not actually bound the request")
+
+
 def test_generator_uses_selected_workflow(monkeypatch):
     # The image generator's workflow_path() resolves the selected file first.
     from pathlib import Path

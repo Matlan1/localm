@@ -1576,6 +1576,30 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
                         workdir=workdir)
 
 
+def comfy_launch_wait_seconds(cfg: Optional[dict] = None) -> int:
+    """The wait budget ``ensure_comfy`` gives an unpinned launch: the
+    configured ``comfy_launch_timeout`` (a ZLUDA/ROCm cold start compiles GPU
+    kernels and can take minutes), falling back to 300s, floored at 30s.
+
+    Extracted out of ``ensure_comfy`` so a CALLER that needs to know this
+    budget ahead of time - a route wrapping ``ensure_available``/
+    ``restart_comfy`` in ``run_in_threadpool_bounded`` needs a timeout at
+    least this large, or it would abort a launch that is still legitimately
+    progressing - reads the exact same number ``ensure_comfy`` will actually
+    wait, rather than a second, independently-maintained guess that could
+    silently drift smaller than a user's own configured timeout. Pass an
+    already-loaded *cfg* to avoid a second ``load_config()`` disk read when
+    the caller already has one."""
+    if cfg is None:
+        from localm.config import load_config
+        cfg = load_config()
+    try:
+        wait_seconds = int(cfg.get("comfy_launch_timeout") or 300)
+    except (TypeError, ValueError):
+        wait_seconds = 300
+    return max(30, wait_seconds)
+
+
 def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                  wait_seconds: Optional[int] = None,
                  launch_cmd: Optional[str] = None,
@@ -1674,13 +1698,13 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             "set the FLUX_API_URL environment variable if it runs elsewhere."
         )
 
-    # A ZLUDA / ROCm cold start compiles GPU kernels and can take minutes, so
-    # honour the configurable timeout when the caller did not pin one.
+    # Honour the configurable timeout when the caller did not pin one - see
+    # comfy_launch_wait_seconds's own docstring for why this is a shared
+    # helper rather than inline logic. The 30s floor applies unconditionally,
+    # even to an explicitly-passed wait_seconds (unchanged from before this
+    # was extracted - a caller-supplied value below 30 was never honoured).
     if wait_seconds is None:
-        try:
-            wait_seconds = int(cfg.get("comfy_launch_timeout") or 300)
-        except (TypeError, ValueError):
-            wait_seconds = 300
+        wait_seconds = comfy_launch_wait_seconds(cfg)
     wait_seconds = max(30, wait_seconds)
 
     # MEDIA-2: optionally start ComfyUI headless. Off by default (keep the

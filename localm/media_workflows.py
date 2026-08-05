@@ -70,6 +70,20 @@ def _lock_for(media: str) -> threading.Lock:
             lock = _media_locks[media] = threading.Lock()
         return lock
 
+
+# Budget for run_in_threadpool_bounded() in make_workflow_router's four
+# routes below (follow-up to #1057) - module-level, not a router-local
+# variable, so a test can monkeypatch it down for a fast timeout simulation.
+# Safe against corruption regardless of what value this is set to: an
+# abandoned writer's real thread keeps holding _lock_for's lock for as long
+# as it actually runs (see the lock's own comment above), so a client retry
+# after seeing a timeout still queues behind it rather than racing it - the
+# #1045 shape _lock_for was added to close. 30s covers ordinary file I/O plus
+# a wait behind another slow request holding the same media's lock;
+# genuinely large workflow uploads on a slow disk are the rare case this is
+# meant to eventually catch, not the common one it should ever fire for.
+_WORKFLOW_RMW_TIMEOUT_S = 30.0
+
 # Distinct from None, which is a legitimate VALUE for `active` (no workflow
 # selected) - using None as both "caller did not pass this" and "resolved to
 # no selection" made list_workflows re-resolve selected_name() a second time
@@ -371,7 +385,10 @@ def make_workflow_router(media: str):
     the already-parsed workflow JSON as a body field, so there is no multipart /
     python-multipart dependency."""
     from fastapi import APIRouter, HTTPException
-    from fastapi.concurrency import run_in_threadpool
+
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
 
     router = APIRouter()
 
@@ -387,6 +404,10 @@ def make_workflow_router(media: str):
     # loop) - see the module-level comment on _lock_for for why: offloading
     # alone removed the free serialization these check-then-act sequences
     # depended on, and this restores it.
+    #
+    # Bounded (follow-up to #1057) at _WORKFLOW_RMW_TIMEOUT_S - see that
+    # constant's own comment for why a client-side timeout here is still
+    # safe against corruption.
 
     @router.get(f"/api/{media}/workflows")
     async def _list_workflows():
@@ -394,7 +415,11 @@ def make_workflow_router(media: str):
             with _lock_for(media):
                 return _list_and_selected(media)
 
-        workflows, selected = await run_in_threadpool(_do)
+        try:
+            workflows, selected = await run_in_threadpool_bounded(
+                _do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Listing {media} workflows timed out: {e}")
         return {"workflows": workflows, "selected": selected}
 
     @router.post(f"/api/{media}/workflows")
@@ -414,9 +439,11 @@ def make_workflow_router(media: str):
                 return {"name": saved, "workflows": workflows, "selected": selected}
 
         try:
-            return await run_in_threadpool(_do)
+            return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Uploading the {media} workflow timed out: {e}")
 
     @router.post(f"/api/{media}/workflows/select")
     async def _select_workflow(body: dict):
@@ -426,9 +453,11 @@ def make_workflow_router(media: str):
                 return {"selected": sel, "workflows": list_workflows(media, active=sel)}
 
         try:
-            return await run_in_threadpool(_do)
+            return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Selecting the {media} workflow timed out: {e}")
 
     @router.delete(f"/api/{media}/workflows/{{name}}")
     async def _delete_workflow(name: str):
@@ -439,8 +468,10 @@ def make_workflow_router(media: str):
                 return {"workflows": workflows, "selected": selected}
 
         try:
-            return await run_in_threadpool(_do)
+            return await run_in_threadpool_bounded(_do, timeout=_WORKFLOW_RMW_TIMEOUT_S)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Deleting the {media} workflow timed out: {e}")
 
     return router

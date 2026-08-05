@@ -726,9 +726,19 @@ def attach_gui(
         # Reads + hashes the whole static tree, so it is offloaded to a worker
         # thread rather than run inline on the event loop (mirrors how other
         # per-request filesystem work in this server is handled).
-        from starlette.concurrency import run_in_threadpool
-        return await run_in_threadpool(
-            _sw_js_response, request.headers.get("if-none-match"))
+        #
+        # Bounded (follow-up to #1057): localm's own bundled static tree is
+        # small and fixed-size, so this should always finish in well under a
+        # second; a generous 15s budget only ever catches a genuinely wedged
+        # filesystem call, never ordinary load.
+        from localm.inference._threadpool_timeout import (
+            ThreadCallTimeout, run_in_threadpool_bounded,
+        )
+        try:
+            return await run_in_threadpool_bounded(
+                _sw_js_response, request.headers.get("if-none-match"), timeout=15.0)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Serving the service worker timed out: {e}")
 
     app.mount("/", _RevalidatingStatic(directory=str(STATIC_DIR), html=True), name="gui")
 

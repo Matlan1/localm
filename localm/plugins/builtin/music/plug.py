@@ -259,12 +259,20 @@ async def music_comfy_models():
 
     Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
     timeout), so it runs OFF the event loop: inline it stalled every concurrent
-    request server-wide while ComfyUI was slow (REG-638)."""
-    from fastapi.concurrency import run_in_threadpool
+    request server-wide while ComfyUI was slow (REG-638).
 
+    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
+    urlopen timeout - see the image plugin's identical route for the full
+    rationale."""
     from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
     s = _backend.settings(load_config())
-    slots = await run_in_threadpool(_backend._comfy_model_slots, s)
+    try:
+        slots = await run_in_threadpool_bounded(_backend._comfy_model_slots, s, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
     if slots is None:
         return {"reachable": False, "api_url": s["api_url"], "slots": [],
                 "message": "ComfyUI is not running - launch it to see available models."}
@@ -274,12 +282,24 @@ async def music_comfy_models():
 @_router.post("/api/music/comfy-launch")
 async def music_comfy_launch():
     """Start (or confirm) ComfyUI is up for the music plugin, without running a
-    generation - backs the Workflow panel's "Launch ComfyUI" button."""
-    from fastapi.concurrency import run_in_threadpool
+    generation - backs the Workflow panel's "Launch ComfyUI" button.
 
+    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
+    itself will honour, plus a buffer - see the image plugin's identical
+    route for the full rationale."""
     from localm.config import load_config
-    s = _backend.settings(load_config())
-    ok, message = await run_in_threadpool(_backend.ensure_available, s)
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    from localm.media.comfy_client import comfy_launch_wait_seconds
+    cfg = load_config()
+    s = _backend.settings(cfg)
+    budget = comfy_launch_wait_seconds(cfg) + 30.0
+    try:
+        ok, message = await run_in_threadpool_bounded(
+            _backend.ensure_available, s, timeout=budget)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Launching ComfyUI timed out: {e}")
     return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 

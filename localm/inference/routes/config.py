@@ -9,10 +9,27 @@ from the http_server module global and the session-scoped audit mode from ctx.
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.concurrency import run_in_threadpool
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
+
+# Budgets for run_in_threadpool_bounded() below - see that module's docstring
+# for what "the caller gives up" does and does not buy (the real call keeps
+# running; only the client-visible wait is bounded). Each is sized generously
+# over the wrapped call's own worst-case legitimate duration, so it only ever
+# fires for a call that has gone genuinely beyond that:
+#   _CONFIG_RMW_TIMEOUT_S: update_config()'s own cross-process lock already
+#     times out at localm.config._CROSS_LOCK_TIMEOUT (10s) - this only needs
+#     to be a bit larger so THAT more specific TimeoutError surfaces first.
+#   _COMFY_STATUS_TIMEOUT_S: _comfy_alive()'s own urlopen timeout is 1.0s.
+#   _COMFY_STOP_TIMEOUT_S: stop_comfy()'s own worst case is bounded by
+#     interrupt_comfy (two 10s urlopens) + free_comfy_vram (one 30s urlopen,
+#     already wrapped in try/except there) + a process-tree kill (normally
+#     instant, rarely a few seconds on Windows) - roughly 50s, so budget 70s.
+_CONFIG_RMW_TIMEOUT_S = 20.0
+_COMFY_STATUS_TIMEOUT_S = 15.0
+_COMFY_STOP_TIMEOUT_S = 70.0
 
 
 def _scrub_media_admin_only(cfg: dict) -> None:
@@ -192,8 +209,16 @@ def register(app: FastAPI, ctx) -> None:
         # time.sleep for up to _CROSS_LOCK_TIMEOUT. This handler is `async def`,
         # so doing that inline would freeze the whole server - health checks,
         # token streaming, every concurrent request - for the entire wait.
-        result = await run_in_threadpool(update_config,
-                                         lambda cfg: cfg.update(validated))
+        # Bounded (follow-up to #1057): update_config() is internally atomic
+        # (one in-memory mutation, one atomic file replace under its own
+        # lock), so abandoning this await never risks a half-written file -
+        # see run_in_threadpool_bounded's module docstring.
+        try:
+            result = await run_in_threadpool_bounded(
+                update_config, lambda cfg: cfg.update(validated),
+                timeout=_CONFIG_RMW_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Saving the config timed out: {e}")
         # REC-OWNER-SETTINGS: update_config() returns the FULL merged config
         # (every key, not just the ones this call changed), so without this
         # filter a config:write-only, non-owner key's PATCH response would echo
@@ -293,7 +318,15 @@ def register(app: FastAPI, ctx) -> None:
         # Off the event loop for the same reason as patch_config above (REG-586):
         # update_config() can block for up to _CROSS_LOCK_TIMEOUT waiting on the
         # cross-process lock, and this handler is `async def`.
-        await run_in_threadpool(update_config, _mutate)
+        #
+        # Bounded (follow-up to #1057): safe for the same reason as patch_config
+        # above - update_config()'s own atomic write can never be left
+        # half-finished by an abandoned caller.
+        try:
+            await run_in_threadpool_bounded(update_config, _mutate,
+                                            timeout=_CONFIG_RMW_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Saving the {name} config timed out: {e}")
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
         # Same admin_only filter as the GET route above: a non-owner config:write
@@ -384,7 +417,14 @@ def register(app: FastAPI, ctx) -> None:
 
         # Off the event loop for the same reason as patch_config above (REG-586):
         # update_config() can block on the cross-process lock.
-        await run_in_threadpool(update_config, _mutate)
+        #
+        # Bounded (follow-up to #1057): see patch_config above - safe against
+        # a half-written config file for the same reason.
+        try:
+            await run_in_threadpool_bounded(update_config, _mutate,
+                                            timeout=_CONFIG_RMW_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Saving the tts config timed out: {e}")
         return _tts_payload(request)
 
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
@@ -412,7 +452,10 @@ def register(app: FastAPI, ctx) -> None:
             (mark_comfy_alive if alive else mark_comfy_dead)(url)
             return {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
 
-        return await run_in_threadpool(_check)
+        try:
+            return await run_in_threadpool_bounded(_check, timeout=_COMFY_STATUS_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Checking ComfyUI status timed out: {e}")
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_stop():
@@ -420,13 +463,28 @@ def register(app: FastAPI, ctx) -> None:
         queue + free VRAM, and terminate the process localm launched (a ComfyUI the
         user started themselves is only aborted, never killed)."""
         from localm.media.comfy_client import stop_comfy
-        ok, message = await run_in_threadpool(stop_comfy)
+        try:
+            ok, message = await run_in_threadpool_bounded(
+                stop_comfy, timeout=_COMFY_STOP_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Stopping ComfyUI timed out: {e}")
         return {"ok": ok, "message": message}
 
     @app.post("/v1/comfy/restart", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_restart():
         """Restart the ComfyUI localm launched (NEW-STOPCOMFY): stop it, then
         re-launch via the configured comfy_launch_cmd/comfy_workdir."""
-        from localm.media.comfy_client import restart_comfy
-        ok, message = await run_in_threadpool(restart_comfy)
+        from localm.config import load_config
+        from localm.media.comfy_client import comfy_launch_wait_seconds, restart_comfy
+        # restart_comfy() = stop_comfy() (bounded by _COMFY_STOP_TIMEOUT_S,
+        # see post_comfy_stop above) THEN ensure_comfy()'s own launch wait -
+        # read the SAME comfy_launch_timeout ensure_comfy will actually
+        # honour (comfy_launch_wait_seconds), not an independent guess, or
+        # this budget could silently drift smaller than the user's own
+        # config and abort a launch that was still legitimately progressing.
+        budget = _COMFY_STOP_TIMEOUT_S + comfy_launch_wait_seconds(load_config()) + 30.0
+        try:
+            ok, message = await run_in_threadpool_bounded(restart_comfy, timeout=budget)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Restarting ComfyUI timed out: {e}")
         return {"ok": ok, "message": message}
