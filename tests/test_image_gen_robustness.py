@@ -215,10 +215,17 @@ class TestSafeLoraName:
         assert comfy.is_safe_lora_name("..") is False
 
     def test_rejects_drive_relative_no_separator(self):
-        # "C:evil" carries no path separator at all - ntpath still treats it
-        # as drive-qualified (drive-relative), same shape confined_under's
-        # per-component check exists to catch.
+        # "C:evil" carries no path separator at all - a colon-qualified drive
+        # (same shape confined_under's per-component check exists to catch).
         assert comfy.is_safe_lora_name("C:evil.safetensors") is False
+
+    def test_rejects_a_mid_string_colon(self):
+        # ntpath.splitdrive (the mechanism this used to rely on alone) only
+        # recognises a drive designator at position 0 - it does not see a
+        # colon anywhere else, so "foo.safetensors:hidden" passed the old
+        # check and could open an NTFS Alternate Data Stream on a
+        # Windows-hosted ComfyUI. The blanket ':' rejection closes this.
+        assert comfy.is_safe_lora_name("foo.safetensors:hidden") is False
 
     def test_rejects_nul_byte(self):
         assert comfy.is_safe_lora_name("evil\x00.safetensors") is False

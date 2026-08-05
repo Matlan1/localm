@@ -161,8 +161,23 @@ def is_safe_lora_name(name: str) -> bool:
     confine it under the way ``pathsafe.confined_name``/``confined_under`` do
     for a real local path. This is instead a pure lexical predicate (no
     filesystem call): reject empty, a NUL byte, an implausibly long value, any
-    path separator, a bare "." / ".." component, or an ``ntpath.splitdrive``-
-    detected drive prefix (catches ``C:evil``, which carries no separator).
+    path separator, a bare "." / ".." component, or a ':' anywhere in the name.
+
+    The ':' check used to be ``not ntpath.splitdrive(name)[0]`` - it only
+    recognises a drive designator at POSITION 0, so ``"foo.safetensors:hidden"``
+    passed it (measured: ``ntpath.splitdrive("foo.safetensors:hidden") ==
+    ("", ...)``, no drive detected). A colon anywhere opens an NTFS Alternate
+    Data Stream on a Windows-hosted ComfyUI the same way it does for localm's
+    own local writes (see ``pathsafe.WINDOWS_RESERVED_NAME_CHARS``'s
+    docstring) - this function's own stated purpose is to be the backstop for
+    WHATEVER receives ``lora_name``, local or remote, so the rejection does not
+    depend on which one it turns out to be. Rejecting ':' anywhere ALSO
+    subsumes every case ``splitdrive`` could ever have caught here (a drive
+    letter is always ':'-qualified, and a forward-slash UNC-style prefix is
+    already rejected by the separator check above it never reaches) - so
+    ``ntpath`` is no longer imported for a check it cannot uniquely provide.
+    No real LoRA filename (the ``.safetensors`` convention this repo and
+    Civitai/HuggingFace both use) legitimately contains a colon.
 
     Called from EVERY entry point that can supply ``lora_name`` - not just the
     HTTP image route, which only protects browser-originated requests. The
@@ -174,8 +189,7 @@ def is_safe_lora_name(name: str) -> bool:
         return False
     if "/" in name or "\\" in name or name in (".", ".."):
         return False
-    import ntpath
-    return not ntpath.splitdrive(name)[0]
+    return ":" not in name
 
 
 def apply_fast_dequant(workflow: dict) -> int:
