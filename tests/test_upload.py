@@ -197,3 +197,82 @@ def test_confined_upload_path_rejects_illegal_chars(scoped_app):
         with pytest.raises(HTTPException) as ei:
             web._confined_upload_path(bad)
         assert ei.value.status_code == 400
+
+
+class TestConfinedUploadPathAliasSubstitution:
+    """DELETE /api/uploads/{name} is the one route in this file that resolves a
+    raw, caller-supplied name directly against an EXISTING file (every other
+    route either writes through _unique_upload_target's non-clobbering
+    retry-with-counter, or folds the name into an already-unique synthesized
+    one - see share.py). An OS-level alias - an NTFS 8.3 short name is the
+    live-confirmed case (this session; also #1068's own finding against a
+    DIFFERENT validator) - can pass basename/character checks while resolving
+    to a pre-existing, DIFFERENTLY-NAMED real file: 'LONGMO~1.GGU' resolving
+    to 'LongModelNameThatIsVeryLong.gguf'. Before pathsafe.confined_name was
+    wired in here, _confined_upload_path only checked containment
+    (target.is_relative_to(base)), which the alias satisfies (it stays inside
+    uploads/) - so a delete request naming an alias the caller never uploaded
+    would have unlinked someone else's real file.
+
+    8dot3 short-name generation is volume/config-dependent (this session
+    measured it enabled on this box's C: and disabled on D:, matching
+    #1068's own test_pull_local_path.py finding), so this simulates the
+    alias condition directly via Path.resolve rather than depending on the
+    OS having actually generated one - deterministic regardless of which
+    volume runs this test."""
+
+    def test_alias_name_is_rejected_by_the_validator(self, scoped_app, monkeypatch):
+        up = scoped_app.state._home / "uploads"
+        up.mkdir(parents=True, exist_ok=True)
+        victim = up / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_bytes(b"VICTIM-CONTENT")
+
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == "LONGMO~1.GGU":
+                return victim.resolve()
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            web._confined_upload_path("LONGMO~1.GGU")
+        assert ei.value.status_code == 400
+        assert victim.exists(), "the alias check must reject BEFORE any delete is attempted"
+
+    def test_alias_delete_request_does_not_remove_the_victim_end_to_end(
+            self, scoped_app, monkeypatch):
+        """Same scenario, through the real HTTP DELETE route - proves the
+        route-level behavior, not just the validator in isolation."""
+        up = scoped_app.state._home / "uploads"
+        up.mkdir(parents=True, exist_ok=True)
+        victim = up / "LongModelNameThatIsVeryLong.gguf"
+        victim.write_bytes(b"VICTIM-CONTENT")
+
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == "LONGMO~1.GGU":
+                return victim.resolve()
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        key = _writer_key()
+        with TestClient(scoped_app) as c:
+            r = c.delete("/api/uploads/LONGMO~1.GGU", headers=_hdr(key))
+            assert r.status_code == 400, r.text
+        assert victim.exists(), "the victim file must survive an alias-named delete request"
+        assert victim.read_bytes() == b"VICTIM-CONTENT"
+
+    def test_same_name_delete_of_the_real_file_still_works(self, scoped_app):
+        """The alias check must not reject the ordinary, legitimate case of
+        deleting a file by its own exact, on-disk name."""
+        up = scoped_app.state._home / "uploads"
+        up.mkdir(parents=True, exist_ok=True)
+        (up / "LongModelNameThatIsVeryLong.gguf").write_bytes(b"content")
+        key = _writer_key()
+        with TestClient(scoped_app) as c:
+            r = c.delete("/api/uploads/LongModelNameThatIsVeryLong.gguf", headers=_hdr(key))
+            assert r.status_code == 200, r.text
+        assert not (up / "LongModelNameThatIsVeryLong.gguf").exists()

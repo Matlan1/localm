@@ -69,5 +69,60 @@ def test_backslash_is_an_ordinary_basename_on_posix(tmp_path):
     assert resolved.name == "a\\b"
 
 
+# --------------------------------------------------------------------------- #
+#  NTFS Alternate Data Stream rejection - same class #1068 fixed in           #
+#  model_manager/gguf.py's _safe_models_filename, unfixed here until now.     #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("bad", [
+    "somefile.exe:hidden.gguf",
+    "note.txt:evil",
+    "n<o>.txt", 'n"o.txt', "p|q", "p?q", "p*q",
+    "ev\x00il.txt",
+])
+def test_reserved_characters_are_rejected(tmp_path, bad):
+    """':' is the character with a live consequence: it does not fail file
+    creation, it opens an NTFS Alternate Data Stream - so
+    'somefile.exe:hidden.gguf' stayed CONFINED (passes the existing
+    containment check, since the write lands inside base) while writing
+    invisibly behind an apparently-empty sibling file. Live-confirmed against
+    this exact function before this test existed: confined_name(base,
+    "somefile.exe:hidden.gguf") was accepted and the write succeeded."""
+    with pytest.raises(HTTPException) as ei:
+        confined_name(tmp_path, bad)
+    assert ei.value.status_code == 400
+
+
+def test_reserved_characters_are_rejected_before_any_write(tmp_path):
+    """The rejection must happen before the caller ever gets a path back to
+    write through - proven by confirming nothing lands on disk, not just that
+    an exception was raised."""
+    with pytest.raises(HTTPException):
+        confined_name(tmp_path, "somefile.exe:hidden.gguf")
+    assert list(tmp_path.iterdir()) == [], (
+        "a rejected ADS-shaped name must never reach a real write")
+
+
+def test_single_letter_drive_shaped_name_is_still_rejected(tmp_path):
+    """A single-letter-drive-shaped name ('a:b.txt') must still be refused
+    end to end, regardless of which check inside confined_name catches it -
+    on Windows, name != Path(name).name already strips the drive before the
+    new character check even runs; the character check is what closes the
+    gap for a multi-character ADS name like 'somefile.exe:hidden.gguf',
+    where there is no drive-letter form to strip."""
+    with pytest.raises(HTTPException):
+        confined_name(tmp_path, "a:b.txt")
+
+
+@pytest.mark.parametrize("good", ["a.txt", "model.gguf", "under_score-dash.bin",
+                                  "spaced name.txt", "unicode-café.txt"])
+def test_ordinary_names_are_unaffected(tmp_path, good):
+    """The new character check must not reject anything it did not reject
+    before - a regression here would be just as real as missing the ADS case
+    in the first place."""
+    resolved = confined_name(tmp_path, good)
+    assert resolved.name == good
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -136,6 +136,7 @@ class TestConfinedUnder:
         "\\\\host\\share", "\\/host\\share\\x", "/\\host/share/x",
         "Q:/nonexistent/target", "Q:evil", "a/Q:evil", "a/b/Q:evil",
         "", ".", "   ", "./", "nest\\..\\..\\victim.txt",
+        "somefile.exe:hidden.gguf", "nest/somefile.exe:hidden.gguf",
     ])
     def test_a_rejected_path_reaches_NO_filesystem_call(self, base, bad,
                                                         monkeypatch):
@@ -173,6 +174,35 @@ class TestConfinedUnder:
         """Callers check existence themselves (a delete target may already be
         gone); confinement must not depend on it."""
         assert confined_under(base, "nest/not-created-yet.png")
+
+    @pytest.mark.parametrize("bad", [
+        "somefile.exe:hidden.gguf",
+        "nest/somefile.exe:hidden.gguf",
+        "nest/deep/n<o>.txt",
+        "p|q.png",
+        "ev\x00il.txt",
+    ])
+    def test_reserved_characters_are_rejected(self, base, bad):
+        """Same NTFS Alternate Data Stream class #1068 fixed in
+        model_manager/gguf.py's _safe_models_filename, and confined_name
+        above - unfixed here until now. Live-confirmed against this exact
+        function before this check existed: confined_under(base,
+        "sub/somefile.exe:hidden.gguf") was accepted and a write through the
+        returned path succeeded, landing an invisible stream behind a
+        visible, apparently-empty sibling."""
+        with pytest.raises(ValueError):
+            confined_under(base, bad)
+
+    def test_reserved_characters_are_rejected_before_any_write(self, base):
+        with pytest.raises(ValueError):
+            confined_under(base, "somefile.exe:hidden.gguf")
+        assert not (base / "somefile.exe").exists(), (
+            "a rejected ADS-shaped name must never reach a real write")
+
+    @pytest.mark.parametrize("good", ["a.png", "nest/a.png", "café.png"])
+    def test_ordinary_names_are_unaffected(self, base, good):
+        out = confined_under(base, good)
+        assert out.name == good.rsplit("/", 1)[-1]
 
 
 # --------------------------------------------------------------------------- #

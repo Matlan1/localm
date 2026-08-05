@@ -24,6 +24,43 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+# Characters Windows itself refuses to let a real filename contain
+# (docs.microsoft.com/windows/win32/fileio/naming-a-file - "Naming
+# Conventions"), plus the C0 control range - MINUS '/' and '\\', deliberately:
+# both confined_name and confined_under already treat separators correctly
+# and PLATFORM-APPROPRIATELY on their own (confined_name via its
+# name != Path(name).name check, which - unlike a blanket rejection - accepts
+# a literal backslash as an ORDINARY basename character on POSIX, matching
+# PurePosixPath's own behavior and this module's own tested contract, see
+# test_pathsafe_confined_name.py's test_backslash_is_an_ordinary_basename_on_posix;
+# confined_under via its explicit split on '/' after normalizing '\\' to it).
+# Including them here would silently override that already-correct,
+# already-tested platform split with a blanket, POSIX-incorrect rejection -
+# a regression this constant must not introduce while closing an unrelated gap.
+#
+# ':' is the character that matters most of what remains: it does not fail
+# file creation at all - it opens an NTFS Alternate Data Stream instead, so
+# 'somefile.exe:hidden.gguf' both passes a naive "no separators" check AND
+# lands INSIDE base (the confinement check below genuinely holds - this is
+# not CWE-22/path-injection), while writing its content into a stream hidden
+# from a normal directory listing behind an innocuous, apparently-empty
+# sibling 'somefile.exe'. Live-confirmed against this exact module:
+# confined_name(base, "somefile.exe:hidden.gguf") was accepted and
+# successfully wrote a hidden stream before this constant existed. Near-same
+# set as localm/model_manager/gguf.py's _safe_models_filename uses (that
+# module's own _WINDOWS_RESERVED_CHARS, which #1068 hardened first) - that
+# one also includes '/' and '\\', safe there only because that validator's
+# OWN separate Path(filename).name check runs first and unconditionally
+# rejects any separator before this set is even consulted, so the overlap is
+# redundant rather than reachable; duplicated here (not imported) rather
+# than shared, since pathsafe is the lower-level, backend-agnostic module
+# gguf.py (or anything else) may depend on, never the reverse. Exported (no
+# leading underscore) so a caller needing a bare character check without a
+# base_dir - e.g. a filename that will be folded into a synthesized,
+# already-unique on-disk name rather than resolved directly - can reuse the
+# SAME set instead of maintaining its own copy that can drift.
+WINDOWS_RESERVED_NAME_CHARS = frozenset('<>:"|?*') | frozenset(chr(c) for c in range(32))
+
 
 def confined_name(base: Path, name: str) -> Path:
     """Resolve *name* and guarantee it stays directly inside *base*, without
@@ -32,7 +69,18 @@ def confined_name(base: Path, name: str) -> Path:
     Blocklisting separators is not enough on Windows: a drive-relative name like
     ``C:evil`` joins to ``C:evil`` (outside *base*), and an absolute name
     replaces the join entirely. We verify the *resolved* path's parent is *base*
-    and the basename is unchanged, which also rejects ``..`` and nested subpaths.
+    and the basename is unchanged, which also rejects ``..`` and nested subpaths
+    AND, as a side effect, an OS-level alias substitution (an NTFS 8.3 short
+    name resolving to a pre-existing, differently-named file: the resolved
+    name differs from the requested one, so this check catches it without any
+    dedicated alias-detection logic - narrower than
+    model_manager/gguf.py's ``_safe_models_filename``, which additionally
+    accepts a case-only variant of an existing name; this function does not,
+    which is a minor strictness difference, not a security gap).
+
+    Reserved characters (``WINDOWS_RESERVED_NAME_CHARS`` above) are rejected
+    LEXICALLY, before any filesystem call - ':' is the one with a live
+    consequence (NTFS Alternate Data Streams; see that constant's docstring).
 
     Windows reserved device names (``con``, ``nul``, ``com1`` ...) are NOT
     specially rejected: they pass as ordinary basenames and resolve directly
@@ -40,6 +88,8 @@ def confined_name(base: Path, name: str) -> Path:
     deliberately not done here - it is not required for confinement and would
     reject otherwise-legitimate names."""
     if name != Path(name).name or name in ("", ".", ".."):
+        raise HTTPException(400, "Invalid file name")
+    if set(name) & WINDOWS_RESERVED_NAME_CHARS:
         raise HTTPException(400, "Invalid file name")
     try:
         resolved = (base / name).resolve()
@@ -120,6 +170,19 @@ def confined_under(base: Path, relpath: str) -> Path:
     for p in parts:
         if len(p) >= 2 and p[1] == ":":
             raise ValueError(f"drive-qualified path component not allowed: {relpath!r}")
+    # Reserved characters (WINDOWS_RESERVED_NAME_CHARS - see that constant's
+    # docstring above confined_name), checked per component now that
+    # separators have already been consumed by the split above so neither
+    # '/' nor '\\' can appear WITHIN a component here. ':' is the one with a
+    # live consequence beyond position 1 (already covered above): NTFS opens
+    # an Alternate Data Stream for it rather than failing the write, so e.g.
+    # 'sub/somefile.exe:hidden.gguf' stayed confined (this check exists
+    # precisely because that DOES pass containment - it is not CWE-22) while
+    # writing invisibly behind an apparently-empty sibling file. Live-
+    # confirmed against this exact function before this check existed.
+    for p in parts:
+        if set(p) & WINDOWS_RESERVED_NAME_CHARS:
+            raise ValueError(f"reserved character in path component not allowed: {relpath!r}")
     try:
         resolved = base.joinpath(*parts).resolve()
         base_resolved = base.resolve()

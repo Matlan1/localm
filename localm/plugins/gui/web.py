@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from localm import pathsafe
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.debuglog import logger
 from localm.plugins.coder.sessions import SessionManager
@@ -508,11 +509,16 @@ def _parse_multipart(body: bytes, boundary: bytes):
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024   # 100 MB / request
 
 
-# Characters never allowed in an uploaded file's basename: the Windows-reserved
-# set (a name like "x.txt:stream" would otherwise write to an NTFS alternate data
-# stream that the list/delete routes cannot see) plus all control chars (a literal
-# NUL would raise ValueError deep in pathlib and surface as a bare 500).
-_BAD_NAME_CHARS = set('<>:"|?*\\/') | {chr(c) for c in range(32)}
+# Characters never allowed in an uploaded file's basename: pathsafe's shared
+# Windows-reserved set (a name like "x.txt:stream" would otherwise write to an
+# NTFS alternate data stream that the list/delete routes cannot see) plus all
+# control chars (a literal NUL would raise ValueError deep in pathlib and
+# surface as a bare 500). Sourced from pathsafe rather than a local copy - a
+# second copy of this exact set is how it drifted from
+# localm/model_manager/gguf.py's own (see that module's own hardening,
+# #1068) in the first place; _confined_upload_path below also delegates its
+# confinement to pathsafe.confined_name for the same reason.
+_BAD_NAME_CHARS = pathsafe.WINDOWS_RESERVED_NAME_CHARS
 
 
 def _name_is_safe(safe: str) -> bool:
@@ -524,6 +530,13 @@ def _name_is_safe(safe: str) -> bool:
     of them accept. Grep for the callers before changing it rather than trusting
     this sentence: a list written into a docstring goes stale the moment someone
     adds one.
+
+    This is a bare character/reserved-name check with NO filesystem call - the
+    right shape for share.py's write path, which folds *safe* into an
+    already-unique, UUID-prefixed name rather than resolving it directly. A
+    caller that resolves *safe* against a real directory (confinement,
+    directory-escape, OS-level alias substitution) needs the FULL check -
+    see _confined_upload_path, which uses pathsafe.confined_name for that.
     """
     return bool(safe) and safe not in (".", "..") and not (set(safe) & _BAD_NAME_CHARS)
 
@@ -541,15 +554,28 @@ def _confined_upload_path(name: str) -> Path:
     any directory components (basename only) and rejects anything that would
     resolve outside the uploads dir - so '..', absolute paths, encoded slashes, or
     a name with illegal/control chars cannot traverse out or crash. Raises
-    HTTPException(400) on an unsafe name."""
+    HTTPException(400) on an unsafe name.
+
+    This is the ONLY caller in this file that resolves a raw name against a
+    real directory without going through _unique_upload_target's retry-with-
+    counter first (it backs DELETE /api/uploads/{name}, where the point is to
+    remove the EXISTING file, not to find a fresh name) - so it is also the
+    one place an OS-level alias (an NTFS 8.3 short name resolving to a
+    pre-existing, differently-named file) could have let a delete request for
+    a name the caller never saw land on someone else's real file, passing
+    confinement (the write/delete stays inside the uploads dir - not CWE-22)
+    while acting on the wrong target. pathsafe.confined_name closes this: its
+    strict resolved-name-equals-requested-name check rejects an alias as a
+    side effect of the same containment check, with no separate alias logic
+    needed - and it also carries the same reserved-character rejection
+    _name_is_safe already applies here, so this call is not weakening
+    anything, only adding the confinement + alias guarantee neither
+    _name_is_safe nor a bare .resolve() provided on its own."""
     base = _uploads_dir()
     safe = Path(name or "").name            # basename only, drops any dir parts
     if not _name_is_safe(safe):
         raise HTTPException(400, "Invalid file name.")
-    target = (base / safe).resolve()
-    if not target.is_relative_to(base.resolve()):
-        raise HTTPException(400, "Invalid file name.")
-    return target
+    return pathsafe.confined_name(base, safe)
 
 
 def _unique_upload_target(base: Path, safe_name: str) -> Path:
