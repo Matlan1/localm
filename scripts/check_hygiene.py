@@ -1303,6 +1303,158 @@ def _import_cycle_violations() -> list[str]:
     return problems
 
 
+# ---- check 8: no console.print reaching an isolated child process ----------
+#
+# WHY. A native crash (a bad CUDA/HIP driver, a corrupt GGUF) can hard-abort a
+# whole process with no catchable exception, so localm isolates every such
+# call into a spawned child (multiprocessing.get_context("spawn").Process) and
+# treats a child's death as a clean, reportable error in the parent. That
+# design has one hard rule: a CHILD must never call console.print (rich
+# writes are not fork/spawn-safe against the parent's own console state, and
+# on Windows a rich/Unicode write against the child's inherited 'charmap'
+# stdout codec has crashed a worker with UnicodeEncodeError before - see
+# _hf_worker.py's own comments). A child reports FACTS as return data; only
+# the PARENT renders them.
+#
+# This existed only as a comment asserting the invariant in _hf_worker.py
+# ("GgufWorker has zero console.print calls, for the identical reason") -
+# true when written, and it drifted silently false once, when a MoE-placement
+# fix added a direct console.print to a code path that runs inside the GGUF
+# child (fixed; that fix is what this check is enforcing so it cannot recur).
+# A comment defending an invariant in a file it does not own is worse than no
+# comment once the invariant moves, because it tells the next reader not to
+# check - so the boundary is enforced here instead of merely asserted there.
+#
+# THE MODULE LIST is the transcription of the parent/child boundary as it
+# actually is: every module reachable (transitively, including function-local
+# imports) from one of the four isolated-child entry points (GGUF chat,
+# embedder, whisper/STT, HF-transformers), verified by tracing each runner's
+# own _runner_main/_worker_main. NOT auto-derived from the import graph -
+# check 7 above already covers cross-package cycles; this is a narrower,
+# deliberately hand-verified list because getting the child boundary WRONG
+# (too narrow) is exactly the failure this check exists to catch, and an
+# automated derivation would need to re-solve the same "which entry point
+# actually reaches this module" question this list already answers.
+_CHILD_PROCESS_MODULES: tuple[str, ...] = (
+    # GGUF chat backend (localm/inference/backends/llamacpp/_runner.py::_runner_entry)
+    "localm/inference/backends/llamacpp/_runner.py",
+    "localm/inference/backends/llamacpp/_worker.py",
+    "localm/inference/backends/llamacpp/llama.py",
+    "localm/inference/backends/llamacpp/_loader.py",
+    "localm/inference/backends/llamacpp/_api.py",
+    "localm/inference/backends/llamacpp/_abi.py",
+    "localm/inference/backends/llamacpp/_structs.py",
+    "localm/inference/backends/llamacpp/mtmd.py",
+    "localm/inference/backends/llamacpp/_sizing.py",
+    "localm/inference/backends/base.py",
+    # GGUF embedder (localm/inference/_embedder_runner.py::_runner_main)
+    "localm/inference/_embedder_runner.py",
+    "localm/inference/embedder.py",
+    # Whisper/STT worker (localm/voice.py::_worker_main, self-contained)
+    "localm/voice.py",
+    # HuggingFace-transformers backend (localm/inference/backends/_hf_runner.py::_runner_entry)
+    "localm/inference/backends/_hf_runner.py",
+    "localm/inference/backends/_hf_worker.py",
+    # Shared by more than one of the above.
+    "localm/debuglog.py",
+    "localm/_mp_spawn.py",
+    "localm/textnorm.py",
+    "localm/inference/media.py",
+    "localm/discover.py",
+    "localm/model_manager/gguf.py",
+    "localm/model_meta.py",
+    "localm/gpu_usage.py",
+    "localm/config.py",
+    "localm/vram.py",
+)
+
+# file -> {ClassName.method_name or bare function name} explicitly permitted to
+# call console.print despite the module being on the child-process list above.
+# Each entry needs a verified reason, not a guess: _sizing.py's VramSizingMixin
+# is inherited by BOTH a parent-side proxy (GgufBackend/IsolatedEmbedder, which
+# call these before Process.start()) and, for the GGUF backend, the child-side
+# GgufWorker - but GgufWorker only ever reaches _check_context_fit (which logs,
+# never prints), never these three. Verified by grepping every call site of
+# each name repo-wide: localm/inference/backends/gguf.py is the sole caller of
+# all three, and every call happens before that same function's
+# ModelRunner().spawn_and_load(...) - i.e. strictly parent-side, before the
+# child exists.
+_CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST: dict[str, frozenset[str]] = {
+    "localm/inference/backends/llamacpp/_sizing.py": frozenset({
+        "VramSizingMixin._check_vram",
+        "VramSizingMixin._effective_ctx_max",
+        "VramSizingMixin._effective_gpu_layers",
+    }),
+}
+
+
+class _ConsolePrintFinder(ast.NodeVisitor):
+    """Collects (lineno, dotted qualname) for every ``console.print(...)`` call
+    in a module, tracking class/function nesting to build the qualname. Matches
+    on the literal name ``console`` (this codebase's one established spelling
+    for the shared rich Console, confirmed repo-wide - see localm/console.py)
+    rather than resolving the symbol, the same "walk the syntax, do not
+    type-resolve" convention check 7's cycle detector above already uses."""
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[int, str]] = []
+        self._stack: list[str] = []
+
+    def _qualname(self) -> str:
+        return ".".join(self._stack) if self._stack else "<module level>"
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._stack.append(node.name)
+        self.generic_visit(node)
+        self._stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._stack.append(node.name)
+        self.generic_visit(node)
+        self._stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr == "print"
+                and isinstance(func.value, ast.Name) and func.value.id == "console"):
+            self.hits.append((node.lineno, self._qualname()))
+        self.generic_visit(node)
+
+
+def _child_process_console_print_violations() -> list[str]:
+    """console.print(...) call sites in a child-process module (see the block
+    comment above) that are not covered by the allowlist. A parse failure is
+    reported, not skipped (same reasoning as check 7: a file this gate cannot
+    read is a file it cannot vouch for)."""
+    problems: list[str] = []
+    for rel in _CHILD_PROCESS_MODULES:
+        path = REPO / rel
+        if not path.is_file():
+            continue   # not a localm checkout, or the module moved; other
+                        # gates (or this list going stale) surface that
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError as e:
+            problems.append(f"could not parse {rel}: {e}")
+            continue
+        finder = _ConsolePrintFinder()
+        finder.visit(tree)
+        allowed = _CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST.get(rel, frozenset())
+        for lineno, qualname in finder.hits:
+            if qualname in allowed:
+                continue
+            problems.append(
+                f"{rel}:{lineno}: console.print(...) in {qualname} - this module "
+                "runs inside an isolated child process (see check 8's block "
+                "comment above); a child must report facts as return data and "
+                "let the PARENT render them, never print directly. If this "
+                "call is genuinely parent-side (e.g. it always runs before "
+                "the child spawns), add it to "
+                "_CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST with a verified reason.")
+    return problems
+
 
 def _strict_env() -> bool:
     """CI-style escalation knob: LOCALM_HYGIENE_STRICT set to anything but a
@@ -1430,6 +1582,7 @@ def main(argv: list[str]) -> int:
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_derivation_violations())
     problems.extend(_import_cycle_violations())
+    problems.extend(_child_process_console_print_violations())
     manifest_failures, manifest_warnings = _release_manifest_gate()
     problems.extend(manifest_failures)
     # Check 4b is warn-only by default (rewording your own [Unreleased] draft is
