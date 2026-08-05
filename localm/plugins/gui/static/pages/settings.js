@@ -1034,6 +1034,18 @@ export async function refreshSettingsPage() {
   // order), then plugin sections (each its own tab with its own Save button).
   const controls = [];
   const sections = new Map();        // id -> { id, label, plugin, ctrls: [] }
+  // A plugin-owned field is filed under its OWNER's section (settingsSectionOf),
+  // never under its declared `group` - deliberate, so a plugin's whole config
+  // lives on one tab. But a field can ALSO belong to a cross-cutting core
+  // category (Privacy is the real case today: chat_mode/coder_mode/memory's
+  // privacy-recall toggles all declare group="Privacy" while living on their
+  // own plugin's tab) - a user browsing that core section would see nothing
+  // about them. Tracked by EXCLUSION (any owner!=core field whose group MATCHES
+  // an existing core section), not a hand-listed set of owners, so a future
+  // field does not need a second place remembering it belongs here too - see
+  // filterTextOf's docstring above for the same principle, earned the same way
+  // (a hand-maintained list going stale is how settings render nowhere).
+  const crossFiledInto = new Map();  // "core-<group>" -> Map(owner -> count)
   for (const field of fields) {
     // Media (ComfyUI) config is rendered in its own Media section below, one
     // subsection per plugin (image/music/video), edited per-plugin via the
@@ -1045,6 +1057,12 @@ export async function refreshSettingsPage() {
     const s = settingsSectionOf(field);
     if (!sections.has(s.id)) sections.set(s.id, { ...s, ctrls: [] });
     sections.get(s.id).ctrls.push(ctrl);
+    if (field.owner && field.owner !== "core") {
+      const coreId = "core-" + field.group;
+      if (!crossFiledInto.has(coreId)) crossFiledInto.set(coreId, new Map());
+      const owners = crossFiledInto.get(coreId);
+      owners.set(field.owner, (owners.get(field.owner) || 0) + 1);
+    }
   }
   _settingsControls = controls;
 
@@ -1069,6 +1087,17 @@ export async function refreshSettingsPage() {
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
+    // Point to any plugin tabs holding a field that ALSO declares this core
+    // group (see crossFiledInto above) - browsing here must not look like
+    // "that is everything", when e.g. Privacy has more related toggles on the
+    // Chat/Coder/Memory plugin tabs.
+    if (!sec.plugin && crossFiledInto.has(sec.id)) {
+      const names = [...crossFiledInto.get(sec.id).keys()]
+        .map((owner) => PLUGIN_SECTION_LABEL[owner]
+          || (owner.charAt(0).toUpperCase() + owner.slice(1)));
+      panel.appendChild(el("div", "sub",
+        `Related settings also live on plugin tabs: ${names.join(", ")}.`));
+    }
     const actions = el("div", "actions");
     const save = el("button", "btn-primary settings-section-save", "Save " + (heading || sec.label));
     save.dataset.sec = sec.id;
