@@ -41,11 +41,12 @@ def _run_generate(monkeypatch, *, gen_result, cancelled):
     # A swap IS needed -> chat model gets unloaded, so the reload is mandatory.
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
     monkeypatch.setattr("localm.vram.unload_chat_for_media",
-                        lambda job, url, label: True)
+                        lambda job, url, label, instance_token=None: True)
     reload_calls = []
     monkeypatch.setattr(
         "localm.vram.reload_chat_after_media",
-        lambda job, url, s, backend, label: reload_calls.append(True))
+        lambda job, url, s, backend, label, instance_token=None:
+            reload_calls.append(True))
 
     captured = {}
 

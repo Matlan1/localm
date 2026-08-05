@@ -85,6 +85,9 @@ async def music(req: MusicRequest, request: Request):
         raise HTTPException(503, "Music generation needs this server's own "
                                  "address to free VRAM first, and it could not "
                                  "be determined.")
+    # Threaded through to the VRAM handover below so it authenticates on a
+    # keyless server too - see selfclient.self_request's docstring.
+    instance_token = getattr(request.app.state, "instance_token", None)
 
     music_dir = _music_dir()
     music_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +137,7 @@ async def music(req: MusicRequest, request: Request):
                       "card - unloading the chat model first."})
         gen_swap = False
         if swap:
-            if not unload_chat_for_media(job, self_url, "music"):
+            if not unload_chat_for_media(job, self_url, "music", instance_token):
                 gen_swap = True
         else:
             job.push({"type": "line", "text":
@@ -181,7 +184,7 @@ async def music(req: MusicRequest, request: Request):
         # the chat model.
         if swap:
             from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "music")
+            reload_chat_after_media(job, self_url, s, _backend, "music", instance_token)
         return ok
 
     job = jobs.start_fn("music", _generate, result_path=out_path.name,

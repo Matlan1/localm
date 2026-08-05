@@ -516,7 +516,8 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
     def test_pinned_engine_is_reported_honestly_not_as_unloaded(self):
         self.engine.active_requests = 1          # a request is mid-generation
 
-        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None):
+        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None,
+                              instance_token=None):
             return self._Adapter(self.client.post(f"/v1{path}"))
 
         from localm import vram as vram_mod
@@ -543,7 +544,8 @@ class TestMediaSwapHonorsPinEndToEnd(_UnloadCase):
         not read that as chat-model success."""
         self.engine.active_requests = 1          # a request is mid-generation
 
-        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None):
+        def fake_self_request(method, path, *, json=None, timeout=30, base_url=None,
+                              instance_token=None):
             return self._Adapter(self.client.post(f"/v1{path}"))
 
         from localm import vram as vram_mod
