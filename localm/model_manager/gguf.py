@@ -664,6 +664,173 @@ def gguf_expert_count(path: Path) -> int:
     return int(value) if isinstance(value, int) and value > 0 else 0
 
 
+# The FUSED per-layer expert weight tensors, exactly as llama.cpp's converters
+# name them: blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps - one tensor
+# PER PROJECTION with every expert fused into it, not one tensor per expert.
+# The router (ffn_gate_inp) and any SHARED expert are deliberately excluded:
+# they are read every token and are tiny, so llama.cpp never moves them.
+#
+# SINGLE SOURCE OF TRUTH: llamacpp/llama.py's _apply_cpu_moe builds its native
+# tensor_buft_overrides regex from these SAME _MOE_TENSOR_PREFIX/_SUFFIX
+# constants (imported from here), and gguf_moe_pinned_expert_bytes below sums
+# exactly the tensors this pattern matches for its VRAM preflight estimate -
+# so the two can never silently disagree about what n_cpu_moe actually pins.
+# Built by concatenation rather than a format string so the literal stays a
+# plain regex with no interpolation machinery around it (mirrors the
+# original comment in llama.py, preserved here since this is now that
+# constant's home).
+_MOE_TENSOR_PREFIX = r"blk\."
+_MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
+# General matcher (not tied to one layer index) with the index as a capture
+# group, derived from the SAME prefix/suffix so it can never drift from what
+# _apply_cpu_moe actually builds per-layer.
+_MOE_EXPERT_TENSOR_RE = re.compile(_MOE_TENSOR_PREFIX + r"(\d+)" + _MOE_TENSOR_SUFFIX)
+
+
+def _gguf_read_string_stream(f) -> str:
+    """Read a length-prefixed GGUF string from an open, positioned file
+    handle, advancing past it. Streaming counterpart to ``_gguf_read_string``
+    (which reads from an in-memory buffer) - needed because tensor-info
+    parsing (see ``gguf_moe_pinned_expert_bytes``) must read PAST the entire
+    metadata KV block, including whatever tokenizer vocabulary array it
+    contains (routinely several MB for a 100k+-token vocab), which is why
+    that function cannot reuse the bounded-4MB-slurp style
+    ``gguf_kv_bytes_per_token``/``gguf_expert_count`` use - those only need
+    EARLY keys and can stop (or silently truncate-and-still-answer) before
+    reaching the vocab; a fixed bound here would be a real correctness risk
+    on a preflight decision, not just cosmetic."""
+    (n,) = struct.unpack("<Q", f.read(8))
+    if n > 10_000_000:
+        # No real GGUF tensor/key name is anywhere near 10 MB; a huge length
+        # here means the stream is misaligned (or genuinely corrupt), not
+        # that this is a legitimately giant string - bail out cleanly rather
+        # than attempt a multi-MB read that can only be wrong either way.
+        raise struct.error("gguf string length implausible")
+    data = f.read(n)
+    if len(data) != n:
+        raise struct.error("gguf string truncated")
+    return data.decode("utf-8")
+
+
+def _gguf_skip_value_stream(f, vtype: int) -> None:
+    """Streaming counterpart to ``_gguf_skip_value`` - advance *f* past one
+    GGUF metadata VALUE of type *vtype* by seeking, not by reading array/blob
+    bytes into memory that nothing here needs."""
+    if vtype == _GGUF_TYPE_STRING:
+        _gguf_read_string_stream(f)
+        return
+    if vtype == _GGUF_TYPE_ARRAY:
+        (elem_type,) = struct.unpack("<I", f.read(4))
+        (count,) = struct.unpack("<Q", f.read(8))
+        if elem_type == _GGUF_TYPE_STRING:
+            for _ in range(count):
+                _gguf_read_string_stream(f)
+            return
+        size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
+        if size is None:
+            raise struct.error(f"unsupported gguf array element type {elem_type}")
+        f.seek(size * count, 1)
+        return
+    size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
+    if size is None:
+        raise struct.error(f"unsupported gguf value type {vtype}")
+    f.seek(size, 1)
+
+
+# GGUF pads the tensor-info section to this many bytes before tensor DATA
+# begins (the format's default; a file may override it via a general.alignment
+# KV key). gguf_moe_pinned_expert_bytes deliberately does not read that key -
+# see its own docstring for why the resulting error is negligible.
+_GGUF_DEFAULT_ALIGNMENT = 32
+
+# Sanity ceiling on a single tensor's dimension count, generous against
+# GGML_MAX_DIMS (4 in every real ggml build) - guards against a corrupt/
+# misaligned stream being read as an implausibly large dims array.
+_GGUF_MAX_TENSOR_DIMS = 8
+
+
+def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[int]:
+    """Bytes occupied by the routed-expert weight tensors of the FIRST
+    *n_pinned_layers* transformer layers - the exact tensors ``_apply_cpu_moe``
+    (llamacpp/llama.py) pins to system RAM for an ``n_cpu_moe=N`` load (see
+    ``_MOE_EXPERT_TENSOR_RE`` above for which tensors and why).
+
+    Computed from each matching tensor's OFFSET DELTA in the file's own
+    tensor-info section (the next tensor's offset minus this one's, sorted by
+    offset; the last tensor's size comes from the file's total size instead)
+    rather than decoding ggml's per-quantization-type block format. This
+    needs no per-type size table (Q4_K, IQ2_XS, Q8_0, ... each have a
+    different bytes-per-block, and getting even one entry wrong would
+    silently mis-size every load using it) and is EXACT regardless of
+    quantization scheme, as long as tensors are laid out contiguously in
+    offset order - true for every llama.cpp-produced GGUF (the only writer
+    that matters here: llama.cpp is also what reads the file back and pins
+    these exact tensors).
+
+    Returns ``None`` - never raises - when the file cannot be parsed as a
+    GGUF, or *n_pinned_layers* is <= 0: the caller then falls back to
+    charging the whole file (today's behavior), never inventing a discount
+    it cannot prove (AGENTS.md rule 5). Returns ``0`` (a real answer, not a
+    failure) when parsing succeeds but nothing in the pinned layer range
+    matches - e.g. a dense model, where ``_apply_cpu_moe`` already treats
+    ``n_cpu_moe`` as a no-op via its own ``gguf_expert_count() == 0`` guard,
+    so charging the whole file here is correct, not a fallback."""
+    if n_pinned_layers <= 0:
+        return None
+    try:
+        file_size = path.stat().st_size
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+            for _ in range(kv_count):
+                _gguf_read_string_stream(f)          # key (value unused here)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                _gguf_skip_value_stream(f, vtype)
+            entries = []
+            for _ in range(tensor_count):
+                name = _gguf_read_string_stream(f)
+                (n_dims,) = struct.unpack("<I", f.read(4))
+                if n_dims > _GGUF_MAX_TENSOR_DIMS:
+                    raise struct.error(f"implausible tensor n_dims {n_dims}")
+                f.seek(8 * n_dims, 1)   # dims[] - unneeded for offset-delta sizing
+                f.seek(4, 1)            # ggml_type - unneeded too
+                (offset,) = struct.unpack("<Q", f.read(8))
+                entries.append((name, offset))
+            data_start = f.tell()
+    except (OSError, struct.error, IndexError, UnicodeDecodeError) as exc:
+        logger.debug("gguf MoE expert-byte probe: could not parse %s (%s)",
+                     path.name, type(exc).__name__)
+        return None
+
+    if not entries:
+        return None
+    remainder = data_start % _GGUF_DEFAULT_ALIGNMENT
+    if remainder:
+        # Only the LAST tensor's size below depends on this: every other
+        # tensor's size comes from the delta to the NEXT tensor's offset,
+        # which cancels any alignment padding out entirely. A file that
+        # overrides the default alignment (rare; not read here) would only
+        # skew the last tensor's size by at most one alignment unit -
+        # negligible against GB-scale tensors.
+        data_start += _GGUF_DEFAULT_ALIGNMENT - remainder
+
+    entries.sort(key=lambda e: e[1])
+    total = 0
+    for idx, (name, offset) in enumerate(entries):
+        m = _MOE_EXPERT_TENSOR_RE.search(name)
+        if not m or int(m.group(1)) >= n_pinned_layers:
+            continue
+        nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
+        size = nxt - offset
+        if size > 0:
+            total += size
+    return total
+
+
 def _gguf_metadata_probe(path: Path) -> dict:
     """Best-effort read of the GGUF header metadata needed for embedding-model
     detection: ``general.architecture`` and whether any ``*.pooling_type`` key
