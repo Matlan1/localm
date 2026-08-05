@@ -129,7 +129,44 @@ def test_use_skill_confines_to_folder(tmp_path):
     _make_skill(tmp_path / ".localcoder" / "skills", "alpha")
     (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
     out = S.tool_use_skill(tmp_path, name="alpha", file="../../../secret.txt")
-    assert (not out.ok) and "escapes" in out.output
+    # Message comes from pathsafe.confined_under now (traversal-specific,
+    # not the old hand-rolled "escapes" wording) - what matters is that it
+    # is refused and the secret is never read, not the exact phrasing.
+    assert (not out.ok) and "traversal" in out.output
+    assert "nope" not in out.output
+
+
+def test_use_skill_rejects_reserved_characters(tmp_path):
+    """Same class #1068 fixed for model filenames: a colon opens an NTFS
+    Alternate Data Stream rather than failing the read, so a naive
+    'no separators' check would pass 'ref.txt:hidden' straight through. The
+    OLD hand-rolled _confine_skill_file had no such check at all."""
+    _make_skill(tmp_path / ".localcoder" / "skills", "alpha", files={"ref.txt": "REFDATA"})
+    out = S.tool_use_skill(tmp_path, name="alpha", file="ref.txt:hidden")
+    assert not out.ok
+
+
+def test_use_skill_alias_leaf_does_not_read_a_different_file(tmp_path, monkeypatch):
+    """An OS-level short-name alias resolving 'file' to a DIFFERENT, real
+    sibling inside the same skill folder stays strictly under the folder -
+    containment alone would not catch it. Deterministic simulation, no real
+    8.3-enabled volume needed (same technique as test_pathsafe_confined_under.py)."""
+    d = _make_skill(tmp_path / ".localcoder" / "skills", "alpha",
+                    files={"LongReferenceFileName.md": "SECRET REFERENCE DATA"})
+    victim = d / "LongReferenceFileName.md"
+    alias = "LONGRE~1.MD"
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, *a, **k):
+        parts = list(self.parts)
+        if alias in parts:
+            parts[parts.index(alias)] = victim.name
+            return real_resolve(Path(*parts), *a, **k)
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    out = S.tool_use_skill(tmp_path, name="alpha", file=alias)
+    assert not out.ok
 
 
 def test_use_skill_missing(tmp_path):

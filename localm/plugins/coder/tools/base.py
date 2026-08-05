@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
+from localm import pathsafe
+
 @dataclass
 class ToolResult:
     ok:      bool
@@ -105,15 +107,35 @@ def _confine(cwd: Path, path: str) -> Path:
     Raises ``PermissionError`` with a clear message if the resolved path
     escapes the working directory (path traversal attempt or accidental
     absolute path outside the project root).
+
+    Delegates to ``pathsafe.confined_absolute_or_under`` - the shared
+    absolute-or-relative confinement primitive - instead of re-implementing
+    resolve()+is_relative_to() here. That closes two gaps this hand-rolled
+    check never had: a UNC/device *path* used to reach ``Path(path).resolve()``
+    with no guard at all (the syscall dials SMB and can hang for minutes -
+    the exact danger ``reject_unsafe_path_string`` documents, on a sink this
+    function shares with it), and an NTFS Alternate Data Stream / short-name
+    alias in *path* was accepted with no character or identity check - these
+    are a coding agent's own file-editing tools, so a hostile instruction
+    embedded in a file the agent reads could steer a subsequent tool call's
+    ``path`` argument the same way a SKILL.md's body can.
+
+    ``"."``/``""`` naming *cwd* itself is an existing, tested contract this
+    function keeps (a tool listing "the project root" is a legitimate
+    request); the shared primitive treats a self-referential result as
+    invalid (matching its delete-oriented callers, for whom "collapses to
+    the confined root" must never mean "the root itself"), so that one case
+    is handled here instead of relaxing the primitive for every caller.
     """
-    resolved = (cwd / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
-    cwd_resolved = cwd.resolve()
-    if not resolved.is_relative_to(cwd_resolved):
+    if path in (".", ""):
+        return cwd.resolve()
+    try:
+        return pathsafe.confined_absolute_or_under(cwd, path)
+    except ValueError as e:
         raise PermissionError(
-            f"'{path}' resolves outside the working directory '{cwd_resolved}'. "
-            "All file operations must stay within the project root."
+            f"'{path}' resolves outside the working directory '{cwd.resolve()}'. "
+            f"All file operations must stay within the project root. ({e})"
         )
-    return resolved
 
 
 @dataclass

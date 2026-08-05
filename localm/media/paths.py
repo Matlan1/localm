@@ -83,6 +83,27 @@ def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+# NOT migrated onto pathsafe.confined_under/confined_absolute_or_under, unlike
+# the other resolve()+containment re-implementations swept up in the same pass
+# (coder/tools/base.py's _confine, mcpserver/server.py's generate_image
+# closure, coder/skills.py's _confine_skill_file) - considered and rejected,
+# not overlooked. Those confine a caller-named STRING to a specific NEW or
+# TARGETED entry, where an NTFS short-name alias substituting a different
+# real sibling changes WHICH file gets written, deleted, or read - a
+# privilege-relevant identity change. check_input_image and
+# confined_move_dest below answer a coarser question: "does this ALREADY-
+# RESOLVED path fall under one of a caller's own allowed root directories",
+# for a READ-and-forward (input_image) or a directory pick (move dest), never
+# a specific new/targeted entry. An alias substituting one file for another
+# WITHIN the same allowed root - the only case containment cannot see -
+# does not cross a privilege boundary here: for input_image the caller is
+# reading only its own uploads/galleries either way; for a non-host-fs
+# move dest the file still lands somewhere inside the caller's own confined
+# home dir; for a host-fs principal "any folder on this machine" is already
+# the documented, granted capability. Revisit if either function starts
+# gating a delete or an exact-identity write.
+
+
 # The UNC/device predicate is localm.pathsafe.is_unc_or_device_path, NOT a copy.
 # This module carried its own for a while, written independently while WS4/WS6
 # was still in flight; that lane has since landed the shared one (#845) and it is

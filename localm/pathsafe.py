@@ -6,11 +6,16 @@ directory. They are backend-agnostic (no media/ComfyUI knowledge) - the kernel's
 session-log browser and the media plugins (image/music/video) all use them, so
 they live here rather than being duplicated per caller.
 
-Three shapes, deliberately distinct:
+Four shapes, deliberately distinct:
 
 * ``confined_name`` - one flat basename, HTTP call sites. Raises HTTPException.
 * ``confined_under`` - a possibly NESTED relative path, non-HTTP call sites
-  (the media clients, CLI/updater code). Raises ValueError.
+  (the media clients, CLI/updater code). Raises ValueError. Rejects an
+  absolute *relpath* as an escape attempt.
+* ``confined_absolute_or_under`` - the same nested-path confinement, but for
+  callers where an absolute path landing inside *base* is a legitimate input
+  rather than an escape attempt (an LLM tool call naming a file by its full
+  path). Raises ValueError.
 * ``reject_unsafe_path_string`` - a LEXICAL pre-check for a caller-supplied
   ABSOLUTE path that is about to be handed to the filesystem. It performs no
   syscall itself, so it can run before the first one.
@@ -219,6 +224,65 @@ def confined_under(base: Path, relpath: str) -> Path:
             raise ValueError(
                 f"path component resolved to a different name than requested, "
                 f"possibly a short-name alias: {relpath!r}")
+        node = node.parent
+    return resolved
+
+
+def confined_absolute_or_under(base: Path, raw: str) -> Path:
+    """Resolve *raw* and guarantee it stays inside *base*, raising
+    ``ValueError`` when it would not.
+
+    Unlike :func:`confined_under`, an ABSOLUTE *raw* is ACCEPTED rather than
+    rejected as an escape attempt, as long as it resolves inside *base* - for
+    callers where an absolute path naming a file already inside the confined
+    root is a legitimate, expected input (an LLM coding-agent tool call
+    naming a file by its full path; an MCP ``output_path``), not merely
+    tolerated the way :func:`confined_name`/:func:`confined_under`'s callers
+    treat one. A RELATIVE *raw* is joined onto *base* first, exactly like
+    ``confined_under`` (nesting permitted, only escape rejected).
+
+    Rejected, in order, before any filesystem call the string would drive: an
+    empty or collapsing result, a UNC or device path (the syscall that would
+    resolve one dials SMB and can hang for minutes - same reasoning as
+    :func:`reject_unsafe_path_string`, judged unconditionally via
+    :func:`is_unc_or_device_path` since *raw* here is caller-supplied, not
+    something the user themselves typed into a folder picker), and a reserved
+    character (``WINDOWS_RESERVED_NAME_CHARS``). After resolving: anything
+    outside *base*, and - per component, walking back from the resolved leaf,
+    exactly like ``confined_under`` - a resolved name that does not match the
+    requested one (an OS-level short-name alias; see that function's
+    docstring for why containment alone cannot catch it). For an absolute
+    *raw* only the components AFTER its anchor are user-supplied content to
+    check - the anchor/drive is not - and only however many of them actually
+    land inside *base* after resolution are compared (an absolute *raw* may
+    repeat *base*'s own already-trusted prefix verbatim)."""
+    s = (raw or "").strip()
+    if not s or s in (".", ".."):
+        raise ValueError(f"invalid path: {raw!r}")
+    if is_unc_or_device_path(s):
+        raise ValueError(f"UNC and device paths are not allowed: {raw!r}")
+    p = Path(s)
+    parts = p.parts[1:] if p.is_absolute() else p.parts
+    if not parts:
+        raise ValueError(f"path resolves to no name: {raw!r}")
+    for part in parts:
+        if set(part) & WINDOWS_RESERVED_NAME_CHARS:
+            raise ValueError(f"reserved character in path component not allowed: {raw!r}")
+    joined = p if p.is_absolute() else base / p
+    try:
+        resolved = joined.resolve()
+        base_resolved = base.resolve()
+    except (OSError, ValueError) as e:
+        raise ValueError(f"path could not be resolved: {raw!r} ({e})")
+    if resolved == base_resolved or base_resolved not in resolved.parents:
+        raise ValueError(f"path escapes {base_resolved}: {raw!r}")
+    depth = len(resolved.relative_to(base_resolved).parts)
+    node = resolved
+    for part in reversed(parts[-depth:]):
+        if node.name != part:
+            raise ValueError(
+                f"path component resolved to a different name than requested, "
+                f"possibly a short-name alias: {raw!r}")
         node = node.parent
     return resolved
 

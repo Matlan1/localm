@@ -982,6 +982,48 @@ class TestGenerateImageSafety:
         mock_gen.assert_not_called()
         assert _unc_calls(seen) == []
 
+    @pytest.mark.parametrize("bad", [
+        "somefile.exe:hidden.gguf", "sub/somefile.exe:hidden.gguf",
+    ])
+    def test_output_path_reserved_characters_are_rejected(self, bad):
+        """Same NTFS Alternate Data Stream class #1068 fixed for model
+        filenames - the OLD _confine closure had no character check at all,
+        so a colon stayed confined (containment held) while opening a
+        hidden stream behind an apparently-empty sibling."""
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": bad})
+        assert r["result"]["isError"] is True
+        mock_gen.assert_not_called()
+
+    def test_output_path_alias_does_not_write_through_a_different_file(
+            self, monkeypatch):
+        """An OS-level short-name alias resolving output_path to a DIFFERENT,
+        real sibling already sitting in the data dir stays strictly inside
+        it - containment alone would not catch it. Deterministic simulation,
+        same technique as test_pathsafe_confined_under.py's alias tests."""
+        from localm.config import home_dir
+        server, _ = _server()
+        home = home_dir()
+        home.mkdir(parents=True, exist_ok=True)
+        victim = home / "LongExistingFileName.png"
+        victim.write_bytes(b"do not overwrite me")
+        alias = "LONGEX~1.PNG"
+        victim_resolved = victim.resolve()
+        real_resolve = Path.resolve
+
+        def fake_resolve(self, *a, **k):
+            if self.name == alias:
+                return victim_resolved
+            return real_resolve(self, *a, **k)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": alias})
+        assert r["result"]["isError"] is True
+        mock_gen.assert_not_called()
+        assert victim.read_bytes() == b"do not overwrite me"
+
     @pytest.mark.parametrize("secret_name",
                              ["auth.key", "auth.json", "sessions.json"])
     def test_input_image_cannot_name_the_credential_store(self, secret_name):
