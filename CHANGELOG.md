@@ -354,6 +354,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   could include a different download running at the same time, or watch the
   wrong folder entirely when pulling into a custom destination. Progress now
   comes from what is actually on disk, and says "unknown" rather than guessing.
+- **The setup menu no longer lists your recommended GPU backend twice.** Option
+  [1] is a shortcut for whatever setup detected for your hardware, so it was
+  always the same choice as one of the numbered entries below it - two lines that
+  looked like different options and did the same thing. The twin is now marked as
+  such. Re-provisioning an existing install also describes itself correctly
+  instead of announcing "Replacing amd-rocm build with amd-rocm" for what is a
+  re-download, or "with auto" when auto is how a backend gets picked rather than
+  a backend you can install.
 - **A self-update could silently swap your GPU runtime to a slower one.** When an
   update needed to re-provision the native binaries, it picked the backend from
   an older detection value that only ever recommends the universal Vulkan build

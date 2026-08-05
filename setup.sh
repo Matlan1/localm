@@ -370,13 +370,27 @@ case "$REC" in
   vulkan|cuda|hip|cpu|metal|amd-rocm) ;;                      # a known backend from the policy
   *) case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac ;;  # fallback if the probe failed
 esac
+# [1] is a shortcut for whichever backend the policy recommended, so it is ALWAYS
+# the same choice as one of the numbered entries below (vulkan on most GPUs, cpu
+# with none). Listing it twice with no relation shown reads as two different
+# options that happen to share a name. Mark the twin instead of removing it: the
+# numbering has to stay stable, and [1] has to keep working for a REC with no
+# numbered entry of its own (metal on Apple Silicon).
+_same="   (same as [1])"
+_m2=""; _m3=""; _m4=""; _m5=""
+case "$REC" in
+  vulkan) _m2="$_same" ;;
+  cuda)   _m3="$_same" ;;
+  hip)    _m4="$_same" ;;
+  cpu)    _m5="$_same" ;;
+esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
 say "    [1] $REC  (recommended)"
-say "    [2] vulkan   - any GPU, no vendor toolkit"
-say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)"
-say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)"
-say "    [5] cpu      - no GPU"
+say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"
+say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)$_m3"
+say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
+say "    [5] cpu      - no GPU$_m5"
 say "    [6] I will build / provide my own (skip the download)"
 say "    (your pick is load-tested; a failure offers Vulkan, never a silent swap)"
 bpick="$(ask "  Pick 1-6 [1]: " 1)"

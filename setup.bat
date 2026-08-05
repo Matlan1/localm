@@ -296,12 +296,23 @@ if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] cuda = peak performance, fetch
 
 rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
 echo.
+rem  [1] is a shortcut for whichever backend the policy recommended, so it is
+rem  ALWAYS the same choice as one of the numbered entries below - amd-rocm on an
+rem  RX 6000, cuda on an NVIDIA card, vulkan otherwise. Listing it twice with no
+rem  relation shown reads as two different options that happen to share a name.
+rem  Mark the twin rather than removing it: the numbering has to stay stable, and
+rem  [1] must keep working even for a REC with no numbered entry of its own.
+set "M2=" & set "M3=" & set "M4=" & set "M5="
+if /i "%REC%"=="vulkan"   set "M2=   (same as [1])"
+if /i "%REC%"=="cuda"     set "M3=   (same as [1])"
+if /i "%REC%"=="amd-rocm" set "M4=   (same as [1])"
+if /i "%REC%"=="cpu"      set "M5=   (same as [1])"
 echo  Native inference runtime (llama.cpp) - press Enter to accept the recommendation:
 echo    [1] %REC%   (recommended for your hardware)
-echo    [2] vulkan     - any GPU (AMD/NVIDIA/Intel), no vendor toolkit
-echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for you)
-echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained
-echo    [5] cpu        - no GPU
+echo    [2] vulkan     - any GPU (AMD/NVIDIA/Intel), no vendor toolkit%M2%
+echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for you)%M3%
+echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained%M4%
+echo    [5] cpu        - no GPU%M5%
 echo    [6] I will build / provide my own (skip the download)
 set "BSEL="
 call :flush
