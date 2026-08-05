@@ -116,6 +116,15 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._llm = None
         self._loaded = False
         self._grammar_unsupported = False
+        # Latches True the first time this model needed the ChatML fallback
+        # (RAG-VISION-1), mirroring _grammar_unsupported immediately above -
+        # including that neither is reset on a later load() of a different
+        # model on this same backend instance; this instance's OWN persistent
+        # policy state is what must survive across many calls (see
+        # _grammar_unsupported's own comment further down). See the
+        # chatml_fallback_reason handling in chat_stream() below for why this
+        # needs surfacing outside --debug.
+        self._chatml_fallback = False
         self._load_cancel = None         # threading.Event to abort a load mid-flight
         # One-time guard for the RAM-offload notice in _check_context_fit: a
         # card-filling model with the default grow step overflows free VRAM on
@@ -779,4 +788,25 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 console.print(
                     "[yellow]grammar is not supported by this native llama "
                     "build; generating without constraint.[/yellow]"
+                )
+            if done.get("chatml_fallback_reason") and not self._chatml_fallback:
+                # First time this model has shown it needs the ChatML
+                # fallback (RAG-VISION-1): latch it and surface the same
+                # degrade notice llama.py's _apply_model_template always
+                # logged - a degrade must stay visible even after crossing a
+                # process boundary, exactly like the grammar_unsupported case
+                # immediately above. Previously this only reached
+                # debuglog.logger, which is invisible without --debug
+                # (AGENTS.md rule 5: the whole point was to surface it).
+                self._chatml_fallback = True
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("chat template not recognized by llama.cpp's "
+                             "built-in matcher (%s); falling back to a "
+                             "generic ChatML prompt",
+                             done["chatml_fallback_reason"])
+                console.print(
+                    "[yellow]this model's chat template is not recognized; "
+                    "falling back to a generic prompt format it may not "
+                    "understand - chat and vision output quality may be "
+                    "degraded[/yellow]"
                 )
