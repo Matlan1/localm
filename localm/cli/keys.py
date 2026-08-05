@@ -117,7 +117,7 @@ def key_clear(yes):
             "requests (unless require_auth is on)"):
         console.print("[dim]Cancelled.[/dim]")
         return
-    auth.clear_api_key()
+    failed = auth.clear_api_key()
     # A browser owner session carries its own ADMIN scope snapshot and survives a
     # key roll (sessions are decoupled from the key value by design), so a
     # leftover owner cookie would keep full access after the key is gone -
@@ -125,7 +125,16 @@ def key_clear(yes):
     # browser session out here, mirroring /api/auth/key/clear. Device bearer
     # KEYS live in the keystore and are untouched.
     revoked = sessions.revoke_all()
-    console.print("[green]✓[/green] API key cleared - open mode.")
+    if failed:
+        # A security step that FAILED must never report success (rule 5). The
+        # underlying warnings go to debuglog only, so without this the user saw a
+        # green tick while the key on disk still granted access.
+        console.print("[red]x[/red] API key NOT fully cleared - credentials may "
+                      "still grant access:")
+        for item in failed:
+            console.print(f"  [yellow]-[/yellow] {item}")
+    else:
+        console.print("[green]✓[/green] API key cleared - open mode.")
     if revoked:
         console.print("[dim]Browser sessions were signed out.[/dim]")
     _note_env_override("is still set, so a key remains active from the environment.")

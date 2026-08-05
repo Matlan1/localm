@@ -251,8 +251,21 @@ def set_api_key(key: Optional[str]) -> None:
                        "will be derived on first use instead", e)
 
 
-def clear_api_key() -> None:
-    """Remove the persisted key (open mode). A leftover env var still applies."""
+def clear_api_key() -> list[str]:
+    """Remove the persisted key (open mode). A leftover env var still applies.
+
+    RETURNS the list of things that could NOT be removed, each already phrased
+    for a user ("the API key file ... (PermissionError ...)"). An EMPTY list
+    means the clear genuinely completed; a non-empty one means credentials
+    SURVIVE and the caller must not report success.
+
+    The return value exists because the warnings below go to ``debuglog.logger``,
+    which a user never sees without ``--debug``. That made every caller's
+    "cleared" message unconditional and therefore FALSE whenever a delete failed
+    - the precise thing AGENTS.md rule 5 forbids, since this is a security step
+    and a surviving key STILL GRANTS ACCESS. Warning into a log nobody reads is
+    not surfacing; the caller has to be able to ask."""
+    failures: list[str] = []
     try:
         key_file().unlink(missing_ok=True)
     except OSError as e:
@@ -261,6 +274,9 @@ def clear_api_key() -> None:
         # silent pass would imply a clear that did not happen (rule 5). Warn loudly.
         logger.warning("could not remove the API key file %s (%s); the key may "
                        "still be active until it is deleted by hand", key_file(), e)
+        failures.append(
+            f"the API key file {key_file()} ({type(e).__name__}: {e}) - that key "
+            f"may still grant access until it is deleted by hand")
     try:
         keystore_file().unlink(missing_ok=True)
     except OSError as e:
@@ -269,6 +285,9 @@ def clear_api_key() -> None:
         logger.warning("could not remove the keystore %s (%s); scoped keys may "
                        "still be active until it is deleted by hand",
                        keystore_file(), e)
+        failures.append(
+            f"the keystore {keystore_file()} ({type(e).__name__}: {e}) - scoped "
+            f"keys may still be valid until it is deleted by hand")
     # The derivation records describe credentials that no longer exist. They hold
     # no plaintext and authenticate nothing, but a clear that leaves credential
     # artefacts behind is not a clear - and a stale salt would silently re-link a
@@ -278,7 +297,11 @@ def clear_api_key() -> None:
     except OSError as e:
         logger.warning("could not remove the owner key derivation records %s "
                        "(%s); delete it by hand", owner_kdf_file(), e)
+        failures.append(
+            f"the owner key derivation records {owner_kdf_file()} "
+            f"({type(e).__name__}: {e}) - delete it by hand")
     _forget_cached_digests()
+    return failures
 
 
 def regenerate_key(nbytes: int = 32) -> str:
