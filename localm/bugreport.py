@@ -671,9 +671,26 @@ def build_report(summary: str, reason: str = "",
     ]
     if what_i_expected:
         parts += ["## What I expected", what_i_expected, ""]
+    if what_happened:
+        happened_body = what_happened
+    elif what_i_did:
+        # A user-composed report (what_i_did present) that answered "what I
+        # was doing" but skipped "what happened" (#958). summary is DERIVED
+        # from what_happened-or-description upstream (save_user_report), so
+        # falling back to it here would just repeat what_i_did's own first
+        # line as a second section - the exact "same sentence twice, no new
+        # information" artifact #958 is made of. Say plainly that this
+        # section was left blank instead of manufacturing a duplicate.
+        happened_body = "(not stated)"
+    else:
+        # No user-composed fields at all: an automatic crash/LocalmError
+        # report, where there was never a separate "what happened" prompt to
+        # begin with - summary/reason ARE the description of what happened,
+        # and this is the report's ONLY account of it. Unchanged from before.
+        happened_body = summary + ((f"\n\nReason: {reason}") if reason else "")
     parts += [
         "## What happened",
-        what_happened or (summary + ((f"\n\nReason: {reason}") if reason else "")),
+        happened_body,
         "",
         "## App state",
         "\n".join(_app_state_lines(diag)),
@@ -848,10 +865,29 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         return None
 
 
+def report_title(summary: str, what_happened: str, description: str) -> str:
+    """The final report/issue title: *summary* verbatim if the caller gave one
+    explicitly, else derived from *what_happened* (a more useful issue title
+    than "what I was doing"), falling back to *description* - first line
+    only, truncated to 120 chars, never empty.
+
+    A standalone function (not inlined in save_user_report) so the ``localm
+    bug-report`` CLI can compute the EXACT SAME title after the report is
+    built, to hand to upload_report/offer_to_send, rather than re-deriving
+    it with logic that could silently disagree with what the report itself
+    says (#958: two producers with different logic is how one of them stays
+    wrong)."""
+    if not summary:
+        title_source = what_happened or description
+        summary = title_source.splitlines()[0] if title_source else ""
+    return summary.strip()[:120] or "user-reported issue"
+
+
 def save_user_report(description: str = "", *, summary: str = "",
                      what_i_expected: str = "", what_happened: str = "",
                      include_log: bool = False,
-                     client: Optional[dict] = None) -> Optional[Path]:
+                     client: Optional[dict] = None,
+                     extra_hang_trace: str = "") -> Optional[Path]:
     """Build and save a USER-initiated bug report and return its path (R47).
 
     The shared backend for the GUI "Report a bug" control and the
@@ -871,15 +907,15 @@ def save_user_report(description: str = "", *, summary: str = "",
     chat-content record dropped by build_digest regardless of what it says -
     never the API key, config secrets, or chat content, #961). *client* is an
     optional GUI-supplied browser context (user agent, page, viewport, recent
-    JS console errors). Returns None on a write failure (the caller surfaces
-    that rather than reporting a false success)."""
+    JS console errors). *extra_hang_trace* lets the CLI supply a freeze trace
+    it found in a DIFFERENT process (REG-736; see live_server_hang_trace) -
+    the self-pid check below only ever catches the caller's own freeze, which
+    is never the CLI's own case. Returns None on a write failure (the caller
+    surfaces that rather than reporting a false success)."""
     description = (description or "").strip()
     what_i_expected = (what_i_expected or "").strip()
     what_happened = (what_happened or "").strip()
-    if not summary:
-        title_source = what_happened or description
-        summary = title_source.splitlines()[0] if title_source else ""
-    summary = summary.strip()[:120] or "user-reported issue"
+    summary = report_title(summary, what_happened, description)
     context: dict = {"operation": "gui-bug-report"}
     if description:
         context["what_i_did"] = description
@@ -900,6 +936,13 @@ def save_user_report(description: str = "", *, summary: str = "",
     # than attaching nothing (REG-542).
     import os as _os
     hang = _recent_hang_traces(pid=_os.getpid())
+    # extra_hang_trace covers the ``localm bug-report`` CLI's own case (REG-736):
+    # it is a separate, short-lived process whose OWN pid never froze, while the
+    # server that DID freeze is a different, still-running process - a pid-of-
+    # self match finds nothing there, so the CLI looks the live server up itself
+    # (live_server_hang_trace) and passes what it found in here instead.
+    if extra_hang_trace:
+        hang = f"{hang}\n\n{extra_hang_trace}" if hang else extra_hang_trace
     if hang:
         context["hang_traces"] = hang
     if isinstance(client, dict) and client:
@@ -1168,6 +1211,29 @@ def report_failure(*, summary: str, reason: str = "",
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
 
+    offer_to_send(summary, path, text, interactive=interactive,
+                   assume_yes=assume_yes, auto_send=auto_send,
+                   open_browser=open_browser, prompt=prompt)
+    return path
+
+
+def offer_to_send(summary: str, path: Optional[Path], text: str, *,
+                   interactive: bool = True, assume_yes: bool = False,
+                   auto_send: bool = False,
+                   open_browser=webbrowser.open, prompt=None) -> None:
+    """Offer to send an ALREADY-BUILT, already-saved report (upload / email /
+    self), or send it immediately with ``auto_send``.
+
+    Split out of report_failure so it is the ONE send flow shared by every
+    producer - report_failure (automatic crash/LocalmError reports, built via
+    build_report) and the ``localm bug-report`` CLI (user-composed reports,
+    built via save_user_report) - rather than two copies that can drift on
+    retry/rate-limit/failure handling (#958: two producers with different
+    behavior is how one of them stays broken). *text* is the in-memory report
+    body (used when *path* is None because the save itself failed); when a
+    file exists, the actually-sent body is RE-READ from it so a user's edits
+    made before picking a channel are what gets sent, not the stale
+    in-memory copy."""
     up_url, up_token = upload_config()
     can_upload = up_url is not None
 
@@ -1177,7 +1243,7 @@ def report_failure(*, summary: str, reason: str = "",
         if not can_upload:
             console.print("[yellow]No hosted send channel is configured - the report is "
                           f"saved at {where}; email it to {MAINTAINER_EMAIL} instead.[/yellow]")
-            return path
+            return
         try:
             res = upload_report(summary, body, url=up_url, token=up_token)
         except RateLimitedError as e:
@@ -1191,16 +1257,16 @@ def report_failure(*, summary: str, reason: str = "",
                               f"{e2.hint or e2.reason}")
                 console.print(f"[dim]The report is at {where} - email it to "
                               f"{MAINTAINER_EMAIL} instead.[/dim]")
-                return path
+                return
         except LocalmError as e:
             console.print(f"[yellow]Could not send it.[/yellow] {e.hint or e.reason}")
             console.print(f"[dim]The report is at {where} - email it to "
                           f"{MAINTAINER_EMAIL} instead.[/dim]")
-            return path
+            return
         link = res.get("url") if isinstance(res, dict) else None
         console.print("[green]Sent to the maintainer.[/green]"
                       + (f" Tracking issue: {link}" if link else ""))
-        return path
+        return
 
     if not interactive or assume_yes:
         if can_upload:
@@ -1210,7 +1276,7 @@ def report_failure(*, summary: str, reason: str = "",
         else:
             console.print(f"[dim]Send it to the maintainer ({MAINTAINER_EMAIL}) by email or "
                           "Discord.[/dim]")
-        return path
+        return
 
     # Re-read the saved file so the user's edits (made before picking a channel)
     # are what actually gets sent - otherwise "edit it first" would be a lie.
@@ -1297,7 +1363,6 @@ def report_failure(*, summary: str, reason: str = "",
     except Exception:
         console.print("[yellow]Could not open that automatically - the report is at "
                       f"{where}.[/yellow]")
-    return path
 
 
 # --------------------------------------------------------------------------- #

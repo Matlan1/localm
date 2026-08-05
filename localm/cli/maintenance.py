@@ -186,13 +186,31 @@ def make_launcher_cmd(force: bool) -> None:
 
 
 @main.command("bug-report")
-@click.option("-m", "--message", default="", help="One-line summary of the problem.")
+@click.option("-m", "--message", default="", help="What were you doing?")
+@click.option("-e", "--expected", default="",
+              help="What did you expect to happen? (optional)")
+@click.option("-w", "--happened", default="", help="What actually happened?")
+@click.option("--no-log", "no_log", is_flag=True,
+              help="Do not attach this run's debug log tail even if one exists. "
+                   "Attached by default when present (debug mode only - a normal "
+                   "run has none to attach - and always scrubbed, never chat "
+                   "content, #961).")
 @click.option("-s", "--send", is_flag=True,
               help="Send it to the maintainer immediately via the hosted proxy - "
                    "no GitHub account needed. Works from any shell, interactive or "
                    "not (a script, a non-tty launcher, an SSH session).")
-def bug_report_cmd(message: str, send: bool) -> None:
+def bug_report_cmd(message: str, expected: str, happened: str,
+                   no_log: bool, send: bool) -> None:
     """Generate an editable bug report and offer to send it to the maintainer.
+
+    Three DISTINCT questions - what you were doing, what you expected, what
+    actually happened - the same three the GUI's "Report a bug" form asks and
+    the same template it builds from, so a report never derives its title AND
+    its whole "What happened" section from one echoed string (#958). Answer
+    inline with -m/-e/-w for a scripted or non-interactive run; run with no
+    flags in a real terminal and you are prompted for each (Enter to skip).
+    At least one of "what were you doing" / "what actually happened" is
+    required - an empty report helps no one.
 
     Collects a useful, safe diagnostic snapshot (OS, GPU, driver, backend, the
     loaded model, an allowlisted config subset, key dependency versions, and the
@@ -202,21 +220,44 @@ def bug_report_cmd(message: str, send: bool) -> None:
     to skip the menu and send it immediately. No GitHub account is ever
     needed."""
     from localm import bugreport
-    context = {"operation": "bug-report"}
+    interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    description, what_expected, what_happened = message, expected, happened
+    if interactive:
+        console.print("[bold]Filing a bug report.[/bold] Press Enter to skip a question.")
+        if not description:
+            description = click.prompt("What were you doing?",
+                                       default="", show_default=False)
+        if not what_expected:
+            what_expected = click.prompt("What did you expect to happen? (optional)",
+                                         default="", show_default=False)
+        if not what_happened:
+            what_happened = click.prompt("What actually happened?",
+                                         default="", show_default=False)
+    description = description.strip()
+    what_expected = what_expected.strip()
+    what_happened = what_happened.strip()
+    if not description and not what_happened:
+        console.print("[yellow]Describe the problem first (-m/-w, or answer the "
+                      "prompt) - an empty report helps no one.[/yellow]")
+        return
+
+    summary = bugreport.report_title("", what_happened, description)
+    console.print(f"[bold]Filing a bug report:[/bold] {summary}")
     # The reporter's server may have hung in a DIFFERENT process (this CLI is not
     # it), so its captured freeze trace can only be found via the live instance
-    # registry, not this process's pid. Attach it here so a `localm bug-report`
-    # filed after "it just hung" carries the diagnosis - the automatic in-app and
-    # crash-recovery paths already do; the CLI silently did not (REG-736).
+    # registry, not this process's pid (REG-736).
     hang = bugreport.live_server_hang_trace()
-    if hang:
-        context["hang_traces"] = hang
-    bugreport.report_failure(
-        summary=message or "user-reported issue",
-        context=context,
-        as_failure=False,
-        auto_send=send,
-        interactive=bool(getattr(sys.stdin, "isatty", lambda: False)()))
+    path = bugreport.save_user_report(
+        description, what_i_expected=what_expected, what_happened=what_happened,
+        include_log=not no_log, extra_hang_trace=hang)
+    if path is not None:
+        console.print(f"[dim]A bug report was saved (edit it before sending):[/dim] {path}")
+    else:
+        console.print("[yellow]Could not save a report file; you can still copy the "
+                      "details above.[/yellow]")
+    text = path.read_text(encoding="utf-8") if path is not None else ""
+    bugreport.offer_to_send(summary, path, text, interactive=interactive,
+                            auto_send=send)
 
 
 

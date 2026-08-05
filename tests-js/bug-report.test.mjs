@@ -46,6 +46,25 @@ test("R47: Save report POSTs description + include_log and shows the saved path"
   assert.equal(doc.getElementById("bug-desc").value, "", "textarea cleared after send");
 });
 
+test("#958: the include-log checkbox defaults to checked, and its value is honored unset", async () => {
+  // The digest is a no-op unless the run already has --debug/LOCALM_DEBUG=1
+  // on (a normal run writes no on-disk log at all, so there is nothing to
+  // attach either way) and is always scrubbed + chat-content-free (#961) -
+  // so attaching it by default costs nothing for the common case and helps
+  // the subset of users who already opted into debug logging. Previously
+  // opt-in, which meant #958's own reports (filed with defaults) had no log
+  // section even when one existed.
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
+  const doc = window.document;
+  assert.equal(doc.getElementById("bug-include-log").checked, true,
+    "checkbox must default to checked");
+  doc.getElementById("bug-desc").value = "did not touch the checkbox";
+  doc.getElementById("bug-send").click();
+  await flush();
+  assert.equal(posts[0].include_log, true, "unset checkbox POSTs its checked default");
+});
+
 test("R47: a blank description does not POST", async () => {
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
