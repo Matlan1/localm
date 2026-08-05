@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Models page now shows a registered model's real architecture and
+  MoE-ness, not just a name guess.** The same header read the HuggingFace
+  search page already uses to badge a remote repo is now captured once, at
+  registration or pull time, and shown on your local list too - a confirmed
+  architecture family, and an "MoE" badge when the file's own header says it
+  has experts. A model registered before this existed shows neither badge
+  until it is next re-registered or picked up by the models-folder sync
+  (which backfills a few at a time on an ordinary launch, never all at once,
+  so a large library never stalls startup) - shown as genuinely unknown in
+  the meantime, never as a false "not MoE" claim about a model nobody has
+  actually checked.
 - **The Models page can now sort by column and rename a model.** Table headers for
   Name, Role, Source, Size and a new Modified column are clickable to sort
   ascending or descending, and the choice is remembered across reloads. A rename
