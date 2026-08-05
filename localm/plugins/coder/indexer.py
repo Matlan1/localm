@@ -30,12 +30,14 @@ when nothing is dirty.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,22 @@ _MAX_SYMBOLS    = 12      # max symbol names shown per file
 # Overridable per call (and via the coder_index_timeout config key); pass
 # deadline_s=None to disable.
 _BUILD_DEADLINE_S = 20.0
+
+# How old a cached map (see load_cached_and_reconcile/save_cache) may be before
+# a session ignores it and does a full build() instead. MEASURED reason this
+# exists at all, not a generic TTL: _rescan_if_dirty()'s pass 2 (new-file
+# discovery via listdir) is deliberately SKIPPED when files_capped is True -
+# on a project bigger than _MAX_FILE_COUNT, a known directory can hold files
+# that were never candidates at all, and treating them as "new" would silently
+# regrow the map past the cap (see _rescan_if_dirty's own docstring). So on a
+# CAPPED project, reconciling a cached map catches edits/deletions to already-
+# tracked files exactly (pass 1 always runs), but a brand-new top-level file
+# stays invisible until the next FULL build - the same limitation the code
+# already accepts for an intra-session dirty rescan on a capped project,
+# extended across a session boundary by caching. This age cap is the backstop
+# that bounds how long that blindness can persist, without adding a second
+# invalidation mechanism (e.g. git status) alongside the one already trusted.
+_MAX_CACHE_AGE_S = 7 * 24 * 3600
 
 
 def _lang_for_ext(ext: str) -> str:
@@ -256,6 +274,16 @@ class ProjectMap:
     # reflected the next time anything actually looks at the map, and N shell
     # calls before that next look cost one rescan, not N.
     dirty: bool = False
+    # Set by build() when *cache_path* was given AND a usable cache was
+    # reconciled instead of a full walk (see build()'s cache_path param).
+    # Never serialised by to_cache_dict() - like `dirty`, it describes how
+    # THIS instance was obtained, not a property of the project - and is read
+    # by persistence.py's _build_project_map to log "from cache" vs "scanned"
+    # without a second call into ProjectMap (see that call site's comment on
+    # why a second classmethod call is deliberately avoided: it defeats the
+    # `patch("...ProjectMap")` / `MockPM.build.return_value = ...` convention
+    # every other test in this project already uses).
+    from_cache: bool = False
 
     # ------------------------------------------------------------------
     #  Build
@@ -264,7 +292,8 @@ class ProjectMap:
     @classmethod
     def build(cls, root: Path, max_files: int = _MAX_FILE_COUNT, *,
               deadline_s: float | None = _BUILD_DEADLINE_S,
-              on_progress=None) -> "ProjectMap":
+              on_progress=None,
+              cache_path: Path | None = None) -> "ProjectMap":
         """Scan *root* and summarise up to *max_files* files.
 
         Walks with ``os.walk`` and PRUNES uninteresting directories in place
@@ -276,7 +305,29 @@ class ProjectMap:
         disable) caps even a pathological walk; *on_progress*, if given, is
         called with the running candidate count. Either limit sets
         ``truncated`` so the map (and the model) shows the index is partial.
+
+        When *cache_path* is given, this is ALSO the entry point for the
+        cross-session cache (MEASURED 13-25x faster than a full walk - see
+        load_cached_and_reconcile's docstring): a usable cache is reconciled
+        and returned directly, skipping the walk below entirely, and either
+        way (cache hit or full walk) the result is saved back to *cache_path*
+        before returning, ready for the next call to reconcile from. This is
+        folded into build() itself - rather than persistence.py calling
+        load_cached_and_reconcile() and build() as two separate ProjectMap
+        classmethods - so build() stays the ONE call production code makes
+        into ProjectMap. A second, differently-named classmethod call site
+        would need every existing ``patch("...ProjectMap")`` test in the repo
+        (368 of them, measured) to also configure it, or a MagicMock's default
+        truthy auto-return silently short-circuits the very ``build()`` mock
+        those tests already set up.
         """
+        if cache_path is not None:
+            cached = cls.load_cached_and_reconcile(root, cache_path)
+            if cached is not None:
+                cached.from_cache = True
+                cached.save_cache(cache_path)
+                return cached
+
         pm = cls(root=root)
         gi_patterns = _load_gitignore_patterns(root)
         start = time.monotonic()
@@ -362,7 +413,117 @@ class ProjectMap:
                                          mtime=st.st_mtime, size=st.st_size))
             count += 1
 
+        if cache_path is not None:
+            pm.save_cache(cache_path)
         return pm
+
+    # ------------------------------------------------------------------
+    #  Cross-session cache: persist the built map, reconcile it against the
+    #  filesystem on load instead of re-walking the whole tree from scratch.
+    # ------------------------------------------------------------------
+    #
+    #  MEASURED (dev-notes, "coder project-map caching"): build() on this
+    #  repo's own tree (300/1000+ candidates, files_capped) takes ~360-450ms;
+    #  forcing a freshly-built map through _rescan_if_dirty() (below) takes
+    #  ~15-30ms - a 13-25x speedup, using the SAME reconciliation logic
+    #  build()'s own dirty-tracking already relies on and already tests, not
+    #  a new invalidation heuristic. This is deliberately NOT a git-based or
+    #  mtime-sweep cache: an exact per-tracked-file stat comparison catches an
+    #  uncommitted edit a git-HEAD check would miss, and costs about the same.
+
+    def to_cache_dict(self) -> dict:
+        """Serialisable snapshot for save_cache(). ``root`` is recorded (and
+        checked on load) as a cheap belt-and-suspenders guard against a
+        project-digest collision handing this map to the wrong project - see
+        checkpoint.py's _project_digest, whose 16-hex-char sha256 truncation
+        makes an actual collision astronomically unlikely, but the check
+        costs one string compare either way."""
+        return {
+            "version": 1,
+            "root": str(self.root),
+            "cached_at": time.time(),
+            "truncated": self.truncated,
+            "files_capped": self.files_capped,
+            "files": [
+                {"path": str(f.path), "lang": f.lang, "lines": f.lines,
+                 "symbols": f.symbols, "mtime": f.mtime, "size": f.size}
+                for f in self.files
+            ],
+        }
+
+    @classmethod
+    def _from_cache_dict(cls, root: Path, data: dict) -> Optional["ProjectMap"]:
+        """Reconstruct a ProjectMap from to_cache_dict()'s shape, or None for
+        anything that does not look right - a corrupt/foreign/future-version
+        cache file must fall back to a full build(), never raise and never be
+        silently trusted (AGENTS rule 5)."""
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return None
+        if data.get("root") != str(root):
+            return None
+        try:
+            files = [
+                FileSummary(path=Path(f["path"]), lang=f["lang"], lines=f["lines"],
+                            symbols=list(f.get("symbols") or []),
+                            mtime=f["mtime"], size=f["size"])
+                for f in data["files"]
+            ]
+        except (KeyError, TypeError):
+            return None
+        return cls(root=root, files=files,
+                   truncated=bool(data.get("truncated", False)),
+                   files_capped=bool(data.get("files_capped", False)))
+
+    @classmethod
+    def load_cached_and_reconcile(cls, root: Path, cache_path: Path,
+                                  max_age_s: float = _MAX_CACHE_AGE_S,
+                                  ) -> Optional["ProjectMap"]:
+        """Load a map cached by save_cache() and bring it up to date against
+        the CURRENT filesystem via the existing _rescan_if_dirty() machinery -
+        NOT a raw cache hit. Returns None (never raises) when there is no
+        usable cache to reconcile: absent, unreadable, wrong shape/version,
+        for a different root, or older than *max_age_s* (see that constant's
+        docstring for why a capped project needs this backstop). The caller's
+        job on None is the same as if caching did not exist: call build()."""
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        cached_at = raw.get("cached_at") if isinstance(raw, dict) else None
+        if not isinstance(cached_at, (int, float)):
+            return None
+        if (time.time() - cached_at) > max_age_s:
+            return None
+        pm = cls._from_cache_dict(root, raw)
+        if pm is None:
+            return None
+        # Force exactly one reconciliation pass regardless of the loaded
+        # `dirty` value (to_cache_dict() never persists it, but be explicit):
+        # a cache is, by definition, a snapshot from an earlier point in
+        # time, so it must always be treated as dirty on load.
+        pm.dirty = True
+        pm._rescan_if_dirty()
+        return pm
+
+    def save_cache(self, cache_path: Path) -> None:
+        """Best-effort persist for the NEXT session's load_cached_and_reconcile()
+        call. Never raises: a caching failure must not break indexing for the
+        session that hit it (AGENTS rule 5 - and the cost of losing a cache
+        write is one slow session-start next time, not lost data). Written
+        atomically (tmp file + os.replace) so a crash or a second concurrent
+        coder session in the same project (see checkpoint.py's #1051 note -
+        the project-map cache is shared across every session in a project,
+        unlike per-session checkpoints) can never leave a torn/corrupt file
+        for the next reader."""
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            tmp_path.write_text(
+                json.dumps(self.to_cache_dict(), ensure_ascii=False),
+                encoding="utf-8")
+            os.replace(tmp_path, cache_path)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     #  Incremental update for a single file

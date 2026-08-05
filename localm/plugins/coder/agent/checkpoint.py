@@ -26,6 +26,17 @@ def _project_dir_for(cwd) -> Path:
     from localm.config import HOME_DIR
     return HOME_DIR / "checkpoints" / _project_digest(cwd)
 
+def _project_map_path_for(cwd) -> Path:
+    """Where the cross-session project-map cache lives for *cwd*:
+    ``HOME/checkpoints/<project-digest>/projectmap.json`` - a SIBLING of this
+    project's per-session checkpoint files, not one of them: the map
+    describes the filesystem, not a conversation, so every coder session in
+    this project shares and refreshes the SAME cache file (see
+    ProjectMap.save_cache's docstring for why that is written atomically).
+    See ``localm.plugins.coder.indexer.ProjectMap.load_cached_and_reconcile``/
+    ``save_cache`` for the read/write side."""
+    return _project_dir_for(cwd) / "projectmap.json"
+
 def _checkpoint_path_for(cwd, checkpoint_id: str) -> Path:
     """One session's resume checkpoint:
     ``HOME/checkpoints/<project-digest>/<checkpoint-id>.json``.

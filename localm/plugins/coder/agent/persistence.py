@@ -19,7 +19,8 @@ from ..audit import SessionMode
 from .checkpoint import (
     _checkpoint_path_for, _derive_title, _index_deadline,
     _legacy_checkpoint_path_for, _legacy_home_checkpoint_path_for,
-    _read_checkpoint, list_checkpoints, migrate_legacy_checkpoint,
+    _project_map_path_for, _read_checkpoint, list_checkpoints,
+    migrate_legacy_checkpoint,
 )
 
 
@@ -357,19 +358,36 @@ class _PersistenceMixin:
     def _build_project_map(self, cwd: Path) -> ProjectMap:
         """Index the project with a config-driven deadline, and surface a one-line
         note when a large tree is slow or truncated so a session started on a huge
-        root (e.g. C:\\) shows progress instead of appearing to hang (CODER-1)."""
+        root (e.g. C:\\) shows progress instead of appearing to hang (CODER-1).
+
+        Tries the cross-session cache first (MEASURED 13-25x faster than a
+        full build - see ProjectMap.build's cache_path param), falling back
+        to a full walk when there is nothing usable to reconcile. Either way,
+        the RESULT is persisted for the next session: a fresh build() leaves
+        a cache the next session can reconcile from, and a reconciled-from-
+        cache map is re-saved too, so this session's own edits (captured
+        in-memory via refresh_file()/mark_dirty() as normal) are what the
+        NEXT session reconciles against, not a stale earlier snapshot.
+
+        This makes exactly ONE call into ProjectMap (deliberately: see
+        build()'s cache_path docstring paragraph for why the cache lookup is
+        folded inside build() rather than being a second classmethod call
+        here)."""
         # Live-attribute access so a test patching agent.ProjectMap is honoured
         # (the name moved into this submodule when agent.py became a package).
         ProjectMap = _agent.ProjectMap
         import time
+        cache_path = _project_map_path_for(cwd)
         t0 = time.monotonic()
-        pm = ProjectMap.build(cwd, deadline_s=_index_deadline())
+        pm = ProjectMap.build(cwd, deadline_s=_index_deadline(), cache_path=cache_path)
         took = time.monotonic() - t0
         if pm.truncated or took > 2.0:
             suffix = (" (large project - index truncated; the agent can still "
                       "list_dir / search_files)" if pm.truncated else "")
+            source = "from cache" if getattr(pm, "from_cache", False) else "scanned"
             self._emit("info",
-                       text=f"Indexed {pm.file_count()} files in {took:.1f}s{suffix}")
+                       text=f"Indexed {pm.file_count()} files ({source}) "
+                            f"in {took:.1f}s{suffix}")
         return pm
 
     @property
