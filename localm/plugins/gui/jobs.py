@@ -56,12 +56,29 @@ class Job:
     returncode: Optional[int] = None
     result: Optional[str] = None   # kind-specific payload (e.g. output image path)
     created_at: float = field(default_factory=time.time)
-    # Stable id (keystore hash) of the key that created this job, or None only when
-    # NO token was presented at all (a fully anonymous request). The events/cancel
-    # routes accept the creator or an admin/owner only (KEY-SCOPE-2), so a leaked
-    # job id is not enough to touch another key's job. (Note: the open-mode loopback
-    # GUI still presents its shell token, so its jobs are owned by that token's id,
-    # not None - tokenless callers simply cannot reach them.)
+    # When the worker thread left, i.e. when this job stopped being in flight.
+    # None while it is still running. Deliberately SEPARATE from created_at,
+    # because the TTL sweep keys on this one: a two-hour job that finished a
+    # second ago must survive, and keying the sweep on created_at evicted
+    # exactly that job (it was already past the cutoff the moment it finished).
+    finished_at: Optional[float] = None
+    # Human-readable name for this operation, in the same words the host console
+    # already uses (start_cli's host_label), so a listing can describe a job
+    # without re-deriving a label from argv.
+    label: Optional[str] = None
+    # Stable id (keystore hash) of the key that created this job, or None when NO
+    # key is configured at all or no token was presented. The events/cancel routes
+    # accept the creator or an admin/owner only (KEY-SCOPE-2), so a leaked job id
+    # is not enough to touch another key's job.
+    #
+    # READ THE OPEN-MODE CASE CAREFULLY, because it is the DEFAULT and an earlier
+    # version of this comment had it backwards: principal_id() returns None
+    # whenever no owner key and no keystore are configured, and the loopback GUI's
+    # shell token is NEITHER of those - so in the default configuration jobs are
+    # UNOWNED, and job_owner_ok() then admits any authenticated caller. Ownership
+    # discriminates in KEYED mode only. Anything built on this field must be
+    # correct in both modes and must not be described as if ownership were always
+    # enforced.
     owner: Optional[str] = None
     _proc: Optional[subprocess.Popen] = None
     # Set by cancel(); in-thread jobs (start_fn, e.g. media gen) poll this to
@@ -76,6 +93,10 @@ class Job:
         default_factory=lambda: collections.deque(maxlen=_HISTORY_MAX))
     _subscribers: list = field(default_factory=list)
     _sub_lock: threading.Lock = field(default_factory=threading.Lock)
+    # The most recent {"type": "progress", ...} event, so a listing can report
+    # pct/phase without replaying the whole history. Written under _sub_lock in
+    # push(), alongside the history append it is derived from.
+    _last_progress: Optional[dict] = None
 
     @property
     def cancel_requested(self) -> bool:
@@ -89,6 +110,8 @@ class Job:
     def push(self, event: dict) -> None:
         with self._sub_lock:
             self._history.append(event)
+            if event.get("type") == "progress":
+                self._last_progress = event
             subs = list(self._subscribers)
         for q, loop in subs:
             loop.call_soon_threadsafe(_safe_put, q, event)
@@ -122,6 +145,43 @@ class Job:
         proc = self._proc
         if proc is not None and proc.poll() is None:
             proc.terminate()
+
+    def mark_finished(self) -> None:
+        """Stamp finished_at once, when the worker thread leaves. Idempotent so
+        a second call (or a cancel that raced the thread's own exit) cannot move
+        the timestamp forward and give the job a second lease on the TTL."""
+        if self.finished_at is None:
+            self.finished_at = time.time()
+
+    def summary(self) -> dict:
+        """This job as a listing row: enough for a client to render and then
+        attach to it, without exposing argv (which carries the resolved model
+        spec and any host path the caller passed) or the owner id.
+
+        pct/phase come from the last progress event rather than from history, so
+        a caller never has to replay 10,000 events to learn how far along a
+        download is. Both are absent, not zero, when the job has not reported
+        progress - a pull that has not yet read a byte-count is at an UNKNOWN
+        percentage, not at 0%."""
+        with self._sub_lock:
+            progress = self._last_progress
+        out = {
+            "id": self.id,
+            "kind": self.kind,
+            "label": self.label,
+            "status": self.status,
+            "created_at": self.created_at,
+            "finished_at": self.finished_at,
+            "cancellable": self.status == "running",
+        }
+        if progress:
+            pct = progress.get("pct")
+            if isinstance(pct, (int, float)):
+                out["pct"] = pct
+            phase = progress.get("phase")
+            if phase:
+                out["phase"] = phase
+        return out
 
 
 class _HostAnnouncer:
@@ -236,6 +296,7 @@ class JobManager:
             argv=[sys.executable, "-X", "utf8", "-m", "localm", *cli_args],
             result=result_path,
             owner=owner,
+            label=host_label,
         )
         with self._lock:
             self._gc()
@@ -293,6 +354,10 @@ class JobManager:
                 if announcer:
                     announcer.record_line(f"job error: {e}")
             finally:
+                # Stamp BEFORE the end event goes out: a subscriber that reacts
+                # to "end" by listing jobs must not see this one still claiming
+                # to be in flight.
+                job.mark_finished()
                 if announcer:
                     if job.status == "failed":
                         announcer.announce_failure_detail()
@@ -308,7 +373,7 @@ class JobManager:
         return job
 
     def start_fn(self, kind: str, fn, *, result_path: str | None = None,
-                 owner: str | None = None) -> Job:
+                 owner: str | None = None, label: str | None = None) -> Job:
         """
         Run a Python callable as a job in a worker thread.
 
@@ -316,9 +381,12 @@ class JobManager:
         ``job.push({"type": "line", ...})`` to report progress and may update
         ``job.result``. owner, when given, binds the job to the creating key's
         principal id so only that key (or an admin/owner) may stream/cancel it.
+        label, when given, is the human-readable operation name a listing shows
+        (the start_cli equivalent is host_label, which doubles as the host
+        console prefix; there is no console mirroring for in-thread jobs).
         """
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path,
-                  owner=owner)
+                  owner=owner, label=label)
         with self._lock:
             self._gc()
             self._jobs[job.id] = job
@@ -332,6 +400,8 @@ class JobManager:
                 job.status = "failed"
                 job.push({"type": "line", "text": f"job error: {e}"})
             finally:
+                # See the start_cli equivalent: stamp before "end" is emitted.
+                job.mark_finished()
                 job.push({
                     "type": "end",
                     "status": job.status,
@@ -341,6 +411,26 @@ class JobManager:
 
         threading.Thread(target=_run, daemon=True).start()
         return job
+
+    def snapshot(self) -> list:
+        """Every tracked job as a listing row, newest first.
+
+        This is the ONLY way to learn a job exists without already holding its
+        id. Until it existed, a job id was handed out exactly once - in the body
+        of the POST that started the job - so a second client, or the same tab
+        after a reload, had no way to ask what was running even though the
+        server knew (ADR-0008).
+
+        Returns summaries, never Job objects: callers must not reach into the
+        live object's history/subscribers outside the lock. Ownership is NOT
+        filtered here - that is the caller's job, because it needs the request
+        to answer it (see job_owner_ok), and in open mode there are no owners to
+        filter on at all.
+        """
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return sorted((j.summary() for j in jobs),
+                      key=lambda s: s["created_at"], reverse=True)
 
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
@@ -357,10 +447,27 @@ class JobManager:
                       for j in self._jobs.values())
 
     def _gc(self) -> None:
+        """Drop jobs that finished more than _TTL_S ago.
+
+        Keyed on finished_at, NOT created_at. The class docstring has always
+        promised "finished jobs stay queryable for an hour"; keying the sweep on
+        created_at did not deliver that, because a job that RAN for longer than
+        the TTL was already past the cutoff the moment it finished, so a
+        two-hour pull became unqueryable the instant it succeeded. finished_at
+        makes the code match the promise.
+
+        A still-running job is never swept at any age, and that is deliberate
+        rather than an oversight: evicting a live job would strand its SSE
+        subscribers and lose the record while the work carries on. An operation
+        that has legitimately been running for hours is reported as running,
+        which is true; created_at travels in the summary so a client can tell a
+        six-second job from a six-hour one instead of being told only "running".
+        """
         cutoff = time.time() - self._TTL_S
         stale = [
             jid for jid, j in self._jobs.items()
-            if j.status != "running" and j.created_at < cutoff
+            if j.status != "running"
+            and (j.finished_at if j.finished_at is not None else j.created_at) < cutoff
         ]
         for jid in stale:
             del self._jobs[jid]
