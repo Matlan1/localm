@@ -13,6 +13,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from localm.inference._executor_health import (
+    anyio_pool_health,
+    executors_snapshot,
     pool_health,
     start_executor_saturation_watch,
 )
@@ -186,3 +188,178 @@ def test_saturation_watch_resets_streak_on_recovery():
     assert len(warnings) == 2, (
         f"expected two separate warnings (one per streak), got "
         f"{len(warnings)}: {warnings}")
+
+
+# --- anyio's default thread pool - the THIRD pool (fastapi.concurrency. ---
+# --- run_in_threadpool's pool; see _executor_health.py's module docstring) --
+
+def test_anyio_pool_health_none_limiter_reports_nothing_to_watch():
+    # No captured reference at all (startup capture never ran, or failed) -
+    # unlike pool_health(None)'s "not created yet", this means "cannot
+    # observe from here", but the REPORTED shape is deliberately identical:
+    # never saturated, no counts.
+    assert anyio_pool_health(None) == {
+        "max_workers": None, "threads_spawned": None, "queued": None,
+        "saturated": False}
+
+
+def test_anyio_pool_health_idle_limiter_is_not_saturated():
+    async def scenario():
+        import anyio.to_thread
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        h = anyio_pool_health(limiter)
+        assert h["max_workers"] == limiter.total_tokens
+        assert h["threads_spawned"] == 0
+        assert h["saturated"] is False
+    asyncio.run(scenario())
+
+
+def test_anyio_pool_health_reports_saturated_and_recovers():
+    """Mirrors test_pool_health_reports_saturated_and_recovers exactly, but
+    for anyio's CapacityLimiter instead of a ThreadPoolExecutor - shrinks the
+    limiter to a single token so one blocked run_sync call plus one queued
+    behind it is enough to prove real saturated/recovered transitions, not
+    just the None/idle shapes above."""
+    async def scenario():
+        import anyio.to_thread
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = 1
+        ev = threading.Event()
+
+        t1 = asyncio.create_task(anyio.to_thread.run_sync(ev.wait))
+        deadline = time.monotonic() + 5.0
+        h = anyio_pool_health(limiter)
+        while h["threads_spawned"] != 1 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            h = anyio_pool_health(limiter)
+        assert h["threads_spawned"] == 1, "the first call never acquired the token"
+
+        t2 = asyncio.create_task(anyio.to_thread.run_sync(lambda: 1))
+        deadline = time.monotonic() + 5.0
+        h = anyio_pool_health(limiter)
+        while not h["saturated"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            h = anyio_pool_health(limiter)
+        assert h["threads_spawned"] == 1
+        assert h["queued"] == 1
+        assert h["saturated"] is True
+
+        ev.set()
+        await t1
+        await t2
+        h2 = anyio_pool_health(limiter)
+        assert h2["saturated"] is False, h2
+    asyncio.run(scenario())
+
+
+def test_anyio_pool_health_never_raises_on_a_malformed_limiter():
+    class _NotARealLimiter:
+        pass
+
+    h = anyio_pool_health(_NotARealLimiter())
+    assert h["saturated"] is False
+    assert h["max_workers"] is None
+
+
+def test_executors_snapshot_includes_anyio_key():
+    """Proves the wiring, not just the standalone function: executors_snapshot
+    (what both the saturation watch and GET /debug/stacks consume) surfaces
+    anyio's pool under the "anyio" key at all, with a real captured limiter."""
+    async def scenario():
+        import anyio.to_thread
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        loop = asyncio.get_running_loop()
+        snapshot = executors_snapshot(loop, anyio_limiter=limiter)
+        assert "anyio" in snapshot
+        assert snapshot["anyio"]["max_workers"] == limiter.total_tokens
+        assert snapshot["anyio"]["saturated"] is False
+    asyncio.run(scenario())
+
+
+def test_executors_snapshot_anyio_key_present_but_unobservable_without_capture():
+    """The default (no anyio_limiter passed) must not silently omit the key -
+    a caller reading the snapshot should see "anyio" present and honestly
+    unobservable, not absent (which would look like a caller-side bug rather
+    than an intentional 'nothing captured here' state)."""
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        snapshot = executors_snapshot(loop)
+        assert snapshot["anyio"] == {
+            "max_workers": None, "threads_spawned": None, "queued": None,
+            "saturated": False}
+    asyncio.run(scenario())
+
+
+def test_saturation_watch_detects_anyio_saturation():
+    """End-to-end proof the background watch (a plain daemon thread, NOT
+    async) actually warns on anyio saturation using a limiter reference
+    captured from async code beforehand - the exact "cannot fetch it itself,
+    must be handed a live reference" contract _executor_health.py's module
+    docstring describes, exercised for real rather than asserted."""
+    from localm.debuglog import logger as _dbg
+
+    handler = _CaptureHandler()
+    prev_level = _dbg.level
+    _dbg.addHandler(handler)
+    _dbg.setLevel(logging.DEBUG)
+
+    async def scenario():
+        import anyio.to_thread
+        loop = asyncio.get_running_loop()
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = 1
+        ev = threading.Event()
+        t1 = asyncio.create_task(anyio.to_thread.run_sync(ev.wait))
+        t2 = asyncio.create_task(anyio.to_thread.run_sync(lambda: 1))
+        await asyncio.sleep(0.3)   # let t1 actually acquire the token
+
+        stop, thread = start_executor_saturation_watch(
+            loop, threshold=0.5, poll=0.2, anyio_limiter=limiter)
+        try:
+            await asyncio.sleep(3.0)
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+            ev.set()
+            await t1
+            await t2
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _dbg.removeHandler(handler)
+        _dbg.setLevel(prev_level)
+
+    warnings = [r for r in handler.records
+               if r[0] == "WARNING" and "thread pool has been fully saturated" in r[1]
+               and r[1].startswith("anyio")]
+    assert len(warnings) == 1, (
+        f"expected exactly one anyio WARNING, got: {handler.records}")
+
+
+def test_debug_stacks_reports_anyio_pool_over_real_http(monkeypatch):
+    """End-to-end through a REAL request, not just the unit-level function
+    calls above: GET /debug/stacks is an async handler with its own running
+    loop, so it fetches anyio's default thread limiter live on every call
+    (see http_server.py) rather than needing a captured reference the way
+    the background saturation watch does. Proves the wiring actually landed
+    in the route, not just in _executor_health.py in isolation."""
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    from localm.inference.http_server import create_app
+    e = MagicMock()
+    e.display_name = "test-model"
+    e.count_tokens.return_value = 5
+    app = create_app(e)
+    with TestClient(app) as c:
+        r = c.get("/debug/stacks",
+                 headers={"Authorization": f"Bearer {app.state.shell_token}"})
+        assert r.status_code == 200, r.text
+        executors = r.json()["executors"]
+        assert "anyio" in executors
+        assert executors["anyio"]["max_workers"] is not None
+        assert executors["anyio"]["saturated"] is False
