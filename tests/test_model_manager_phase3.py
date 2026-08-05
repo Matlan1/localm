@@ -329,6 +329,223 @@ class TestSnapshotDiskSpaceAndCompleteness:
 
 
 # ---------------------------------------------------------------------------
+# 2026-08-05: two different repos (or one repo pulled twice under a reused
+# --name, no special characters required) can compute the exact same dest -
+# model_name comes from _sanitize_name, a LOSSY coercion used directly as both
+# the MODELS_DIR subdirectory and the registry key, with no uniqueness check.
+# Confirmed live before this fix existed: snapshot_download merges into
+# whatever is already at dest rather than clearing it, and the final
+# registration used to call _register() directly, so a second, unrelated
+# pull silently mixed its files into an earlier pull's directory and
+# overwrote its registry entry - reported as an ordinary successful pull.
+# ---------------------------------------------------------------------------
+
+def _fake_hf_api_by_repo(files_by_repo: dict):
+    """Like _fake_hf_api, but a DIFFERENT sibling list per repo_id - needed
+    here because the whole point is two DIFFERENT repos."""
+    class _FakeInfo:
+        def __init__(self, siblings):
+            self.siblings = siblings
+
+    class _FakeHfApi:
+        def model_info(self, repo_id, files_metadata=True):
+            return _FakeInfo([SimpleNamespace(rfilename=name, size=len(content))
+                              for name, content in files_by_repo[repo_id].items()])
+    return _FakeHfApi
+
+
+def _fake_snapshot_download_writing(files_by_repo: dict, downloaded: list):
+    def _download(repo_id, local_dir, **kw):
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        for name, content in files_by_repo[repo_id].items():
+            (d / name).write_bytes(content)
+        downloaded.append(repo_id)
+        return str(d)
+    return _download
+
+
+class TestSnapshotDestCollision:
+    REPO_A = "TheBloke/Llama-2-7B-Chat-GGUF-HF"
+    REPO_B = "NousResearch/CompletelyUnrelatedModel"
+    FILES = {
+        REPO_A: {"config.json": b"A-CONFIG", "pytorch_model.bin": b"A-WEIGHTS"},
+        REPO_B: {"config.json": b"B-CONFIG-DIFFERENT-LENGTH",
+                 "pytorch_model.bin": b"B-WEIGHTS-ALSO-DIFFERENT"},
+    }
+
+    def _wire(self, monkeypatch):
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi",
+                            _fake_hf_api_by_repo(self.FILES))
+        downloaded: list = []
+        monkeypatch.setattr(
+            huggingface_hub, "snapshot_download",
+            _fake_snapshot_download_writing(self.FILES, downloaded))
+        return downloaded
+
+    def test_plain_name_reuse_across_two_repos_is_refused(
+            self, fake_registry, monkeypatch, capsys):
+        """THE finding: an ordinary user reusing a --name for a different
+        repo weeks later - no special characters, no attacker, just a name
+        they liked - must be refused, not silently merged."""
+        store, models_dir = fake_registry
+        downloaded = self._wire(monkeypatch)
+
+        ok_a = mm._pull_hf_snapshot(self.REPO_A, "mymodel")
+        assert ok_a is True
+        capsys.readouterr()
+
+        ok_b = mm._pull_hf_snapshot(self.REPO_B, "mymodel")
+
+        assert ok_b is False
+        assert downloaded == [self.REPO_A]        # B's download never ran
+        assert store["mymodel"]["source"] == f"hf:{self.REPO_A}"   # A survives
+        dest = models_dir / "mymodel"
+        assert (dest / "pytorch_model.bin").read_bytes() == b"A-WEIGHTS"
+        out = capsys.readouterr().out.lower()
+        assert "different model" in out
+        assert "mymodel" in out
+
+    def test_sanitized_default_name_collision_is_also_refused(
+            self, fake_registry, monkeypatch, capsys):
+        """The same defect via the OTHER trigger: two default (un-named)
+        pulls whose repo-tail collapses to the same sanitized name."""
+        store, models_dir = fake_registry
+        repo_a, repo_b = "owner1/Llama_3(8B)", "owner2/Llama_3-8B"
+        files = {
+            repo_a: {"config.json": b"A", "w-a.bin": b"AAAA"},
+            repo_b: {"config.json": b"BB", "w-b.bin": b"BBBB"},
+        }
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api_by_repo(files))
+        downloaded: list = []
+        monkeypatch.setattr(huggingface_hub, "snapshot_download",
+                            _fake_snapshot_download_writing(files, downloaded))
+
+        from localm.model_manager.registry import _sanitize_name
+        assert _sanitize_name(repo_a.split("/")[-1]) == \
+               _sanitize_name(repo_b.split("/")[-1]), \
+               "test setup broken: these must actually collide"
+
+        assert mm._pull_hf_snapshot(repo_a, None) is True
+        assert mm._pull_hf_snapshot(repo_b, None) is False
+        assert downloaded == [repo_a]
+
+    def test_redownload_of_the_same_repo_still_works(
+            self, fake_registry, monkeypatch, capsys):
+        """The collision check must not fire on a legitimate --redownload of
+        the repo already registered at this exact dest (matching source)."""
+        store, models_dir = fake_registry
+        self._wire(monkeypatch)
+
+        assert mm._pull_hf_snapshot(self.REPO_A, "mymodel") is True
+        capsys.readouterr()
+
+        ok = mm._pull_hf_snapshot(self.REPO_A, "mymodel", redownload=True)
+
+        assert ok is True
+        # redownload=True skips the "already downloaded" fast path's dedup
+        # prompt branch, but the snapshot IS already complete, so it still
+        # short-circuits there rather than re-downloading - that pre-existing
+        # behavior is unrelated to this fix and is not what this test checks;
+        # the point is only that the NEW collision check does not refuse it.
+        assert store["mymodel"]["source"] == f"hf:{self.REPO_A}"
+        out = capsys.readouterr().out.lower()
+        assert "different model" not in out
+
+    def test_resumable_partial_of_the_same_repo_still_works(
+            self, fake_registry, monkeypatch):
+        """An interrupted download of THIS repo (config.json landed, the
+        weight file did not, never reached registration) must still resume -
+        the collision check must not mistake 'nothing registered here yet'
+        for a foreign occupant."""
+        store, models_dir = fake_registry
+        # An UNRELATED prior registration exists elsewhere, to prove the
+        # check is keyed on THIS dest, not merely "is the registry non-empty".
+        store["someone-else"] = {"path": str(models_dir / "someone-else"),
+                                 "source": "hf:other/repo", "model_type": "llm"}
+        (models_dir / "someone-else").mkdir(parents=True)
+
+        dest = models_dir / "partial-repo"
+        dest.mkdir(parents=True)
+        (dest / "config.json").write_text("{}", encoding="utf-8")
+
+        siblings = [SimpleNamespace(rfilename="config.json", size=2),
+                   SimpleNamespace(rfilename="model.safetensors", size=1000)]
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(siblings))
+        downloaded: list = []
+
+        def _resume(repo_id, local_dir, **kw):
+            (Path(local_dir) / "model.safetensors").write_bytes(b"x" * 1000)
+            downloaded.append(repo_id)
+            return str(local_dir)
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", _resume)
+
+        ok = mm._pull_hf_snapshot("owner/repo", "partial-repo")
+
+        assert ok is True
+        assert downloaded == ["owner/repo"]
+        assert store["partial-repo"]["source"] == "hf:owner/repo"
+
+    def test_final_registration_routes_through_dedup(
+            self, fake_registry, monkeypatch):
+        """The second half of the fix: _pull_hf_snapshot's OWN call site for
+        the post-download registration must be _register_with_dedup, not the
+        plain _register - the same asymmetry _pull_gguf_file already closed
+        for its own path. (_register_with_dedup legitimately calls the plain
+        _register internally as its own final implementation step once its
+        dedup checks pass - that is not what this test is about; it is about
+        which function THIS CALL SITE reaches for directly, so both are
+        replaced with bare recording stubs rather than letting either run for
+        real.)"""
+        store, models_dir = fake_registry
+        self._wire(monkeypatch)
+
+        called_dedup = []
+        monkeypatch.setattr(mm, "_register_with_dedup",
+                            lambda name, *a, **k: called_dedup.append(name) or True)
+        called_plain = []
+        monkeypatch.setattr(mm, "_register",
+                            lambda name, *a, **k: called_plain.append(name))
+
+        ok = mm._pull_hf_snapshot(self.REPO_A, "mymodel")
+
+        assert ok is True
+        assert called_dedup == ["mymodel"]
+        assert called_plain == []
+
+    def test_name_collision_at_a_different_path_is_reported_honestly(
+            self, fake_registry, monkeypatch, capsys):
+        """_register_with_dedup returns False for a REAL name conflict that
+        is orthogonal to the dest-collision check above: 'mymodel' is already
+        registered pointing at some OTHER path, and this dest ('mymodel')
+        does not exist yet, so the new pre-download collision block never
+        fires. The download still runs and writes real bytes to disk - but
+        registration is then correctly refused (non-interactive, different
+        file under the same name). The call site must not paper over that:
+        it must not print a green checkmark / return True for a download
+        that was never actually registered under the requested name."""
+        store, models_dir = fake_registry
+        downloaded = self._wire(monkeypatch)
+
+        elsewhere = models_dir / "elsewhere"
+        elsewhere.mkdir(parents=True)
+        store["mymodel"] = {"path": str(elsewhere), "source": "hf:owner/old",
+                            "model_type": "llm"}
+
+        ok = mm._pull_hf_snapshot(self.REPO_A, "mymodel")
+
+        assert downloaded == [self.REPO_A]          # the download DID run
+        assert ok is False                          # but registration was refused
+        assert store["mymodel"]["source"] == "hf:owner/old"   # untouched
+        out = capsys.readouterr().out.lower()
+        assert "could not be registered" in out
+        assert "✓" not in out                  # no false success checkmark
+
+
+# ---------------------------------------------------------------------------
 # GAP-CLI-1: user -n name is sanitized before becoming a registry key
 # ---------------------------------------------------------------------------
 
