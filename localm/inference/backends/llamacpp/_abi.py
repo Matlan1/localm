@@ -456,6 +456,9 @@ def _ggml_version(lib: ctypes.CDLL) -> Optional[Tuple[int, ...]]:
         return None
 
 
+_detected_arity: Optional[int] = None
+
+
 def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
     """Argument count of ``llama_sampler_init_penalties``: 4, 5, or 0 = unknown.
 
@@ -483,16 +486,26 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
 
     The gap is a build made in the ~3 hours between them, or any V2 build with
     ggml 0.18.0 (upstream ~b10180..b10269). Those report 0.
+
+    Cached per process like the layout: this is called from ``_build_sampler``,
+    i.e. once per GENERATION REQUEST, and re-reading ``ggml_version()`` (which
+    also re-binds restype/argtypes on a shared function object) on every request
+    would be per-token-stream overhead for an answer that cannot change while a
+    process holds one library handle.
     """
+    global _detected_arity
+    if _detected_arity is not None:
+        return _detected_arity
     if lib is None:
         from ._loader import load_lib
         lib = load_lib()
     if model_params_layout(lib) == MODEL_PARAMS_V1:
-        return 4
-    ver = _ggml_version(lib)
-    if ver is not None and ver >= _PENALTIES_5ARG_GGML:
-        return 5
-    return 0
+        _detected_arity = 4
+    else:
+        ver = _ggml_version(lib)
+        _detected_arity = 5 if (ver is not None
+                                and ver >= _PENALTIES_5ARG_GGML) else 0
+    return _detected_arity
 
 
 def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:

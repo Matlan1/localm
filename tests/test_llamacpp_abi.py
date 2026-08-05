@@ -122,6 +122,11 @@ class _FakeLib:
                  ggml_version: str = None):
         self.llama_model_default_params = _ParamsFn(mp)
         self.llama_context_default_params = _FakeFn(cp)
+        # Every real build exports this; only its ARITY differs. Omitting it
+        # would make has_penalties_sampler() return False via the
+        # symbol-missing branch, so a test about the arity branch would pass
+        # without ever reaching it.
+        self.llama_sampler_init_penalties = _FakeFn(0)
         if markers is None:
             markers = isinstance(mp, LlamaModelParamsV2)
         if markers:
@@ -137,8 +142,10 @@ def _reset_layout_cache():
     different fake library each time, so a leaked cache would make later tests
     assert against an earlier test's build."""
     _abi._detected_layout = None
+    _abi._detected_arity = None
     yield
     _abi._detected_layout = None
+    _abi._detected_arity = None
 
 
 # --------------------------------------------------------------------------- #
@@ -467,3 +474,56 @@ def test_set_use_mmap_on_v2_never_touches_the_v1_boolean_block():
     before = _raw(mp)[64:72]
     set_use_mmap(mp, False)
     assert _raw(mp)[64:72] == before
+
+
+# --------------------------------------------------------------------------- #
+#  Per-request cost and log volume
+#
+#  has_penalties_sampler() / penalties_arity() run inside _build_sampler, i.e.
+#  once per GENERATION REQUEST. Anything unbounded there is multiplied by the
+#  request rate, so these guard the two things that would be.
+# --------------------------------------------------------------------------- #
+
+def test_penalties_arity_is_cached_not_re_probed_per_call():
+    """ggml_version() is a C call plus a restype/argtypes rebind on a SHARED
+    function object; re-doing it per request is pure overhead for an answer that
+    cannot change while one library handle is held."""
+    lib = _FakeLib(good_model_v2(), good_ctx(), ggml_version="0.18.1")
+    calls = []
+    real = lib.ggml_version
+    lib.ggml_version = lambda *a: (calls.append(1), real(*a))[1]
+    lib.ggml_version.restype = None
+    lib.ggml_version.argtypes = None
+
+    assert _abi.penalties_arity(lib) == 5
+    first = len(calls)
+    for _ in range(25):
+        assert _abi.penalties_arity(lib) == 5
+    assert len(calls) == first, (
+        f"ggml_version was re-probed {len(calls) - first} extra times across 25 "
+        "calls; penalties_arity must cache")
+
+
+def test_unknown_arity_warns_once_not_per_request(monkeypatch, caplog):
+    """A per-request warning is how a real warning gets ignored. The ambiguous
+    build (V2 + ggml 0.18.0) must say so ONCE, not on every generation."""
+    import logging
+
+    from localm.inference.backends.llamacpp import _api
+
+    lib = _FakeLib(good_model_v2(), good_ctx(), ggml_version="0.18.0")
+    monkeypatch.setattr(_api, "load_lib", lambda: lib)
+    monkeypatch.setattr(_api, "_warned_penalties_arity", False, raising=False)
+    # Seed the per-process caches off the FAKE lib. Without this the no-arg
+    # penalties_arity() inside has_penalties_sampler would reach for the real
+    # _loader.load_lib and touch the machine's actual runtime.
+    assert _abi.penalties_arity(lib) == 0
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        results = [_api.has_penalties_sampler() for _ in range(20)]
+
+    assert results == [False] * 20, "an unprovable arity must never be called"
+    hits = [r for r in caplog.records
+            if "llama_sampler_init_penalties" in r.getMessage()]
+    assert len(hits) == 1, (
+        f"expected exactly one warning across 20 requests, got {len(hits)}")

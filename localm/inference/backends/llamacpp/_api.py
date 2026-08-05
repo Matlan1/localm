@@ -538,6 +538,9 @@ def llama_sampler_init_temp(temp: float) -> ctypes.c_void_p:
     return _bind("llama_sampler_init_temp", LlamaSampler, ctypes.c_float)(temp)
 
 
+_warned_penalties_arity = False
+
+
 def has_penalties_sampler() -> bool:
     """True when this llama.dll exports llama_sampler_init_penalties AND localm
     can determine which of its two signatures the build uses.
@@ -554,14 +557,22 @@ def has_penalties_sampler() -> bool:
         return False
     from ._abi import penalties_arity
     if penalties_arity() == 0:
-        from localm.debuglog import logger
-        logger.warning(
-            "the provisioned llama runtime's llama_sampler_init_penalties "
-            "signature cannot be determined (it is a post-reorder build with "
-            "ggml < 0.18.1, where upstream changed the argument list without "
-            "changing any symbol). Skipping the repetition-penalty sampler "
-            "rather than risk a mis-marshalled call; run 'localm setup-llama "
-            "--force' to move to a build localm can bind exactly.")
+        # WARN ONCE. This function runs inside _build_sampler, i.e. once per
+        # GENERATION REQUEST, so an unconditional warning here would emit a line
+        # per request for the life of the server - and a flooded log is how a
+        # real warning gets ignored. The condition is a property of the loaded
+        # library and cannot change while the process holds it.
+        global _warned_penalties_arity
+        if not _warned_penalties_arity:
+            _warned_penalties_arity = True
+            from localm.debuglog import logger
+            logger.warning(
+                "the provisioned llama runtime's llama_sampler_init_penalties "
+                "signature cannot be determined (it is a post-reorder build with "
+                "ggml < 0.18.1, where upstream changed the argument list without "
+                "changing any symbol). Skipping the repetition-penalty sampler "
+                "rather than risk a mis-marshalled call; run 'localm setup-llama "
+                "--force' to move to a build localm can bind exactly.")
         return False
     return True
 
