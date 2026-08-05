@@ -337,6 +337,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **A chatty GPU log line no longer floods the console and the activity view.**
+  On some workloads the native runtime prints a "CUDA Graph id N reused" line
+  many times per second, with the number cycling through a set of values. The
+  repeat-collapsing that already tidies the other native lines could not group
+  these, because it matched on the whole line and the number kept changing, so
+  they came through one by one - a captured session showed 8934 of 9012 lines
+  being this single message. They are now collapsed into one counted line that
+  also reports how many different values appeared, and the lines around them
+  group properly again instead of being pushed out by the flood. Messages that
+  genuinely differ, such as a per-layer load report, are still shown in full.
 - **`localm doctor` no longer claims the native ABI check passed when it was
   switched off.** With `LOCALM_SKIP_ABI_CHECK` set, doctor reported "native ABI:
   struct layout matches this build" - stating the layout had been verified for a

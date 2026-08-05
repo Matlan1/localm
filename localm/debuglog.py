@@ -26,6 +26,7 @@ import collections
 import contextlib
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -549,10 +550,33 @@ class _LineGrouper:
     every call): a lookback of exactly 1 (the original design) never
     re-matches either line, so nothing ever collapses and a long generation
     floods the live console/ring-buffer views with the full pair forever.
-    The same stream also carries a line that changes every occurrence
-    ("CUDA Graph id N reused", N varies) - that one can never be grouped by
-    exact match, which is fine and expected; the point is that it must not
-    defeat grouping of the two lines that DO repeat verbatim around it.
+    The same stream also carries "CUDA Graph id N reused", where N varies.
+
+    THIS CLASS ORIGINALLY EXEMPTED THAT LINE, on the premise that it "changes
+    every occurrence" and so "can never be grouped by exact match, which is fine
+    and expected". MEASURED 2026-08-05 against a real 9012-line capture
+    (issues/cuda graphs.txt): the premise is FALSE. N cycles through a BOUNDED,
+    REPEATING set - 21 distinct values in that capture, each recurring roughly
+    425 times. Those lines are verbatim repeats; they are merely spaced 21 apart
+    against an LRU that then held 8, so every one was evicted before it came
+    round and NOTHING grouped: 8934 of 9012 lines emitted individually, to the
+    console and the GUI activity ring, not just the debug log.
+
+    Worse, the exemption defeated the very thing this class exists to protect.
+    With 21 ids interleaved, the 8 slots were consumed entirely by graph ids, so
+    the warmup pair was evicted too - "warmup reset" appears 23x ungrouped
+    against 4x grouped in that same file.
+
+    So grouping is keyed on a DIGIT-NORMALISED template, not the raw line. Exact
+    match genuinely cannot collapse a varying integer - that part was true - but
+    that is a property of exact match, not a reason to accept the flood. Raising
+    _MAX_PENDING was rejected: the capture holds 105 distinct ids overall, so the
+    working set changes between phases and no fixed size is correct in general,
+    only sizes correct for the workload someone happened to measure.
+
+    A template seen with ONE variant renders exactly as before, so every line
+    that groups correctly today is byte-identical; only the previously
+    ungroupable case changes, to "<template> (xCOUNT, N distinct)".
 
     Up to _MAX_PENDING distinct lines are held open at once as an LRU set,
     each with its own running count: a line that matches one already pending
@@ -578,26 +602,94 @@ class _LineGrouper:
     # responsiveness.
     _MAX_PENDING = 8
 
+    # Grouping key: the line with every run of digits replaced, so lines that
+    # differ ONLY in an embedded number share one pending slot. See the class
+    # docstring for why exact-string matching could not collapse the measured
+    # case no matter how large _MAX_PENDING got.
+    _DIGITS_RE = re.compile(r"\d+")
+    _PLACEHOLDER = "<N>"
+
+    # Cap on how many distinct raw variants of one template are retained, purely
+    # so a stream that never repeats cannot turn this into unbounded memory.
+    # Past the cap the variants are no longer individually recoverable and the
+    # count is reported as "N+".
+    _MAX_VARIANTS = 256
+
+    # TEMPLATE COLLAPSE IS A FALLBACK FOR WHAT EXACT MATCHING CANNOT SERVE, not
+    # a replacement for it. Two conditions, BOTH required:
+    #
+    #   1. more distinct variants than _MAX_PENDING. At or below that, every
+    #      variant fits in its own slot and exact matching already groups each
+    #      one with its own count - which is strictly more informative than a
+    #      placeholder. Collapsing there would DESTROY working output.
+    #   2. genuine repetition - the average variant seen at least
+    #      _COLLAPSE_MIN_REPEATS times. Without this, "load_tensors: layer 0
+    #      assigned to device ROCm0" through "layer 27 ..." would compress 28
+    #      informative lines into one, losing every layer number to save
+    #      nothing. That is a LIST of distinct messages, not a flood.
+    #
+    # The measured cases separate cleanly on both, so neither is a fine
+    # judgement: the captured flood is 105 variants at 85 repeats each; a load
+    # report is 28 variants at 1; the two-id case in the tests is 2 variants,
+    # which condition 1 alone already protects.
+    _COLLAPSE_MIN_REPEATS = 2
+
     def __init__(self, emit) -> None:
         self._emit = emit
-        self._pending: "collections.OrderedDict[str, int]" = collections.OrderedDict()
+        # key -> [count, {variant: count}, overflowed]. The inner dict is
+        # insertion-ordered, so variants can be replayed in arrival order.
+        self._pending: "collections.OrderedDict[str, list]" = collections.OrderedDict()
+
+    @classmethod
+    def _key(cls, line: str) -> str:
+        return cls._DIGITS_RE.sub(cls._PLACEHOLDER, line)
 
     def feed(self, line: str) -> None:
-        if line in self._pending:
-            self._pending.move_to_end(line)
-            self._pending[line] += 1
+        key = self._key(line)
+        entry = self._pending.get(key)
+        if entry is not None:
+            self._pending.move_to_end(key)
+            entry[0] += 1
+            if line in entry[1]:
+                entry[1][line] += 1
+            elif len(entry[1]) < self._MAX_VARIANTS:
+                entry[1][line] = 1
+            else:
+                entry[2] = True
             return
         if len(self._pending) >= self._MAX_PENDING:
-            oldest_line, oldest_count = self._pending.popitem(last=False)
-            self._emit_one(oldest_line, oldest_count)
-        self._pending[line] = 1
+            _oldest_key, oldest = self._pending.popitem(last=False)
+            self._emit_one(*oldest)
+        self._pending[key] = [1, {line: 1}, False]
 
-    def _emit_one(self, line: str, count: int) -> None:
-        self._emit(line if count <= 1 else f"{line}({count})")
+    def _emit_one(self, count: int, variants: dict, overflowed: bool) -> None:
+        # ONE variant -> byte-identical to the pre-template behaviour, so every
+        # line that groups correctly today keeps its exact present output.
+        if len(variants) == 1 and not overflowed:
+            line, n = next(iter(variants.items()))
+            self._emit(line if n <= 1 else f"{line}({n})")
+            return
+        # Anything exact matching could have handled, or that is a list rather
+        # than a flood, is emitted per-variant with its own count - byte-identical
+        # to the pre-template behaviour. See _COLLAPSE_MIN_REPEATS for both
+        # conditions and why each is load-bearing.
+        if not overflowed and (len(variants) <= self._MAX_PENDING
+                               or count < self._COLLAPSE_MIN_REPEATS * len(variants)):
+            for line, n in variants.items():
+                self._emit(line if n <= 1 else f"{line}({n})")
+            return
+        # A genuine flood. The varying part becomes a placeholder rather than one
+        # arbitrary value, because picking one would misreport it as THE value.
+        # The distinct count is KEPT - 105 distinct graph ids is a different
+        # situation from 2, and rule 5 asks for a counted line, never a silenced
+        # one.
+        n_distinct = f"{len(variants)}+" if overflowed else str(len(variants))
+        template = self._key(next(iter(variants)))
+        self._emit(f"{template} (x{count}, {n_distinct} distinct)")
 
     def flush(self) -> None:
-        for line, count in self._pending.items():
-            self._emit_one(line, count)
+        for entry in self._pending.values():
+            self._emit_one(*entry)
         self._pending.clear()
 
 
