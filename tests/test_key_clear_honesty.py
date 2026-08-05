@@ -69,6 +69,28 @@ class TestClearApiKeyReportsWhatSurvived:
         failures = auth.clear_api_key()
         assert any("PermissionError" in f["error"] for f in failures)
 
+    def test_the_failure_is_also_written_to_the_local_log(
+            self, runner, monkeypatch, caplog):
+        """The HTTP route deliberately logs NOTHING of its own, on the grounds
+        that clear_api_key already records each failure here with the path and
+        the OS error. That justification is load-bearing: if this warning were
+        ever refactored away, the route would lose its only local signal and
+        nothing else would notice. Pin it."""
+        import logging
+        runner.invoke(main, ["key", "generate"])
+        key_name = auth.key_file().name
+        _unlink_denied_for(monkeypatch, key_name)
+
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            auth.clear_api_key()
+
+        warned = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.WARNING]
+        assert any(key_name in m for m in warned), (
+            "auth.clear_api_key must name the file it could not remove")
+        assert any("PermissionError" in m or "cannot access" in m
+                   for m in warned), "and must say why it failed"
+
     def test_label_is_path_free_so_a_network_caller_can_use_it(
             self, runner, monkeypatch):
         """``what`` must never carry the path: it is the ONLY field the HTTP

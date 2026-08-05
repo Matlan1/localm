@@ -134,13 +134,15 @@ def register(app: FastAPI, ctx) -> None:
             # returns "path" (an absolute filesystem path, which carries the
             # account name - rule 2) and "error" (raw OS exception text -
             # py/stack-trace-exposure). Those are for the LOCAL CLI and the local
-            # log, never for an HTTP response. clear_api_key's own logger.warning
-            # already recorded the full detail locally.
-            what = [f["what"] for f in failed]
-            _dbg.warning(
-                "owner API key clear via /api/auth/key/clear was INCOMPLETE: %s",
-                "; ".join(what))
-            return {"cleared": False, "warnings": what}
+            # log, never for an HTTP response.
+            #
+            # Nothing is logged HERE, on purpose - this is not a silenced warning.
+            # clear_api_key already warns to THIS SAME logger once per thing it
+            # could not remove (localm/auth.py, the OSError handlers), and those
+            # lines carry the path and the OS error, so they are strictly more
+            # informative than anything this route could add. A second line for
+            # the same event would only restate it with less detail.
+            return {"cleared": False, "warnings": [f["what"] for f in failed]}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
         return {"cleared": True, "warnings": []}
 
