@@ -104,7 +104,8 @@ import threading
 import time
 from typing import Optional
 
-from localm.inference.backends.base import InvalidGrammarError, ModelLoadCancelled
+from localm.inference.backends.base import (
+    InvalidGrammarError, ModelLoadCancelled, UnsupportedInputError)
 
 
 class RunnerBusy(Exception):
@@ -301,6 +302,19 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # alongside a genuine native fault (any OTHER exception here
                 # propagates uncaught, on purpose - see below).
                 resp_q.put(("error", str(e), "InvalidGrammarError"))
+            except UnsupportedInputError as e:
+                # Input this model could not process - in practice a
+                # VisionInputError from mtmd (an unprocessable image, or an
+                # mmproj that rejected the prompt). Same shape as the grammar
+                # case above and recoverable for the same reason: every one of
+                # those is a CHECKED status code from a native call that
+                # RETURNED NORMALLY, so nothing was corrupted and this worker
+                # can keep serving. mtmd_tokenize touches no llama context at
+                # all; a failed mtmd_helper_eval_chunks leaves the native KV
+                # populated with _cached_tokens empty, which llama.py's prefill
+                # already detects and wipes (see its "empty-bookkeeping case"
+                # comment) - so no extra cleanup is owed here.
+                resp_q.put(("error", str(e), "UnsupportedInputError"))
             # Any OTHER uncaught fault from the generator (a non-grammar
             # native fault, deliberately re-raised by GgufWorker.chat_stream)
             # propagates OUT of this whole function, uncaught, on purpose:
@@ -607,6 +621,13 @@ class ModelRunner:
                         tag = result[2] if len(result) > 2 else ""
                         if tag == "InvalidGrammarError":
                             raise InvalidGrammarError(msg)
+                        if tag == "UnsupportedInputError":
+                            # Deliberately NOT a RuntimeError: GgufBackend.chat_stream
+                            # treats RuntimeError from here as "the worker died" and
+                            # unloads the model. This one is a per-request refusal by
+                            # a perfectly healthy worker, so it must not evict a
+                            # loaded model. UnsupportedInputError is a ValueError.
+                            raise UnsupportedInputError(msg)
                         raise RuntimeError(msg)
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")

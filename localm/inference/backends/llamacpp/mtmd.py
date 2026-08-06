@@ -20,6 +20,9 @@ across llama.cpp versions, so this binding avoids version-specific struct layout
 * the image is decoded to raw RGB by the caller and passed to the clean-signature
   ``mtmd_bitmap_init(w, h, rgb)`` - NOT ``mtmd_helper_bitmap_init_from_buf``, whose
   return type drifted to a by-value wrapper in newer builds.
+* ``mtmd_input_text`` DID drift and cannot be avoided (it is the one struct this
+  module must pass by value), so both layouts are bound and the live one is
+  MEASURED at load time - see :func:`_detect_input_text_class`.
 
 Verified end-to-end on gfx1030 with gemma-4 + mmproj-BF16: a test image was
 described correctly. See dev-notes for the standalone probe this was lifted from.
@@ -31,6 +34,7 @@ import ctypes
 import os
 from typing import List, Optional, Tuple
 
+from ..base import VisionInputError
 from . import _api as api
 
 
@@ -40,13 +44,48 @@ class _MtmdParams(ctypes.Structure):
     _fields_ = [("_buf", ctypes.c_uint64 * 32)]   # 256 bytes
 
 
-class _MtmdInputText(ctypes.Structure):
+class _MtmdInputTextV1(ctypes.Structure):
+    """``mtmd_input_text`` BEFORE llama.cpp 4114ba18b (#25548, 2026-07-12).
+
+    The text is NUL-terminated: the tokenizer did ``input_text = text->text``."""
+
     _fields_ = [("text", ctypes.c_char_p),
                 ("add_special", ctypes.c_bool),
                 ("parse_special", ctypes.c_bool)]
 
 
+class _MtmdInputTextV2(ctypes.Structure):
+    """``mtmd_input_text`` FROM #25548 onward: an explicit ``text_len``.
+
+    That commit ("mtmd: fix silent prompt truncation on embedded NUL") inserted
+    ``size_t text_len`` as the SECOND field and switched the tokenizer to
+    ``input_text.assign(text->text, text->text_len)``. Passing the V1 layout to a
+    V2 build is silently catastrophic rather than merely wrong: the callee reads
+    ``text_len`` out of V1's ``add_special``/``parse_special`` bytes plus padding,
+    so with both flags true it reads 257 and TRUNCATES EVERY PROMPT TO 257 BYTES -
+    which drops the image marker for any prompt with a system preamble, yielding
+    "number of media markers in text (0) does not match number of bitmaps (1)".
+    It also reads the two flags from offsets 16/17, past the end of V1's 16 bytes.
+    See dev-notes/mtmd-input-text-abi-drift-2026-08-06.md."""
+
+    _fields_ = [("text", ctypes.c_char_p),
+                ("text_len", ctypes.c_size_t),
+                ("add_special", ctypes.c_bool),
+                ("parse_special", ctypes.c_bool)]
+
+
+def _make_input_text(cls, raw: bytes, add_special: bool, parse_special: bool):
+    """Build *cls* for *raw*, supplying ``text_len`` only where the layout has it."""
+    if cls is _MtmdInputTextV2:
+        return cls(raw, len(raw), add_special, parse_special)
+    return cls(raw, add_special, parse_special)
+
+
 _lib: Optional[ctypes.CDLL] = None
+
+# Which mtmd_input_text layout the LOADED mtmd honours. Resolved once per process
+# by _detect_input_text_class (a property of the library, not of the model).
+_input_text_class: Optional[type] = None
 
 
 class MtmdUnavailable(RuntimeError):
@@ -88,9 +127,16 @@ def _load_lib() -> ctypes.CDLL:
     m.mtmd_input_chunks_init.restype = ctypes.c_void_p
     m.mtmd_input_chunks_free.argtypes = [ctypes.c_void_p]
     m.mtmd_tokenize.restype = ctypes.c_int32
-    m.mtmd_tokenize.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                ctypes.POINTER(_MtmdInputText),
+    # The mtmd_input_text pointer is bound as an untyped void* on purpose: which
+    # of the two layouts is live is only known after _detect_input_text_class
+    # runs, and re-pointing argtypes per call would mutate shared state on this
+    # CDLL's function object. Callers pass ctypes.addressof(struct).
+    m.mtmd_tokenize.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
                                 ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
+    # Exported by both ABI eras (checked against the 2026-06-04 and 2026-08-04
+    # builds); used by the layout probe below.
+    m.mtmd_helper_get_n_tokens.restype = ctypes.c_size_t
+    m.mtmd_helper_get_n_tokens.argtypes = [ctypes.c_void_p]
     m.mtmd_helper_eval_chunks.restype = ctypes.c_int32
     m.mtmd_helper_eval_chunks.argtypes = [
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
@@ -100,9 +146,83 @@ def _load_lib() -> ctypes.CDLL:
     return m
 
 
+# Probe payloads for _detect_input_text_class. Both are EXACTLY 256 bytes, and
+# that length is load-bearing rather than arbitrary: a V1 build reads add_special
+# from byte 8 and parse_special from byte 9, which under the V2 struct are the low
+# two bytes of text_len. At 256 those read as add_special=False, parse_special=True.
+# add_special MUST come out False, or a V1 build would prepend BOS to the empty
+# string it sees and return 1 token instead of 0, destroying the discriminator.
+_PROBE_CONTROL = b"a" * 256
+_PROBE_EMBEDDED_NUL = b"\x00" + b"a" * 255
+
+
+def _probe_n_tokens(m: ctypes.CDLL, ctx: int, cls: type, raw: bytes) -> Optional[int]:
+    """Tokenize *raw* with the *cls* layout and return the token count, or None if
+    the call itself failed.
+
+    Text only: no marker, no bitmaps. So nothing is image-preprocessed, no llama
+    context is touched (``mtmd_tokenize`` only fills a chunk list; only
+    ``mtmd_helper_eval_chunks`` writes KV), and mtmd logs nothing - 0 markers
+    against 0 bitmaps is a match, so both eras return rc 0 and the probe is
+    silent in the native log on the healthy path."""
+    chunks = m.mtmd_input_chunks_init()
+    if not chunks:
+        return None
+    try:
+        itext = _make_input_text(cls, raw, False, True)
+        rc = m.mtmd_tokenize(ctx, chunks, ctypes.addressof(itext), None, 0)
+        if rc != 0:
+            return None
+        return int(m.mtmd_helper_get_n_tokens(chunks))
+    except Exception:   # noqa: BLE001 - a probe failure must not condemn the lib
+        return None
+    finally:
+        m.mtmd_input_chunks_free(chunks)
+
+
+def _detect_input_text_class(m: ctypes.CDLL, ctx: int) -> Optional[type]:
+    """Which ``mtmd_input_text`` layout the loaded mtmd honours, or None if the
+    probe could not decide.
+
+    Measures the exact property depended on - does this build read ``text_len``
+    or ``strlen`` - rather than correlating with a symbol. #25548 added no new
+    export, so any symbol probe (the approach ``_abi.py`` can use for
+    ``llama_model_params``, where the marker symbols landed in the SAME commit as
+    the reorder) would have a window of builds where it is simply wrong.
+
+    Two calls that differ only in a leading NUL byte:
+
+    * CONTROL ``"a"*256`` must tokenize to > 0 tokens. This is the fires-control
+      for the instrument: without it, a build where tokenize always yields 0
+      would be silently read as "uses strlen" instead of "the probe is broken".
+    * DISCRIMINATOR ``"\\0" + "a"*255``, same 256 bytes. A build that honours
+      text_len tokenizes all 256 and returns > 0; a build using strlen stops at
+      the leading NUL, tokenizes nothing and returns 0.
+
+    Inconclusive is a real answer and is NOT resolved by guessing: the caller
+    keeps the model text-only with a logged reason. Guessing V2 on a V1 build
+    would leave add_special/parse_special reading out of the low bytes of
+    text_len, i.e. a prompt tokenized with the wrong special-token handling and
+    no error anywhere - silent wrong output, which is worse than no vision."""
+    control = _probe_n_tokens(m, ctx, _MtmdInputTextV2, _PROBE_CONTROL)
+    if not control:
+        return None
+    embedded = _probe_n_tokens(m, ctx, _MtmdInputTextV2, _PROBE_EMBEDDED_NUL)
+    if embedded is None:
+        return None
+    return _MtmdInputTextV2 if embedded > 0 else _MtmdInputTextV1
+
+
 class MtmdContext:
     """A loaded mmproj bound to a text model, able to evaluate image prompts into
     that model's llama context."""
+
+    # Always overwritten by __init__ with the PROBED layout (and __init__ refuses
+    # to construct at all when the probe is inconclusive, so this default is
+    # unreachable in production). It exists so an instance built by other means -
+    # tests bypass the native-loading __init__ deliberately - marshals with the
+    # current upstream layout instead of raising AttributeError.
+    _input_text_class: type = _MtmdInputTextV2
 
     def __init__(self, mmproj_path: str, model_ptr: int) -> None:
         self._m = _load_lib()
@@ -117,6 +237,23 @@ class MtmdContext:
                 "(mmproj incompatible with this model or build)")
         self.supports_vision = bool(self._m.mtmd_support_vision(self._ctx))
         self.marker = self._m.mtmd_default_marker().decode("utf-8")
+
+        # Resolve the mtmd_input_text layout once per process. Needs a live
+        # context (mtmd_tokenize takes one), so it happens here rather than in
+        # _load_lib; the answer is a property of the LIBRARY, so it is cached
+        # globally and later contexts reuse it.
+        global _input_text_class
+        if _input_text_class is None:
+            _input_text_class = _detect_input_text_class(self._m, self._ctx)
+            if _input_text_class is None:
+                self.free()
+                raise MtmdUnavailable(
+                    "could not determine this build's mtmd_input_text layout "
+                    "(the text-length probe was inconclusive); refusing to guess, "
+                    "because guessing wrong silently truncates every image prompt")
+            from localm.debuglog import logger
+            logger.debug("mtmd input_text layout: %s", _input_text_class.__name__)
+        self._input_text_class = _input_text_class
 
     def eval_into(self, llama_ctx: int, prompt: str,
                   images: List[Tuple[int, int, bytes]], *,
@@ -143,24 +280,31 @@ class MtmdContext:
             for (w, h, rgb) in images:
                 bmp = m.mtmd_bitmap_init(w, h, rgb)
                 if not bmp:
-                    raise RuntimeError("mtmd_bitmap_init failed (bad image buffer)")
+                    raise VisionInputError("mtmd_bitmap_init failed (bad image buffer)")
                 bitmaps.append(bmp)
             chunks = m.mtmd_input_chunks_init()
             if not chunks:
-                raise RuntimeError("mtmd_input_chunks_init failed")
+                raise VisionInputError("mtmd_input_chunks_init failed")
             try:
-                itext = _MtmdInputText(prompt.encode("utf-8"), add_special, True)
+                raw = prompt.encode("utf-8")
+                itext = _make_input_text(
+                    self._input_text_class, raw, add_special, True)
                 arr = (ctypes.c_void_p * len(bitmaps))(*bitmaps)
-                rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.byref(itext),
+                rc = m.mtmd_tokenize(self._ctx, chunks, ctypes.addressof(itext),
                                      arr, len(bitmaps))
                 if rc != 0:
-                    raise RuntimeError(f"mtmd_tokenize failed (rc={rc})")
+                    raise VisionInputError(
+                        f"the vision projector could not process this image "
+                        f"(mtmd_tokenize rc={rc}). See the debug log for the "
+                        f"native reason.")
                 new_n_past = ctypes.c_int32(0)
                 rc2 = m.mtmd_helper_eval_chunks(
                     self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,
                     ctypes.byref(new_n_past))
                 if rc2 != 0:
-                    raise RuntimeError(f"mtmd image eval failed (rc={rc2})")
+                    raise VisionInputError(
+                        f"the vision projector could not evaluate this image "
+                        f"(mtmd_helper_eval_chunks rc={rc2})")
                 pos = int(new_n_past.value)
                 # RAG-VISION-1: the generation loop trusts this position as the
                 # base for every subsequent single-token decode with zero prior
@@ -173,7 +317,7 @@ class MtmdContext:
                 # instead of failing loudly. A garbage pos manifests exactly like
                 # the degenerate/repeated-token output this check exists to catch.
                 if pos <= 0 or (ctx_n_ctx and pos > ctx_n_ctx):
-                    raise RuntimeError(
+                    raise VisionInputError(
                         f"mtmd image eval returned an implausible position "
                         f"(new_n_past={pos}, context size={ctx_n_ctx}) - refusing "
                         f"to generate from a likely-corrupted KV state")
