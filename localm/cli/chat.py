@@ -447,7 +447,10 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
-    from localm.inference.backends.base import UnsupportedInputError
+    from localm.inference.backends.base import (
+        ImageDecodeUnavailable,
+        UnsupportedInputError,
+    )
     parts: list[str] = []
     printer = _ThinkPrinter()
     t0 = _time.monotonic()
@@ -459,6 +462,16 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
             parts.append(token)
             printer.feed(token)
         printer.flush()
+    except ImageDecodeUnavailable as e:
+        # BEFORE the UnsupportedInputError arm below, which DISCARDS the message
+        # and prints vision-capability guidance in its place. That guidance is
+        # right for its own case and actively wrong for this one: the model is
+        # vision-capable and the picture is fine, the environment simply has no
+        # image decoder, so "pick or download a vision model" sends the user
+        # after a problem they do not have. This arm keeps the real message,
+        # which names the missing library and the fix.
+        console.print(f"\n[red]{e}[/red]")
+        return ""
     except UnsupportedInputError:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # vision model this install has, or how to get one.

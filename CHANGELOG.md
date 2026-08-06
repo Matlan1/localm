@@ -11,74 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-### Fixed
-- **Unloading a model while it was still loading no longer reports a broken
-  llama runtime.** If a model was being loaded in the background while
-  something else freed memory or swapped models, the load could fail with
-  "Native llama runtime failed to load ... Provision or repair it with localm
-  setup-llama" - pointing at a runtime that was perfectly fine. It now reports
-  that the load was superseded, which is what actually happened. The same race
-  during a reply or a token count now says the model was unloaded instead of
-  failing with an internal error.
-- **Image understanding now runs on the GPU instead of the CPU.** The vision
-  projector was pinned to the CPU for every user, on every GPU, with every
-  projector, to work around a failure that only affects one AMD card paired with
-  a bf16 projector. On top of that it used a fixed 4 threads no matter how many
-  cores the machine has. A screenshot took about ten minutes with the graphics
-  card sitting idle, close enough to the timeout that it often failed outright.
-  It now uses the GPU, and only falls back to the CPU if the GPU attempt really
-  fails, saying so in the log. The same image now takes a couple of seconds. Set
-  `LOCALM_MTMD_CPU=1` to force the old CPU behaviour.
-- **Asking a GGUF vision model about an image crashed the model process.** The
-  reply was "Native inference fault (worker exit 1). The model has been
-  unloaded", and the model had to reload from scratch on the next message. A
-  recent llama.cpp change added an explicit length field to the structure
-  localm passes the prompt in; without it the runtime read a garbage length and
-  cut every image prompt off after 257 bytes, losing the marker that says where
-  the picture goes. Anything ahead of the image pushed it past that limit, so
-  with the memory plugin recalling anything at all this happened on every image,
-  even in a brand new chat. localm now detects which layout the installed
-  runtime uses and passes the prompt whole. Separately, an image the projector
-  genuinely cannot process is now reported as a failed message, leaving the
-  model loaded, instead of being treated as a crash.
-- **A low-VRAM warning could blame the running server for holding its own
-  VRAM.** When possible, the warning names a concrete instance holding the
-  memory, but the lookup never excluded the process printing the warning
-  itself, so it could report "another localm instance (port N) is running
-  ... - POST /v1/models/unload on port N to free it" about its own,
-  just-loaded model - telling you to unload the model you were about to
-  use. It now excludes itself from that lookup, and when the VRAM really is
-  held by one of its own other resident models, says so plainly instead of
-  blaming a nonexistent sibling.
-- **Chat now reloads a model that was evicted to make VRAM room for the
-  embedder.** Running an embedding or RAG task frees every loaded chat model,
-  and the server is built to bring it back on the next turn. It could not: a
-  chat request that did not name a model explicitly was refused with
-  "Model parameter is required and cannot be empty" before the server ever got
-  as far as working out which model the request meant, so the model was never
-  reloaded and chat stayed dead until it was loaded by hand from the Models
-  page. An unnamed request now resolves to the model in use, exactly as the
-  documented `"localm"` default already did. A request that genuinely cannot be
-  served (no model loaded and none configured) is still refused the same way.
-- **A refused request now records WHY in the debug log, not just the status.**
-  A failing request logged its status and timing and nothing else, so a chat
-  failure reported with a full debug log still could not be diagnosed. The
-  reason the server gave the client is now written to the log beside it.
-- **An unnamed request after switching models could silently reload the
-  wrong one.** The model an unnamed chat turn falls back to was only ever
-  updated at server startup, not on a later model switch, so start model A,
-  switch to model B, then trigger an eviction - the embedder freeing VRAM,
-  unloading B by itself, or B idling out - and the next unnamed turn
-  silently came back as A instead of B. It now tracks the model actually
-  last in use, whichever of those paths freed it.
-- **`GET /health` reported a plain 503 for a model that was about to reload
-  itself.** After an eviction the server keeps the model on hand to reload on
-  the next request, but health had no way to say so and just reported "no
-  engine" - a likely reason to reach for a manual reload instead of just
-  sending another chat turn. It now reports the recoverable model instead,
-  and still 503s when there genuinely is nothing to recover.
-
-## [0.1.4] - 2026-08-05
+## [0.1.4] - 2026-08-06
 
 ### Added
 - **Image generation now sends a "Rendering… (Ns elapsed)" heartbeat every
@@ -449,6 +382,83 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Asking about an image on an install without the PyTorch stack no longer
+  fails as a "native inference fault".** Image understanding needs the Pillow
+  imaging library, which until now was installed only alongside PyTorch and
+  transformers. Setup skips that whole stack when it is not needed for chat, so
+  a GGUF-only install had no image decoder, and attaching a picture reported
+  "Native inference fault (worker exit 1). The model has been unloaded ... see
+  the debug log for the native stack trace" and dropped the model out of memory.
+  None of that was true: there was no native fault, there was no native stack
+  trace, and the model was fine. Pillow is now installed with localm itself, so
+  image understanding works on every install rather than only on one with a
+  graphics stack. If it is missing anyway, the message now names Pillow and the
+  model stays loaded.
+- **Unloading a model while it was still loading no longer reports a broken
+  llama runtime.** If a model was being loaded in the background while
+  something else freed memory or swapped models, the load could fail with
+  "Native llama runtime failed to load ... Provision or repair it with localm
+  setup-llama" - pointing at a runtime that was perfectly fine. It now reports
+  that the load was superseded, which is what actually happened. The same race
+  during a reply or a token count now says the model was unloaded instead of
+  failing with an internal error.
+- **Image understanding now runs on the GPU instead of the CPU.** The vision
+  projector was pinned to the CPU for every user, on every GPU, with every
+  projector, to work around a failure that only affects one AMD card paired with
+  a bf16 projector. On top of that it used a fixed 4 threads no matter how many
+  cores the machine has. A screenshot took about ten minutes with the graphics
+  card sitting idle, close enough to the timeout that it often failed outright.
+  It now uses the GPU, and only falls back to the CPU if the GPU attempt really
+  fails, saying so in the log. The same image now takes a couple of seconds. Set
+  `LOCALM_MTMD_CPU=1` to force the old CPU behaviour.
+- **Asking a GGUF vision model about an image crashed the model process.** The
+  reply was "Native inference fault (worker exit 1). The model has been
+  unloaded", and the model had to reload from scratch on the next message. A
+  recent llama.cpp change added an explicit length field to the structure
+  localm passes the prompt in; without it the runtime read a garbage length and
+  cut every image prompt off after 257 bytes, losing the marker that says where
+  the picture goes. Anything ahead of the image pushed it past that limit, so
+  with the memory plugin recalling anything at all this happened on every image,
+  even in a brand new chat. localm now detects which layout the installed
+  runtime uses and passes the prompt whole. Separately, an image the projector
+  genuinely cannot process is now reported as a failed message, leaving the
+  model loaded, instead of being treated as a crash.
+- **A low-VRAM warning could blame the running server for holding its own
+  VRAM.** When possible, the warning names a concrete instance holding the
+  memory, but the lookup never excluded the process printing the warning
+  itself, so it could report "another localm instance (port N) is running
+  ... - POST /v1/models/unload on port N to free it" about its own,
+  just-loaded model - telling you to unload the model you were about to
+  use. It now excludes itself from that lookup, and when the VRAM really is
+  held by one of its own other resident models, says so plainly instead of
+  blaming a nonexistent sibling.
+- **Chat now reloads a model that was evicted to make VRAM room for the
+  embedder.** Running an embedding or RAG task frees every loaded chat model,
+  and the server is built to bring it back on the next turn. It could not: a
+  chat request that did not name a model explicitly was refused with
+  "Model parameter is required and cannot be empty" before the server ever got
+  as far as working out which model the request meant, so the model was never
+  reloaded and chat stayed dead until it was loaded by hand from the Models
+  page. An unnamed request now resolves to the model in use, exactly as the
+  documented `"localm"` default already did. A request that genuinely cannot be
+  served (no model loaded and none configured) is still refused the same way.
+- **A refused request now records WHY in the debug log, not just the status.**
+  A failing request logged its status and timing and nothing else, so a chat
+  failure reported with a full debug log still could not be diagnosed. The
+  reason the server gave the client is now written to the log beside it.
+- **An unnamed request after switching models could silently reload the
+  wrong one.** The model an unnamed chat turn falls back to was only ever
+  updated at server startup, not on a later model switch, so start model A,
+  switch to model B, then trigger an eviction - the embedder freeing VRAM,
+  unloading B by itself, or B idling out - and the next unnamed turn
+  silently came back as A instead of B. It now tracks the model actually
+  last in use, whichever of those paths freed it.
+- **`GET /health` reported a plain 503 for a model that was about to reload
+  itself.** After an eviction the server keeps the model on hand to reload on
+  the next request, but health had no way to say so and just reported "no
+  engine" - a likely reason to reach for a manual reload instead of just
+  sending another chat turn. It now reports the recoverable model instead,
+  and still 503s when there genuinely is nothing to recover.
 - **Image, music and video generation, and RAG indexing/re-embedding/embedding
   setup, could report "failed" for a job that actually succeeded.** If VRAM
   handover back to the chat model (or, for embedding setup, the collection
