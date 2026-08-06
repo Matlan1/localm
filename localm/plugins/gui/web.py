@@ -411,6 +411,14 @@ class ComfyPullRequest(BaseModel):
     # client-supplied repo/path. The server re-resolves everything else from
     # COMFY_MODEL_SOURCES itself (see model_pull_comfy_source in routes/models.py).
     filename: str
+    # Which plugin's per-plugin comfy.workdir to prefer when resolving the
+    # download destination (NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR) -
+    # purely a SELECTOR into the server's own already-trusted per-plugin
+    # config blocks, never a path itself, so it carries none of the
+    # filename/repo trust concerns the comment above guards against.
+    # Validated against the known plugin set server-side; an unrecognized
+    # value is treated the same as None (falls back to the legacy global key).
+    plugin: str | None = None
 
 
 class RemoveModelRequest(BaseModel):

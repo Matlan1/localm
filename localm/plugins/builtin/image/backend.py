@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from localm.image_gen import comfy as _comfy
-from localm.media.managed_comfy import legacy_comfy_value
+from localm.media.managed_comfy import legacy_comfy_value, managed_comfy_active
 from localm.plugins import media_config
 from localm.vram import media_estimate_bytes, resolve_swap_policy
 
@@ -39,6 +39,27 @@ def settings(full_config: dict) -> dict:
     # pretending the chosen backend is active.
     warning = media_config.combine_warnings(
         warning, media_config.backend_unavailable_warning(__package__, backend_name))
+    # NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD: when the managed
+    # ComfyUI instance is selected ("own"), NEITHER the per-plugin comfy.* fields
+    # NOR the legacy global comfy_api_url/comfy_launch_cmd/comfy_workdir may be
+    # honoured here - any of them, stale or deliberate, defeats
+    # ensure_comfy()'s managed-routing branch, which only engages when the
+    # caller passes NOTHING. legacy_comfy_value() already suppressed the global
+    # launch_cmd/workdir keys for this case; comfy_api_url and the per-plugin
+    # comfy_blk fields never got the same treatment. Only comfy_target ==
+    # "user" lets any of these win, matching what "own"/"user" is supposed to
+    # mean. _comfy.default_api_url() itself resolves to the managed instance's
+    # URL whenever own_active is True, so it is always the correct fallback.
+    own_active = managed_comfy_active(full_config)
+    api_url = ("" if own_active else comfy_blk.get("api_url")) \
+        or (None if own_active else full_config.get("comfy_api_url")) \
+        or _comfy.default_api_url()
+    launch_cmd = "" if own_active else (
+        comfy_blk.get("launch_cmd")
+        or legacy_comfy_value("comfy_launch_cmd", full_config) or "")
+    workdir = "" if own_active else (
+        comfy_blk.get("workdir")
+        or legacy_comfy_value("comfy_workdir", full_config) or "")
     return {
         "backend": backend_name,
         # sanitize_comfy_url on the RESOLVED value, not just the default_api_url
@@ -47,16 +68,9 @@ def settings(full_config: dict) -> dict:
         # admin-set link-local/metadata host reach the outbound comfy calls
         # (CHK-COMFY-APIURL residual). Sanitising here is idempotent for the
         # already-guarded default path.
-        "api_url": _comfy.sanitize_comfy_url(
-            (comfy_blk.get("api_url")
-             or full_config.get("comfy_api_url")
-             or _comfy.default_api_url()).rstrip("/")),
-        # The legacy global fallback is suppressed while the managed instance is
-        # active - a genuine per-plugin comfy_blk override still always wins.
-        "launch_cmd": comfy_blk.get("launch_cmd")
-        or legacy_comfy_value("comfy_launch_cmd", full_config) or "",
-        "workdir": comfy_blk.get("workdir")
-        or legacy_comfy_value("comfy_workdir", full_config) or "",
+        "api_url": _comfy.sanitize_comfy_url(api_url.rstrip("/")),
+        "launch_cmd": launch_cmd,
+        "workdir": workdir,
         "output_dir": comfy_blk.get("output_dir")
         or full_config.get("comfy_output_dir", "") or "",
         "reload_after": bool(block.get(

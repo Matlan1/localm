@@ -310,15 +310,39 @@ def _version_marker(workdir: Path, commit: Optional[str]) -> str:
     return "unknown"
 
 
+def _any_plugin_workdir(cfg: dict) -> Optional[str]:
+    """The first non-empty per-plugin ``comfy.workdir`` among image/music/video,
+    in that order, or None. `setup_managed_comfy()` is a single, plugin-agnostic
+    action (one shared managed instance, not invoked per-plugin), so there is no
+    "current plugin" to resolve against here - any plugin's configured folder is
+    equally valid evidence of "an existing ComfyUI to copy" (see
+    NEW-MANAGED-COMFY-IGNORES-PLUGIN-WORKDIR)."""
+    from localm.plugins.media_config import MEDIA_PLUGINS, resolve_config
+    for name in MEDIA_PLUGINS:
+        block, _warning = resolve_config(name, cfg)
+        comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
+        workdir = comfy_blk.get("workdir")
+        if workdir:
+            return workdir
+    return None
+
+
 def discover_user_comfy(cfg: Optional[dict] = None) -> Optional[UserComfyStack]:
     """The user's replicable ComfyUI, or None when there is nothing usable to copy.
 
     "Usable" means: comfy_workdir is set, is a directory, has ComfyUI's ``main.py``,
     AND a venv interpreter is discoverable under it (we replicate that venv's package
     set, so a ComfyUI with no venv is not copyable). None here is the dispatcher's
-    signal to run the fresh hardware-matched install (S3) instead."""
+    signal to run the fresh hardware-matched install (S3) instead.
+
+    Checks the legacy GLOBAL comfy_workdir first, then falls back to any
+    plugin's own comfy.workdir (NEW-MANAGED-COMFY-IGNORES-PLUGIN-WORKDIR) -
+    this previously only ever checked the bare global key, so a folder set
+    solely via a plugin's own Settings field (the common case; the Settings UI
+    foregrounds per-plugin fields) was invisible here even though it is
+    exactly what that plugin's own launch path already uses."""
     cfg = cfg if cfg is not None else load_config()
-    workdir = cfg.get("comfy_workdir")
+    workdir = cfg.get("comfy_workdir") or _any_plugin_workdir(cfg)
     if not workdir:
         return None
     wd = Path(workdir)

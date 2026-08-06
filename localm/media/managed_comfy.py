@@ -305,12 +305,25 @@ class ComfyTarget:
     managed: bool
 
 
-def resolve_comfy_target(cfg: Optional[dict] = None) -> ComfyTarget:
+def resolve_comfy_target(cfg: Optional[dict] = None,
+                         plugin: Optional[str] = None) -> ComfyTarget:
     """THE single coexistence resolver (decision 6). Returns the managed
     instance's (api_url, workdir, launch_cmd) when managed routing is active,
     else the user's ComfyUI exactly as today: the same api_url
     ``default_api_url()`` yields, the ``comfy_workdir`` config value, and no
     launch_cmd (the caller resolves/discovers its own, as before).
+
+    *plugin* ("image"/"music"/"video"), when given, resolves THAT plugin's own
+    ``comfy.workdir`` (via ``media_config.resolve_config``, honouring
+    "use config from") ahead of the legacy global ``comfy_workdir`` for the
+    non-managed branch - this function previously only ever read the bare
+    global key, so a value set solely via the per-plugin Settings field (the
+    common case; the Settings UI foregrounds it) was invisible here even
+    though it is exactly what the plugin's own launch path actually uses
+    (see NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR). Omitted by a caller
+    with no plugin context (e.g. the CLI's generic status command); that
+    caller still gets a correct answer whenever the global key or the managed
+    instance covers it.
 
     Media modules can call this to get the URL, workdir, AND launch command at
     once; the URL alone also flows automatically through ``default_api_url()``
@@ -320,25 +333,33 @@ def resolve_comfy_target(cfg: Optional[dict] = None) -> ComfyTarget:
         return ComfyTarget(api_url=managed_comfy_api_url(),
                            workdir=managed_comfy_workdir(),
                            launch_cmd=managed_comfy_launch_cmd(), managed=True)
-    # User's ComfyUI, untouched. Import here (not at module load) to avoid a
-    # circular import: comfy_client imports this module lazily too.
+    # User's ComfyUI. Import here (not at module load) to avoid a circular
+    # import: comfy_client imports this module lazily too.
     from localm.media.comfy_client import default_api_url
+    workdir = cfg.get("comfy_workdir")
+    if plugin:
+        from localm.plugins.media_config import resolve_config
+        block, _warning = resolve_config(plugin, cfg)
+        comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
+        workdir = comfy_blk.get("workdir") or workdir
     return ComfyTarget(api_url=default_api_url(),
-                       workdir=cfg.get("comfy_workdir"), launch_cmd=None,
+                       workdir=workdir, launch_cmd=None,
                        managed=False)
 
 
-def comfy_models_dest_dir(subfolder: str, cfg: Optional[dict] = None) -> Optional[Path]:
+def comfy_models_dest_dir(subfolder: str, cfg: Optional[dict] = None,
+                          plugin: Optional[str] = None) -> Optional[Path]:
     """Absolute ``models/<subfolder>`` directory for whichever ComfyUI
     ``resolve_comfy_target()`` says is currently active - the destination a
     downloaded model file needs to land in for THAT ComfyUI to see it.
 
     Managed -> ``<LOCALM_HOME>/comfyui-models/<subfolder>``. External with a
-    configured ``comfy_workdir`` -> ``<comfy_workdir>/models/<subfolder>``.
-    External with no ``comfy_workdir`` configured -> None: there is no
-    known-safe filesystem location to write into, and the caller must say so
-    plainly rather than guessing."""
-    target = resolve_comfy_target(cfg)
+    configured workdir (per-plugin when *plugin* is given, else the legacy
+    global ``comfy_workdir``) -> ``<workdir>/models/<subfolder>``. External
+    with no workdir configured anywhere -> None: there is no known-safe
+    filesystem location to write into, and the caller must say so plainly
+    rather than guessing."""
+    target = resolve_comfy_target(cfg, plugin=plugin)
     if target.managed:
         return managed_comfy_paths().models_dir / subfolder
     if target.workdir:

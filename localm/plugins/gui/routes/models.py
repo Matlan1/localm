@@ -711,7 +711,7 @@ def register(app: FastAPI, ctx) -> None:
             except Exception as e:
                 logger.debug("preflight workflow build failed for %s: %s", kind, e)
                 return []
-            target = resolve_comfy_target()
+            target = resolve_comfy_target(plugin=kind)
             return describe_missing_models(workflow, target.api_url)
 
         loop = asyncio.get_running_loop()
@@ -729,7 +729,7 @@ def register(app: FastAPI, ctx) -> None:
             }
             if source is not None:
                 repo, file = source.spec.rsplit(":", 1)
-                dest_dir = comfy_models_dest_dir(source.comfy_subfolder)
+                dest_dir = comfy_models_dest_dir(source.comfy_subfolder, plugin=kind)
                 entry["source"] = {
                     "repo": repo, "file": file,
                     "size_bytes": source.size_bytes, "model_type": source.model_type,
@@ -768,17 +768,23 @@ def register(app: FastAPI, ctx) -> None:
         closed when it is not."""
         from localm.media.managed_comfy import comfy_models_dest_dir
         from localm.model_manager.registry import resolve_comfy_model_source
+        from localm.plugins.media_config import MEDIA_PLUGINS
         require_fs_host(request)
         source = resolve_comfy_model_source(req.filename.strip())
         if source is None:
             raise HTTPException(400, f"Not a curated download source: {req.filename}")
-        dest_dir = comfy_models_dest_dir(source.comfy_subfolder)
+        # req.plugin is a SELECTOR into the server's own trusted per-plugin
+        # config, not a path - an unrecognized value just falls back to no
+        # plugin context (the legacy global comfy_workdir), same as before
+        # this field existed.
+        plugin = req.plugin if req.plugin in MEDIA_PLUGINS else None
+        dest_dir = comfy_models_dest_dir(source.comfy_subfolder, plugin=plugin)
         if dest_dir is None:
             raise HTTPException(
                 400,
-                "No known ComfyUI models folder to download into - set a "
-                "ComfyUI working directory in Settings > Media, or enable the "
-                "managed ComfyUI instance.")
+                "No ComfyUI folder is configured to download into - set the "
+                "'ComfyUI folder' field in Settings > Media (per-plugin or "
+                "shared), or enable the managed ComfyUI instance.")
         args = ["pull", "--type", source.model_type, "--comfy-dest-dir", str(dest_dir),
                 "--no-register", "--", source.spec]
         job = jobs.start_cli("pull", args, extra_env={
