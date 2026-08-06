@@ -128,14 +128,16 @@ test("missing WITH a curated source: shows repo/file/size, offers Download", asy
   assert.ok(buttons.includes("Download"), "a real Download button, never silent auto-pull");
   assert.ok(buttons.includes("Not now"));
 
-  // Clicking Download POSTs the exact filename and nothing else (server
-  // re-resolves repo/path itself - the client never sends one).
+  // Clicking Download POSTs the exact filename, plus which plugin's own
+  // ComfyUI folder to resolve the destination against
+  // (NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR) - and nothing else
+  // (server re-resolves repo/path itself - the client never sends one).
   [...win.document.querySelectorAll("#modal-body button")]
     .find((b) => b.textContent === "Download").click();
   await tick(); await tick(); await tick();
   const proceed = await proceedPromise;
   assert.equal(proceed, true);
-  assert.deepEqual(pulls, [{ filename: "flux1-dev-Q8_0.gguf" }]);
+  assert.deepEqual(pulls, [{ filename: "flux1-dev-Q8_0.gguf", plugin: "image" }]);
 });
 
 test("Not now skips the download without any pull POST", async () => {
