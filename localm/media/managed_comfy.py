@@ -277,8 +277,18 @@ def legacy_comfy_value(key: str, full_config: dict) -> str:
     would silently pass it through as if it WERE a deliberate override,
     defeating managed-instance auto-routing for anyone who ever set
     comfy_workdir/comfy_launch_cmd - including users who set it long before a
-    managed instance existed. A genuine PER-PLUGIN override (the caller's own
-    ``comfy_blk.get(...)``) is untouched by this and still wins, as intended."""
+    managed instance existed.
+
+    NOTE: a per-plugin override (the caller's own ``comfy_blk.get(...)``) used
+    to be treated as exempt from this ("a deliberate choice, not a stale
+    global default") - that turned out to be the identical ambiguity in a
+    different place: a per-plugin field set before the user ever touched
+    comfy_target, or before switching it back to "own", is indistinguishable
+    from a deliberate override and silently defeated "own" mode the same way
+    (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Each backend.py
+    now suppresses its OWN per-plugin comfy_blk value too, gated on the same
+    ``managed_comfy_active()`` check this function uses - so "own" means own
+    for the per-plugin field as well, not just this legacy global one."""
     if managed_comfy_active(full_config):
         return ""
     return full_config.get(key, "") or ""

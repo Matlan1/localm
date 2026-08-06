@@ -9,12 +9,14 @@ another module selected by ``backend`` name.
 
 Legacy global keys (comfy_launch_cmd / comfy_workdir / comfy_output_dir /
 reload_llm_after_imagine) seed the defaults until the user saves per-plugin
-values - EXCEPT comfy_launch_cmd/comfy_workdir specifically, which are
-suppressed while the managed ComfyUI instance is active (see
-managed_comfy.legacy_comfy_value): otherwise a global value left over from
-before the managed instance existed would silently defeat its auto-launch
-routing forever. A genuine per-plugin override is unaffected and still
-always wins.
+values. api_url / launch_cmd / workdir specifically - both the legacy global
+key AND this plugin's own per-plugin comfy_blk override - are suppressed
+entirely while the managed ComfyUI instance is active (comfy_target == "own"
+and installed; see managed_comfy.managed_comfy_active). A per-plugin value
+set before the user ever touched comfy_target, or before switching it back
+to "own", reads identically to a deliberate override and used to silently
+defeat managed routing (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD).
+Only comfy_target == "user" lets any of these three fields win - "own" means own.
 
 Per-plugin output containment (FAC-3): the shared ``generate_video`` has no
 ``comfy_output_dir`` parameter, so the only way to feed it this plugin's own

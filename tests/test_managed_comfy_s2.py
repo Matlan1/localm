@@ -196,6 +196,39 @@ def test_discover_finds_git_stack(home, fake_user_comfy):
     assert stack.version_marker.startswith("git:")
 
 
+def test_discover_finds_stack_via_plugin_only_workdir(home, fake_user_comfy):
+    """NEW-MANAGED-COMFY-IGNORES-PLUGIN-WORKDIR: a folder set ONLY via a
+    plugin's own comfy.workdir field (no global comfy_workdir) - the shape the
+    modern Settings UI actually produces - must still be discovered, so
+    `localm comfy setup` copies the user's existing ComfyUI (S2) instead of
+    silently running a redundant multi-GB fresh install (S3) because the
+    global-only check found nothing."""
+    from localm.media import managed_comfy_provision as prov
+    cfg.save_config({**cfg.load_config(), "plugins": {
+        "video": {"comfy": {"workdir": str(fake_user_comfy.workdir)}}}})
+    stack = prov.discover_user_comfy()
+    assert stack is not None
+    assert stack.commit == fake_user_comfy.commit
+
+
+def test_discover_prefers_legacy_global_over_plugin_workdir(home, fake_user_comfy, tmp_path):
+    """The legacy global comfy_workdir, when ALSO set, still wins - matching
+    discover_user_comfy()'s own documented order ("checks the legacy GLOBAL
+    comfy_workdir first, then falls back to any plugin's own comfy.workdir").
+    A plugin-only value pointed at a folder with no usable ComfyUI (no venv)
+    must not silently override a genuinely usable global one."""
+    from localm.media import managed_comfy_provision as prov
+    unusable = tmp_path / "plugin-pointed-elsewhere"
+    unusable.mkdir()
+    (unusable / "main.py").write_text("# comfy, no venv\n", encoding="utf-8")
+    cfg.save_config({**cfg.load_config(),
+                     "comfy_workdir": str(fake_user_comfy.workdir),
+                     "plugins": {"image": {"comfy": {"workdir": str(unusable)}}}})
+    stack = prov.discover_user_comfy()
+    assert stack is not None
+    assert stack.commit == fake_user_comfy.commit
+
+
 def test_read_user_comfy_commit_git_and_nongit(tmp_path, fake_user_comfy):
     from localm.media import managed_comfy_provision as prov
     assert prov.read_user_comfy_commit(fake_user_comfy.workdir) == fake_user_comfy.commit

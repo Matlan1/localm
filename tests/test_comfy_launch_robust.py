@@ -149,8 +149,12 @@ def test_ensure_comfy_delegates_to_the_shared_helper(monkeypatch, tmp_path):
     alive_calls = {"n": 0}
 
     def _alive(api_url, timeout=3.0):
+        # > 2, not > 1: NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's double-checked
+        # lock adds a RE-CHECK under _launch_lock_for() between the pre-lock
+        # probe and the post-spawn poll loop - three _comfy_alive() calls
+        # minimum before a launch is confirmed up (dead, dead-under-lock, up).
         alive_calls["n"] += 1
-        return alive_calls["n"] > 1
+        return alive_calls["n"] > 2
 
     monkeypatch.setattr(comfy_client, "_comfy_alive", _alive)
     monkeypatch.setattr(_time_mod, "sleep", lambda s: None)
@@ -225,7 +229,9 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
            "comfy_launch_timeout": 30}
-    alive = iter([False, True])     # dead, then up after spawn
+    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
+    # double-checked re-check), then up after spawn.
+    alive = iter([False, False, True])
     spawned = {}
 
     def fake_popen(argv, cwd=None, **kw):
@@ -283,7 +289,9 @@ def _spawn_with_cfg(tmp_path, cfg):
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
            "comfy_launch_timeout": 30, **cfg}
-    alive = iter([False, True])
+    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
+    # double-checked re-check), then up after spawn.
+    alive = iter([False, False, True])
     spawned = {}
 
     def fake_popen(argv, cwd=None, **kw):
@@ -340,7 +348,9 @@ def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
         venv_python=managed_root / "venv" / "Scripts" / "python.exe",
         extra_model_paths=managed_root / "extra_model_paths.yaml",
     )
-    alive = iter([False, True])
+    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
+    # double-checked re-check), then up after spawn.
+    alive = iter([False, False, True])
     spawned = {}
 
     def fake_popen(argv, cwd=None, **kw):
@@ -375,7 +385,9 @@ def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
     comfy_client._confirmed_alive.clear()
     own_launcher = tmp_path / f"comfyui.{_ext()}"
     own_launcher.write_text("echo hi\n", encoding="utf-8")
-    alive = iter([False, True])
+    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
+    # double-checked re-check), then up after spawn.
+    alive = iter([False, False, True])
     spawned = {}
 
     def fake_popen(argv, cwd=None, **kw):
@@ -434,6 +446,103 @@ def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
     assert ok is False
     assert "not reachable" in msg
     popen.assert_not_called()
+
+
+def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
+    """NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK: two independent triggers for the
+    SAME api_url (a generate submission and the separate "Launch ComfyUI"
+    button, at minimum - confirmed live on the maintainer's own machine, right
+    after a reboot ruled out any leftover process) must not each independently
+    decide ComfyUI is down and spawn a competing process. Fires two genuinely
+    concurrent ensure_comfy() calls at a dead api_url, with a mocked
+    slow-but-eventually-successful launch, and asserts only ONE subprocess is
+    actually spawned - the double-checked _launch_lock_for() must serialize
+    the decision, not just the bookkeeping."""
+    import threading
+
+    comfy_client._confirmed_alive.clear()
+    launcher = tmp_path / f"comfyui.{_ext()}"
+    launcher.write_text("echo hi\n", encoding="utf-8")
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
+           "comfy_launch_timeout": 30}
+    # A URL unused by any other test in this module - the readiness cache is
+    # process-global, so a shared URL could let a sibling test's leftover
+    # confirmation short-circuit this one before it ever reaches the lock.
+    url = "http://127.0.0.1:8196"
+
+    spawn_count = {"n": 0}
+    spawn_lock = threading.Lock()
+    # Barrier so BOTH threads reach ensure_comfy()'s pre-lock aliveness check
+    # at (as close to) the same instant as possible - the race this test
+    # exists to prove is the two-simultaneous-callers case, not two callers
+    # that merely happen to run moments apart (which the pre-fix code already
+    # handled fine via the readiness cache once ONE of them finished).
+    start_barrier = threading.Barrier(2)
+
+    def fake_popen(argv, cwd=None, **kw):
+        with spawn_lock:
+            spawn_count["n"] += 1
+        proc = MagicMock()
+        proc.poll.return_value = None        # still running, not an immediate exit
+        return proc
+
+    def fake_alive(api_url, timeout=3.0):
+        # "Up" only once something has actually been spawned - both callers'
+        # PRE-LOCK check must see False (spawn_count starts at 0), so both
+        # proceed to race for the lock; whichever wins spawns once, and the
+        # loser's RE-CHECK under the lock (and its own post-spawn poll loop,
+        # for whichever caller ends up waiting rather than launching) then
+        # sees True without ever calling Popen itself.
+        with spawn_lock:
+            return spawn_count["n"] > 0
+
+    results = [None, None]
+
+    def _call(i):
+        start_barrier.wait(timeout=10)
+        results[i] = comfy.ensure_comfy(url)
+
+    # Patch ONCE from this (the main) thread, wrapping both workers' entire
+    # run - never let each worker thread enter/exit its OWN `with patch(...)`
+    # on the SAME targets. unittest.mock.patch's __enter__/__exit__ save and
+    # restore a plain module attribute with no locking of their own, so two
+    # threads independently patching/unpatching the identical target race:
+    # thread B can save thread A's MOCK as "the original" and thread A's
+    # __exit__ can then restore ahead of B's, leaving the attribute
+    # PERMANENTLY pointed at a mock function once both `with` blocks exit -
+    # silently corrupting subprocess.Popen/_comfy_alive/load_config for every
+    # test that runs afterward in this process. Patching once here, before
+    # starting either thread, means both workers merely READ the same
+    # already-substituted functions - no concurrent mutation of the patch
+    # state, so teardown is deterministic.
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=fake_alive), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        threads = [threading.Thread(target=_call, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+    assert all(not t.is_alive() for t in threads), (
+        "a worker thread did not finish within the join timeout - "
+        "the lock may be deadlocked")
+
+    assert all(r is not None for r in results), f"a thread did not finish: {results}"
+    assert results[0][0] is True, results[0]
+    assert results[1][0] is True, results[1]
+    # Exactly one of the two is the WINNER that actually reached
+    # _launch_and_wait()'s poll loop ("ComfyUI is up."); the other is the
+    # LOSER that found it already up on either its pre-lock check or its
+    # re-check under the lock ("ComfyUI is running.") and never spawned -
+    # which one wins the race is non-deterministic, but the 1-and-1 split is
+    # not: it is the actual proof the lock serialized the decision rather
+    # than both threads independently reaching the launch step.
+    messages = sorted(r[1] for r in results)
+    assert messages == ["ComfyUI is running.", "ComfyUI is up."], messages
+    assert spawn_count["n"] == 1, (
+        f"expected exactly ONE subprocess spawn from two concurrent callers, "
+        f"got {spawn_count['n']}")
 
 
 def test_ensure_comfy_error_points_at_the_folder():
@@ -503,7 +612,9 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
 
     # On Windows, python.exe should run directly as list (no cmd wrapper)
     monkeypatch.setattr(sys, "platform", "win32")
-    alive_1 = iter([False, True])
+    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
+    # double-checked re-check), then up after spawn.
+    alive_1 = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg), \
          patch("subprocess.Popen", side_effect=fake_popen), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive_1)):
@@ -522,7 +633,8 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
                "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
                "comfy_disable_auto_launch": True}
     spawned.clear()
-    alive_2 = iter([False, True])
+    # dead, dead-under-lock, then up after spawn (see the note above).
+    alive_2 = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg_bat), \
          patch("subprocess.Popen", side_effect=fake_popen), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive_2)):

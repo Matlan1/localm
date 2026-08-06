@@ -73,3 +73,56 @@ class TestComfyModelsDestDir:
                     "comfy_workdir": r"D:\some\other\comfy"}
         dest = mc.comfy_models_dest_dir("vae", cfg_dict)
         assert dest == home / "comfyui-models" / "vae"
+
+
+class TestComfyModelsDestDirPerPlugin:
+    """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR: resolve_comfy_target()'s
+    non-managed branch used to read ONLY the bare global comfy_workdir - the
+    modern Settings UI writes the per-plugin comfy.workdir field instead, so a
+    real user's download destination resolved to None ("no known folder")
+    despite having a folder visibly set. Fixed by threading a `plugin` param
+    through resolve_comfy_target()/comfy_models_dest_dir()."""
+
+    def test_plugin_only_workdir_resolves_with_the_plugin_arg(self, home):
+        cfg_dict = {"managed_comfy_enabled": False,
+                    "plugins": {"image": {"comfy": {"workdir": r"D:\my\comfy"}}}}
+        dest = mc.comfy_models_dest_dir("unet", cfg_dict, plugin="image")
+        assert dest == Path(r"D:\my\comfy") / "models" / "unet"
+
+    def test_plugin_only_workdir_is_invisible_without_the_plugin_arg(self, home):
+        # Without telling resolve_comfy_target() which plugin is asking, a
+        # per-plugin-only value has no context to resolve against - this is
+        # the exact bug shape, confirmed still correctly absent when the
+        # caller genuinely has no plugin context (model_pull_comfy_source
+        # covers "no context" by trying all three plugins itself - see the
+        # GUI route test - this asserts what the bare function does alone).
+        cfg_dict = {"managed_comfy_enabled": False,
+                    "plugins": {"image": {"comfy": {"workdir": r"D:\my\comfy"}}}}
+        assert mc.comfy_models_dest_dir("unet", cfg_dict) is None
+
+    def test_plugin_workdir_wins_over_legacy_global(self, home):
+        # Same precedence backend.py's settings() already applies: a genuine
+        # per-plugin override beats the legacy global fallback.
+        cfg_dict = {
+            "comfy_workdir": r"D:\stale\global",
+            "plugins": {"music": {"comfy": {"workdir": r"D:\deliberate\music-comfy"}}},
+        }
+        target = mc.resolve_comfy_target(cfg_dict, plugin="music")
+        assert target.workdir == r"D:\deliberate\music-comfy"
+
+    def test_plugin_with_no_override_falls_back_to_legacy_global(self, home):
+        # A plugin with no per-plugin override of its own still gets the
+        # legacy global fallback - unaffected by this fix.
+        cfg_dict = {"comfy_workdir": r"D:\shared\comfy", "plugins": {}}
+        target = mc.resolve_comfy_target(cfg_dict, plugin="video")
+        assert target.workdir == r"D:\shared\comfy"
+
+    def test_managed_active_still_ignores_plugin_workdir(self, home):
+        # The plugin param must never leak into the MANAGED branch - it
+        # remains absolute, matching test_managed_active_ignores_external_workdir
+        # above for the legacy-global case.
+        _install_managed(home)
+        cfg_dict = {"comfy_target": "own",
+                    "plugins": {"image": {"comfy": {"workdir": r"D:\some\other\comfy"}}}}
+        dest = mc.comfy_models_dest_dir("checkpoints", cfg_dict, plugin="image")
+        assert dest == home / "comfyui-models" / "checkpoints"

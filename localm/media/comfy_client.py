@@ -1370,6 +1370,23 @@ def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
 #  the spawn step at a time: a second caller blocks until the first's whole
 #  attempt resolves (success or timeout), then re-checks aliveness under the
 #  lock before ever considering a launch of its own.
+#
+#  KNOWN NARROW TRADE-OFF, not fixed here: a caller reached via
+#  run_in_threadpool_bounded (imagine_comfy_launch, the generate submission
+#  path) budgets ~comfy_launch_wait_seconds()+30s for its OWN attempt - not
+#  for "queue behind someone else's attempt, THEN make my own". If caller A's
+#  launch is slow and eventually fails (using its full wait_seconds), a
+#  concurrent caller B can spend nearly all of ITS budget just waiting on
+#  this lock, then get ThreadCallTimeout'd almost immediately after finally
+#  acquiring it - a misleading "timed out" HTTP response even though (per
+#  _threadpool_timeout.py's abandon_on_cancel=True contract) B's own launch
+#  attempt keeps running to completion on the abandoned worker thread and may
+#  still succeed moments later. Narrow (needs a genuinely slow-then-failing
+#  first attempt, not just a fast failure - a fast failure releases this lock
+#  quickly) and no worse than the pre-lock behaviour it replaces (both
+#  callers colliding and BOTH failing); flagged rather than fixed since
+#  closing it needs the outer timeout budget to account for lock wait time,
+#  a change to every ensure_comfy() call site, not this lock alone.
 # ---------------------------------------------------------------------------
 
 _launch_locks: dict = {}

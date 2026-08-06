@@ -100,6 +100,40 @@ class TestPreflightRoute:
         assert entry["source"]["size_bytes"] == 12_708_281_504
         assert entry["dest_dir"] == str(Path(str(tmp_path / "external-comfy")) / "models" / "unet")
 
+    def test_dest_dir_resolves_via_plugin_only_workdir(self, scoped_app, tmp_path):
+        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR: media_preflight
+        already has `kind` in scope and now passes it through to
+        comfy_models_dest_dir(), so a workdir set ONLY per-plugin (the shape
+        the modern Settings UI actually produces - no global comfy_workdir at
+        all) resolves correctly here too, not just at the download route."""
+        import localm.config as _cfg
+        cfg = _cfg.load_config()
+        cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
+        _cfg.save_config(cfg)
+
+        fake_info = {
+            "UnetLoaderGGUF": {
+                "input": {"required": {"unet_name": [["other.gguf"], {}]}}
+            }
+        }
+        fake_wf = tmp_path / "wf.json"
+        fake_wf.write_text(json.dumps({
+            "1": {"class_type": "UnetLoaderGGUF",
+                  "inputs": {"unet_name": "flux1-dev-Q8_0.gguf"}}
+        }))
+
+        from localm.media import comfy_client as cc
+        with patch.object(cc, "comfy_object_info", return_value=fake_info), \
+             patch("localm.image_gen.comfy.workflow_path", return_value=fake_wf):
+            with TestClient(scoped_app) as c:
+                r = c.post("/api/media/image/preflight", json={})
+
+        assert r.status_code == 200
+        missing = r.json()["missing"]
+        assert len(missing) == 1
+        assert missing[0]["dest_dir"] == str(
+            Path(str(tmp_path / "per-plugin-comfy")) / "models" / "unet")
+
     @pytest.mark.parametrize("bad_name", [
         "../secrets.safetensors", "..\\secrets.safetensors",
         "sub/dir.safetensors", "sub\\dir.safetensors",
@@ -192,6 +226,55 @@ class TestPullComfySourceRoute:
                        json={"filename": "ae.safetensors"})
         assert r.status_code == 200
         assert "job_id" in r.json()
+
+    def test_curated_filename_with_plugin_only_workdir_and_plugin_hint_starts_a_job(
+            self, scoped_app, tmp_path):
+        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR, end to end through
+        the real route + request model: a workdir set ONLY via the per-plugin
+        comfy.workdir field (no global comfy_workdir at all - the shape the
+        modern Settings UI produces) resolves correctly when the request
+        names which plugin is asking, exactly what the real browser flow now
+        sends (helpers.js's checkModelsBeforeGenerate -> _offerModelDownload).
+        This is the maintainer's own reported "can't find working dir" error,
+        reproduced and closed at the route level."""
+        import localm.config as _cfg
+        cfg = _cfg.load_config()
+        cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
+        _cfg.save_config(cfg)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source",
+                       json={"filename": "ae.safetensors", "plugin": "image"})
+        assert r.status_code == 200, r.text
+        assert "job_id" in r.json()
+
+    def test_curated_filename_with_plugin_only_workdir_and_no_plugin_hint_is_400(
+            self, scoped_app, tmp_path):
+        """Without a plugin hint (an older/direct API caller), resolution
+        still falls back to the legacy global key only - documented,
+        unchanged behavior; the real browser flow always sends `plugin` now,
+        so this is not a regression this fix needs to close."""
+        import localm.config as _cfg
+        cfg = _cfg.load_config()
+        cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
+        _cfg.save_config(cfg)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source",
+                       json={"filename": "ae.safetensors"})
+        assert r.status_code == 400
+
+    def test_unrecognized_plugin_value_falls_back_gracefully(self, scoped_app, tmp_path):
+        """req.plugin is a SELECTOR into trusted server config, validated
+        against MEDIA_PLUGINS (web.py's own contract comment) - an
+        unrecognized value must not error, just fall back to no plugin
+        context, same as omitting it entirely."""
+        import localm.config as _cfg
+        cfg = _cfg.load_config()
+        cfg["comfy_workdir"] = str(tmp_path / "external-comfy")
+        _cfg.save_config(cfg)
+        with TestClient(scoped_app) as c:
+            r = c.post("/api/models/pull-comfy-source",
+                       json={"filename": "ae.safetensors", "plugin": "not-a-real-plugin"})
+        assert r.status_code == 200, r.text
 
 
 class TestComfyRoutesAreScoped:

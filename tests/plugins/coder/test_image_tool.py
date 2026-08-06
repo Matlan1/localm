@@ -103,6 +103,24 @@ class TestFluxImageTool(unittest.TestCase):
         self.assertIs(kwargs.get("delete_outputs"), True)
 
     @patch("localm.image_gen.comfy.generate_image")
+    def test_uses_default_api_url_not_a_hardcoded_default(self, mock_gen):
+        """This tool used to hardcode
+        os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188"), bypassing
+        default_api_url()'s localm-managed-instance routing entirely - so the
+        coder agent's image tool never routed to a managed ComfyUI, managed-
+        active or not (same bug family as
+        NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Confirms it
+        now calls through default_api_url() by mocking IT to a distinct URL
+        and asserting that value - not the old hardcoded loopback default -
+        reaches generate_image()."""
+        mock_gen.return_value = (True, "Image saved to x")
+        with patch("localm.media.comfy_client.default_api_url",
+                   return_value="http://127.0.0.1:8189"):
+            tool_generate_image(self.cwd, "p", self.output_path)
+        _, kwargs = mock_gen.call_args
+        self.assertEqual(kwargs.get("api_url"), "http://127.0.0.1:8189")
+
+    @patch("localm.image_gen.comfy.generate_image")
     def test_default_mode_keeps_sidecar(self, mock_gen):
         mock_gen.return_value = (True, "Image saved to x")
         tool_generate_image(self.cwd, "p", self.output_path)
