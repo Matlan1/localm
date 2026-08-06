@@ -11,12 +11,22 @@ across llama.cpp versions, so this binding avoids version-specific struct layout
 
 * ``mtmd_context_params`` is treated as an OVER-ALLOCATED opaque buffer. We call the
   exported ``mtmd_context_params_default()`` and pass it through UNMODIFIED except
-  byte 0 - ``use_gpu`` (the first field) - which we force to 0 so the clip encode
-  runs on CPU. On Win64 a struct that large is passed by hidden pointer, so an
-  over-sized buffer is safe regardless of the real field layout.
-* CPU clip is the universally-safe path: gfx1030 / RDNA2 hipBLAS fails a BF16 GEMM
-  (CUBLAS_STATUS_INTERNAL_ERROR) on a BF16 mmproj. The text model still runs on the
-  GPU; only the (one-off, per-image) projector encode is on CPU.
+  two leading fields whose offsets were MEASURED against the shipped runtime
+  (``use_gpu`` at byte 0, ``n_threads`` at byte 4 - the default params read
+  ``01 01 00 00 04 00 00 00``). On Win64 a struct that large is passed by hidden
+  pointer, so an over-sized buffer is safe regardless of the real field layout.
+* THE PROJECTOR RUNS ON THE GPU. It used to be forced onto the CPU unconditionally,
+  on this reasoning: "CPU clip is the universally-safe path: gfx1030 / RDNA2 hipBLAS
+  fails a BF16 GEMM (CUBLAS_STATUS_INTERNAL_ERROR) on a BF16 mmproj." That failure is
+  real, but it is specific to a BF16 projector, and the override was applied to every
+  user, every GPU and every mmproj - a safety net promoted into the design. Measured
+  cost of that on a 1600x928 screenshot (920 image tokens, Qwen3-VL-8B + an f16
+  mmproj): the encode ran for TEN MINUTES on 4 of 12 cores and very nearly hit the
+  900s first-token timeout, with the GPU idle throughout.
+  So: GPU first, and fall back to CPU only when the GPU path ACTUALLY fails, saying
+  so plainly in the log (AGENTS.md rule 5). ``n_threads`` is also set now - mtmd
+  defaults it to 4 regardless of the machine, which is what made the CPU path so
+  much worse than it had to be.
 * the image is decoded to raw RGB by the caller and passed to the clean-signature
   ``mtmd_bitmap_init(w, h, rgb)`` - NOT ``mtmd_helper_bitmap_init_from_buf``, whose
   return type drifted to a by-value wrapper in newer builds.
@@ -91,6 +101,21 @@ _input_text_class: Optional[type] = None
 class MtmdUnavailable(RuntimeError):
     """Raised when mtmd.dll or the mmproj cannot be loaded - the GGUF backend then
     stays text-only rather than crashing."""
+
+
+class MtmdGpuEncodeFailed(VisionInputError):
+    """A GPU projector encode failed at runtime. Distinct from a plain
+    :class:`VisionInputError` purely so the caller knows a CPU retry is worth one
+    attempt (it owns the KV cache, which the failed evaluation dirtied, so the
+    retry cannot happen inside ``eval_into``)."""
+
+
+def _encode_threads() -> int:
+    """Threads for the projector. mtmd defaults to a flat 4 regardless of the
+    machine; leave one core for the rest of the server rather than taking the box.
+    Falls back to mtmd's own default when the CPU count is unknown."""
+    n = os.cpu_count() or 4
+    return max(1, n - 1)
 
 
 def _load_lib() -> ctypes.CDLL:
@@ -224,13 +249,29 @@ class MtmdContext:
     # current upstream layout instead of raising AttributeError.
     _input_text_class: type = _MtmdInputTextV2
 
+    # Same reason as the class default above: __init__ always sets it, but an
+    # instance built without __init__ must not AttributeError. False is the
+    # conservative default - it means "do not suggest a CPU retry".
+    on_gpu: bool = False
+
     def __init__(self, mmproj_path: str, model_ptr: int) -> None:
         self._m = _load_lib()
-        params = self._m.mtmd_context_params_default()
-        # Force use_gpu (first field, byte 0) off -> CPU clip (see module docs).
-        ctypes.cast(ctypes.byref(params), ctypes.POINTER(ctypes.c_uint8))[0] = 0
-        self._ctx = self._m.mtmd_init_from_file(
-            mmproj_path.encode("utf-8"), model_ptr, params)
+        self._mmproj_path = mmproj_path
+        self._model_ptr = model_ptr
+        self.on_gpu = True
+        self._ctx = self._open(use_gpu=True)
+        if not self._ctx:
+            # A GPU-side refusal at INIT (the backend cannot take this projector at
+            # all) is exactly the case the old blanket CPU override existed for, so
+            # degrade here rather than losing vision - but say so, and only after
+            # the real path was actually tried.
+            from localm.debuglog import logger
+            logger.warning(
+                "mtmd: the vision projector could not be loaded onto the GPU; "
+                "falling back to CPU encoding, which is much slower on large "
+                "images. Set LOCALM_MTMD_CPU=1 to skip the GPU attempt entirely.")
+            self.on_gpu = False
+            self._ctx = self._open(use_gpu=False)
         if not self._ctx:
             raise MtmdUnavailable(
                 f"mtmd_init_from_file returned NULL for {mmproj_path} "
@@ -254,6 +295,51 @@ class MtmdContext:
             from localm.debuglog import logger
             logger.debug("mtmd input_text layout: %s", _input_text_class.__name__)
         self._input_text_class = _input_text_class
+
+    def _open(self, *, use_gpu: bool) -> Optional[int]:
+        """Create the native mtmd context, on GPU or CPU.
+
+        Only two fields of the opaque params buffer are touched, both at offsets
+        measured against the shipped runtime (see the module docstring):
+        ``use_gpu`` at byte 0 and ``n_threads`` at byte 4.
+
+        ``n_threads`` matters even on the GPU path (parts of preprocessing stay on
+        the host) and matters enormously on the CPU one: mtmd's own default is a
+        flat 4 regardless of the machine, so a 12-thread box was using a third of
+        itself. ``LOCALM_MTMD_CPU=1`` is an escape hatch for a build/GPU where the
+        GPU encode is broken in a way that only shows up mid-encode."""
+        if use_gpu and os.environ.get("LOCALM_MTMD_CPU"):
+            return None
+        params = self._m.mtmd_context_params_default()
+        buf = ctypes.cast(ctypes.byref(params), ctypes.POINTER(ctypes.c_uint8))
+        buf[0] = 1 if use_gpu else 0
+        ctypes.cast(ctypes.byref(params, 4),
+                    ctypes.POINTER(ctypes.c_int32))[0] = _encode_threads()
+        return self._m.mtmd_init_from_file(
+            self._mmproj_path.encode("utf-8"), self._model_ptr, params)
+
+    def retry_on_cpu(self) -> bool:
+        """Rebuild this context on the CPU after a GPU encode failed at RUNTIME.
+
+        The gfx1030 / RDNA2 hipBLAS BF16 GEMM failure the old blanket override was
+        written for does NOT show up at init - it surfaces mid-encode - so an
+        init-time fallback alone would not cover it. Returns False when already on
+        the CPU (so the caller reports the real error instead of looping)."""
+        if not self.on_gpu:
+            return False
+        from localm.debuglog import logger
+        logger.warning(
+            "mtmd: the GPU vision encode failed; rebuilding the projector on the "
+            "CPU and retrying. Image replies will be slower until the model is "
+            "reloaded.")
+        try:
+            self._m.mtmd_free(self._ctx)
+        except Exception:   # noqa: BLE001 - freeing a wedged context must not mask the retry
+            pass
+        self._ctx = None
+        self.on_gpu = False
+        self._ctx = self._open(use_gpu=False)
+        return bool(self._ctx)
 
     def eval_into(self, llama_ctx: int, prompt: str,
                   images: List[Tuple[int, int, bytes]], *,
@@ -302,7 +388,11 @@ class MtmdContext:
                     self._ctx, llama_ctx, chunks, 0, 0, n_batch, True,
                     ctypes.byref(new_n_past))
                 if rc2 != 0:
-                    raise VisionInputError(
+                    # On the GPU path this is the shape the documented gfx1030 /
+                    # RDNA2 hipBLAS BF16 failure takes, so tell the caller a CPU
+                    # retry is worth one attempt rather than failing the request.
+                    exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
+                    raise exc(
                         f"the vision projector could not evaluate this image "
                         f"(mtmd_helper_eval_chunks rc={rc2})")
                 pos = int(new_n_past.value)

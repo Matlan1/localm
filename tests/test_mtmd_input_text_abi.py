@@ -15,6 +15,7 @@ dev-notes/mtmd-input-text-abi-drift-2026-08-06.md.
 """
 
 import ctypes
+import os
 
 import pytest
 
@@ -178,6 +179,134 @@ def test_eval_into_raises_vision_input_error_on_a_nonzero_tokenize_rc():
         with pytest.raises(VisionInputError):
             ctx.eval_into(0x5000, "prompt <__media__>", [(4, 4, b"\0" * 48)],
                           add_special=True)
+    finally:
+        api.llama_n_ctx = orig
+
+
+# --------------------------------------------------------------------------- #
+#  The projector runs on the GPU, and degrades only on a real failure          #
+# --------------------------------------------------------------------------- #
+
+class _ParamsRecorder:
+    """Captures the params buffer mtmd_init_from_file is handed, so the two
+    offsets this module writes can be asserted as BYTES rather than trusted."""
+
+    def __init__(self, init_returns=0x7000):
+        self.seen = []
+        self._init_returns = init_returns
+
+    def mtmd_context_params_default(self):
+        return lmtmd._MtmdParams()
+
+    def mtmd_init_from_file(self, path, model, params):
+        raw = ctypes.string_at(ctypes.byref(params), ctypes.sizeof(params))
+        self.seen.append({"use_gpu": raw[0],
+                          "n_threads": int.from_bytes(raw[4:8], "little")})
+        return self._init_returns
+
+    def mtmd_free(self, ctx):
+        pass
+
+
+def _bare_ctx(m):
+    c = lmtmd.MtmdContext.__new__(lmtmd.MtmdContext)
+    c._m = m
+    c._mmproj_path = "x.gguf"
+    c._model_ptr = 1
+    return c
+
+
+def test_open_asks_for_the_gpu_and_a_real_thread_count():
+    """The regression this guards: the projector was pinned to the CPU for every
+    user on every GPU, and n_threads was left at mtmd's flat default of 4, so a
+    screenshot took ten minutes with the card idle."""
+    rec = _ParamsRecorder()
+    c = _bare_ctx(rec)
+    c._open(use_gpu=True)
+    assert rec.seen[-1]["use_gpu"] == 1
+    assert rec.seen[-1]["n_threads"] == lmtmd._encode_threads()
+    assert rec.seen[-1]["n_threads"] != 4 or (os.cpu_count() or 4) == 5
+
+
+def test_open_can_still_be_asked_for_cpu():
+    rec = _ParamsRecorder()
+    c = _bare_ctx(rec)
+    c._open(use_gpu=False)
+    assert rec.seen[-1]["use_gpu"] == 0
+
+
+def test_env_escape_hatch_skips_the_gpu_attempt(monkeypatch):
+    monkeypatch.setenv("LOCALM_MTMD_CPU", "1")
+    rec = _ParamsRecorder()
+    c = _bare_ctx(rec)
+    assert c._open(use_gpu=True) is None
+    assert rec.seen == [], "the GPU attempt must not reach mtmd_init_from_file"
+
+
+def test_encode_threads_leaves_a_core_and_never_returns_zero():
+    n = lmtmd._encode_threads()
+    assert n >= 1
+    assert n <= (os.cpu_count() or 4)
+
+
+def test_retry_on_cpu_reopens_once_and_refuses_to_loop():
+    rec = _ParamsRecorder()
+    c = _bare_ctx(rec)
+    c.on_gpu = True
+    c._ctx = 0x7000
+    assert c.retry_on_cpu() is True
+    assert c.on_gpu is False
+    assert rec.seen[-1]["use_gpu"] == 0
+    # Already on the CPU: a second call must decline, or a failing encode would
+    # rebuild forever instead of reporting.
+    assert c.retry_on_cpu() is False
+
+
+def test_a_gpu_encode_failure_is_retryable_but_a_cpu_one_is_not():
+    """The type carries the retry decision, so the caller (which owns the KV the
+    failed evaluation dirtied) can reset and try once on the CPU."""
+    assert issubclass(lmtmd.MtmdGpuEncodeFailed, VisionInputError)
+
+    import localm.inference.backends.llamacpp._api as api
+
+    class _M:
+        def mtmd_bitmap_init(self, w, h, rgb):
+            return 0x3000
+
+        def mtmd_bitmap_free(self, b):
+            pass
+
+        def mtmd_input_chunks_init(self):
+            return 0x4000
+
+        def mtmd_input_chunks_free(self, c):
+            pass
+
+        def mtmd_tokenize(self, *a):
+            return 0
+
+        def mtmd_helper_eval_chunks(self, *a):
+            return 5                      # a native eval failure
+
+    orig = api.llama_n_ctx
+    api.llama_n_ctx = lambda _c: 4096
+    try:
+        for on_gpu, expected in ((True, lmtmd.MtmdGpuEncodeFailed),
+                                 (False, VisionInputError)):
+            c = _bare_ctx(_M())
+            c._ctx = 0x2000
+            c._input_text_class = lmtmd._MtmdInputTextV2
+            c.on_gpu = on_gpu
+            with pytest.raises(expected):
+                c.eval_into(0x5000, "p <__media__>", [(4, 4, b"\0" * 48)],
+                            add_special=True)
+            if not on_gpu:
+                # and it must NOT be the retryable subclass
+                try:
+                    c.eval_into(0x5000, "p <__media__>", [(4, 4, b"\0" * 48)],
+                                add_special=True)
+                except Exception as e:
+                    assert not isinstance(e, lmtmd.MtmdGpuEncodeFailed)
     finally:
         api.llama_n_ctx = orig
 

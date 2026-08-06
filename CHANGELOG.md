@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Image understanding now runs on the GPU instead of the CPU.** The vision
+  projector was pinned to the CPU for every user, on every GPU, with every
+  projector, to work around a failure that only affects one AMD card paired with
+  a bf16 projector. On top of that it used a fixed 4 threads no matter how many
+  cores the machine has. A screenshot took about ten minutes with the graphics
+  card sitting idle, close enough to the timeout that it often failed outright.
+  It now uses the GPU, and only falls back to the CPU if the GPU attempt really
+  fails, saying so in the log. The same image now takes a couple of seconds. Set
+  `LOCALM_MTMD_CPU=1` to force the old CPU behaviour.
 - **Asking a GGUF vision model about an image crashed the model process.** The
   reply was "Native inference fault (worker exit 1). The model has been
   unloaded", and the model had to reload from scratch on the next message. A

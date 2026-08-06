@@ -1397,8 +1397,23 @@ class LlamaCpp:
                     # Clear any prior turn's KV so the mtmd prefill from position 0 is
                     # valid on a reused context, then evaluate the image+text prompt.
                     self._reset_kv_for_image()
-                    pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                               add_special=add_special)
+                    from .mtmd import MtmdGpuEncodeFailed
+                    try:
+                        pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                                   add_special=add_special)
+                    except MtmdGpuEncodeFailed:
+                        # The projector runs on the GPU now; a GPU encode that fails
+                        # mid-flight (the documented gfx1030 / RDNA2 hipBLAS BF16
+                        # case) is worth exactly one CPU retry before the request
+                        # fails. The KV must be reset again first: the failed
+                        # evaluation already wrote into it. Rebuilding is latched in
+                        # the MtmdContext, so this costs one retry per model load,
+                        # not one per image.
+                        if not self._mtmd.retry_on_cpu():
+                            raise
+                        self._reset_kv_for_image()
+                        pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                                   add_special=add_special)
 
             sampler = _build_sampler(
                 vocab=self._tokenizer._vocab,
