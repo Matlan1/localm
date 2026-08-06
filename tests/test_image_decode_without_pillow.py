@@ -121,3 +121,39 @@ def test_pillow_is_a_core_dependency_not_an_extra():
         "pillow is declared in BOTH core and the gpu extra; drop the duplicate so "
         "there is one place that decides the version"
     )
+
+
+def test_cli_reports_the_missing_library_not_vision_guidance(monkeypatch, capsys):
+    """The CLI's `except UnsupportedInputError` arm DISCARDS the exception and
+    prints vision-capability guidance in its place ("pick or download a vision
+    model"). That is correct for its own case and wrong for this one: the model
+    is vision-capable and the image is fine.
+
+    A new subclass silently inherits into every existing handler of its parent,
+    so this asserts the CLI distinguishes them rather than collapsing both into
+    one message. Ordering is the whole fix, and ordering is invisible in a diff.
+    """
+    from localm.cli import chat as chat_mod
+
+    class _Engine:
+        def chat_stream(self, *a, **k):
+            raise ImageDecodeUnavailable(
+                "Cannot decode the attached image: the Pillow imaging library is "
+                "not installed in this localm environment. Install it into the "
+                "same environment (uv pip install pillow) and try again."
+            )
+
+    # Fail loudly if the guidance path is reached at all, rather than inferring
+    # it from absent output: an assertion on missing text passes when the whole
+    # call silently no-ops.
+    def _boom(*a, **k):
+        raise AssertionError("vision_input_guidance must not run for this error")
+
+    import localm.model_manager as mm
+    monkeypatch.setattr(mm, "vision_input_guidance", _boom, raising=False)
+
+    out = chat_mod._stream_once(_Engine(), [{"role": "user", "content": "hi"}])
+    text = capsys.readouterr().out
+    assert out == ""
+    assert "Pillow" in text, text
+    assert "vision model" not in text.lower(), text
