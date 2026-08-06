@@ -424,6 +424,28 @@ _CANCEL_DRAIN_TIMEOUT = 5.0
 _SIMPLE_CMD_TIMEOUT = 30.0
 
 
+class _RunnerTornDown(Exception):
+    """Internal: ``shutdown()`` released the child and its queues underneath an
+    in-flight command on another thread.
+
+    NOT a native fault and NOT a crash. ``shutdown()`` deliberately takes no lock
+    (so teardown works while a command holds ``_q_lock``), and it CLOSES the three
+    queues BEFORE it nulls them, so a command polling the response queue can land
+    on either side of that window:
+
+    * a closed queue - measured, ``multiprocessing.Queue.get()`` after ``close()``
+      raises ``ValueError``, not ``Empty``, so it slips straight past the
+      ``except _queue.Empty`` handler;
+    * ``_proc``/``_resp_q`` already None - an ``AttributeError`` on the next
+      attribute access.
+
+    Both used to escape raw and be reported by GgufBackend.load() as "Native llama
+    runtime failed to load: 'NoneType' object has no attribute 'is_alive'.
+    Provision or repair it with localm setup-llama" - telling the user to repair a
+    perfectly healthy runtime for what is really "you unloaded the model while it
+    was loading"."""
+
+
 class ModelRunner:
     """Parent-side handle to one isolated GGUF worker process. One instance
     per loaded ``GgufBackend`` - never a module-level singleton."""
@@ -451,6 +473,36 @@ class ModelRunner:
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
+
+    def _exitcode(self):
+        """The child's exit code, or None once it has been released.
+
+        Reads ``_proc`` ONCE into a local. Every caller of this used to be
+        ``self._proc.exitcode`` inside a branch entered because ``is_alive()``
+        was False - and ``is_alive()`` is False both when the child DIED and when
+        ``shutdown()`` set ``_proc`` to None, so the branch that reports the death
+        could itself AttributeError on the second case."""
+        proc = self._proc
+        return None if proc is None else proc.exitcode
+
+    def _poll(self, timeout: float):
+        """``resp_q.get()`` that turns a concurrent teardown into
+        :class:`_RunnerTornDown`.
+
+        ``_queue.Empty`` still propagates untouched - it is the normal
+        keep-waiting signal every caller's loop is built around."""
+        q = self._resp_q
+        if q is None:
+            raise _RunnerTornDown
+        try:
+            return q.get(timeout=timeout)
+        except _queue.Empty:
+            raise
+        except (ValueError, OSError):
+            # Measured: a closed multiprocessing.Queue raises ValueError from
+            # get(); a closed underlying handle raises OSError. Neither is a
+            # native fault - they mean shutdown() ran under us.
+            raise _RunnerTornDown from None
 
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
@@ -493,10 +545,20 @@ class ModelRunner:
                 self._ctrl_q.put(("cancel_load",))
                 cancel_sent = True
             try:
-                result = self._resp_q.get(timeout=_LOAD_POLL_INTERVAL)
+                result = self._poll(_LOAD_POLL_INTERVAL)
+            except _RunnerTornDown:
+                # unload()/eviction released this runner mid-load. A deliberate
+                # abort, so report it the same way a superseded load is reported
+                # (GgufBackend.load re-raises ModelLoadCancelled untouched) rather
+                # than as a runtime that needs repairing.
+                raise ModelLoadCancelled(
+                    "the model was unloaded while it was still loading")
             except _queue.Empty:
+                if self._proc is None:
+                    raise ModelLoadCancelled(
+                        "the model was unloaded while it was still loading")
                 if not self._proc.is_alive():
-                    code = self._proc.exitcode
+                    code = self._exitcode()
                     raise RuntimeError(
                         f"The native model-loading process crashed (exit code "
                         f"{code}) while loading. The server stayed up; see the "
@@ -580,12 +642,24 @@ class ModelRunner:
                     result = None
                     while result is None:
                         try:
-                            result = self._resp_q.get(timeout=_LOAD_POLL_INTERVAL)
+                            result = self._poll(_LOAD_POLL_INTERVAL)
+                        except _RunnerTornDown:
+                            raise RuntimeError(
+                                "The model was unloaded while this reply was "
+                                "being generated. It will reload on the next "
+                                "request."
+                            )
                         except _queue.Empty:
                             if not self.is_alive():
+                                if self._proc is None:
+                                    raise RuntimeError(
+                                        "The model was unloaded while this reply "
+                                        "was being generated. It will reload on "
+                                        "the next request."
+                                    )
                                 raise RuntimeError(
                                     f"Native inference fault (worker exit "
-                                    f"{self._proc.exitcode}). The model has been "
+                                    f"{self._exitcode()}). The model has been "
                                     "unloaded and will reload on the next request. "
                                     "See the debug log for the native stack trace."
                                 )
@@ -646,7 +720,9 @@ class ModelRunner:
         deadline = time.monotonic() + _CANCEL_DRAIN_TIMEOUT
         while time.monotonic() < deadline:
             try:
-                result = self._resp_q.get(timeout=0.5)
+                result = self._poll(0.5)
+            except _RunnerTornDown:
+                return   # shutdown() got there first - nothing left to drain
             except _queue.Empty:
                 if not self.is_alive():
                     return   # died on its own - nothing left to drain
@@ -688,11 +764,17 @@ class ModelRunner:
             while result is None:
                 wait = max(0.01, min(0.5, deadline - time.monotonic()))
                 try:
-                    result = self._resp_q.get(timeout=wait)
+                    result = self._poll(wait)
+                except _RunnerTornDown:
+                    raise RuntimeError(
+                        f"The model was unloaded while handling '{name}'.")
                 except _queue.Empty:
                     if not self.is_alive():
+                        if self._proc is None:
+                            raise RuntimeError(
+                                f"The model was unloaded while handling '{name}'.")
                         raise RuntimeError(
-                            f"The model process crashed (exit code {self._proc.exitcode}) "
+                            f"The model process crashed (exit code {self._exitcode()}) "
                             f"while handling '{name}'.")
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)

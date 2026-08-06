@@ -1,0 +1,196 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""shutdown() racing an in-flight command must not look like a broken runtime.
+
+``ModelRunner.shutdown()`` deliberately takes no lock (so teardown works while a
+command holds ``_q_lock``) and CLOSES the three queues BEFORE it nulls them. So a
+command polling the response queue on another thread - a background preload, a
+live stream, a token count - can land on either side of that window:
+
+* closed queue: measured, ``multiprocessing.Queue.get()`` after ``close()`` raises
+  ``ValueError``, NOT ``Empty``, so it slipped straight past ``except _queue.Empty``;
+* ``_proc`` already None: ``AttributeError: 'NoneType' object has no attribute
+  'is_alive'``.
+
+Reported from a real session (a background preload racing a VRAM eviction), where
+it surfaced as "Native llama runtime failed to load: 'NoneType' object has no
+attribute 'is_alive'. Provision or repair it with localm setup-llama" - telling
+the user to repair a healthy install.
+"""
+
+import multiprocessing as mp
+import queue as _queue
+
+import pytest
+
+from localm.inference.backends.base import ModelLoadCancelled
+from localm.inference.backends.llamacpp import _runner as R
+
+
+class _FakeProc:
+    exitcode = None
+
+    def __init__(self, alive=True):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
+class _AlwaysEmpty:
+    """A response queue that never yields, so the loop always takes the Empty
+    branch - which is where the teardown check has to live."""
+
+    def __init__(self, on_get=None):
+        self._on_get = on_get
+
+    def get(self, timeout=None):
+        if self._on_get is not None:
+            self._on_get()
+        raise _queue.Empty
+
+    def put(self, *a, **k):
+        pass
+
+
+def _runner_with(resp_q, proc=None):
+    r = R.ModelRunner()
+    r._resp_q = resp_q
+    r._req_q = _AlwaysEmpty()
+    r._ctrl_q = _AlwaysEmpty()
+    r._proc = proc if proc is not None else _FakeProc()
+    return r
+
+
+# --------------------------------------------------------------------------- #
+#  _poll: the single place the two teardown shapes are normalised              #
+# --------------------------------------------------------------------------- #
+
+def test_poll_lets_empty_through_untouched():
+    """Empty is the normal keep-waiting signal every loop is built around; if
+    _poll swallowed it, a load would spin instead of honouring its deadline."""
+    r = _runner_with(_AlwaysEmpty())
+    with pytest.raises(_queue.Empty):
+        r._poll(0.01)
+
+
+def test_poll_reports_a_nulled_queue_as_torn_down():
+    r = _runner_with(None)
+    with pytest.raises(R._RunnerTornDown):
+        r._poll(0.01)
+
+
+def test_poll_reports_a_really_closed_queue_as_torn_down():
+    """Against a REAL multiprocessing.Queue, not a stub asserting the behaviour
+    we assumed: the ValueError-not-Empty detail is the whole reason this bug
+    escaped the existing handler."""
+    q = mp.get_context("spawn").Queue()
+    q.close()
+    q.cancel_join_thread()
+    r = _runner_with(q)
+    with pytest.raises(R._RunnerTornDown):
+        r._poll(0.01)
+
+
+def test_exitcode_is_none_rather_than_raising_once_the_proc_is_released():
+    r = _runner_with(_AlwaysEmpty(), proc=_FakeProc())
+    r._proc = None
+    assert r._exitcode() is None
+
+
+# --------------------------------------------------------------------------- #
+#  spawn_and_load - the reported crash                                         #
+# --------------------------------------------------------------------------- #
+
+def _load_runner(resp_q, on_get=None, monkeypatch=None):
+    r = R.ModelRunner()
+
+    def _fake_spawn():
+        r._req_q = _AlwaysEmpty()
+        r._ctrl_q = _AlwaysEmpty()
+        r._resp_q = resp_q if resp_q is not None else _AlwaysEmpty(on_get)
+        r._proc = _FakeProc()
+
+    r._spawn = _fake_spawn
+    return r
+
+
+def test_load_racing_a_shutdown_reports_cancelled_not_a_broken_runtime():
+    """The exact reported failure: _proc goes None between the get() and the
+    liveness check. Pre-fix this raised AttributeError, which GgufBackend.load
+    turned into "Native llama runtime failed to load ... repair it with localm
+    setup-llama"."""
+    r = None
+
+    def _null_the_proc():
+        r._proc = None            # shutdown() landing mid-poll
+
+    r = _load_runner(None, on_get=_null_the_proc)
+    with pytest.raises(ModelLoadCancelled):
+        r.spawn_and_load({}, timeout=1.0)
+
+
+def test_load_racing_a_queue_close_reports_cancelled_not_a_broken_runtime():
+    """The other side of the same window: shutdown() closes the queues BEFORE it
+    nulls them, so this ordering is the one hit FIRST."""
+    q = mp.get_context("spawn").Queue()
+    q.close()
+    q.cancel_join_thread()
+    r = _load_runner(q)
+    with pytest.raises(ModelLoadCancelled):
+        r.spawn_and_load({}, timeout=1.0)
+
+
+def test_a_genuinely_dead_child_still_reports_a_crash():
+    """The fix must not swallow the case the branch exists for. A child that
+    really died - proc present, not alive - still gets the crash message with
+    its exit code, not a cancellation."""
+    r = R.ModelRunner()
+
+    def _fake_spawn():
+        r._req_q = _AlwaysEmpty()
+        r._ctrl_q = _AlwaysEmpty()
+        r._resp_q = _AlwaysEmpty()
+        dead = _FakeProc(alive=False)
+        dead.exitcode = 3
+        r._proc = dead
+
+    r._spawn = _fake_spawn
+    with pytest.raises(RuntimeError, match="exit code 3"):
+        r.spawn_and_load({}, timeout=1.0)
+
+
+# --------------------------------------------------------------------------- #
+#  the same window on the streaming and simple-command paths                   #
+# --------------------------------------------------------------------------- #
+
+def test_chat_stream_racing_a_shutdown_says_unloaded_not_attribute_error():
+    r = None
+
+    def _null_the_proc():
+        r._proc = None
+
+    r = _runner_with(_AlwaysEmpty(_null_the_proc))
+    with pytest.raises(RuntimeError, match="unloaded"):
+        list(r.chat_stream(messages=[{"role": "user", "content": "hi"}],
+                           first_chunk_timeout=1.0))
+
+
+def test_simple_request_racing_a_shutdown_says_unloaded_not_attribute_error():
+    r = None
+
+    def _null_the_proc():
+        r._proc = None
+
+    r = _runner_with(_AlwaysEmpty(_null_the_proc))
+    with pytest.raises(RuntimeError, match="unloaded"):
+        r.count_tokens("some text")
+
+
+def test_a_genuinely_dead_child_still_reports_a_native_fault_on_the_stream():
+    """Fires-control for the stream path's own regression: a real death must
+    still be reported as a native fault, with the exit code."""
+    r = _runner_with(_AlwaysEmpty(), proc=_FakeProc(alive=False))
+    r._proc.exitcode = 1
+    with pytest.raises(RuntimeError, match="Native inference fault"):
+        list(r.chat_stream(messages=[{"role": "user", "content": "hi"}],
+                           first_chunk_timeout=1.0))

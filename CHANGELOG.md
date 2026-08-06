@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Unloading a model while it was still loading no longer reports a broken
+  llama runtime.** If a model was being loaded in the background while
+  something else freed memory or swapped models, the load could fail with
+  "Native llama runtime failed to load ... Provision or repair it with localm
+  setup-llama" - pointing at a runtime that was perfectly fine. It now reports
+  that the load was superseded, which is what actually happened. The same race
+  during a reply or a token count now says the model was unloaded instead of
+  failing with an internal error.
 - **Image understanding now runs on the GPU instead of the CPU.** The vision
   projector was pinned to the CPU for every user, on every GPU, with every
   projector, to work around a failure that only affects one AMD card paired with
