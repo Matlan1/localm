@@ -6,9 +6,17 @@ from __future__ import annotations
 import base64
 import io
 import re
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
-import numpy as np
+if TYPE_CHECKING:
+    # numpy is referenced ONLY by decode_audio's return annotation, and this
+    # module has `from __future__ import annotations`, so that annotation is
+    # never evaluated at runtime. Importing numpy at module scope made the whole
+    # module unimportable without it - including decode_image_url, which needs
+    # only Pillow. numpy is not a core dependency (it arrives transitively via
+    # the voice extra), so on an install without it, attaching an image failed
+    # on `import numpy` in a function that never touches an array.
+    import numpy as np
 
 
 # A vision image can be several MB; cap the network fetch generously but

@@ -79,6 +79,30 @@ def test_the_error_is_recoverable_by_the_gguf_worker(monkeypatch):
     assert issubclass(ImageDecodeUnavailable, UnsupportedInputError)
 
 
+def test_decoding_an_image_does_not_require_numpy(monkeypatch):
+    """The image path needs Pillow and nothing else.
+
+    numpy is NOT a core dependency - it arrives transitively via the voice extra,
+    so a base install can easily lack it. `localm.inference.media` used to import
+    it at module scope for a single return annotation on decode_audio, under
+    `from __future__ import annotations`, so it was never evaluated at runtime and
+    bought nothing - while making the whole module, decode_image_url included,
+    unimportable without numpy.
+
+    Blocking the LEAF module and re-importing is what makes this real: asserting
+    on the source text would pass against any refactor that reintroduced the
+    import somewhere else.
+    """
+    import importlib
+
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    monkeypatch.delitem(sys.modules, "localm.inference.media", raising=False)
+
+    media = importlib.import_module("localm.inference.media")
+    img = media.decode_image_url(_PNG_DATA_URI)
+    assert img.size == (1, 1)
+
+
 def test_pillow_is_a_core_dependency_not_an_extra():
     """The packaging half. Guard 2 above turns a crash into a clear message, but
     a clear message is still a broken feature: the GGUF vision path needs Pillow
