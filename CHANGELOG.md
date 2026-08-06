@@ -12,6 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Asking a GGUF vision model about an image crashed the model process.** The
+  reply was "Native inference fault (worker exit 1). The model has been
+  unloaded", and the model had to reload from scratch on the next message. A
+  recent llama.cpp change added an explicit length field to the structure
+  localm passes the prompt in; without it the runtime read a garbage length and
+  cut every image prompt off after 257 bytes, losing the marker that says where
+  the picture goes. Anything ahead of the image pushed it past that limit, so
+  with the memory plugin recalling anything at all this happened on every image,
+  even in a brand new chat. localm now detects which layout the installed
+  runtime uses and passes the prompt whole. Separately, an image the projector
+  genuinely cannot process is now reported as a failed message, leaving the
+  model loaded, instead of being treated as a crash.
 - **A low-VRAM warning could blame the running server for holding its own
   VRAM.** When possible, the warning names a concrete instance holding the
   memory, but the lookup never excluded the process printing the warning

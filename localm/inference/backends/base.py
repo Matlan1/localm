@@ -17,6 +17,25 @@ class UnsupportedInputError(ValueError):
     """
 
 
+class VisionInputError(UnsupportedInputError):
+    """Raised when a vision-capable model could not process THIS image or prompt,
+    as opposed to not supporting images at all.
+
+    A subclass so every existing ``except UnsupportedInputError`` handler (the
+    CLI's vision guidance, the RAG plugin, http_engine) keeps working unchanged.
+
+    Why it must not be a bare ``RuntimeError``: the GGUF worker's dispatch loop
+    deliberately lets an escaping exception KILL the process, because the
+    contract there is that an escaping exception means a native fault which left
+    the model in an unknown state (see ``_runner.py``'s chat_stream branch). Every
+    failure ``mtmd.eval_into`` reports is the opposite of that - a native call
+    that RETURNED NORMALLY with a status code localm itself checked - so the model
+    is unharmed and the request should fail, not the worker. Before this existed,
+    one unprocessable image tore down the worker process, evicted the model from
+    VRAM and logged a CRITICAL crash with a full traceback.
+    """
+
+
 class InvalidGrammarError(ValueError):
     """Raised when a GBNF grammar string cannot be parsed by the native grammar
     engine, so the request can be rejected with a clean 400 up front.

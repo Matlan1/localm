@@ -10,6 +10,8 @@ import io
 
 import pytest
 
+from localm.inference.backends.base import VisionInputError
+
 # Pillow ships only with the [gpu] extra, which CI deliberately does not install
 # (the ci.yml Tests step uses [dev,rag] only). Skip cleanly when it is absent so
 # the suite still collects, matching the repo convention that gpu/gguf-tier tests
@@ -122,7 +124,15 @@ class TestMtmdEvalIntoSanity:
     (not a hardcoded 512) and must refuse an implausible new_n_past rather
     than silently handing a likely-corrupted KV position to the generation
     loop - both gaps found during a RELEASE.md verification pass while
-    diagnosing RAG image-description producing garbage/hallucinated output."""
+    diagnosing RAG image-description producing garbage/hallucinated output.
+
+    The refusal is a VisionInputError (a ValueError) rather than the RuntimeError
+    it used to be. That is deliberate and is the point of the change: a
+    RuntimeError escaping here KILLED the whole gguf worker process and evicted
+    the model, because _runner.py treats an escaping non-grammar exception as a
+    native fault. Every failure eval_into reports is a checked status code from a
+    native call that returned normally, so it must stay a per-request refusal.
+    See tests/test_mtmd_input_text_abi.py."""
 
     def test_default_n_batch_derives_from_real_context_size(self, monkeypatch):
         monkeypatch.setattr(
@@ -153,7 +163,7 @@ class TestMtmdEvalIntoSanity:
             "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
             lambda llama_ctx: 4096)
         ctx = _fake_mtmd_context(new_n_past=0)
-        with pytest.raises(RuntimeError, match="implausible position"):
+        with pytest.raises(VisionInputError, match="implausible position"):
             ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
 
     def test_a_new_n_past_beyond_the_context_size_is_refused(self, monkeypatch):
@@ -161,7 +171,7 @@ class TestMtmdEvalIntoSanity:
             "localm.inference.backends.llamacpp.mtmd.api.llama_n_ctx",
             lambda llama_ctx: 4096)
         ctx = _fake_mtmd_context(new_n_past=999_999)   # far beyond a 4096 context
-        with pytest.raises(RuntimeError, match="implausible position"):
+        with pytest.raises(VisionInputError, match="implausible position"):
             ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
 
     def test_a_plausible_new_n_past_is_accepted(self, monkeypatch):
