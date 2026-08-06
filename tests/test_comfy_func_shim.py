@@ -316,7 +316,11 @@ def _capture_spawn_env(monkeypatch, tmp_path, *, once=False, remember=False,
     if remember:
         cfg["comfy_func_shim"] = True
 
-    alive = iter([False, True])
+    # dead, dead-under-lock (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK's
+    # double-checked re-check under _launch_lock_for), then up after spawn -
+    # ensure_comfy() now makes THREE _comfy_alive() calls minimum before a
+    # launch is confirmed, not two.
+    alive = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg), \
          patch("subprocess.Popen", side_effect=fake_popen), \
          patch.object(comfy_client, "_comfy_alive",
