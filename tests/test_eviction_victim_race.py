@@ -105,6 +105,11 @@ def evicting(monkeypatch):
         d.clear()
     hs._active_model_name = None
     hs._default_model_name = None
+    # Also reset by unload_one_model/unload_all_models/_idle_unload_once
+    # whenever they clear _active_model_name (see _last_active_model_name's
+    # own docstring) - a name remembered by an earlier test must not leak
+    # into this one's expectation of a clean slate.
+    hs._last_active_model_name = None
     hs._engine = None
     hs._inference_sem = None
     hs._switch_desired = None
@@ -216,6 +221,14 @@ def _install(monkeypatch, engines, *, total_gb=10):
         d.clear()
     hs._active_model_name = None
     hs._default_model_name = None
+    # Also reset by unload_one_model/unload_all_models/_idle_unload_once
+    # whenever they clear _active_model_name (see _last_active_model_name's
+    # own docstring) - so a model unloaded by an EARLIER test in this file
+    # (e.g. test_idle_unload_victim_not_pinnable_during_native_free) cannot
+    # leak its remembered name into a LATER test that expects a genuinely
+    # unresolvable state, such as
+    # test_localm_request_resolving_to_no_model_is_503_not_500.
+    hs._last_active_model_name = None
     hs._engine = None
     hs._inference_sem = None
     hs._switch_desired = None

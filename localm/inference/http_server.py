@@ -1510,7 +1510,7 @@ async def unload_one_model(name: str) -> dict:
     no-op success (idempotent, matching unload_all_models()'s "nothing to do"
     case), not an error - callers that need to reject an unknown model name
     outright should check the registry themselves before calling this."""
-    global _active_model_name, _engine, _inference_sem
+    global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
                              wait_for_vram_release)
@@ -1549,6 +1549,12 @@ async def unload_one_model(name: str) -> dict:
 
     was_active = _active_model_name == name
     if was_active:
+        if _active_model_name:
+            # The Engine stays in _engines above for exactly this: a lazy
+            # reload on the next request. Keep its NAME alive too, same as
+            # unload_all_models, or nothing can resolve an unnamed request
+            # back to it (see _last_active_model_name / _resolve_unnamed_model_name).
+            _last_active_model_name = _active_model_name
         _active_model_name = None
         _engine = None
         _inference_sem = None
@@ -1660,7 +1666,7 @@ async def _idle_unload_once(ttl: int) -> bool:
     context mid-decode (that crashes the GPU driver), and the idle time is
     re-checked inside the lock so a request that arrived while we waited for the
     lock cancels the unload. The next inference reloads the model lazily."""
-    global _active_model_name, _engine, _inference_sem
+    global _active_model_name, _last_active_model_name, _engine, _inference_sem
     if ttl <= 0:
         return False
         
@@ -1729,6 +1735,15 @@ async def _idle_unload_once(ttl: int) -> bool:
             if _engine is engine:
                 _engine = None
             if _active_model_name == name:
+                if _active_model_name:
+                    # Same reasoning as unload_one_model/unload_all_models: capture
+                    # the name before it is possibly cleared below, so a still-idle
+                    # server with nothing left in _engines_lru can still resolve an
+                    # unnamed request (see _last_active_model_name /
+                    # _resolve_unnamed_model_name). Harmless when the LRU fallback
+                    # below keeps a real active model instead, since that value
+                    # wins over _last_active_model_name automatically.
+                    _last_active_model_name = _active_model_name
                 _active_model_name = _engines_lru[-1] if _engines_lru else None
                 _engine = _engines[_active_model_name] if _active_model_name else None
                 _inference_sem = _inference_sems.get(_active_model_name) if _active_model_name else None

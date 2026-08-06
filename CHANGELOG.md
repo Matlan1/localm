@@ -38,9 +38,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **An unnamed request after switching models could silently reload the
   wrong one.** The model an unnamed chat turn falls back to was only ever
   updated at server startup, not on a later model switch, so start model A,
-  switch to model B, then trigger an eviction (e.g. the embedder freeing VRAM)
-  and the next unnamed turn silently came back as A instead of B. It now
-  tracks the model actually last in use.
+  switch to model B, then trigger an eviction - the embedder freeing VRAM,
+  unloading B by itself, or B idling out - and the next unnamed turn
+  silently came back as A instead of B. It now tracks the model actually
+  last in use, whichever of those paths freed it.
 - **`GET /health` reported a plain 503 for a model that was about to reload
   itself.** After an eviction the server keeps the model on hand to reload on
   the next request, but health had no way to say so and just reported "no
