@@ -49,9 +49,23 @@ class ScanPreview(NamedTuple):
     method: str
 
 def get_comfy_workdir() -> Optional[str]:
+    # Managed routing is absolute: when localm's own ComfyUI is selected and
+    # installed, that IS the folder to scan, full stop - any per-plugin/global
+    # workdir left over from before (or set for an unrelated custom install)
+    # must not shadow it, matching the same "own means own" rule
+    # image/music/video backend.py now enforce for the launch path
+    # (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). This scan
+    # button has no single "current plugin" to resolve against (it is a
+    # generic action, not tied to one media type), so the non-managed
+    # fallback below still checks all three plugin blocks itself rather than
+    # calling resolve_comfy_target() with a specific plugin.
+    from localm.media.managed_comfy import resolve_comfy_target
+    target = resolve_comfy_target()
+    if target.managed:
+        return target.workdir
     cfg = load_config()
     # Check plugin-specific config overrides
-    for p in ("image", "video", "music"):
+    for p in ("image", "music", "video"):
         workdir = cfg.get("plugins", {}).get(p, {}).get("comfy", {}).get("workdir")
         if workdir:
             return workdir
@@ -59,11 +73,17 @@ def get_comfy_workdir() -> Optional[str]:
 
 def get_comfy_api_url() -> str:
     from localm.media.comfy_client import default_api_url
+    from localm.media.managed_comfy import managed_comfy_active
     cfg = load_config()
-    for p in ("image", "video", "music"):
-        api_url = cfg.get("plugins", {}).get(p, {}).get("comfy", {}).get("api_url")
-        if api_url:
-            return api_url
+    # Same "own means own" rule as get_comfy_workdir() above: a per-plugin/
+    # global api_url override is only consulted when NOT routed to the
+    # managed instance - default_api_url() alone already resolves the managed
+    # URL correctly when it is.
+    if not managed_comfy_active(cfg):
+        for p in ("image", "music", "video"):
+            api_url = cfg.get("plugins", {}).get(p, {}).get("comfy", {}).get("api_url")
+            if api_url:
+                return api_url
     return default_api_url()
 
 def _existing_registered_paths(reg: dict) -> set:

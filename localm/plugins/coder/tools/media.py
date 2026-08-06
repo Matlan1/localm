@@ -27,15 +27,23 @@ def tool_generate_image(
 
     In privacy mode (``_privacy=True``, injected by the agent) the prompt
     sidecar is suppressed so no prompt trace is written to disk."""
-    import os
     from localm.image_gen.comfy import generate_image
+    from localm.media.comfy_client import default_api_url
 
     try:
         out_p = _confine(cwd, output_path)
         input_p = _confine(cwd, input_image) if input_image else None
     except PermissionError as e:
         return ToolResult.error(str(e))
-    api_url = os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188")
+    # default_api_url() already checks FLUX_API_URL first (same precedence
+    # this used to hardcode), then localm-managed-instance routing, then the
+    # configured comfy_api_url, falling back to the loopback default last.
+    # The bare os.environ.get(...) this replaced bypassed all of that, so the
+    # coder agent's image tool never routed to a managed ComfyUI instance -
+    # same bug family as NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD,
+    # found independently while auditing every ensure_comfy()/default_api_url()
+    # caller for the same class of gap.
+    api_url = default_api_url()
     ok, message = generate_image(
         prompt, out_p,
         api_url=api_url,

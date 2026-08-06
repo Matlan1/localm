@@ -8,7 +8,80 @@ from unittest.mock import patch
 import pytest
 
 from localm import model_manager as mm
-from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
+from localm.model_manager.scan import (
+    get_comfy_api_url, get_comfy_workdir, preview_comfy_models, scan_comfy_models,
+)
+
+
+@pytest.fixture()
+def comfy_home(tmp_path, monkeypatch):
+    """Isolated LOCALM_HOME for get_comfy_workdir()/get_comfy_api_url(), which
+    call load_config() directly - config.py's HOME_DIR/CONFIG_FILE are frozen
+    at import time, so the autouse env-var isolation alone does not redirect
+    them; patch the module attrs explicitly, matching test_comfy_models_dest_dir.py."""
+    import localm.config as cfg
+    h = tmp_path / ".localm"
+    h.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(h))
+    monkeypatch.setattr(cfg, "HOME_DIR", h)
+    monkeypatch.setattr(cfg, "MODELS_DIR", h / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", h / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", h / "registry.json")
+    return h
+
+
+class TestGetComfyWorkdirManagedAwareness:
+    """get_comfy_workdir()/get_comfy_api_url() used to have ZERO managed-
+    instance awareness - they resolved a per-plugin/global override the same
+    way regardless of whether localm's own ComfyUI was the actual active
+    target, so the GUI's "Scan for ComfyUI models" button could silently scan
+    the wrong folder (same bug family as
+    NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD, found
+    independently while auditing every comfy_workdir/comfy_api_url resolver
+    for the same class of gap)."""
+
+    def _install_managed(self, home_dir):
+        from localm.media import managed_comfy as mc
+        from localm.media.managed_comfy_provision import MARKER_FILENAME
+        paths = mc.managed_comfy_paths()
+        paths.main_py.parent.mkdir(parents=True, exist_ok=True)
+        paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
+        paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        paths.venv_python.write_text("", encoding="utf-8")
+        (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
+        assert mc.is_managed_comfy_installed()
+        return paths
+
+    def test_workdir_falls_back_through_plugins_then_global_when_not_managed(self, comfy_home):
+        import localm.config as cfg
+        cfg.save_config({**cfg.load_config(),
+                         "comfy_workdir": r"D:\stale\global",
+                         "plugins": {"video": {"comfy": {"workdir": r"D:\deliberate\video-comfy"}}}})
+        assert get_comfy_workdir() == r"D:\deliberate\video-comfy"
+
+    def test_workdir_routes_to_managed_instance_ignoring_stale_plugin_value(self, comfy_home):
+        """The actual bug: managed is active AND installed, but a per-plugin
+        workdir left over from an unrelated custom install used to still win
+        because get_comfy_workdir() never checked managed routing at all."""
+        import localm.config as cfg
+        paths = self._install_managed(comfy_home)
+        cfg.save_config({**cfg.load_config(), "comfy_target": "own",
+                         "plugins": {"image": {"comfy": {"workdir": r"D:\some\other\comfy"}}}})
+        assert get_comfy_workdir() == str(paths.root)
+
+    def test_api_url_routes_to_managed_instance_ignoring_stale_plugin_value(self, comfy_home):
+        import localm.config as cfg
+        from localm.media import managed_comfy as mc
+        self._install_managed(comfy_home)
+        cfg.save_config({**cfg.load_config(), "comfy_target": "own",
+                         "plugins": {"image": {"comfy": {"api_url": "http://127.0.0.1:8188"}}}})
+        assert get_comfy_api_url() == mc.MANAGED_COMFY_API_URL
+
+    def test_api_url_honours_plugin_override_when_not_managed(self, comfy_home):
+        import localm.config as cfg
+        cfg.save_config({**cfg.load_config(),
+                         "plugins": {"music": {"comfy": {"api_url": "http://127.0.0.1:8199"}}}})
+        assert get_comfy_api_url() == "http://127.0.0.1:8199"
 
 
 @pytest.fixture()

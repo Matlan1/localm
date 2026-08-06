@@ -613,8 +613,11 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
  *  false only if the download itself failed after the user asked for it, so
  *  the caller can decide whether to keep going.  *log*, when given, gets the
  *  download's streamed progress lines appended (same log panel the page
- *  already uses for the generation job itself). */
-function _offerModelDownload(missingModel, log) {
+ *  already uses for the generation job itself).  *plugin* ("image"/"music"/
+ *  "video"), when given, tells the server which plugin's own ComfyUI folder
+ *  to download into (NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR) - without
+ *  it the server falls back to the legacy shared comfy_workdir only. */
+function _offerModelDownload(missingModel, log, plugin) {
   const { filename, source } = missingModel;
   return new Promise((resolve) => {
     let settled = false;
@@ -640,7 +643,7 @@ function _offerModelDownload(missingModel, log) {
         try {
           const r = await fetch("/api/models/pull-comfy-source", {
             method: "POST", headers: authHeaders(),
-            body: JSON.stringify({ filename }),
+            body: JSON.stringify({ filename, plugin: plugin || null }),
           });
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -712,7 +715,7 @@ export async function checkModelsBeforeGenerate(kind, log, overrides = {}) {
   }
   const missing = (data && data.missing) || [];
   for (const m of missing) {
-    if (m.source) await _offerModelDownload(m, log);
+    if (m.source) await _offerModelDownload(m, log, kind);
     else _reportUncuratedMiss(m, log);
   }
   return true;

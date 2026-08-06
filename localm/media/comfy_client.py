@@ -520,10 +520,21 @@ def _format_missing(missing: list) -> str:
         avail = f" Available {field}: {shown}." if options else ""
         lines.append(
             f"  - '{name}' (the {field} for the {cls} node) is not installed.{avail}")
+    # NEW-COMFY-PREFLIGHT-MESSAGE-WRONG-AFTER-GUI-SWAP: this used to assert "The
+    # chat model was NOT unloaded", which is only true when THIS function's own
+    # caller (generate_image()/generate_music()/generate_video()) is the one
+    # that would have done the unload. The GUI plugins (image/music/video
+    # plug.py) unload the chat model THEMSELVES, earlier, before ever calling
+    # in here - so that claim was false exactly there, and the contradiction
+    # showed up verbatim in a real transcript ("Chat model unloaded - freed 9.4
+    # GB" immediately followed by "The chat model was NOT unloaded"). Whether an
+    # unload already happened is not something this function can know from
+    # *missing* alone, so it no longer claims either way - the actual VRAM
+    # state is reported correctly by the caller's own reload-on-every-exit-path
+    # step regardless of what this message says.
     lines.append(
         "Install the file(s) into ComfyUI's models folder, or pick a workflow whose "
-        "models you have on the Workflow panel (Settings -> Media). The chat model was "
-        "NOT unloaded - fix this and run again.")
+        "models you have on the Workflow panel (Settings -> Media), then run again.")
     return "\n".join(lines)
 
 
@@ -1342,6 +1353,60 @@ def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+#  NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK: serialize ensure_comfy()'s whole
+#  check-then-launch sequence per api_url.
+#
+#  Without this, two callers for the SAME api_url that both find ComfyUI down
+#  (confirmed live: a generation submission racing the separate "Launch
+#  ComfyUI" button, both reaching ensure_comfy() within milliseconds of each
+#  other, neither with anything positive cached yet) each independently
+#  decide to spawn a process and launch a SECOND ComfyUI with no
+#  --port/--database-url override to keep them apart - they collide on the
+#  same default port and database lock, and BOTH launches fail, even though
+#  nothing else was ever running. The 5-second readiness cache
+#  (_CONFIRM_TTL_SECONDS above) only de-duplicates a CONFIRMED-ALIVE result;
+#  it has nothing to offer while both callers are independently still mid-
+#  launch. This lock closes that: only one caller per api_url ever reaches
+#  the spawn step at a time: a second caller blocks until the first's whole
+#  attempt resolves (success or timeout), then re-checks aliveness under the
+#  lock before ever considering a launch of its own.
+#
+#  KNOWN NARROW TRADE-OFF, not fixed here: a caller reached via
+#  run_in_threadpool_bounded (imagine_comfy_launch, the generate submission
+#  path) budgets ~comfy_launch_wait_seconds()+30s for its OWN attempt - not
+#  for "queue behind someone else's attempt, THEN make my own". If caller A's
+#  launch is slow and eventually fails (using its full wait_seconds), a
+#  concurrent caller B can spend nearly all of ITS budget just waiting on
+#  this lock, then get ThreadCallTimeout'd almost immediately after finally
+#  acquiring it - a misleading "timed out" HTTP response even though (per
+#  _threadpool_timeout.py's abandon_on_cancel=True contract) B's own launch
+#  attempt keeps running to completion on the abandoned worker thread and may
+#  still succeed moments later. Narrow (needs a genuinely slow-then-failing
+#  first attempt, not just a fast failure - a fast failure releases this lock
+#  quickly) and no worse than the pre-lock behaviour it replaces (both
+#  callers colliding and BOTH failing); flagged rather than fixed since
+#  closing it needs the outer timeout budget to account for lock wait time,
+#  a change to every ensure_comfy() call site, not this lock alone.
+# ---------------------------------------------------------------------------
+
+_launch_locks: dict = {}
+_launch_locks_guard = _threading.Lock()
+
+
+def _launch_lock_for(api_url: str) -> "_threading.Lock":
+    """The per-api_url lock serializing ensure_comfy()'s launch decision.
+    Created on first use; never removed (one lock per distinct api_url this
+    process ever launches for - unbounded only in the sense that the set of
+    distinct api_urls a single process targets is itself small and stable)."""
+    with _launch_locks_guard:
+        lock = _launch_locks.get(api_url)
+        if lock is None:
+            lock = _threading.Lock()
+            _launch_locks[api_url] = lock
+        return lock
+
+
+# ---------------------------------------------------------------------------
 #  NEW-COMFY-SILENT-PARTIAL-APPLY: surface ComfyUI's own console warnings
 # ---------------------------------------------------------------------------
 #
@@ -1624,13 +1689,13 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
 
     Returns (ok, message); the message explains what to configure when
     nothing could be launched.
-    """
-    import shlex
-    import subprocess
-    import sys as _sys
-    import time as _t
-    from localm.config import load_config
 
+    The whole decide-then-launch sequence is serialized per api_url via
+    _launch_lock_for() (NEW-COMFY-LAUNCH-NO-SERIALIZATION-LOCK) - see that
+    lock's own module-level comment for why. The cheap aliveness checks below
+    run BEFORE acquiring it, so a caller that finds ComfyUI already up never
+    waits on anything.
+    """
     def _say(text: str) -> None:
         if on_progress:
             try:
@@ -1645,6 +1710,32 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         mark_comfy_alive(api_url)
         return True, "ComfyUI is running."
     mark_comfy_dead(api_url)
+
+    with _launch_lock_for(api_url):
+        # Re-check under the lock: another caller may have finished an entire
+        # launch (or be mid-launch and about to succeed) while we were
+        # waiting for it above - the classic double-checked pattern. Without
+        # this a caller that waited through someone else's whole launch would
+        # still go on to attempt a redundant one of its own.
+        if is_comfy_confirmed(api_url) or _comfy_alive(api_url):
+            mark_comfy_alive(api_url)
+            return True, "ComfyUI is running."
+        return _launch_and_wait(
+            api_url, launch_cmd, workdir, wait_seconds, _say)
+
+
+def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
+                     workdir: Optional[str], wait_seconds: Optional[int],
+                     _say) -> tuple[bool, str]:
+    """The actual decide-config / spawn / poll-until-up body of ensure_comfy(),
+    split out so the lock in ensure_comfy() wraps it without needing to
+    re-indent it. Always called with _launch_lock_for(api_url) already held -
+    not meant to be called directly."""
+    import shlex
+    import subprocess
+    import sys as _sys
+    import time as _t
+    from localm.config import load_config
 
     cfg = load_config()
 
