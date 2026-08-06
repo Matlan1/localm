@@ -93,6 +93,10 @@ dependencies = [
     # dependency until #585 rewrote the server off it; the requirement outlived the
     # import by mistake and pulled in 13 packages nothing here uses, python-multipart
     # among them, which the GUI upload/share paths go out of their way to avoid.
+    # Image decoding for vision models. CORE, not an extra: the GGUF vision
+    # path needs it and needs no torch, while pillow used to ship only with the
+    # gpu extra - so a GGUF-only install crashed on any attached image.
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]
@@ -131,7 +135,6 @@ gpu = [
     # on psutil today, so this path has been working on a transitive dep by luck;
     # declare what we actually import so an accelerate change cannot break it.
     "psutil>=7.2.2",
-    "pillow>=12.3.0",
     "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.24.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",

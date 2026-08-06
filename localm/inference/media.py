@@ -26,7 +26,24 @@ def decode_image_url(url: str):
     baseline capability - any key can send an image_url - so this fetch must be
     policy-checked like every other model-triggered request.)
     """
-    from PIL import Image
+    try:
+        from PIL import Image
+    except ImportError as e:
+        # Pillow is a core dependency, so this is reachable only on a build where
+        # it failed to install or was removed. Report THAT, rather than letting an
+        # ImportError escape: on the GGUF path this call runs inside the worker
+        # process, whose dispatch loop treats any escaping exception as a native
+        # fault and kills the process - so a missing pure-Python library used to
+        # be reported as "Native inference fault (worker exit 1) ... see the debug
+        # log for the native stack trace" and evict the model. Every clause of
+        # that was false. ImageDecodeUnavailable is an UnsupportedInputError, so
+        # the worker reports it per-request and keeps serving (_runner.py).
+        from localm.inference.backends.base import ImageDecodeUnavailable
+        raise ImageDecodeUnavailable(
+            "Cannot decode the attached image: the Pillow imaging library is not "
+            "installed in this localm environment. Install it into the same "
+            "environment (uv pip install pillow) and try again."
+        ) from e
 
     if url.startswith("data:"):
         # data:image/jpeg;base64,<bytes>

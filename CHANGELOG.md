@@ -382,6 +382,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and pulling from HuggingFace by name is unaffected.
 
 ### Fixed
+- **Asking about an image on an install without the PyTorch stack no longer
+  fails as a "native inference fault".** Image understanding needs the Pillow
+  imaging library, which until now was installed only alongside PyTorch and
+  transformers. Setup skips that whole stack when it is not needed for chat, so
+  a GGUF-only install had no image decoder, and attaching a picture reported
+  "Native inference fault (worker exit 1). The model has been unloaded ... see
+  the debug log for the native stack trace" and dropped the model out of memory.
+  None of that was true: there was no native fault, there was no native stack
+  trace, and the model was fine. Pillow is now installed with localm itself, so
+  image understanding works on every install rather than only on one with a
+  graphics stack. If it is missing anyway, the message now names Pillow and the
+  model stays loaded.
 - **Unloading a model while it was still loading no longer reports a broken
   llama runtime.** If a model was being loaded in the background while
   something else freed memory or swapped models, the load could fail with

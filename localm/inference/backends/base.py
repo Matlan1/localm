@@ -36,6 +36,25 @@ class VisionInputError(UnsupportedInputError):
     """
 
 
+class ImageDecodeUnavailable(UnsupportedInputError):
+    """Raised when an image cannot be decoded because Pillow is not installed,
+    as opposed to the image or the model being at fault.
+
+    A sibling of :class:`VisionInputError` rather than the same class, because
+    the CAUSE is different and the user-facing fix is different: nothing is
+    wrong with the picture, the build simply has no image decoder. It shares the
+    :class:`UnsupportedInputError` parent for the recovery semantics documented
+    there - the GGUF worker reports it as a per-request error and keeps serving,
+    instead of treating an escaping exception as a native fault and tearing the
+    process down.
+
+    That distinction is the whole point: a missing pure-Python dependency used
+    to surface as "Native inference fault (worker exit 1) ... see the debug log
+    for the native stack trace", which is wrong in every part. There was no
+    native fault, no native stack trace, and the model was unharmed.
+    """
+
+
 class InvalidGrammarError(ValueError):
     """Raised when a GBNF grammar string cannot be parsed by the native grammar
     engine, so the request can be rejected with a clean 400 up front.
