@@ -95,8 +95,8 @@ localm run mymodel --gpu-layers 20 --prompt "hello"
 On **Windows** the installer recommends **`cuda`** for NVIDIA (peak performance,
 self-contained - see below). The universal alternative is
 `localm setup-llama --backend vulkan` (runs on the NVIDIA GPU through the normal
-driver, no CUDA toolkit); on **Linux** that Vulkan build is what the installer
-recommends for NVIDIA (the Linux CUDA build needs a system CUDA runtime present).
+driver, no CUDA toolkit); on **Linux**, Vulkan is still what the installer
+recommends by default.
 
 For peak performance pick `--backend cuda`. On **Windows** this is a guided,
 self-contained path: setup checks your driver, then fetches BOTH the CUDA
@@ -112,14 +112,23 @@ NVIDIA is found, uses Vulkan for now and tells you what to do; after updating a
 driver, re-run
 `localm setup-llama --backend cuda --force`.
 
-After provisioning, setup **load-tests** the library exactly as `localm run`
-will. If the CUDA build cannot load on your machine it automatically falls back
-to Vulkan, then CPU, so setup never leaves you with a broken runtime. (On Linux,
-`--backend cuda` uses the upstream CUDA build and expects the CUDA runtime
-present; the same load-test + fallback applies.)
+**On Linux**, `--backend cuda` is also self-contained, the same way: upstream
+llama.cpp does not publish a Linux CUDA binary itself, so setup fetches one
+built specifically for localm, plus the CUDA runtime libraries (cudart,
+cuBLAS, NCCL) as separate small downloads - again, no CUDA Toolkit install
+needed. This is newer than the Windows path and has not yet been confirmed
+across real NVIDIA Linux hardware, so Vulkan stays the default recommendation
+there for now; try `--backend cuda` explicitly if you want to test it, and
+report back what you find.
 
-> `--sha256 <hex>` pins the **CUDA build** archive only; both it and the cudart
-> runtime bundle come from the same upstream release.
+After provisioning, setup **load-tests** the library exactly as `localm run`
+will, on every platform. If the CUDA build cannot load on your machine it
+automatically falls back to Vulkan, then CPU, so setup never leaves you with a
+broken runtime.
+
+> `--sha256 <hex>` pins the **CUDA build** archive only; the cudart runtime
+> bundle (Windows) or the CUDA runtime libraries (Linux) are verified by their
+> own separately published checksums instead.
 
 ## Intel (Arc)
 
