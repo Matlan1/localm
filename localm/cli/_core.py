@@ -237,7 +237,7 @@ def _read_version_for_cli() -> str:
         from localm._version import read_version
         return read_version()
     except Exception:
-        return "0.1.4"
+        return "0.1.5rc1"
 
 
 

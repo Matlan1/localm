@@ -468,7 +468,7 @@ wheels = [
 
 [[package]]
 name = "localm"
-version = "0.1.4"
+version = "0.1.5rc1"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
