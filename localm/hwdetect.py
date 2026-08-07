@@ -177,8 +177,12 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
         llama.cpp release ships a self-contained cudart bundle, so it is out-of-the-box
         with no CUDA Toolkit, and setup-llama's driver preflight + load-test fall back
         to vulkan if the driver is too old - never strands a box on a runtime it cannot load)
-      * NVIDIA on Linux                        -> vulkan    (the Linux cuda build needs a
-        system CUDA toolkit we cannot self-provide; vulkan runs via the display driver)
+      * NVIDIA on Linux                        -> vulkan    (a self-contained Linux CUDA
+        path now EXISTS - setup-llama can fetch a self-built binary plus the CUDA runtime
+        libraries, no Toolkit needed, same as Windows - but it is newer and not yet
+        confirmed across real NVIDIA Linux hardware, so vulkan stays the DEFAULT
+        recommendation for now. `--backend cuda` is a working explicit choice; see
+        docs/gpu-setup.md. Flip this once real-hardware confirmation comes in.)
       * AMD on Windows, RX 6000 / unknown     -> amd-rocm  (self-contained gfx103X build)
       * AMD on Windows, clearly not RX 6000    -> vulkan    (gfx103X build won't fit)
       * any other GPU (Intel, Linux AMD, mixed)-> vulkan    (no vendor toolkit needed)
