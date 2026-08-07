@@ -138,12 +138,22 @@ jobs:
         # collides with localm's own version-release tags - see ADR-0010's
         # hosting decision. --clobber lets a re-dispatch for the same
         # llama_tag replace a previous (e.g. broken) upload rather than fail.
+        #
+        # --repo is REQUIRED here, explicitly: a real dispatched run failed
+        # with "fatal: not a git repository" because this job never checks
+        # out localm's own repo (only ggml-org/llama.cpp, into ./llama.cpp) -
+        # gh normally infers the target repo from the cwd's git remote, and
+        # there isn't one. ${{ github.repository }} (not a hardcoded slug)
+        # so this stays correct if the repo is ever renamed or forked.
         run: |
           gh release view "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
+            --repo "${{ github.repository }}" \
             || gh release create "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
+                 --repo "${{ github.repository }}" \
                  --title "llama.cpp CUDA (Linux) - ${{ github.event.inputs.llama_tag }}" \
                  --notes "Built by build-llama-cuda-linux.yml from ggml-org/llama.cpp@${{ github.event.inputs.llama_tag }}, CUDA ${{ github.event.inputs.cuda_version }}. See dev-notes/ADR-0010 (not published) for why this exists: upstream does not publish a bare Linux CUDA binary itself."
           gh release upload "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
+            --repo "${{ github.repository }}" \
             "${{ env.TARBALL }}" "${{ env.TARBALL }}.sha256" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
