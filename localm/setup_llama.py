@@ -1450,6 +1450,95 @@ def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "rel
     _fetch_and_place(url, target, sha)
 
 
+# NVIDIA publishes its own CUDA runtime libraries (cudart, cuBLAS, NCCL) as
+# plain PyPI wheels - the SAME channel localm's own HF/torch backend already
+# depends on for the identical libraries (recommended_torch_variant's cu126
+# index, hwdetect.py). This is lighter than extracting them from ggml-org's
+# CUDA Docker image: no registry auth token, no multi-layer flatten, no
+# multi-GB base image ever touched - see dev-notes/ADR-0010's prototype
+# findings for the measured comparison. NVIDIA renamed the CUDA-13-line
+# packages to be UNSUFFIXED (nvidia-cublas-cu13 etc. are now deprecated
+# stubs pointing at bare nvidia-cublas) - both lines are listed explicitly so
+# neither naming scheme is guessed at. nccl has NOT made that migration yet
+# (nvidia-nccl is a placeholder with no Linux wheel as of this writing), so
+# the cuda-13 line still pins the cu12 nccl package - confirmed live against
+# PyPI's JSON API this session, not assumed.
+_CUDA_RUNTIME_PYPI_PACKAGES = {
+    "cuda-12": ("nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12", "nvidia-nccl-cu12"),
+    "cuda-13": ("nvidia-cuda-runtime", "nvidia-cublas", "nvidia-nccl-cu12"),
+}
+
+
+def _pypi_wheel_url_and_sha(package: str) -> tuple:
+    """The (url, sha256) of *package*'s latest Linux x86_64 wheel from PyPI's
+    JSON API, or (None, None) if unavailable. Never raises (mirrors
+    _release_assets' contract: a best-effort lookup whose caller always has a
+    fallback path, so a network hiccup here must not crash setup)."""
+    api = f"https://pypi.org/pypi/{package}/json"
+    try:
+        req = urllib.request.Request(api, headers={"Accept": "application/json",
+                                                    "User-Agent": "localm-setup-llama"})
+        with verified_urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        version = data["info"]["version"]
+        for f in data["releases"].get(version, []):
+            name = str(f.get("filename", ""))
+            if name.endswith(".whl") and "x86_64" in name and "linux" in name.lower():
+                sha = (f.get("digests") or {}).get("sha256")
+                url = f.get("url")
+                if url:
+                    return url, sha
+    except Exception as e:
+        logger.debug("PyPI wheel lookup failed for %s (%s)", package, e)
+    return None, None
+
+
+def _fetch_pypi_runtime_lib(package: str, target: Path) -> int:
+    """Download *package*'s Linux wheel from PyPI, verify it, and copy every
+    ``.so*`` file it contains into *target* (flat - matches how the llama.cpp
+    runtime dir is already laid out). Returns the number of files copied.
+    Raises :class:`ArtifactError` on a download or validation failure, same
+    contract as :func:`_fetch_and_place`, so callers decide fatal-vs-fallback
+    identically for either artifact source.
+
+    NEVER reads from any OTHER environment already on the user's machine
+    (AGENTS.md rule 4: self-contained, no sibling folder on disk) - this
+    always fetches and places a PRIVATE copy into *target*, exactly like the
+    Windows cudart bundle is never "detected" on the user's system, only ever
+    fetched fresh. An earlier draft of this design considered scanning an
+    existing venv for an already-usable runtime; that was rejected for
+    exactly this reason before any code was written."""
+    url, sha = _pypi_wheel_url_and_sha(package)
+    if url is None:
+        raise ArtifactError(f"could not resolve a PyPI Linux wheel for {package!r}")
+    with tempfile.TemporaryDirectory() as tmp:
+        wheel = Path(tmp) / f"{package}.whl"
+        dl = _download(url, wheel)
+        _validate_archive(wheel, expected_sha256=sha, dl=dl)   # a wheel is a zip
+        ex = Path(tmp) / "x"
+        _extract_archive(wheel, ex)
+        n = 0
+        for f in sorted(ex.rglob("*.so*")):
+            if f.is_file() and not f.is_symlink():
+                shutil.copy2(f, target / f.name)
+                n += 1
+        return n
+
+
+def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
+    """Fetch every PyPI-hosted CUDA runtime library for *cuda_line* ('cuda-12'
+    or 'cuda-13') into *target*. Returns the total files copied. Raises
+    ArtifactError (from the first failing package) on any failure - a
+    partially-assembled CUDA runtime is worse than none, so this does not
+    swallow a single package's failure and continue with the rest."""
+    packages = _CUDA_RUNTIME_PYPI_PACKAGES.get(cuda_line, ())
+    total = 0
+    for pkg in packages:
+        console.print(f"[dim]Fetching CUDA runtime library:[/dim] {pkg}")
+        total += _fetch_pypi_runtime_lib(pkg, target)
+    return total
+
+
 def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
                        with_cudart: bool, cuda_line: str = _CUDA_LINE) -> None:
     """Resolve + fetch the prebuilt(s) for *chosen* into *target*. For CUDA with
