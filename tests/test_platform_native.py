@@ -5,6 +5,7 @@ These run on any host by monkeypatching sys.platform, so the Linux and macOS
 code paths are exercised from the Windows CI too.
 """
 
+import os
 import sys
 
 import pytest
@@ -120,3 +121,31 @@ def test_find_binary_dir_none_when_lib_absent(monkeypatch, tmp_path):
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     monkeypatch.setattr(config, "load_config", lambda: {"binary_dir": str(tmp_path)})
     assert config.find_binary_dir() is None
+
+
+def test_add_to_search_path_covers_pypi_fetched_cuda_runtime_libs(monkeypatch, tmp_path):
+    """Pins why Linux CUDA (dev-notes/ADR-0010) needed no NEW loader code:
+    _add_to_search_path adds the runtime binary DIRECTORY to LD_LIBRARY_PATH
+    unconditionally, for every backend - it has no per-file/per-backend logic
+    at all, so setup-llama's PyPI-fetched libcudart.so/libcublas.so/
+    libnccl.so (which land in that exact directory - see
+    test_linux_cuda_runtime_provisioning.py) are already covered by the SAME
+    mechanism ROCm and every other backend already relies on. This does not
+    prove the files are individually findable via dlopen (that needs a real
+    Linux+CUDA box) - it pins the one thing verifiable here: the directory
+    they were fetched into is unconditionally added to the search path,
+    matching this module's own documented design (see _loader.py's module
+    docstring)."""
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    for name in ("libllama.so", "libggml-cuda.so", "libcudart.so.12",
+                "libcublas.so.12", "libnccl.so.2"):
+        (runtime_dir / name).write_bytes(b"\x7fELF")
+
+    _loader._add_to_search_path(runtime_dir)
+
+    assert str(runtime_dir) in os.environ["LD_LIBRARY_PATH"].split(os.pathsep)
