@@ -1,0 +1,128 @@
+name: Build llama.cpp CUDA (Linux)
+
+on:
+  # DISPATCH-ONLY, deliberately, matching ci.yml's own standing directive on
+  # this repo: no push/pull_request trigger, ever, without asking the
+  # maintainer first (see ci.yml's header comment - the point there is about
+  # COST, not which trigger, and it applies here with equal force). A CUDA
+  # Toolkit install plus a full multi-architecture kernel compile is a real,
+  # multi-minute spend; it must only run when someone deliberately decides a
+  # new llama.cpp tag needs a rebuilt Linux CUDA artifact, never automatically.
+  #
+  # Upstream (ggml-org/llama.cpp) does not publish a bare Linux CUDA binary in
+  # its own GitHub Releases (confirmed live, both the latest and the pinned
+  # tag - see dev-notes/ADR-0010). It DOES build one inside its official CUDA
+  # Docker image (.devops/cuda.Dockerfile); this workflow reproduces that same
+  # build (same cmake flags, sourced from that Dockerfile) but publishes a
+  # plain tarball instead of a container, so setup-llama can fetch it the same
+  # way it fetches every other backend's prebuilt archive.
+  workflow_dispatch:
+    inputs:
+      llama_tag:
+        description: "llama.cpp tag to build (e.g. b9870)"
+        required: true
+        default: "b9870"
+      cuda_version:
+        description: "CUDA Toolkit version to build against"
+        required: true
+        default: "12.6.3"
+
+permissions:
+  contents: write   # to upload the built archive as a release asset on THIS repo
+
+jobs:
+  build:
+    # ubuntu-24.04 pinned explicitly (not ubuntu-latest, which moves under us
+    # without warning): matches ggml-org's own cuda.Dockerfile base
+    # (nvidia/cuda:...-ubuntu24.04), so the glibc floor this produces is the
+    # SAME one already measured for the Docker-image build in ADR-0010
+    # (GLIBC_2.38), not a different, unverified one.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out llama.cpp at the requested tag
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ github.event.inputs.llama_tag }}
+          path: llama.cpp
+
+      - name: Install the CUDA Toolkit (no GPU needed to compile)
+        uses: Jimver/cuda-toolkit@v0.2.24
+        id: cuda-toolkit
+        with:
+          cuda: ${{ github.event.inputs.cuda_version }}
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas-dev", "nvrtc-dev"]'
+
+      - name: Install build toolchain
+        # gcc-14/g++-14 matches ggml-org's own cuda.Dockerfile build stage
+        # (ENV CC=gcc-14 CXX=g++-14 CUDAHOSTCXX=g++-14) - kept the same
+        # compiler version upstream itself builds and tests against, rather
+        # than whatever ubuntu-24.04's default gcc happens to be.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14 cmake build-essential libssl-dev
+
+      - name: Configure
+        # Flags copied from ggml-org/llama.cpp's own .devops/cuda.Dockerfile
+        # build stage, verbatim, so this produces the SAME artifact shape
+        # their Docker image does (multi-.so, dynamically-loaded backends,
+        # every CPU dispatch variant bundled) - not a guessed configuration.
+        # CMAKE_CUDA_ARCHITECTURES is deliberately left UNSET, matching
+        # upstream's own default (their Dockerfile only sets it for a
+        # non-default CUDA_DOCKER_ARCH) - ggml's own CMakeLists.txt then picks
+        # its standard broad-compatibility architecture list, the same one
+        # every default Docker build gets.
+        working-directory: llama.cpp
+        env:
+          CC: gcc-14
+          CXX: g++-14
+          CUDAHOSTCXX: g++-14
+        run: |
+          cmake -B build \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CUDA=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        working-directory: llama.cpp
+        run: cmake --build build --config Release -j"$(nproc)"
+
+      - name: Package libraries only
+        # LIBRARIES ONLY, never the ~49 bundled CLI executables (llama-cli,
+        # llama-server, llama-bench, ...) - localm loads the runtime in-process
+        # via ctypes and never shells out to a bundled binary (see setup_llama.
+        # py's _is_wanted, which already enforces exactly this on every other
+        # backend). Shipping the executables here would be dead weight and, per
+        # that same function's docstring, one of them (ggml-rpc-server) carries
+        # its own unauthenticated-RCE advisory (CVE-2026-34159) - no reason to
+        # bundle a network daemon localm never runs.
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find llama.cpp/build -name "*.so*" -not -name "*rpc-server*" \
+            -exec cp -Pv {} out/ \;
+          ls -la out/
+          tag="${{ github.event.inputs.llama_tag }}"
+          tarball="llama-${tag}-bin-ubuntu-cuda-x64.tar.gz"
+          tar -C out -czf "$tarball" .
+          sha256sum "$tarball" | tee "$tarball.sha256"
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+
+      - name: Publish as a release asset on this repo
+        # Distinct tag scheme (llama-cuda-linux-<upstream-tag>) so this never
+        # collides with localm's own version-release tags - see ADR-0010's
+        # hosting decision. --clobber lets a re-dispatch for the same
+        # llama_tag replace a previous (e.g. broken) upload rather than fail.
+        run: |
+          gh release view "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
+            || gh release create "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
+                 --title "llama.cpp CUDA (Linux) - ${{ github.event.inputs.llama_tag }}" \
+                 --notes "Built by build-llama-cuda-linux.yml from ggml-org/llama.cpp@${{ github.event.inputs.llama_tag }}, CUDA ${{ github.event.inputs.cuda_version }}. See dev-notes/ADR-0010 (not published) for why this exists: upstream does not publish a bare Linux CUDA binary itself."
+          gh release upload "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
+            "${{ env.TARBALL }}" "${{ env.TARBALL }}.sha256" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
