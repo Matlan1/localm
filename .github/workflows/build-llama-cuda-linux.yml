@@ -151,11 +151,24 @@ jobs:
         # gh normally infers the target repo from the cwd's git remote, and
         # there isn't one. ${{ github.repository }} (not a hardcoded slug)
         # so this stays correct if the repo is ever renamed or forked.
+        #
+        # --prerelease is REQUIRED here too: this repo also hosts localm's own
+        # vX.Y.Z app releases, and GitHub's /releases/latest (which the update
+        # proxy queries) is just "newest non-draft, non-prerelease release" -
+        # it has no idea this tag is a runtime blob, not an app build. Without
+        # this flag, publishing here silently shadows the real app release the
+        # moment it is newer, and every user's update check starts reporting
+        # this tag as the "latest version". Measured live 2026-08-07: exactly
+        # that happened, for the ~minutes between this release publishing and
+        # the flag being added by hand. Worker.js also filters by tag pattern
+        # now (see tools/bugreport-proxy/worker.js) as defense in depth, but
+        # this flag is the first line and must not be dropped.
         run: |
           gh release view "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
             --repo "${{ github.repository }}" \
             || gh release create "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \
                  --repo "${{ github.repository }}" \
+                 --prerelease \
                  --title "llama.cpp CUDA (Linux) - ${{ github.event.inputs.llama_tag }}" \
                  --notes "Built by build-llama-cuda-linux.yml from ggml-org/llama.cpp@${{ github.event.inputs.llama_tag }}, CUDA ${{ github.event.inputs.cuda_version }}. See dev-notes/ADR-0010 (not published) for why this exists: upstream does not publish a bare Linux CUDA binary itself."
           gh release upload "llama-cuda-linux-${{ github.event.inputs.llama_tag }}" \

@@ -161,21 +161,10 @@ async function latestRelease(request, env, url) {
   if (gate) return gate;
   // Opt-in prerelease channel (localm's update_allow_prerelease setting, admin_only,
   // default off - see dev-notes/self-updater-design's prerelease-channel addendum).
-  // The DEFAULT path below is byte-for-byte what this function did before the
-  // channel existed - a non-opted-in client's answer must never change because
-  // this param exists to be read.
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
-  let rel;
-  if (!wantsPrerelease) {
-    const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases/latest`);
-    if (gh.status === 404) return json({ ok: true, version: null, note: "no releases yet" });
-    if (!gh.ok) return json({ error: "release lookup failed", status: gh.status }, 502);
-    rel = await gh.json();
-  } else {
-    rel = await latestIncludingPrerelease(env);
-    if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
-    if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
-  }
+  const rel = await latestAppRelease(env, wantsPrerelease);
+  if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
+  if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
   // Prefer a .zip asset (the build); else the first asset; else none.
   const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
@@ -196,28 +185,47 @@ async function latestRelease(request, env, url) {
   });
 }
 
-// Opted-in path: the single most recent NON-DRAFT release, stable or prerelease.
-// Returns the release object, null (no qualifying release - the /update route
-// reports this the same as /releases/latest's own 404 case), or undefined (the
-// GitHub call itself failed - reported as a 502, same as the default path).
+// Matches an app release tag (v1.2.3, v1.2.3rc1, v1.2.3-beta, ...) and nothing
+// else. This repo also hosts non-app releases in the SAME release list - e.g.
+// llama-cuda-linux-<tag>, the self-built Linux CUDA runtime (dev-notes/ADR-0010)
+// - and GitHub's own "latest release" concept has no notion of release TYPE, so
+// without this filter any such release can silently outrank the real app build
+// the moment it is newer. Measured live 2026-08-07: /releases/latest returned
+// llama-cuda-linux-b9870 ahead of v0.1.4 for the few minutes between that build
+// publishing and its --prerelease flag being set by hand. The CI workflow that
+// publishes those builds now always sets --prerelease too (belt), but this
+// filter is what makes the mistake structurally impossible regardless of that
+// (suspenders) - it does not depend on every future release-creating workflow
+// remembering the flag correctly.
+const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
+
+// The single most recent NON-DRAFT release matching APP_TAG_RE, optionally
+// including prereleases. Returns the release object, null (no qualifying
+// release - the /update route reports this the same as a 404), or undefined
+// (the GitHub call itself failed - reported as a 502).
 //
-// Uses /releases (the list endpoint), not /releases/latest, because GitHub's own
-// docs define /releases/latest as excluding prereleases by name - verified against
-// GitHub's REST API documentation, not assumed. Two things NOT trusted from that
-// same reading:
-//   - Sort order: unlike /releases/latest's documented "sorted by created_at",
-//     the List Releases docs name NO ordering guarantee, so this picks the max by
-//     published_at explicitly rather than trusting array order or index 0.
-//   - Draft visibility: GitHub's docs say only a push-access token even RECEIVES
-//     draft entries in this listing, so UPDATE_GITHUB_TOKEN (a Contents:read token,
-//     not a collaborator) most likely never sees one - but a draft must never be
-//     offered to ANYONE, so this filters draft === true explicitly rather than
-//     relying on that token-permission behavior holding.
-async function latestIncludingPrerelease(env) {
+// Uses /releases (the list endpoint), not /releases/latest, for BOTH the
+// default and prerelease-channel paths: /releases/latest cannot be asked "the
+// latest release matching this tag pattern", only "the latest release, full
+// stop" - so the only way to apply APP_TAG_RE at all is to list and filter by
+// hand. Two things NOT trusted from GitHub's docs while doing so:
+//   - Sort order: the List Releases docs name NO ordering guarantee, so this
+//     picks the max by published_at explicitly rather than trusting array
+//     order or index 0.
+//   - Draft visibility: GitHub's docs say only a push-access token even
+//     RECEIVES draft entries in this listing, so UPDATE_GITHUB_TOKEN (a
+//     Contents:read token, not a collaborator) most likely never sees one -
+//     but a draft must never be offered to ANYONE, so this filters
+//     draft === true explicitly rather than relying on that token-permission
+//     behavior holding.
+async function latestAppRelease(env, includePrerelease) {
   const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases?per_page=30`);
   if (!gh.ok) return undefined;
   const all = await gh.json();
-  const candidates = (Array.isArray(all) ? all : []).filter((r) => r.draft !== true);
+  const candidates = (Array.isArray(all) ? all : [])
+    .filter((r) => r.draft !== true)
+    .filter((r) => includePrerelease || r.prerelease !== true)
+    .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")));
   if (!candidates.length) return null;
   return candidates.reduce((best, r) => {
     const rt = Date.parse(r.published_at || r.created_at || 0) || 0;
