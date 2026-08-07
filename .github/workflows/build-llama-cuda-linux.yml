@@ -25,7 +25,15 @@ on:
       cuda_version:
         description: "CUDA Toolkit version to build against"
         required: true
-        default: "12.6.3"
+        # 12.8.1, not the earlier 12.6.3 default: a real dispatched run with
+        # 12.6.3 failed nvcc's own host-compiler check ("gcc versions later
+        # than 13 are not supported") against the gcc-14 pin below, which
+        # was itself copied from ggml-org's cuda.Dockerfile - and THAT
+        # Dockerfile uses CUDA 12.8.1, not 12.6. The mismatch was mine (a
+        # default picked independently of the gcc pin, never cross-checked)
+        # - 12.8.1 restores the exact combination already verified working
+        # against the real Docker image extraction (dev-notes/ADR-0010).
+        default: "12.8.1"
 
 permissions:
   contents: write   # to upload the built archive as a release asset on THIS repo
