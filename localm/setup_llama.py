@@ -95,6 +95,15 @@ _ROCM_TAG = "b1307"
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
 _FALLBACK_TAG = "b9870"
 
+# THIS repo, for the Linux CUDA build hosted here (see dev-notes/ADR-0010):
+# upstream publishes no bare Linux CUDA binary (verified live against their
+# releases), so build-llama-cuda-linux.yml builds and publishes one under a
+# distinct tag scheme (llama-cuda-linux-<upstream-tag>) rather than a new
+# dedicated repo - simplest for a solo-maintained project. A public repo
+# slug in a URL is not personal disclosure (AGENTS.md rule 2's own
+# documented carve-out), same as every other GitHub URL already in this file.
+_LOCALM_REPO = "Matlan1/localm"
+
 # Pinned fallback checksums for tag b9870 and b1307 (lemonade AMD build) release
 # assets. Only consulted when the release API is unreachable or publishes no
 # `digest` - the online path reads the digest straight off the asset listing.
@@ -600,6 +609,37 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
                       f"for {tag}; using pinned amd-rocm build - rerun later for the "
                       "latest.[/yellow]")
         return DEFAULT_URL, DEFAULT_URL_SHA256
+
+    if backend == "cuda" and _platform_key() == "linux":
+        # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
+        # all - verified live against their releases, see dev-notes/ADR-0010 -
+        # so the generic _ASSET_MATCH path below would only ever construct a
+        # guessed URL that 404s. Resolve against THIS repo's own build
+        # instead (build-llama-cuda-linux.yml), same tag every other Linux
+        # backend uses so it never drifts out of sync with the rest of the
+        # system on its own.
+        tag = _latest_tag()
+        assets = _release_assets(f"llama-cuda-linux-{tag}", repo=_LOCALM_REPO)
+        for a in assets:
+            name = str(a.get("name", "")).lower()
+            if name.endswith(".tar.gz") and "sha256" not in name and a.get("browser_download_url"):
+                url = a["browser_download_url"]
+                digest = a.get("digest")
+                sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
+                return url, sha
+        # Genuinely unresolvable (this repo has not built that exact upstream
+        # tag yet - a real, expected state, not an error to paper over): raise
+        # click.ClickException, which _provision_with_fallback's caller
+        # already catches and turns into the same offer/force-vulkan-fallback
+        # path every other provisioning failure in this file uses - reusing
+        # that existing, already-tested mechanism rather than inventing a new
+        # one. Never construct a guessed URL here the way the generic path
+        # below does; there is no stable naming convention for a build that
+        # was never made, and a guessed URL against this repo would 404
+        # exactly as uninformatively as the upstream one already did.
+        raise click.ClickException(
+            f"no self-built Linux CUDA runtime found for llama.cpp tag {tag!r} "
+            f"on {_LOCALM_REPO} (dev-notes/ADR-0010) - falling back to vulkan.")
 
     plat = _platform_key()
     entry = _ASSET_MATCH.get(plat, {}).get(backend)
@@ -1585,6 +1625,34 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             _fetch_and_place(cudart["browser_download_url"], target, cudart_sha)
         else:
             console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
+        return
+    if chosen == "cuda" and with_cudart and sys.platform not in ("win32", "darwin"):
+        # sys.platform, not _platform_key(): matches this function's OWN
+        # existing style two lines up (the win32 cudart branch), rather than
+        # mixing the two equivalent-in-production-but-differently-mockable
+        # spellings within one function - caught by a test that mocked
+        # _platform_key alone and still hit the win32 branch on a real
+        # Windows test box, since sys.platform itself never moved.
+        #
+        # Self-contained Linux CUDA (dev-notes/ADR-0010): the binary comes
+        # from THIS repo's own build (_resolve_backend_asset's linux-cuda
+        # special case, above), the runtime libraries (cudart/cublas/nccl)
+        # from PyPI wheels (_fetch_cuda_runtime_libs, Unit 1) - never from
+        # scanning anything already on the user's machine (AGENTS.md rule 4).
+        # If _resolve_backend_asset raises (no self-built runtime exists yet
+        # for this exact upstream tag), that propagates to
+        # _provision_with_fallback's caller exactly like every other
+        # provisioning failure, which offers/forces the vulkan fallback -
+        # nothing new to handle here.
+        url, fallback_sha = _resolve_backend_asset("cuda", cuda_line)
+        _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
+        if sha256:
+            console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only; "
+                          "the PyPI runtime libraries are verified by their own "
+                          "published checksums instead.")
+        n = _fetch_cuda_runtime_libs(cuda_line, target)
+        console.print(f"[dim]CUDA runtime:[/dim] {n} librar{'y' if n == 1 else 'ies'} "
+                      "fetched from PyPI - no CUDA Toolkit install needed")
         return
     # Every other backend is a single archive resolved from the chosen name.
     # Also reached for chosen == "cuda" with with_cudart False (no current
