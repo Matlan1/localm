@@ -180,13 +180,14 @@ test("update: latest release uses the UPDATE token and prefers the .zip asset", 
   const seen = {};
   const restore = stubFetch(async (url, opts) => {
     seen.url = url; seen.opts = opts;
-    return new Response(JSON.stringify({
+    return new Response(JSON.stringify([{
       tag_name: "v0.2.0", name: "0.2.0", body: "notes", published_at: "2026-07-01T00:00:00Z",
+      draft: false, prerelease: false,
       assets: [
         { id: 1, name: "notes.txt", size: 10 },
         { id: 2, name: "localm-0.2.0.zip", size: 1234 },
       ],
-    }), { status: 200 });
+    }]), { status: 200 });
   });
   try {
     const r = await worker.fetch(
@@ -195,21 +196,22 @@ test("update: latest release uses the UPDATE token and prefers the .zip asset", 
     const out = await r.json();
     assert.equal(out.version, "v0.2.0");
     assert.equal(out.asset.id, 2, "the .zip asset is preferred");
-    assert.match(seen.url, /\/releases\/latest$/);
+    assert.match(seen.url, /\/releases\?per_page=30$/);
     assert.equal(seen.opts.headers.Authorization, "Bearer ght_update"); // UPDATE token, not issue
   } finally { restore(); }
 });
 
 test("update: serves the detached .sig signature alongside the .zip asset", async () => {
   const restore = stubFetch(async (url) => {
-    if (url.endsWith("/releases/latest")) {
-      return new Response(JSON.stringify({
+    if (url.includes("/releases?")) {
+      return new Response(JSON.stringify([{
         tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "2026-07-01T00:00:00Z",
+        draft: false, prerelease: false,
         assets: [
           { id: 2, name: "localm-0.2.0.zip", size: 1234 },
           { id: 3, name: "localm-0.2.0.zip.sig", size: 89 },
         ],
-      }), { status: 200 });
+      }]), { status: 200 });
     }
     if (url.includes("/releases/assets/3")) {   // the .sig asset API -> signed redirect
       return { status: 302, ok: false, headers: { get: (k) =>
@@ -231,11 +233,12 @@ test("update: serves the detached .sig signature alongside the .zip asset", asyn
 
 test("update: no .sig asset -> signature is null (client decides enforce vs open)", async () => {
   const restore = stubFetch(async (url) => {
-    if (url.endsWith("/releases/latest")) {
-      return new Response(JSON.stringify({
-        tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "x",
+    if (url.includes("/releases?")) {
+      return new Response(JSON.stringify([{
+        tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "2026-07-01T00:00:00Z",
+        draft: false, prerelease: false,
         assets: [{ id: 2, name: "localm-0.2.0.zip", size: 1234 }],
-      }), { status: 200 });
+      }]), { status: 200 });
     }
     return new Response("{}", { status: 404 });
   });
@@ -248,7 +251,10 @@ test("update: no .sig asset -> signature is null (client decides enforce vs open
 });
 
 test("update: no releases yet -> ok with version null", async () => {
-  const restore = stubFetch(async () => new Response("{}", { status: 404 }));
+  // The list endpoint (used for both channels now) never 404s for "no releases" -
+  // it returns 200 with an empty array. Unlike the old /releases/latest special
+  // case, an actual 404/error here is a real failure (see the 502 test below).
+  const restore = stubFetch(async () => new Response("[]", { status: 200 }));
   try {
     const r = await worker.fetch(
       req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
@@ -260,20 +266,61 @@ test("update: no releases yet -> ok with version null", async () => {
 
 // ------------------------ update: prerelease channel ----------------------
 
-test("update: no channel param -> unchanged /releases/latest call, no drafts endpoint hit", async () => {
+test("update: no channel param -> uses the releases list, filtered by app tag pattern", async () => {
+  // Regression test for the 2026-08-07 incident: this repo also hosts non-app
+  // releases in the SAME release list (llama-cuda-linux-<tag>, the self-built
+  // Linux CUDA runtime - see dev-notes/ADR-0010). A newer non-app release must
+  // never be offered as the "latest" app version. This reproduces the exact
+  // shape that happened live: a CUDA-linux release published AFTER the real
+  // app release, non-draft, non-prerelease - exactly what the old, unfiltered
+  // /releases/latest call returned for several minutes before both the CI
+  // workflow (--prerelease) and this filter were fixed.
   const seen = {};
   const restore = stubFetch(async (url, opts) => {
     seen.url = url; seen.opts = opts;
-    return new Response(JSON.stringify({
-      tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "2026-07-01T00:00:00Z",
-      assets: [{ id: 2, name: "localm-0.2.0.zip", size: 1234 }],
-    }), { status: 200 });
+    return new Response(JSON.stringify([
+      { tag_name: "llama-cuda-linux-b9870", name: "llama.cpp CUDA (Linux) - b9870",
+        draft: false, prerelease: false, published_at: "2026-08-07T16:19:04Z",
+        assets: [{ id: 9, name: "llama-cuda-linux-b9870.tar.gz", size: 999 }] },
+      { tag_name: "v0.1.4", name: "0.1.4",
+        draft: false, prerelease: false, published_at: "2026-08-06T20:35:53Z",
+        assets: [{ id: 2, name: "localm-0.1.4.zip", size: 1234 }] },
+    ]), { status: 200 });
   });
   try {
     const r = await worker.fetch(
       req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
     assert.equal(r.status, 200);
-    assert.match(seen.url, /\/releases\/latest$/, "the default path is byte-for-byte the pre-channel call");
+    const out = await r.json();
+    assert.equal(out.version, "v0.1.4", "the non-app release must never win, even though it is newer");
+    assert.equal(out.asset.id, 2);
+    assert.match(seen.url, /\/releases\?per_page=30$/, "uses the list endpoint, not /releases/latest");
+  } finally { restore(); }
+});
+
+test("update: channel=prerelease also excludes a non-app-tagged release, even though it is newer", async () => {
+  // Same regression as the default-channel test above, for the prerelease
+  // channel's own code path. The pre-fix code (latestIncludingPrerelease) had
+  // NO tag filtering at all here - a second, independent copy of the same bug,
+  // just never triggered live because update_allow_prerelease defaults off.
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases?")) {
+      return new Response(JSON.stringify([
+        { tag_name: "llama-cuda-linux-b9870", draft: false, prerelease: false,
+          published_at: "2026-08-07T16:19:04Z", assets: [] },
+        { tag_name: "v0.1.5-rc1", draft: false, prerelease: true,
+          published_at: "2026-08-07T10:00:00Z",
+          assets: [{ id: 5, name: "localm-0.1.5-rc1.zip", size: 1 }] },
+      ]), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update?channel=prerelease",
+                       headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.version, "v0.1.5-rc1", "the non-app release must never win here either");
   } finally { restore(); }
 });
 
@@ -283,15 +330,15 @@ test("update: an unrecognized channel value falls through to the default (stable
   const seen = {};
   const restore = stubFetch(async (url) => {
     seen.url = url;
-    return new Response(JSON.stringify({
-      tag_name: "v0.2.0", assets: [], published_at: "2026-07-01T00:00:00Z",
-    }), { status: 200 });
+    return new Response(JSON.stringify([
+      { tag_name: "v0.2.0", draft: false, prerelease: false, assets: [], published_at: "2026-07-01T00:00:00Z" },
+    ]), { status: 200 });
   });
   try {
     await worker.fetch(
       req(undefined, { method: "GET", path: "/update?channel=stable", headers: { "X-Localm-Token": "s3cret" } }),
       ENV_UP);
-    assert.match(seen.url, /\/releases\/latest$/);
+    assert.match(seen.url, /\/releases\?per_page=30$/);
   } finally { restore(); }
 });
 
