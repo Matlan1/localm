@@ -13,6 +13,13 @@ pre-loaded by absolute path with ``RTLD_GLOBAL`` so the main library resolves
 them, and the build's own runtime deps (ROCm/CUDA) are expected to be resolvable
 via the build's rpath, the system linker (ldconfig), or ``LD_LIBRARY_PATH``.
 
+This is why Linux CUDA (dev-notes/ADR-0010) needed NO new loader code: setup-
+llama's PyPI-fetched cudart/cublas/nccl libraries (``setup_llama.py``'s
+``_fetch_cuda_runtime_libs``) land in the SAME runtime binary directory
+``_add_to_search_path`` already adds to ``LD_LIBRARY_PATH`` unconditionally,
+for every backend - exactly the mechanism this paragraph already documented,
+verified rather than assumed before concluding no change was needed here.
+
 Provision the binaries with ``localm setup-llama``. ``LLAMA_CPP_LIB`` overrides
 the path to the library file for one-off use.
 """
