@@ -124,8 +124,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          find llama.cpp/build -name "*.so*" -not -name "*rpc-server*" \
-            -exec cp -Pv {} out/ \;
+          # "*.so*" (no anchor) matches "so" as a SUBSTRING anywhere in the
+          # name, not just a real .so extension - a real dispatched run
+          # packaged "language-server.source.ts" this way ("server.SOurce.ts"
+          # satisfies it). "*.so" / "*.so.*" require an actual .so extension
+          # or a versioned .so.N suffix, matching every real library while
+          # excluding that false hit.
+          find llama.cpp/build \( -name "*.so" -o -name "*.so.*" \) \
+            -not -name "*rpc-server*" -exec cp -Pv {} out/ \;
           ls -la out/
           tag="${{ github.event.inputs.llama_tag }}"
           tarball="llama-${tag}-bin-ubuntu-cuda-x64.tar.gz"
