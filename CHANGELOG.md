@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.1.5rc2] - 2026-08-08
+
 ### Added
 - **Self-contained CUDA support on Linux, as an explicit opt-in choice.**
   `localm setup-llama --backend cuda` now works on Linux the same way it
