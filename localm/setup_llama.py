@@ -95,14 +95,19 @@ _ROCM_TAG = "b1307"
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
 _FALLBACK_TAG = "b9870"
 
-# THIS repo, for the Linux CUDA build hosted here (see dev-notes/ADR-0010):
-# upstream publishes no bare Linux CUDA binary (verified live against their
-# releases), so build-llama-cuda-linux.yml builds and publishes one under a
-# distinct tag scheme (llama-cuda-linux-<upstream-tag>) rather than a new
-# dedicated repo - simplest for a solo-maintained project. A public repo
-# slug in a URL is not personal disclosure (AGENTS.md rule 2's own
-# documented carve-out), same as every other GitHub URL already in this file.
-_LOCALM_REPO = "Matlan1/localm"
+# Third-party Linux CUDA prebuilt (see dev-notes/ADR-0010): upstream publishes
+# no bare Linux CUDA binary itself (verified live against their releases), so
+# this fetches from an actively-maintained third party instead - the same
+# shape as the amd-rocm backend's own dependency on lemonade-sdk/
+# llamacpp-rocm, just below. hybridgroup/llama-cpp-builder tracks upstream's
+# bNNNNN tag numbering 1:1 and publishes the same asset-name convention
+# upstream itself uses for every other Linux backend - verified live before
+# wiring this in: a real asset downloaded, its ELF NEEDED list and glibc
+# floor parsed (dev-notes/ADR-0010). Deliberately NOT a localm-built/-hosted
+# binary - see the ADR for why self-building was considered and rejected. A
+# public repo slug in a URL is not personal disclosure (AGENTS.md rule 2's
+# own documented carve-out), same as every other GitHub URL in this file.
+_CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 
 # Pinned fallback checksums for tag b9870 and b1307 (lemonade AMD build) release
 # assets. Only consulted when the release API is unreachable or publishes no
@@ -578,10 +583,11 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
     and queries the local pinned checksum dictionary.
 
     *cuda_line* selects which asset-name substrings to match for the 'cuda'
-    backend on Windows (see NvidiaInfo.cuda_line) - ignored for every other
-    backend/platform, which have a single, non-line-specific matcher list.
-    Defaults to _CUDA_LINE (None resolved below, not bound as a literal
-    default - _CUDA_LINE is defined later in this module, after this function).
+    backend on Windows AND Linux (see NvidiaInfo.cuda_line) - ignored for
+    every other backend/platform, which have a single, non-line-specific
+    matcher list. Defaults to _CUDA_LINE (None resolved below, not bound as a
+    literal default - _CUDA_LINE is defined later in this module, after this
+    function).
     """
     cuda_line = cuda_line or _CUDA_LINE
     if backend == "amd-rocm":
@@ -614,32 +620,39 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
         # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
         # all - verified live against their releases, see dev-notes/ADR-0010 -
         # so the generic _ASSET_MATCH path below would only ever construct a
-        # guessed URL that 404s. Resolve against THIS repo's own build
-        # instead (build-llama-cuda-linux.yml), same tag every other Linux
-        # backend uses so it never drifts out of sync with the rest of the
-        # system on its own.
+        # guessed URL that 404s. Resolve against hybridgroup/llama-cpp-builder
+        # instead, the same shape as the amd-rocm -> lemonade-sdk branch just
+        # above: they track upstream's own tag numbering 1:1 and publish
+        # upstream's own asset-name convention, so the same tag every other
+        # Linux backend uses applies here too.
+        #
+        # cuda_line-aware, like the win32 cuda branch below: hybridgroup
+        # publishes both a cuda-12 asset ("...-cuda-x64.tar.gz") and a
+        # cuda-13 one ("...-cuda-13-x64.tar.gz") - verified live, real bytes
+        # downloaded for the cuda-12 one (dev-notes/ADR-0010).
+        suffix = "-cuda-13-x64.tar.gz" if cuda_line == "cuda-13" else "-cuda-x64.tar.gz"
         tag = _latest_tag()
-        assets = _release_assets(f"llama-cuda-linux-{tag}", repo=_LOCALM_REPO)
+        assets = _release_assets(tag, repo=_CUDA_LINUX_REPO)
         for a in assets:
             name = str(a.get("name", "")).lower()
-            if name.endswith(".tar.gz") and "sha256" not in name and a.get("browser_download_url"):
+            if name.endswith(suffix) and a.get("browser_download_url"):
                 url = a["browser_download_url"]
                 digest = a.get("digest")
                 sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
                 return url, sha
-        # Genuinely unresolvable (this repo has not built that exact upstream
-        # tag yet - a real, expected state, not an error to paper over): raise
-        # click.ClickException, which _provision_with_fallback's caller
-        # already catches and turns into the same offer/force-vulkan-fallback
-        # path every other provisioning failure in this file uses - reusing
-        # that existing, already-tested mechanism rather than inventing a new
-        # one. Never construct a guessed URL here the way the generic path
-        # below does; there is no stable naming convention for a build that
-        # was never made, and a guessed URL against this repo would 404
-        # exactly as uninformatively as the upstream one already did.
+        # Genuinely unresolvable (hybridgroup has not built that exact
+        # upstream tag yet - a real, occasionally-expected lag for a third
+        # party, not an error to paper over): raise click.ClickException,
+        # which _provision_with_fallback's caller already catches and turns
+        # into the same offer/force-vulkan-fallback path every other
+        # provisioning failure in this file uses - reusing that existing,
+        # already-tested mechanism rather than inventing a new one. Never
+        # construct a guessed URL here the way the generic path below does;
+        # a guessed URL against a third party's repo is even less trustworthy
+        # than one against upstream itself.
         raise click.ClickException(
-            f"no self-built Linux CUDA runtime found for llama.cpp tag {tag!r} "
-            f"on {_LOCALM_REPO} (dev-notes/ADR-0010) - falling back to vulkan.")
+            f"no Linux CUDA build found for llama.cpp tag {tag!r} on "
+            f"{_CUDA_LINUX_REPO} (dev-notes/ADR-0010) - falling back to vulkan.")
 
     plat = _platform_key()
     entry = _ASSET_MATCH.get(plat, {}).get(backend)
@@ -1490,22 +1503,25 @@ def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "rel
     _fetch_and_place(url, target, sha)
 
 
-# NVIDIA publishes its own CUDA runtime libraries (cudart, cuBLAS, NCCL) as
-# plain PyPI wheels - the SAME channel localm's own HF/torch backend already
+# NVIDIA publishes its own CUDA runtime libraries (cudart, cuBLAS) as plain
+# PyPI wheels - the SAME channel localm's own HF/torch backend already
 # depends on for the identical libraries (recommended_torch_variant's cu126
-# index, hwdetect.py). This is lighter than extracting them from ggml-org's
-# CUDA Docker image: no registry auth token, no multi-layer flatten, no
-# multi-GB base image ever touched - see dev-notes/ADR-0010's prototype
-# findings for the measured comparison. NVIDIA renamed the CUDA-13-line
-# packages to be UNSUFFIXED (nvidia-cublas-cu13 etc. are now deprecated
-# stubs pointing at bare nvidia-cublas) - both lines are listed explicitly so
-# neither naming scheme is guessed at. nccl has NOT made that migration yet
-# (nvidia-nccl is a placeholder with no Linux wheel as of this writing), so
-# the cuda-13 line still pins the cu12 nccl package - confirmed live against
-# PyPI's JSON API this session, not assumed.
+# index, hwdetect.py). NVIDIA renamed the CUDA-13-line packages to be
+# UNSUFFIXED (nvidia-cublas-cu13 etc. are now deprecated stubs pointing at
+# bare nvidia-cublas) - both lines are listed explicitly so neither naming
+# scheme is guessed at.
+#
+# NCCL deliberately NOT included: the actual binary this fetches alongside
+# (hybridgroup/llama-cpp-builder's Linux CUDA build, see _CUDA_LINUX_REPO)
+# was checked directly - every one of its 26 shared libraries' raw bytes
+# grepped for "libnccl", none found - so it does not link against it at all.
+# An earlier prototype (extracting from ggml-org's own CUDA Docker image,
+# see dev-notes/ADR-0010) DID need it; that image is not what ships here, so
+# do not re-add nccl from that earlier finding without re-checking the
+# binary actually in use at the time.
 _CUDA_RUNTIME_PYPI_PACKAGES = {
-    "cuda-12": ("nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12", "nvidia-nccl-cu12"),
-    "cuda-13": ("nvidia-cuda-runtime", "nvidia-cublas", "nvidia-nccl-cu12"),
+    "cuda-12": ("nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12"),
+    "cuda-13": ("nvidia-cuda-runtime", "nvidia-cublas"),
 }
 
 
@@ -1635,15 +1651,16 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         # Windows test box, since sys.platform itself never moved.
         #
         # Self-contained Linux CUDA (dev-notes/ADR-0010): the binary comes
-        # from THIS repo's own build (_resolve_backend_asset's linux-cuda
-        # special case, above), the runtime libraries (cudart/cublas/nccl)
-        # from PyPI wheels (_fetch_cuda_runtime_libs, Unit 1) - never from
-        # scanning anything already on the user's machine (AGENTS.md rule 4).
-        # If _resolve_backend_asset raises (no self-built runtime exists yet
-        # for this exact upstream tag), that propagates to
-        # _provision_with_fallback's caller exactly like every other
-        # provisioning failure, which offers/forces the vulkan fallback -
-        # nothing new to handle here.
+        # from a third-party prebuilt, hybridgroup/llama-cpp-builder
+        # (_resolve_backend_asset's linux-cuda special case, above -
+        # deliberately NOT a localm-built binary, see the ADR), the runtime
+        # libraries (cudart/cublas) from PyPI wheels (_fetch_cuda_runtime_libs,
+        # Unit 1) - never from scanning anything already on the user's
+        # machine (AGENTS.md rule 4). If _resolve_backend_asset raises (no
+        # matching build exists yet for this exact upstream tag on
+        # hybridgroup's repo), that propagates to _provision_with_fallback's
+        # caller exactly like every other provisioning failure, which
+        # offers/forces the vulkan fallback - nothing new to handle here.
         url, fallback_sha = _resolve_backend_asset("cuda", cuda_line)
         _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
         if sha256:

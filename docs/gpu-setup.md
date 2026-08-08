@@ -114,12 +114,12 @@ driver, re-run
 
 **On Linux**, `--backend cuda` is also self-contained, the same way: upstream
 llama.cpp does not publish a Linux CUDA binary itself, so setup fetches one
-built specifically for localm, plus the CUDA runtime libraries (cudart,
-cuBLAS, NCCL) as separate small downloads - again, no CUDA Toolkit install
-needed. This is newer than the Windows path and has not yet been confirmed
-across real NVIDIA Linux hardware, so Vulkan stays the default recommendation
-there for now; try `--backend cuda` explicitly if you want to test it, and
-report back what you find.
+from an actively-maintained third-party builder, plus the CUDA runtime
+libraries (cudart, cuBLAS) as separate small downloads - again, no CUDA
+Toolkit install needed. This is newer than the Windows path and has not yet
+been confirmed across real NVIDIA Linux hardware, so Vulkan stays the default
+recommendation there for now; try `--backend cuda` explicitly if you want to
+test it, and report back what you find.
 
 After provisioning, setup **load-tests** the library exactly as `localm run`
 will, on every platform. If the CUDA build cannot load on your machine it
