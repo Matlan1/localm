@@ -1,3 +1,17 @@
+# PARKED, not deleted (2026-08-08): moved out of .github/workflows/ so it can
+# never be discovered or dispatched, but kept intact and tracked in git in
+# case a self-built path is wanted later. localm's actual Linux CUDA support
+# fetches a prebuilt from hybridgroup/llama-cpp-builder instead - see
+# dev-notes/ADR-0010 for the full comparison (self-building was rejected: it
+# is a new category of responsibility - compiling and shipping a native
+# binary under localm's own name - that nothing else in this project takes
+# on, and neither the maintainer nor this pipeline can actually load-test the
+# result on real NVIDIA hardware either way, so "we compiled it ourselves"
+# buys no real additional confidence here). To reactivate: `git mv` this file
+# back to .github/workflows/, review it against setup_llama.py's THEN-current
+# _resolve_backend_asset shape (it will have drifted), and re-verify every
+# step live - see this file's own CI-bug history in
+# dev-notes/FIX-LOOP-2026-08-07-linux-cuda.md before trusting it unreviewed.
 name: Build llama.cpp CUDA (Linux)
 
 on:

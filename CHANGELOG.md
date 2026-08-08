@@ -11,6 +11,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Self-contained CUDA support on Linux, as an explicit opt-in choice.**
+  `localm setup-llama --backend cuda` now works on Linux the same way it
+  already does on Windows: it fetches a compiled build plus the CUDA
+  runtime libraries (cudart, cuBLAS) with no CUDA Toolkit install needed.
+  Upstream llama.cpp does not publish a Linux CUDA binary itself, so this
+  fetches one from an actively-maintained third-party builder instead -
+  Vulkan remains the recommended backend on Linux until real hardware
+  confirms the CUDA path, and the existing load-test-then-fallback safety
+  net still applies if the CUDA build cannot load on your machine.
+
 ## [0.1.5rc1] - 2026-08-07
 
 ### Added
@@ -24,6 +35,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   default - Vulkan remains the recommended backend on Linux until that
   lands, and the existing load-test-then-fallback safety net still
   applies if the CUDA build cannot load on your machine.
+- **Correction (2026-08-08):** the mechanism described above (localm
+  compiling and hosting its own build) was replaced before this release
+  ever shipped: it fetches from an actively-maintained third party instead
+  (no NCCL dependency either) - see the corrected `[Unreleased]` entry
+  above. This release was never promoted past the prerelease channel.
 
 ## [0.1.4] - 2026-08-06
 

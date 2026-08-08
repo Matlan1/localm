@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Self-contained CUDA on Linux end to end - see dev-notes/ADR-0010:
-  - fetching NVIDIA's CUDA runtime libraries (cudart/cublas/nccl) as plain
+  - fetching NVIDIA's CUDA runtime libraries (cudart/cublas) as plain
     PyPI wheels (Unit 1);
-  - resolving the compiled binary from THIS repo's own CI build, since
-    upstream publishes none for Linux (Unit 3);
+  - resolving the compiled binary from a third-party prebuilt
+    (hybridgroup/llama-cpp-builder), since upstream publishes none for
+    Linux and localm does not build its own binaries (Unit 3);
   - _provision_backend wiring the two together on Linux (Unit 3).
 
 These tests exercise the REAL zip validation and extraction path (a wheel is
@@ -176,8 +177,8 @@ def test_fetch_pypi_runtime_lib_refuses_wrong_checksum(monkeypatch, tmp_path):
 
 def test_fetch_pypi_runtime_lib_raises_when_no_wheel_resolved(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "_pypi_wheel_url_and_sha", lambda pkg: (None, None))
-    with pytest.raises(sl.ArtifactError, match="nvidia-nccl-cu12"):
-        sl._fetch_pypi_runtime_lib("nvidia-nccl-cu12", tmp_path)
+    with pytest.raises(sl.ArtifactError, match="nvidia-cublas-cu12"):
+        sl._fetch_pypi_runtime_lib("nvidia-cublas-cu12", tmp_path)
 
 
 # ------------------------- _fetch_cuda_runtime_libs -------------------------- #
@@ -217,26 +218,41 @@ def test_cuda_13_line_uses_unsuffixed_package_names():
     assert "nvidia-cuda-runtime" in pkgs
     assert "nvidia-cublas-cu13" not in pkgs
     assert "nvidia-cuda-runtime-cu13" not in pkgs
-    # nccl has NOT migrated yet (confirmed live this session) - must still be cu12.
-    assert "nvidia-nccl-cu12" in pkgs
+
+
+def test_no_line_fetches_nccl():
+    """hybridgroup/llama-cpp-builder's actual binary was checked directly -
+    none of its 26 shared libraries reference libnccl at all (unlike an
+    earlier prototype against a different build - see dev-notes/ADR-0010) -
+    so fetching it would be pure waste. Pins the omission so a future edit
+    cannot silently re-add it without re-verifying against the binary
+    actually in use at the time."""
+    for pkgs in sl._CUDA_RUNTIME_PYPI_PACKAGES.values():
+        assert not any("nccl" in p for p in pkgs)
 
 
 # ------------------------- linux cuda binary resolver ------------------------ #
-# _resolve_backend_asset's new linux-cuda special case (Unit 3): resolves
-# against THIS repo's own CI-built release instead of upstream's (which has
-# none), mirroring the sibling amd-rocm special case's own test conventions
-# (mock only _release_assets/_latest_tag, never the network itself).
+# _resolve_backend_asset's linux-cuda special case (Unit 3, corrected): resolves
+# against hybridgroup/llama-cpp-builder (a third-party prebuilt) instead of
+# upstream's (which has none), mirroring the sibling amd-rocm special case's own
+# test conventions (mock only _release_assets/_latest_tag, never the network
+# itself).
 
 _DUMMY_LINUX_CUDA_ASSETS = [
     {
         "name": "llama-b9870-bin-ubuntu-cuda-x64.tar.gz",
-        "browser_download_url": "https://dummy.github/releases/download/llama-cuda-linux-b9870/llama-b9870-bin-ubuntu-cuda-x64.tar.gz",
+        "browser_download_url": "https://dummy.github/hybridgroup/llama-cpp-builder/releases/download/b9870/llama-b9870-bin-ubuntu-cuda-x64.tar.gz",
         "digest": "sha256:dummylinuxcudasha",
     },
     {
         "name": "llama-b9870-bin-ubuntu-cuda-x64.tar.gz.sha256",
-        "browser_download_url": "https://dummy.github/releases/download/llama-cuda-linux-b9870/llama-b9870-bin-ubuntu-cuda-x64.tar.gz.sha256",
+        "browser_download_url": "https://dummy.github/hybridgroup/llama-cpp-builder/releases/download/b9870/llama-b9870-bin-ubuntu-cuda-x64.tar.gz.sha256",
         "digest": "sha256:dummysidecarsha",
+    },
+    {
+        "name": "llama-b9870-bin-ubuntu-cuda-13-x64.tar.gz",
+        "browser_download_url": "https://dummy.github/hybridgroup/llama-cpp-builder/releases/download/b9870/llama-b9870-bin-ubuntu-cuda-13-x64.tar.gz",
+        "digest": "sha256:dummylinuxcuda13sha",
     },
 ]
 
@@ -252,18 +268,35 @@ def test_resolve_linux_cuda_asset_finds_tarball(monkeypatch):
 
     monkeypatch.setattr(sl, "_release_assets", fake_release_assets)
 
-    url, sha = sl._resolve_backend_asset("cuda")
+    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
 
     assert url == _DUMMY_LINUX_CUDA_ASSETS[0]["browser_download_url"]
     assert sha == "dummylinuxcudasha"
-    # Resolved against THIS repo, under the llama-cuda-linux-<tag> scheme -
-    # not upstream (ggml-org/llama.cpp), which publishes nothing here.
-    assert seen["repo"] == sl._LOCALM_REPO
-    assert seen["tag"] == "llama-cuda-linux-b9870"
+    # Resolved against hybridgroup's repo, by the SAME bare tag every other
+    # Linux backend uses - not upstream (ggml-org/llama.cpp), which
+    # publishes nothing here, and not a prefixed tag scheme (that was the
+    # self-built mechanism's own naming, now parked, not this one's).
+    assert seen["repo"] == sl._CUDA_LINUX_REPO
+    assert seen["tag"] == "b9870"
+
+
+def test_resolve_linux_cuda_asset_picks_cuda13_line(monkeypatch):
+    """THE cuda_line-AWARENESS CASE: hybridgroup publishes both a cuda-12
+    asset (bare "-cuda-x64.tar.gz") and a cuda-13 one
+    ("-cuda-13-x64.tar.gz") - a Blackwell GPU (NvidiaInfo.cuda_line ==
+    'cuda-13') must get the cuda-13 asset, never the cuda-12 default."""
+    monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: _DUMMY_LINUX_CUDA_ASSETS)
+
+    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-13")
+
+    assert url == _DUMMY_LINUX_CUDA_ASSETS[2]["browser_download_url"]
+    assert sha == "dummylinuxcuda13sha"
 
 
 def test_resolve_linux_cuda_asset_never_picks_the_sha256_sidecar(monkeypatch):
-    """THE NEGATIVE CASE: the release also lists the .sha256 sidecar file -
+    """THE NEGATIVE CASE: the release also lists a .sha256 sidecar file -
     it must never be mistaken for the tarball itself (which would then get
     "extracted" as an archive and fail confusingly downstream)."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
@@ -272,18 +305,18 @@ def test_resolve_linux_cuda_asset_never_picks_the_sha256_sidecar(monkeypatch):
     reordered = [_DUMMY_LINUX_CUDA_ASSETS[1], _DUMMY_LINUX_CUDA_ASSETS[0]]
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: reordered)
 
-    url, _ = sl._resolve_backend_asset("cuda")
+    url, _ = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
 
     assert url.endswith(".tar.gz")
     assert not url.endswith(".sha256")
 
 
 def test_resolve_linux_cuda_asset_raises_when_not_yet_built(monkeypatch):
-    """A real, expected state (this repo has not run the CI build for this
+    """A real, occasionally-expected state (hybridgroup has not built this
     exact upstream tag yet) - must raise click.ClickException, which
     _provision_with_fallback's caller already turns into the vulkan
-    fallback, never construct a guessed URL (there is nothing to guess a
-    filename FROM for a build that was never made)."""
+    fallback, never construct a guessed URL (a guessed URL against a third
+    party's naming is even less trustworthy than one against upstream's)."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
@@ -293,8 +326,8 @@ def test_resolve_linux_cuda_asset_raises_when_not_yet_built(monkeypatch):
 
 
 def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypatch):
-    """Regression guard: the new linux-cuda special case must never
-    intercept the EXISTING Windows cuda path, which has its own resolver
+    """Regression guard: the linux-cuda special case must never intercept
+    the EXISTING Windows cuda path, which has its own resolver
     (_resolve_cuda_pair, exercised in test_cuda_setup.py) predating this."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
@@ -308,8 +341,8 @@ def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypat
     url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
 
     assert url == "https://dummy/win-cuda.zip"
-    # Called against upstream (None/default), never localm's own repo.
-    assert sl._LOCALM_REPO not in calls
+    # Called against upstream (None/default), never the Linux-CUDA third party.
+    assert sl._CUDA_LINUX_REPO not in calls
 
 
 # ------------------------- linux cuda provisioning wiring --------------------- #
@@ -357,6 +390,19 @@ def test_provision_backend_linux_cuda_never_calls_windows_cuda_pair(monkeypatch,
 
 
 # ------------------------- real network smoke test -------------------------- #
+
+@pytest.mark.integration
+def test_resolve_linux_cuda_asset_real_network(monkeypatch):
+    """Not mocked at all beyond forcing the linux branch: a real GitHub
+    Releases lookup against hybridgroup/llama-cpp-builder, proving the
+    actual asset-name convention and repo are correct right now, not just
+    matching a fixture of them."""
+    monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
+    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
+    assert url.startswith(f"https://github.com/{sl._CUDA_LINUX_REPO}/releases/download/")
+    assert url.endswith("-cuda-x64.tar.gz")
+    assert sha and len(sha) == 64   # a real sha256 hex digest
+
 
 @pytest.mark.integration
 def test_fetch_pypi_runtime_lib_real_network(tmp_path):
