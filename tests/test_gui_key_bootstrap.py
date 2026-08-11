@@ -69,8 +69,13 @@ class TestShellRoute:
     def test_loopback_protected_sets_httponly_cookie_not_localstorage(self, monkeypatch):
         # Protected mode + loopback: the key is set as an HttpOnly cookie and is
         # NEVER echoed into the page (S2 - no localStorage seeding).
+        # Host set to a real loopback literal, for the same reason the open-mode
+        # test below does it: the protected branch is now same-origin gated too,
+        # and TestClient's default Host ("testserver") is a harness artifact no
+        # real browser sends. Without this the test would keep passing on the
+        # NO-cookie side and silently stop testing what it is named for.
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
-        r = TestClient(_app("127.0.0.1")).get("/")
+        r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200
         assert "REALKEY123" not in r.text
         assert "localStorage.setItem('localm.apiKey'" not in r.text
@@ -112,7 +117,12 @@ class TestShellRoute:
         monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
         sessions.sessions_file().parent.mkdir(parents=True, exist_ok=True)
         sessions.sessions_file().write_text("{ corrupt not json", encoding="utf-8")
-        r = TestClient(_app("127.0.0.1")).get("/")
+        # Loopback literal Host is LOAD-BEARING here: the branch is same-origin
+        # gated, so with TestClient's default "testserver" Host this test would
+        # get its no-cookie result from the ORIGIN GATE and never reach the
+        # corrupt-store fail-safe it exists to prove. Same assertion, wrong
+        # reason, and nothing in the output would say so.
+        r = TestClient(_app("127.0.0.1")).get("/", headers={"Host": "127.0.0.1"})
         assert r.status_code == 200                      # shell served, not 500
         assert "localm_session=" not in _set_cookies(r)  # fail-safe: no cookie/access
 
@@ -186,6 +196,118 @@ class TestShellRoute:
             assert r.status_code == 200
             assert SHELL_GLOBAL in r.text, host
             assert "SHELLTOK123" in r.text, host
+
+
+class TestProtectedShellIsSameOriginGated:
+    """The KEYED auto-seed branch is same-origin gated, exactly as the keyless
+    branch above it already was. Before this, a credential-free cross-origin
+    GET / on a keyed loopback install was answered with a Set-Cookie carrying a
+    real OWNER session, so the branch protecting a keyed install gave away more
+    than the keyless branch one gate away was refusing.
+
+    Each test asserts on the presence or absence of the Set-Cookie ITSELF, never
+    on a later request's status code: a downstream 401 can arrive for reasons
+    that have nothing to do with this branch (CSRF, scope, an unrelated guard),
+    so it cannot distinguish "no session was minted" from "a session was minted
+    and something else refused it". The cookie is the thing under test."""
+
+    KEY = "REALKEY123"
+
+    def _get(self, monkeypatch, headers, cookies=None, key=KEY):
+        # Cookies go on the CLIENT, not the request: starlette deprecates
+        # per-request cookies precisely because their persistence semantics are
+        # ambiguous, and every assertion here is about cookie behaviour.
+        monkeypatch.setenv("LOCALM_API_KEY", key)
+        return TestClient(_app("127.0.0.1"), cookies=cookies or {}).get(
+            "/", headers=headers)
+
+    def test_cross_origin_mints_no_session(self, monkeypatch):
+        # THE DEFECT. A mismatched Origin gets the plain shell and NO cookie.
+        r = self._get(monkeypatch, {"Origin": "https://evil.example"})
+        assert r.status_code == 200
+        cookies = _set_cookies(r)
+        assert "localm_session=" not in cookies
+        assert self.KEY not in cookies
+        assert self.KEY not in r.text
+
+    def test_dns_rebind_no_origin_attacker_host_mints_no_session(self, monkeypatch):
+        # The no-Origin half of the same gate, mirroring the open-mode case: a
+        # rebound attacker domain sends NO Origin (the browser considers it
+        # same-origin with the opener) but its Host is never a loopback literal.
+        r = self._get(monkeypatch, {"Host": "evil.example:8642"})
+        assert r.status_code == 200
+        assert "localm_session=" not in _set_cookies(r)
+
+    def test_same_origin_first_visit_still_mints(self, monkeypatch):
+        # Must not overcorrect (1/3): the ordinary case this branch EXISTS for -
+        # the owner opens 127.0.0.1 in a browser, no Origin on a top-level
+        # navigation - still gets signed in.
+        for host in ("127.0.0.1", "127.0.0.1:8642", "localhost", "[::1]:8642"):
+            r = self._get(monkeypatch, {"Host": host})
+            assert r.status_code == 200, host
+            cookies = _set_cookies(r)
+            assert "localm_session=" in cookies, host
+            assert self.KEY not in cookies, host      # opaque id, never the key
+
+    def test_same_origin_explicit_matching_origin_still_mints(self, monkeypatch):
+        # Must not overcorrect (2/3): a real same-origin browser fetch/reload
+        # DOES send Origin; matching it is not a cross-origin request.
+        r = self._get(monkeypatch,
+                      {"Origin": "http://127.0.0.1:8642", "Host": "127.0.0.1:8642"})
+        assert r.status_code == 200
+        assert "localm_session=" in _set_cookies(r)
+
+    def test_same_origin_reload_with_valid_session_does_not_re_mint(self, monkeypatch):
+        # Must not overcorrect (3/3), part one: an ordinary reload must not spawn
+        # a fresh session every time. Drive the REAL cookie from the first
+        # response rather than a synthetic one, so this exercises the actual
+        # lookup() path.
+        first = self._get(monkeypatch, {"Host": "127.0.0.1"})
+        sid = first.cookies.get("localm_session")
+        assert sid, "precondition: the first visit must mint a session"
+        again = self._get(monkeypatch, {"Host": "127.0.0.1"},
+                          cookies={"localm_session": sid})
+        assert again.status_code == 200
+        assert "localm_session=" not in _set_cookies(again)   # reused, not re-minted
+
+    def test_same_origin_after_key_roll_stays_signed_in(self, monkeypatch):
+        # Must not overcorrect (3/3), part two, and the regression this branch was
+        # ORIGINALLY written to fix: the session is deliberately decoupled from the
+        # key, so a browser holding a valid session must survive an owner-key ROLL
+        # instead of being bounced to the key gate. Rolling the key must not
+        # re-mint (the old session is still good) and must not clear anything.
+        first = self._get(monkeypatch, {"Host": "127.0.0.1"})
+        sid = first.cookies.get("localm_session")
+        assert sid, "precondition: the first visit must mint a session"
+
+        from localm import sessions as _sessions
+        rolled = self._get(monkeypatch, {"Host": "127.0.0.1"},
+                           cookies={"localm_session": sid}, key="ROLLEDKEY456")
+        assert rolled.status_code == 200
+        assert "localm_session=" not in _set_cookies(rolled)  # not bounced, not re-minted
+        assert _sessions.lookup(sid) is not None               # and still authoritative
+
+    def test_non_document_cross_origin_fetch_mints_nothing(self, monkeypatch):
+        # The shape a hostile page actually uses: fetch(..., {credentials:
+        # "include"}) from another origin. It cannot read the body (CORS), but
+        # before the gate the browser would still have STORED the Set-Cookie.
+        r = self._get(monkeypatch, {
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+        })
+        assert r.status_code == 200
+        assert "localm_session=" not in _set_cookies(r)
+
+    def test_lan_bind_with_loopback_host_header_still_mints_nothing(self, monkeypatch):
+        # The gate ADDS to the bind check, it does not replace it. A forged
+        # loopback Host on a network bind must not become a way in: `loopback`
+        # is still evaluated against what the server bound to.
+        monkeypatch.setenv("LOCALM_API_KEY", self.KEY)
+        r = TestClient(_app("0.0.0.0")).get("/", headers={"Host": "127.0.0.1"})
+        assert r.status_code == 200
+        assert "localm_session=" not in _set_cookies(r)
 
 
 class TestLaunchGrantHandoff:

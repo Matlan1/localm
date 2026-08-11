@@ -791,6 +791,17 @@ def attach_gui(
         # authorization (a network client never receives or guesses it) - which is why
         # it works where the keyless loopback-only auto-seed below cannot. A bad/used/
         # expired grant falls through to the normal shell (no error, nothing leaked).
+        #
+        # DELIBERATELY NOT gated on _is_same_origin_document_request, unlike BOTH
+        # branches below. That gate substitutes for a credential; this branch already
+        # HAS one, and a stronger one. A cross-origin page cannot mint, read or guess
+        # a 256-bit single-use grant, so redemption already proves the caller is the
+        # launcher on this machine - the check would add nothing here. It would also
+        # actively BREAK the branch's stated purpose: the gate requires a loopback
+        # LITERAL Host when no Origin is present, while this grant is redeemed on ANY
+        # bind, so the launcher opening http://<lan-ip>:PORT/?localm_token=... would be
+        # refused (covered by TestLaunchGrantHandoff::test_grant_IS_redeemed_on_a_
+        # network_bind). Exempt because it carries its own credential, not by oversight.
         grant = request.query_params.get("localm_token")
         if grant and key and _consume_launch_grant(request.app, grant):
             from urllib.parse import urlencode
@@ -800,7 +811,7 @@ def attach_gui(
             resp = RedirectResponse(url=clean, status_code=303, headers=headers)
             _set_session_cookies(resp, key, secure=request.url.scheme == "https")
             return resp
-        if key and loopback:
+        if key and loopback and _is_same_origin_document_request(request):
             # Protected mode on loopback: establish an HttpOnly session cookie so
             # the key never touches page JS / localStorage. Only MINT a new
             # session when the browser has no valid one, so an ordinary reload does
@@ -808,6 +819,27 @@ def attach_gui(
             # session is still valid after an owner-key ROLL stays signed in (the
             # session is decoupled from the key), instead of being bounced to the
             # key gate (the reported bug).
+            #
+            # Same-origin gated for the SAME reason spelled out on the open-mode
+            # branch below, which applies here with more force, not less: "loopback"
+            # describes what the SERVER BOUND TO, not who is asking. Without it, a
+            # cross-origin GET / (any website the user visits, regardless of
+            # "cors_origins") was answered with a Set-Cookie carrying a real OWNER
+            # session - so the branch that exists to protect a KEYED install handed
+            # out more than the keyless branch one gate away was already refusing to.
+            # A mismatched Origin, or an absent Origin with a non-loopback Host (DNS
+            # rebinding), now falls through to the plain shell with no cookie.
+            #
+            # SCOPE, so the next reader does not mistake this for more than it is:
+            # this is an ORIGIN check, not a caller-identity check. A top-level
+            # navigation from the local browser presents no Origin and a loopback
+            # Host, so anything else on this machine able to shape a request the
+            # same way is indistinguishable from it here, and no header-based test
+            # can separate the two. Treating a loopback-local caller as the owner
+            # is the pre-existing C1 assumption this branch implements; the gate
+            # narrows WHICH ORIGINS reach it and deliberately claims nothing more.
+            # Where that assumption is not wanted, the ?localm_token= launch grant
+            # above is the mechanism that does not rest on it.
             from localm.inference.http_server import SESSION_COOKIE
             from localm import sessions as _sessions
             existing = (request.cookies.get(SESSION_COOKIE) or "").strip()

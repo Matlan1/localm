@@ -21,6 +21,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working across a key roll. Keys minted with `localm keys create` are
   unaffected and are still re-checked on every run, so revoking one still
   removes shell access from the jobs it created.
+- **The GUI shell now applies the same same-origin check when a key is
+  configured that it already applied when one is not.** On a loopback bind,
+  the page that signs a keyed owner in was answering requests from any origin,
+  not just its own; it now serves the plain shell to anything cross-origin, as
+  the keyless path already did. Signing in locally is unchanged: a first visit
+  still signs you in, a reload does not sign you in again, and a browser that
+  is already signed in stays signed in after you roll the owner key. The
+  one-time launcher handoff is unaffected and still works on any bind.
 
 ## [0.1.5rc2] - 2026-08-08
 
