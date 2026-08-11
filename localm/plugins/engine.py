@@ -959,10 +959,26 @@ class PluginManager:
             sys.modules.pop(uniq, None)
             raise ValueError(f"plugin {spec.name!r}: no callable {attr!r}")
         host = PluginHost(self.app, self, spec)
-        register(host)
-        # Serve a declared surface assets_dir even if register() did not mount it
-        # itself, so a client_entry plugin's module never silently 404s.
-        host.mount_surface_assets()
+        try:
+            register(host)
+            # Serve a declared surface assets_dir even if register() did not mount
+            # it itself, so a client_entry plugin's module never silently 404s.
+            host.mount_surface_assets()
+        except Exception:
+            # register() can raise AFTER already mounting some routes or chat
+            # hooks (a plugin that wires up part of itself, then hits a bad
+            # config value and raises). Without this, those mounts stay live on
+            # self.app and firing on every request/chat turn while self._loaded
+            # never gets the entry - so the engine reports the plugin "not
+            # loaded" while it demonstrably still acts on user traffic, and a
+            # retry (enable()/install() calling _load again) mounts a SECOND
+            # copy on top of the still-live first one. host.unmount() undoes
+            # exactly what THIS host tracked (routes, static mounts, chat
+            # hooks, deferred on_startup callbacks), so a failed load leaves
+            # nothing behind, matching what "not loaded" claims.
+            host.unmount()
+            _purge_plugin_modules(uniq)
+            raise
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
         self._maybe_fire_first_use(spec.name)   # REC-ONFIRSTUSE

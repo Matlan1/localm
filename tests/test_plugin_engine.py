@@ -484,6 +484,81 @@ def test_load_enabled_isolates_failures(env):
         assert c.get("/api/good/ping").status_code == 200
 
 
+def _flaky_then_ok(name, marker_path):
+    """A plugin whose register() mounts a route AND a chat hook, then raises -
+    but only the FIRST time (a marker file flips it to a clean success on any
+    later attempt, modelling a retry after the first load failed)."""
+    return textwrap.dedent(f'''
+        import os
+        from fastapi import APIRouter
+        _r = APIRouter()
+
+        @_r.get("/api/{name}/ping")
+        def ping():
+            return {{"pong": True}}
+
+        def register(host):
+            host.mount_router(_r)
+            host.register_chat_hook("inlet", lambda msgs, ctx: msgs)
+            marker = {marker_path!r}
+            if not os.path.exists(marker):
+                open(marker, "w").close()
+                raise RuntimeError("boom after partial registration")
+
+        def unregister():
+            pass
+    ''')
+
+
+def test_load_failure_after_partial_register_leaves_nothing_live(env, tmp_path):
+    """A plugin whose register() mounts a route and a chat hook, then raises,
+    must leave NEITHER live: the engine reporting "not loaded" must be true,
+    not just claimed. Before the fix, _load() propagated the exception straight
+    out of register() without ever calling host.unmount(), so the route stayed
+    reachable and the chat hook kept firing on every turn while self._loaded
+    never got the entry - a partial state unreachable for cleanup. A retry
+    (enable() called again) must not stack a second copy on top of the first
+    failed attempt's remnants either."""
+    from localm.inference.chat_pipeline import ChatPipeline
+    from localm.plugins.engine import PluginManager
+
+    plugins = env / "plugins"
+    marker = tmp_path / "flaky.attempted"
+    _make_plugin(plugins, "flaky", _flaky_then_ok("flaky", str(marker)))
+    app = FastAPI()
+    app.state.chat_pipeline = ChatPipeline()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.discover()
+
+    # include_router() on this FastAPI/Starlette version stores an opaque
+    # wrapper object per mount rather than flattening child routes onto
+    # app.router.routes, so a mounted route cannot be identified by a `.path`
+    # attribute. The route COUNT (relative to the pre-load baseline) is the
+    # real, version-independent signal for "how many mounts are attached" -
+    # actual reachability is proven separately via TestClient below.
+    baseline_routes = len(app.router.routes)
+
+    with pytest.raises(RuntimeError, match="boom after partial registration"):
+        mgr._load(mgr._specs["flaky"])
+    assert "flaky" not in mgr._loaded
+    assert len(app.router.routes) == baseline_routes, \
+        "a failed load must not leave its route mount behind"
+    assert not app.state.chat_pipeline.has("inlet"), \
+        "a failed load must not leave its chat hook firing on every turn"
+    with TestClient(app) as c:
+        assert c.get("/api/flaky/ping").status_code == 404
+
+    # Retry (e.g. the user clicks enable again): must load clean, not stack a
+    # second route/hook on top of the first failed attempt's remnants.
+    mgr._load(mgr._specs["flaky"])
+    assert "flaky" in mgr._loaded
+    assert len(app.router.routes) == baseline_routes + 1, \
+        "retry produced a duplicate route mount left over from the failed first attempt"
+    assert app.state.chat_pipeline.has("inlet")
+    with TestClient(app) as c:
+        assert c.get("/api/flaky/ping").status_code == 200
+
+
 def test_protected_plugin_cannot_be_disabled(env):
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
