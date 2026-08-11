@@ -429,24 +429,52 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         finally:
             r.shutdown(grace=0)
 
-    def test_native_crash_trace_file_is_cleaned_up(self, monkeypatch):
-        """The per-worker trace file must not accumulate in the logs dir. Once
-        its contents have been relayed there is nothing left to keep, and a stale
-        file would be misread as a fresh crash by the next reader."""
-        _, trace_path = self._fault_during_chat_stream(monkeypatch)
+    def test_native_crash_trace_file_is_consumed_not_left_behind(
+            self, monkeypatch):
+        """The per-worker trace file must not survive the crash it describes: a
+        stale file would be misread as a fresh crash by the next reader.
+
+        Asserts the trace was CAPTURED as well as gone. Without that first half
+        this test passes vacuously when nothing ever wrote the file - which is
+        exactly what the fires-control caught it doing: with the arming call
+        removed, "the file does not exist" is trivially true and the test could
+        not fail on the defect it was written for."""
+        message, trace_path = self._fault_during_chat_stream(monkeypatch)
         assert trace_path is not None
+        assert "Fatal Python error" in message, (
+            "nothing was captured, so this test would be asserting cleanup of a "
+            f"file that never existed\n--- message ---\n{message}")
         assert not trace_path.exists(), (
             f"the worker crash-trace file was left behind at {trace_path}")
 
-    def test_healthy_worker_leaves_no_trace_file(self):
-        """A worker that exits cleanly must leave nothing behind at all - the
-        capture costs one empty file per load and that file has to be reaped, or
-        a long-running server slowly fills its own logs dir."""
+    def test_healthy_worker_arms_a_trace_then_reaps_it(self):
+        """The capture costs one empty file per model load, so a clean shutdown
+        has to reap it or a long-running server slowly fills its own logs dir.
+
+        Checks the file EXISTS while the worker is alive before checking it is
+        gone afterwards - same reason as the test above: "absent at the end" is
+        satisfied just as well by never having armed at all, so on its own it
+        proves nothing about either arming or cleanup.
+
+        The existence check is POLLED, not immediate. ``_spawn()`` returns as
+        soon as ``Process.start()`` does, and a spawn-context child then has to
+        boot a fresh interpreter and run its imports before it arms anything - so
+        an immediate check races the child and fails on a perfectly healthy
+        worker (measured: it did)."""
         r = ModelRunner()
         r._spawn()
         trace_path = r._crash_trace_path
-        assert trace_path is not None
-        r.shutdown(grace=2)
+        try:
+            assert trace_path is not None
+            deadline = time.monotonic() + 30.0
+            while not trace_path.exists() and time.monotonic() < deadline:
+                assert r.is_alive(), "the worker died before arming a trace file"
+                time.sleep(0.05)
+            assert trace_path.exists(), (
+                "the worker never armed a native-fault trace file, so a native "
+                "fault in it would go uncharacterised")
+        finally:
+            r.shutdown(grace=5)
         assert not trace_path.exists(), (
             f"a cleanly shut-down worker left {trace_path} behind")
 
