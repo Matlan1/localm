@@ -28,6 +28,7 @@ synchronous timeout contract - see TestExecutorPoolReclaim below.
 from __future__ import annotations
 
 import asyncio
+import logging
 import multiprocessing as mp
 import os
 import queue as _queue
@@ -243,6 +244,202 @@ class TestCrashDiagnosticsReachDebugLog:
             "if there is nothing in that log to see\n--- log content ---\n"
             + text
         )
+
+
+class TestNativeSignalCrashDiagnosticsReachDebugLog:
+    """Mirrors test_gguf_runner_isolation.py's identical class (PR #1228).
+    The class above closes the gap for a crash that still has a PYTHON
+    exception; it cannot close the gap for a genuine native-SIGNAL death
+    (SIGILL/SIGSEGV/SIGABRT) with no Python exception at all - Python never
+    regains control there, so no ``except`` clause can run. Before this fix,
+    HFRunner's two crash messages (spawn_and_load's load-crash branch and
+    chat_stream's generation-crash branch) both claimed "see the debug log
+    for the native stack trace" for exactly that fault class, with nothing
+    ever written for it - the sibling gap flagged in
+    dev-notes/vulkan-vision-native-fault-2026-08-11.md alongside the GGUF
+    worker's identical (and, at the time, already-fixed) defect.
+
+    Covers BOTH call sites independently, not just one: they are two
+    separate message constructions (spawn_and_load's and chat_stream's), and
+    proving one calls ``_crash_detail()`` correctly says nothing about
+    whether the other does too - see diff-review-discipline.md item 23 on
+    why a shared helper existing does not prove every call site reaches it.
+
+    ``os.abort()`` (the ``LOCALM_HF_FAULT_FOR_TEST=abort`` hook) is used
+    rather than a synthetic SIGILL because it is the same CLASS - the
+    process dies from a native signal with no Python exception - and it is
+    the project's existing, already-trusted way to produce that class in a
+    REAL child process."""
+
+    def _fault_during_load(self, monkeypatch):
+        """Drive a real worker to a real native abort during spawn_and_load.
+        Returns (message, trace_path). The fault env var is set BEFORE the
+        call (spawn_and_load calls _spawn() internally): the child reads it
+        from its OWN os.environ, a snapshot taken at spawn time - setting it
+        afterwards could never reach the running child."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = HFRunner()
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.spawn_and_load(_DUMMY_LOAD_PARAMS, timeout=30.0)
+            trace_path = r._crash_trace_path
+            assert not r.is_alive()
+            return str(ei.value), trace_path
+        finally:
+            r.shutdown(grace=0)
+
+    def _fault_during_chat_stream(self, monkeypatch):
+        """Drive a real worker to a real native abort mid-chat_stream.
+        Returns (message, trace_path)."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = HFRunner()
+        r._spawn()
+        trace_path = r._crash_trace_path
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+            assert not r.is_alive()
+            return str(ei.value), trace_path
+        finally:
+            r.shutdown(grace=0)
+
+    def test_native_abort_during_load_is_reported_with_its_captured_trace(
+            self, monkeypatch, caplog):
+        """The load-crash site (spawn_and_load): a native-signal death during
+        model load must be reported with WHAT faulted, not merely that
+        something did. Asserts on the TRACE CONTENT rather than the exit
+        code or the word "crashed" - both were already true before this fix
+        and are exactly what the field logs show."""
+        with caplog.at_level(logging.ERROR, logger="localm"):
+            message, _ = self._fault_during_load(monkeypatch)
+
+        assert "crashed" in message.lower()
+        assert "Fatal Python error" in message, (
+            "a real native-signal death during load produced no captured "
+            "trace, so the caller still cannot tell WHICH native call "
+            f"faulted\n--- message ---\n{message}"
+        )
+
+        logged = "\n".join(r.getMessage() for r in caplog.records)
+        assert "Fatal Python error" in logged and "_hf_runner.py" in logged, (
+            "the trace never reached the localm logger, or names no Python "
+            f"frame, so it cannot say where the fault happened\n{logged}"
+        )
+
+    def test_native_abort_during_chat_stream_is_reported_with_its_captured_trace(
+            self, monkeypatch, caplog):
+        """The generation-crash site (chat_stream) - independent of the
+        load-crash site above, since it is a separate message construction
+        at a separate call site."""
+        with caplog.at_level(logging.ERROR, logger="localm"):
+            message, _ = self._fault_during_chat_stream(monkeypatch)
+
+        assert "native inference fault" in message.lower()
+        assert "Fatal Python error" in message, (
+            "a real native-signal death produced no captured trace, so the "
+            "caller still cannot tell WHICH native call faulted - the "
+            f"reported issue 1222 / 1223 symptom\n--- message ---\n{message}"
+        )
+
+        logged = "\n".join(r.getMessage() for r in caplog.records)
+        assert "Fatal Python error" in logged and "_hf_runner.py" in logged, (
+            "the trace never reached the localm logger, or names no Python "
+            f"frame, so it cannot say where the fault happened\n{logged}"
+        )
+
+    def test_no_trace_captured_during_load_is_stated_not_implied(self, monkeypatch):
+        """When nothing was captured the load-crash message must SAY so.
+        The pre-fix message asserted a trace was in the debug log whether or
+        not anything had written one, which is what sent the reporter
+        looking for a trace that was never going to be there.
+
+        Simulates the capture never having been armed (an unwritable logs
+        dir, or a platform where enable() no-ops) by making
+        child_crash_trace_path() raise - exactly the branch _spawn()'s own
+        ``except OSError`` handles - rather than overriding
+        ``_crash_trace_path`` after the fact: spawn_and_load() calls
+        _spawn() internally, so a post-hoc override would be clobbered by a
+        second, real spawn before it ever took effect. This exercises the
+        real "capture unavailable" path on both sides: the parent falls back
+        to None, and the child's _arm_native_crash_trace(None) no-ops."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        import localm.debuglog as debuglog_mod
+
+        def _raise(tag):
+            raise OSError("simulated: logs dir unwritable")
+
+        monkeypatch.setattr(debuglog_mod, "child_crash_trace_path", _raise)
+
+        r = HFRunner()
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.spawn_and_load(_DUMMY_LOAD_PARAMS, timeout=30.0)
+            assert r._crash_trace_path is None, (
+                "the simulated allocation failure should have left "
+                "_crash_trace_path unset, exactly like a real unwritable "
+                "logs dir")
+        finally:
+            r.shutdown(grace=0)
+        assert "no native stack trace was captured" in str(ei.value).lower()
+
+    def test_no_trace_captured_during_chat_stream_is_stated_not_implied(
+            self, monkeypatch):
+        """Same statement-not-implied contract, at the chat_stream site."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = HFRunner()
+        r._spawn()
+        r._crash_trace_path = None
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+            assert "no native stack trace was captured" in str(ei.value).lower()
+        finally:
+            r.shutdown(grace=0)
+
+    def test_native_crash_trace_file_is_consumed_not_left_behind(self, monkeypatch):
+        """The per-worker trace file must not survive the crash it
+        describes: a stale file would be misread as a fresh crash by the
+        next reader.
+
+        Asserts the trace was CAPTURED as well as gone - without that first
+        half this test passes vacuously when nothing ever wrote the file."""
+        message, trace_path = self._fault_during_chat_stream(monkeypatch)
+        assert trace_path is not None
+        assert "Fatal Python error" in message, (
+            "nothing was captured, so this test would be asserting cleanup "
+            f"of a file that never existed\n--- message ---\n{message}"
+        )
+        assert not trace_path.exists(), (
+            f"the worker crash-trace file was left behind at {trace_path}")
+
+    def test_healthy_worker_arms_a_trace_then_reaps_it(self):
+        """The capture costs one empty file per model load, so a clean
+        shutdown has to reap it or a long-running server slowly fills its
+        own logs dir.
+
+        Checks the file EXISTS while the worker is alive before checking it
+        is gone afterwards: "absent at the end" is satisfied just as well by
+        never having armed at all, so on its own it proves nothing about
+        either arming or cleanup. Polled, not immediate - a spawn-context
+        child has to boot a fresh interpreter and run its imports before it
+        arms anything, so an immediate check races a perfectly healthy
+        worker."""
+        r = HFRunner()
+        r._spawn()
+        trace_path = r._crash_trace_path
+        try:
+            assert trace_path is not None
+            deadline = time.monotonic() + 30.0
+            while not trace_path.exists() and time.monotonic() < deadline:
+                assert r.is_alive(), "the worker died before arming a trace file"
+                time.sleep(0.05)
+            assert trace_path.exists(), (
+                "the worker never armed a native-fault trace file, so a "
+                "native fault in it would go uncharacterised")
+        finally:
+            r.shutdown(grace=5)
+        assert not trace_path.exists(), (
+            f"a cleanly shut-down worker left {trace_path} behind")
 
 
 # --------------------------------------------------------------------------- #

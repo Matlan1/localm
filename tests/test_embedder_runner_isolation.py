@@ -15,10 +15,12 @@ the LOCALM_EMBEDDER_FAULT_FOR_TEST hook - the same code path a real driver
 abort would take. Modeled directly on tests/test_gguf_runner_isolation.py.
 """
 
+import logging
 import multiprocessing as mp
 import os
 import queue as _queue
 import threading
+import time
 
 import pytest
 
@@ -220,6 +222,128 @@ class TestEmbedCrashContainment:
             assert r.is_alive(), "an ordinary exception must not kill the worker"
         finally:
             r.shutdown(grace=0)
+
+
+class TestNativeSignalCrashDiagnosticsReachDebugLog:
+    """Mirrors test_gguf_runner_isolation.py's identical class (PR #1228) and
+    test_hf_runner_isolation.py's sibling version of it. Before this fix,
+    EmbedderRunner's single crash message (_wait(), shared by
+    spawn_and_load and embed()) claimed "see the debug log for the native
+    stack trace" for a genuine native-SIGNAL death (SIGILL/SIGSEGV/SIGABRT),
+    with nothing ever written for it - the sibling gap flagged in
+    dev-notes/vulkan-vision-native-fault-2026-08-11.md.
+
+    Only ONE call site exists here (_wait(), used by both load and embed -
+    see _embedder_runner.py), unlike HFRunner's two independent message
+    constructions, so proving it once via embed() (simpler to set up than
+    spawn_and_load - no real model path needed) fully covers the shared
+    logic: there is no separate per-caller branch inside _wait() that could
+    independently be wrong.
+
+    ``os.abort()`` (the ``LOCALM_EMBEDDER_FAULT_FOR_TEST=abort`` hook) is
+    used rather than a synthetic SIGILL because it is the same CLASS - the
+    process dies from a native signal with no Python exception - and it is
+    the project's existing, already-trusted way to produce that class in a
+    REAL child process."""
+
+    def _fault_during_embed(self, monkeypatch):
+        """Drive a real worker to a real native abort while handling embed().
+        Returns (message, trace_path)."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = EmbedderRunner()
+        r._spawn()
+        trace_path = r._crash_trace_path
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.embed(["hello"], timeout=30.0)
+            assert not r.is_alive()
+            return str(ei.value), trace_path
+        finally:
+            r.shutdown(grace=0)
+
+    def test_native_abort_is_reported_with_its_captured_trace(
+            self, monkeypatch, caplog):
+        """Asserts on the TRACE CONTENT rather than the exit code or the
+        word "crashed" - both were already true before this fix and are
+        exactly what the field logs show."""
+        with caplog.at_level(logging.ERROR, logger="localm"):
+            message, _ = self._fault_during_embed(monkeypatch)
+
+        assert "crashed" in message.lower()
+        assert "Fatal Python error" in message, (
+            "a real native-signal death produced no captured trace, so the "
+            "caller still cannot tell WHICH native call faulted - the "
+            f"reported issue 1222 / 1223 symptom\n--- message ---\n{message}"
+        )
+
+        logged = "\n".join(r.getMessage() for r in caplog.records)
+        assert "Fatal Python error" in logged and "_embedder_runner.py" in logged, (
+            "the trace never reached the localm logger, or names no Python "
+            f"frame, so it cannot say where the fault happened\n{logged}"
+        )
+
+    def test_no_trace_captured_is_stated_not_implied(self, monkeypatch):
+        """When nothing was captured the message must SAY so. The pre-fix
+        message asserted a trace was in the debug log whether or not
+        anything had written one, which is what sent the reporter looking
+        for a trace that was never going to be there."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = EmbedderRunner()
+        r._spawn()
+        # Simulate the capture having failed (an unwritable logs dir, a
+        # platform where enable() no-ops) by dropping the path the parent
+        # would read. Unlike HFRunner.spawn_and_load, embed() does NOT call
+        # _spawn() again, so a post-hoc override here is not clobbered.
+        r._crash_trace_path = None
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.embed(["hello"], timeout=30.0)
+            assert "no native stack trace was captured" in str(ei.value).lower()
+        finally:
+            r.shutdown(grace=0)
+
+    def test_native_crash_trace_file_is_consumed_not_left_behind(self, monkeypatch):
+        """The per-worker trace file must not survive the crash it
+        describes: a stale file would be misread as a fresh crash by the
+        next reader.
+
+        Asserts the trace was CAPTURED as well as gone - without that first
+        half this test passes vacuously when nothing ever wrote the file."""
+        message, trace_path = self._fault_during_embed(monkeypatch)
+        assert trace_path is not None
+        assert "Fatal Python error" in message, (
+            "nothing was captured, so this test would be asserting cleanup "
+            f"of a file that never existed\n--- message ---\n{message}"
+        )
+        assert not trace_path.exists(), (
+            f"the worker crash-trace file was left behind at {trace_path}")
+
+    def test_healthy_worker_arms_a_trace_then_reaps_it(self):
+        """The capture costs one empty file per model load, so a clean
+        shutdown has to reap it or a long-running server slowly fills its
+        own logs dir.
+
+        Checks the file EXISTS while the worker is alive before checking it
+        is gone afterwards: "absent at the end" is satisfied just as well by
+        never having armed at all. Polled, not immediate - a spawn-context
+        child has to boot a fresh interpreter and run its imports before it
+        arms anything."""
+        r = EmbedderRunner()
+        r._spawn()
+        trace_path = r._crash_trace_path
+        try:
+            assert trace_path is not None
+            deadline = time.monotonic() + 30.0
+            while not trace_path.exists() and time.monotonic() < deadline:
+                assert r.is_alive(), "the worker died before arming a trace file"
+                time.sleep(0.05)
+            assert trace_path.exists(), (
+                "the worker never armed a native-fault trace file, so a "
+                "native fault in it would go uncharacterised")
+        finally:
+            r.shutdown(grace=5)
+        assert not trace_path.exists(), (
+            f"a cleanly shut-down worker left {trace_path} behind")
 
 
 # --------------------------------------------------------------------------- #

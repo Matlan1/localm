@@ -80,9 +80,59 @@ _EMBED_STDERR_IDLE_CLOSE_SECS = 5.0
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
 
-def _runner_main(req_q, resp_q) -> None:
+_crash_trace_fh = None   # child-side: kept alive so faulthandler can write to it
+
+
+def _arm_native_crash_trace(path) -> None:
+    """Child side: point faulthandler at *path* so a death by native SIGNAL
+    leaves a trace the parent can relay into the debug log.
+
+    THIS IS THE ONLY THING THAT CAN CAPTURE THAT CLASS - mirrors
+    ``llamacpp/_runner.py``'s identical helper (PR #1228 / issues 1222-1223):
+    a SIGILL/SIGSEGV/SIGABRT inside native code never returns to Python, so
+    no ``except`` clause anywhere in this module can record it, and the
+    parent's "see the debug log for the native stack trace" message had
+    nothing behind it for that fault class - the same sibling gap flagged in
+    dev-notes/vulkan-vision-native-fault-2026-08-11.md.
+
+    Armed as early as possible - before GGUFEmbedder or any native library is
+    anywhere near loaded - because a fault can only be captured by a handler
+    that was already installed when it happened. Unlike llamacpp/_runner.py
+    and _hf_runner.py, this module has no separate ``_runner_entry`` wrapper
+    around ``_runner_main`` (nothing else needed one), so this is called as
+    the very first statement inside ``_runner_main`` itself instead.
+
+    Failures are logged, never raised: losing the trace must not stop the
+    worker from doing its job. But it is NOT silenced (AGENTS.md rule 5) and
+    ``is_enabled()`` is checked rather than trusting "enable() did not
+    raise"."""
+    global _crash_trace_fh
+    if path is None:
+        return
+    import faulthandler
+    from localm.debuglog import logger
+    try:
+        _crash_trace_fh = open(path, "w", encoding="utf-8")
+        faulthandler.enable(file=_crash_trace_fh, all_threads=True)
+        if not faulthandler.is_enabled():
+            logger.warning(
+                "embedder worker: faulthandler.enable() returned without "
+                "raising but is_enabled() is False - a native fault in this "
+                "worker will produce no stack trace")
+    except Exception as e:   # noqa: BLE001 - a diagnostic must never break the worker
+        logger.warning(
+            "embedder worker: could not arm the native-fault trace (%s: %s) "
+            "- a native fault in this worker will produce no stack trace",
+            type(e).__name__, e)
+
+
+def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
     """Long-lived child: owns one GGUFEmbedder (one loaded model) for its
-    whole process lifetime, dispatching one request at a time."""
+    whole process lifetime, dispatching one request at a time.
+
+    Arms the native-fault trace before anything else, including before the
+    debug-log attach below - see ``_arm_native_crash_trace``."""
+    _arm_native_crash_trace(crash_trace_path)
     from localm.debuglog import attach_child_logging, dedup_native_stderr
     attach_child_logging()   # native load-failure diagnostics land in the
                               # shared debug log from this process too.
@@ -257,9 +307,62 @@ class EmbedderRunner:
         self._proc = None
         self._req_q = None
         self._resp_q = None
+        # Where THIS runner's child writes its native-fault trace. Chosen by
+        # the parent (see debuglog.child_crash_trace_path for why it is not
+        # recomputed child-side) and set in _spawn(); None before the first
+        # spawn. Mirrors ModelRunner._crash_trace_path exactly.
+        self._crash_trace_path = None
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
+
+    def _native_crash_trace(self) -> str:
+        """This child's captured native-fault trace, consumed and removed, or
+        "" when there is none. Consuming rather than merely reading is
+        deliberate: the file is a one-shot record of one death, so leaving it
+        in place would let a later reader (or the next spawn of a reused
+        runner) attribute a stale trace to a fresh crash. Mirrors
+        ModelRunner._native_crash_trace exactly."""
+        path = self._crash_trace_path
+        if path is None:
+            return ""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        finally:
+            self._discard_native_crash_trace()
+        return text
+
+    def _discard_native_crash_trace(self) -> None:
+        """Remove this child's trace file. Best-effort: a leftover costs one
+        small file in the logs dir, never correctness."""
+        path = self._crash_trace_path
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _crash_detail(self) -> str:
+        """A trailing detail for a crash message: the native trace when one
+        was captured, else a plain statement that none was.
+
+        Saying "no native stack trace was captured" OUT LOUD matters as much
+        as relaying one (AGENTS.md rule 5): before this existed, the message
+        claimed a trace was in the debug log whether or not anything had ever
+        written one."""
+        trace = self._native_crash_trace()
+        if not trace:
+            return " No native stack trace was captured for this fault."
+        from localm.debuglog import logger
+        # Logged as well as returned: the trace is multi-line and belongs in
+        # the debug log the message points at, not inlined into an HTTP
+        # error body.
+        logger.error("embedder worker native fault trace:\n%s", trace)
+        first = trace.splitlines()[0].strip()
+        return f" Native fault: {first} (full trace in the debug log)."
 
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
@@ -267,8 +370,22 @@ class EmbedderRunner:
         ctx = mp.get_context("spawn")   # explicit: identical on every OS
         self._req_q = ctx.Queue()
         self._resp_q = ctx.Queue()
+        # A previous child of this runner may have left one behind (a crash
+        # whose trace nothing consumed); drop it before the new child claims
+        # the name, so a stale trace can never be reported against the new
+        # process.
+        self._discard_native_crash_trace()
+        from localm.debuglog import child_crash_trace_path, logger
+        try:
+            self._crash_trace_path = child_crash_trace_path("embedder-worker")
+        except OSError as e:
+            # An unwritable logs dir costs the trace, not the worker.
+            logger.warning("could not allocate a native-fault trace file (%s); "
+                           "a native fault in this worker will not be traced", e)
+            self._crash_trace_path = None
         self._proc = ctx.Process(
-            target=_runner_main, args=(self._req_q, self._resp_q),
+            target=_runner_main,
+            args=(self._req_q, self._resp_q, self._crash_trace_path),
             name="localm-embedder-worker", daemon=True)
         self._proc.start()
 
@@ -305,8 +422,8 @@ class EmbedderRunner:
                     code = self._proc.exitcode
                     raise RuntimeError(
                         f"The embedding worker process crashed (exit code "
-                        f"{code}) during '{label}'. The server stayed up; see "
-                        "the debug log for the native stack trace.")
+                        f"{code}) during '{label}'. The server stayed up."
+                        + self._crash_detail())
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     raise RuntimeError(
@@ -351,3 +468,9 @@ class EmbedderRunner:
         self._proc = None
         self._req_q = None
         self._resp_q = None
+        # A worker torn down through shutdown() has had its exit accounted
+        # for by whoever called it, so any trace it left is either already
+        # relayed or describes a death nobody is going to report. Either way
+        # it must not outlive the process it describes.
+        self._discard_native_crash_trace()
+        self._crash_trace_path = None
