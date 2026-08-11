@@ -131,21 +131,28 @@ def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
     not shipped: caught by testing this function against its own intended
     target before trusting it.
 
-    Deliberately over-inclusive character extraction (isalnum(), not a
-    precise literal-only parse): this also picks up a letter that is
-    really part of a metacharacter escape (the 'd' in ``\\d``), which is
-    harmless - an extra probe costs microseconds - whereas under-
-    extracting would silently narrow exactly the coverage this exists to
-    add. Bounded to _MAX_DERIVED_PROBE_CHARS distinct characters - a cheap,
-    first-line bound on probe COUNT; _check_one's own internal wall-clock
-    budget is what actually bounds total COST regardless of count, since a
-    caller-controlled property (how many distinct characters a pattern
-    names) must never be able to scale validation cost past a fixed
-    ceiling. Returns () for a pattern with no alphanumeric content."""
+    Every DISTINCT character in *pattern* is a candidate, not filtered to
+    isalnum(): an ambiguous-alternation pattern's danger is keyed to
+    whichever specific character it names, and that character is exactly
+    as often punctuation (a literal ``.`` or ``,`` in an escape like
+    ``\\.``) as it is a letter or digit - isalnum() silently dropped every
+    such character from consideration, so a pattern keyed to punctuation
+    got no derived probe at all and this whole layer could never catch it.
+    Deliberately over-inclusive rather than a precise literal-only parse:
+    this also picks up a character that is really part of regex syntax (a
+    metacharacter escape like the 'd' in ``\\d``, or a delimiter like
+    ``(``), which is harmless - an extra probe costs microseconds -
+    whereas under-extracting would silently narrow exactly the coverage
+    this exists to add. Bounded to _MAX_DERIVED_PROBE_CHARS distinct
+    characters - a cheap, first-line bound on probe COUNT, unaffected by
+    widening which characters are eligible; _check_one's own internal
+    wall-clock budget is what actually bounds total COST regardless of
+    count, since a caller-controlled property (how many distinct
+    characters a pattern names) must never be able to scale validation
+    cost past a fixed ceiling. Returns () for an empty pattern."""
     counts: "dict[str, int]" = {}
     for ch in pattern:
-        if ch.isalnum():
-            counts[ch] = counts.get(ch, 0) + 1
+        counts[ch] = counts.get(ch, 0) + 1
     most_frequent = sorted(counts, key=lambda ch: counts[ch], reverse=True)
     return tuple(ch * 60_000 for ch in most_frequent[:_MAX_DERIVED_PROBE_CHARS])
 

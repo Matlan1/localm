@@ -639,6 +639,74 @@ def test_pattern_derived_probes_catches_ambiguous_alternation_not_caught_by_stat
         "that should only be catchable via the daemon probe")
 
 
+def test_pattern_derived_probes_includes_punctuation_characters():
+    """The isalnum() filter (closed 2026-08-11) meant a pattern whose
+    catastrophic-backtracking ambiguity is keyed to a PUNCTUATION character -
+    e.g. the literal comma in ``(,|,)*b`` - never got a derived probe for
+    that character at all, since isalnum() silently dropped it before the
+    frequency count ever saw it. Every distinct character the pattern names
+    is now a candidate, not just alnum() ones."""
+    from localm.inference._trigger_probe import _pattern_derived_probes
+
+    probes = _pattern_derived_probes(r"(,|,)*b")
+    derived_chars = {p[0] for p in probes}
+    assert "," in derived_chars, (
+        f"comma never got a derived probe - derived chars were {derived_chars!r}; "
+        "a punctuation-keyed catastrophic pattern is invisible to this layer")
+
+
+def test_pattern_derived_probes_catches_ambiguous_alternation_keyed_to_punctuation(monkeypatch):
+    """Same defect class as test_..._not_caught_by_static_filter above, but
+    keyed to a PUNCTUATION character rather than a letter - the isalnum()
+    bypass this closes (2026-08-11): before the fix, _pattern_derived_probes
+    silently dropped every non-alnum character from consideration, so a
+    pattern whose ambiguity is keyed to a literal comma got NO derived probe
+    for it and passed validation despite being genuinely catastrophic (same
+    mechanism as ``(a|a)*b``, just keyed to ``,`` instead of ``a`` - neither
+    fixed probe contains a repeated comma either, so nothing else would
+    catch it)."""
+    import time
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import _static_shape_rejection, validate_trigger_patterns
+
+    pattern = r"(,|,)*b"
+    assert _static_shape_rejection(pattern) is None, (
+        "this pattern is the test's whole point BECAUSE the static filter "
+        "cannot see it - if this assertion fails, pick a different pattern "
+        "that still bypasses the static filter")
+
+    _fast_trigger_probe_timeout(monkeypatch)
+    t0 = time.perf_counter()
+    with pytest.raises(InvalidGrammarError):
+        validate_trigger_patterns([pattern])
+    elapsed = time.perf_counter() - t0
+    # Must have gone through the (slow) probe path, not the static one - the
+    # inverse assertion from the DoS-fix tests above.
+    assert elapsed > 0.05, (
+        f"rejected in {elapsed:.3f}s - suspiciously fast for a pattern "
+        "that should only be catchable via the daemon probe")
+
+
+def test_pattern_derived_probes_still_bounded_with_many_punctuation_characters():
+    """Widening the character set to include punctuation must not create a
+    new cost sink: _MAX_DERIVED_PROBE_CHARS still bounds probe COUNT
+    regardless of how many distinct punctuation characters a pattern names -
+    the internal per-pattern wall-clock budget (_PROBE_LOOP_BUDGET_SECONDS)
+    is what bounds total cost, and it does so by bounding how many probes
+    ever run, not by which characters they are drawn from."""
+    from localm.inference._trigger_probe import _MAX_DERIVED_PROBE_CHARS, _pattern_derived_probes
+
+    # ASCII 33-47 is fifteen consecutive punctuation characters, none alnum.
+    many_punct = "".join(chr(c) for c in range(33, 48))
+    assert not any(ch.isalnum() for ch in many_punct)
+    probes = _pattern_derived_probes(many_punct)
+    assert len(probes) == _MAX_DERIVED_PROBE_CHARS, (
+        f"got {len(probes)} probes for {len(many_punct)} distinct punctuation "
+        f"characters - the _MAX_DERIVED_PROBE_CHARS={_MAX_DERIVED_PROBE_CHARS} "
+        "count bound no longer holds")
+
+
 def test_validate_trigger_patterns_accepts_the_fixed_tool_call_trigger():
     """Dogfood check: localm's OWN production trigger pattern (post-#933) must
     pass its own validator - proves the validator is not so tight it rejects

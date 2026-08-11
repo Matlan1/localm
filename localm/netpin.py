@@ -102,8 +102,18 @@ def pinned_session(pinned_ip: str) -> requests.Session:
     The caller owns the session lifetime (use it as a context manager, or close
     it after a streamed body is fully read) and must send the original hostname
     as the ``Host`` header so virtual-host routing survives the IP pin.
+
+    ``trust_env`` is disabled: with it on (the ``requests`` default), an
+    HTTP_PROXY/HTTPS_PROXY environment variable routes the connection through
+    that proxy instead of dialling the pinned IP at all - a plain-HTTP request
+    through a proxy is forwarded via a *different* connection pool
+    (``requests.adapters.HTTPAdapter.proxy_manager_for``, unaware of
+    ``_pinned_ip``), so the pin above is bypassed entirely rather than merely
+    weakened. The same flag also stops ``requests`` from auto-attaching
+    ``.netrc`` credentials to a request the caller never asked to authenticate.
     """
     session = requests.Session()
+    session.trust_env = False
     adapter = PinnedIPAdapter(pinned_ip)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
