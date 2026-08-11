@@ -239,7 +239,16 @@ def _check_venv_creation() -> None:
     multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
     matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
     silently failing with "[WinError 2]") passed a doctor run showing everything
-    green precisely because nothing probed this. This check would have caught it."""
+    green precisely because nothing probed this. This check would have caught it.
+
+    Also probes that pip actually landed inside the new venv (NEW-MANAGED-COMFY-
+    VENV-MISSING-PIP): ``-m venv`` can report success - return code 0, the
+    interpreter file present - while its own mandatory ensurepip bootstrap
+    silently failed (a base Python with ensurepip stripped, or a broken
+    install). The managed-ComfyUI installer pip-installs into a venv it just
+    created with no ``--without-pip`` fallback, so a pip-less venv here would
+    read as doctor-green right up until provisioning fails deep inside with an
+    opaque "No module named pip"."""
     import subprocess
     import tempfile
     from pathlib import Path
@@ -249,6 +258,8 @@ def _check_venv_creation() -> None:
     venv_python = real_base_python() or sys.executable
     ok = False
     detail = ""
+    pip_ok = True
+    pip_detail = ""
     try:
         with tempfile.TemporaryDirectory(prefix="localm-doctor-venv-") as tmp:
             dest = Path(tmp) / "probe-venv"
@@ -261,13 +272,28 @@ def _check_venv_creation() -> None:
             if not ok:
                 tail = (r.stderr or r.stdout or "").strip().splitlines()
                 detail = tail[-1] if tail else ""
+            else:
+                pr = subprocess.run(
+                    [str(expected), "-m", "pip", "--version"],
+                    capture_output=True, text=True, timeout=30)
+                pip_ok = pr.returncode == 0
+                if not pip_ok:
+                    tail = (pr.stderr or pr.stdout or "").strip().splitlines()
+                    pip_detail = tail[-1] if tail else ""
     except Exception as e:
         console.print(f"  {_FAIL_SYM}  venv-creation check errored: {e}")
         return
 
-    if ok:
+    if ok and pip_ok:
         console.print(f"  {_OK_SYM}  venv creation: OK "
                       "(the managed-ComfyUI installer uses this)")
+    elif ok and not pip_ok:
+        console.print(
+            f"  {_FAIL_SYM}  venv creation FAILED"
+            + (f" ({pip_detail})" if pip_detail else "")
+            + " - the venv was created but has no working pip; managed ComfyUI "
+              "setup ('localm comfy setup') will fail even though the runtime "
+              "above checks out")
     else:
         console.print(
             f"  {_FAIL_SYM}  venv creation FAILED"
