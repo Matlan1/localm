@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Settings now shows which backend is actually installed, not just what
+  would be picked fresh.** The Runtime & GPU section only ever showed the
+  recommended default; Live tuning now shows what your install is really
+  running. If you have an NVIDIA GPU but are still on the Vulkan backend, a
+  dismissable hint says CUDA usually performs better - it only ever informs,
+  and never switches anything for you.
 - **Settings can now update localm's own ComfyUI.** The managed-ComfyUI box
   offered Set up, Repair and Remove but no way to update, so if you only use
   the GUI you could install localm's ComfyUI and never move it to a newer one.
@@ -23,6 +29,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **`localm update` no longer swaps your installed backend for a different
+  one.** The runtime-provisioning step picked whichever backend the current
+  hardware recommendation named, rather than the one you actually had
+  installed, so a change to that recommendation (an NVIDIA-on-Linux install
+  moving from Vulkan to CUDA, for example) could re-provision an already-
+  working install onto a backend you never chose. Updates now keep whatever
+  backend is already installed, no matter what the recommendation says.
 - **A model process that dies from an ordinary error is no longer reported as a
   "native inference fault".** Any death of the model process used to be announced
   that way, including a plain Python error inside it - so a missing image library,

@@ -726,23 +726,39 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
 
 
 def _installed_backend() -> str:
-    """Best-effort backend for a runtime re-provision: the hwdetect recommendation
-    (the same universal-safe policy setup uses), defaulting to the vendor-neutral
-    'vulkan'. The install manifest does not record the chosen backend, so this is a
-    detection, not a lookup.
+    """The backend for a runtime re-provision: whatever is ALREADY INSTALLED on
+    this box, read from setup_llama's on-disk marker - never re-derived from
+    the current hardware-recommendation policy. Falls back to
+    recommended_install_backend() only when nothing is provisioned yet (no
+    marker at all: a fresh install, or one predating the marker) - there is
+    nothing to preserve in that case, so recommending is a first-time pick,
+    not an override.
 
-    MUST call recommended_install_backend() - the docstring above already claimed
-    "the same policy setup uses", but the code read Detection.recommended instead, a
-    legacy field that (per its own comment in hwdetect.py) can only ever be "vulkan"
-    or "cpu" and predates the CUDA/ROCm-aware policy. This is the #833 bug
-    (bugreport.py:177-184 fixed it there, for the same reason) recurring here: this
-    function feeds post_swap_command's "runtime" class, i.e. a REAL self-update on a
-    user's machine re-provisioning the native binaries after a code swap. Measured
-    live on a Windows AMD RX 6900 XT (RDNA2/gfx1030) box: Detection.recommended read
-    "vulkan" while recommended_install_backend() correctly read "amd-rocm" - so a
-    user on that hardware class running `localm update` through a "runtime"-class
-    update would have had their ROCm install silently swapped to Vulkan, with no
-    prompt and no record of the downgrade."""
+    THIS FUNCTION USED TO CALL recommended_install_backend() UNCONDITIONALLY.
+    That was itself the fix for an earlier bug (#833: this function originally
+    read the legacy Detection.recommended field, which can only ever be
+    "vulkan" or "cpu" - see hwdetect.py). It was correct only as long as the
+    recommendation policy never changed for hardware someone was already
+    running, and it stopped being correct the moment it did: b8878c2b changed
+    the NVIDIA-on-Linux recommendation from vulkan to cuda, which meant an
+    NVIDIA-Linux user running vulkan - working fine - would have been silently
+    re-provisioned onto cuda by their next "runtime"-class `localm update`,
+    despite never asking for the switch.
+
+    The maintainer's ruling: never override what a user is running, whether
+    the choice was deliberate or just what an older default happened to
+    install - detect and display it in Settings instead (the GUI /api/backend
+    route), and at most offer a dismissable hint. So this now preserves
+    unconditionally rather than trying to tell "deliberate" apart from
+    "inherited default": the two need the same answer, which is to never
+    change it out from under the user."""
+    try:
+        from localm import setup_llama
+        installed = setup_llama.installed_backend()
+        if installed:
+            return installed
+    except Exception:
+        pass
     try:
         from localm import hwdetect
         return hwdetect.recommended_install_backend() or "vulkan"
