@@ -175,14 +175,14 @@ def _fingerprint_context_layout(raw: bytes) -> Optional[str]:
     THE ONE ASYMMETRY, and the whole reason ctx_type is scored GRADED (0/1/2)
     rather than as a plain "is not -1" boolean:
 
-    The two hypotheses are the same pattern 4 bytes apart, so their windows
-    OVERLAP on three positions (36/40/44 under V1's reading are 40/44/48
-    under V2's). Those three predict "== -1" for BOTH hypotheses, so they
-    inflate both scores equally and discriminate nothing. The positions that
-    actually decide are 32, 36 and 52 - and offset 32 was a FREE POINT for
-    V1 in both directions, because on ctx_v2 bytes offset 32 is
-    n_threads_batch (measured 4), which is not -1 and so passed V1's
-    "ctx_type is not -1" check just as readily as a real ctx_type would.
+    The two hypotheses are the same pattern 4 bytes apart, so their -1 runs
+    OVERLAP: V1 expects -1 at 36/40/44/48, V2 at 40/44/48/52. Offsets
+    40/44/48 are therefore predicted "== -1" by BOTH, inflating both scores
+    equally and discriminating nothing. Only 32, 36 and 52 decide anything -
+    and offset 32 was a FREE POINT for V1 whichever layout was really
+    loaded, because on ctx_v2 bytes it holds n_threads_batch (measured 4),
+    which is not -1 and so passed V1's "ctx_type is not -1" check just as
+    readily as a real ctx_type would.
 
     That free point is what made a legitimate ctx_v2 build with ONE drifted
     default REFUSE. MEASURED on the old binary scoring:
