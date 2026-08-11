@@ -294,7 +294,19 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
     async def embeddings(req: EmbeddingRequest):
-        if not req.model:
+        # An empty model means "no preference", exactly like /v1/chat/completions
+        # and /v1/completions (see chat_completions above for the full
+        # rationale) - refuse only when there is genuinely nothing to fall back
+        # to. Safe here even though the dedicated-embedder fast path just below
+        # is keyed on an EXPLICIT req.model (a registry/config lookup): that
+        # match can never fire on an empty model, so an unnamed request always
+        # falls through to the general get_engine() resolution further down -
+        # the same resolution chat/completions already use. And Engine.embed()
+        # itself already falls back to the dedicated embedder (or raises a
+        # clean NotImplementedError, caught below as a 422) when the resolved
+        # engine cannot embed, so relaxing this gate cannot turn into a
+        # silently-wrong 200.
+        if not req.model and not (_hs._active_model_name or _hs._default_model_name):
             raise HTTPException(400, "Model parameter is required and cannot be empty")
 
         # If the requested model is registered as model_type="embedding", OR it is
@@ -371,6 +383,9 @@ def register(app: FastAPI, ctx) -> None:
                     {"object": "embedding", "index": i, "embedding": _enc_emb(vec)}
                     for i, vec in enumerate(vecs_emb)
                 ],
+                # req.model is guaranteed truthy here (both branches above that
+                # lead into this block require an explicit match against it),
+                # so it needs no fallback - unlike the general path below.
                 "model": req.model,
                 "usage": {"prompt_tokens": 0, "total_tokens": 0},
             }
@@ -433,7 +448,12 @@ def register(app: FastAPI, ctx) -> None:
                 {"object": "embedding", "index": i, "embedding": _encode(vec)}
                 for i, vec in enumerate(vecs)
             ],
-            "model": req.model,
+            # Report the model that actually answered when the request named
+            # none, same as /v1/chat/completions and /v1/completions - an
+            # omitted model is falsy and falls through to engine.display_name;
+            # an explicit "localm" is a real value the client sent and still
+            # echoes back unchanged.
+            "model": req.model or engine.display_name,
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
         }
 
