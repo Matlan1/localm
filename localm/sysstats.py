@@ -239,7 +239,18 @@ def _vram_probe() -> None:
     here, whatever its status, IS a completed attempt worth caching). The
     refresh-window timer still advances on a raised exception too, so a
     persistently erroring probe backs off at the same cadence as a healthy one
-    instead of retrying on every single poll (mirrors _gpu_util_probe)."""
+    instead of retrying on every single poll (mirrors _gpu_util_probe).
+
+    Unlike list_gpus()'s own probe machinery, this has no epoch/retirement
+    guard against a straggler thread writing late: list_gpus() needs one
+    because the NATIVE torch/HIP call it starts can hang uninterruptibly
+    forever, so it abandons that call and returns early, leaving a thread
+    that may write whenever (or never). This function never does that - it
+    calls vram_capacity() and blocks on IT, and vram_capacity() (via
+    list_gpus()'s own deadline) is guaranteed to return within that same
+    bounded deadline regardless of what its own native probe does. So this
+    thread is always bounded and never becomes an abandoned straggler
+    itself; there is nothing here for an epoch to fence out."""
     global _vram_inflight, _vram_last, _vram_last_at
     computed = None
     try:
