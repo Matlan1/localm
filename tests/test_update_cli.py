@@ -38,6 +38,27 @@ def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkey
     assert "up to date" not in r.output
 
 
+def test_update_check_blocked_by_net_policy(monkeypatch):
+    """A net-policy refusal already flows through the existing 'Could not check
+    for updates' path (same as test_update_apply_failure_is_surfaced's shape) -
+    it must show the short reason, and never claim the update is up to date."""
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(updater, "available", lambda: True)
+
+    def boom():
+        raise LocalmError(
+            "update checks are off because network access is set to off",
+            reason='turn on "Check for updates even when network access is off" '
+                   "in Settings, or set network access to ask or allow")
+
+    monkeypatch.setattr(updater, "check", boom)
+    r = CliRunner().invoke(main, ["update", "--check"])
+    output = " ".join(r.output.split())   # rich wraps long lines; normalize whitespace first
+    assert "Could not check for updates" in output
+    assert "network access is set to off" in output
+    assert "up to date" not in output
+
+
 def test_update_check_reports_available(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {

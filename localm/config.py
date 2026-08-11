@@ -604,6 +604,13 @@ DEFAULT_CONFIG: dict = {
     # proxy considers offering. See dev-notes/self-updater-design's prerelease
     # channel addendum.
     "update_allow_prerelease": False,
+    # Net-policy carve-out for the update channel ONLY (see updater.py's check()
+    # and settings_schema.py's update_ignore_net_policy, admin_only). net_mode
+    # is meant to be a real kill switch - explicit user actions still respect
+    # net_mode=off (see netpolicy.py's module docstring) - so this defaults to
+    # False: the update check obeys it like everything else unless an admin
+    # opts this one channel out.
+    "update_ignore_net_policy": False,
     # Names of enabled engine plugins (WordPress-style). Managed by the plugin
     # engine (plugin enable/disable, GUI Plugins page) via update_config, NOT the
     # settings form. Declared here for a documented home + default (else the

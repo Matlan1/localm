@@ -194,13 +194,47 @@ def _prerelease_channel_enabled() -> bool:
         return False
 
 
+def _net_policy_allows_update_check() -> bool:
+    """Whether the update check may reach the network: allowed whenever
+    ``net_mode`` is not ``"off"``, or an admin explicitly exempted the update
+    channel (settings_schema.py's ``update_ignore_net_policy``, admin_only,
+    default False).
+
+    Same bar as model_manager/pull.py's own ``network_mode() == "off"`` gate for
+    an explicit-but-still-policy-governed network action (see netpolicy.py's
+    module docstring: explicit user actions "still respect net_mode = off so
+    one switch really does kill everything") - "ask"/"allow" need no per-call
+    confirmation here, only the literal kill switch stops it.
+
+    Best-effort like _prerelease_channel_enabled(): an unreadable config
+    resolves to the safe direction (blocked), matching network_mode()'s own
+    fail-closed behavior on a config-read failure (HON-2) rather than silently
+    letting a network call through that a broken config cannot actually confirm
+    was requested."""
+    from localm.netpolicy import network_mode
+    if network_mode() != "off":
+        return True
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("update_ignore_net_policy", False))
+    except Exception:
+        return False
+
+
 def check(*, opener=None) -> dict:
     """Ask the proxy for the latest release and compare to the running version.
 
     Returns ``{current, latest, newer, notes, published_at, asset}``. *latest* is
     None when there are no releases. Raises :class:`~localm.bugreport.LocalmError`
-    when not configured or the proxy fails - the caller decides whether to surface it
-    (the manual command does) or swallow it (the startup check does).
+    when not configured, blocked by network policy, or the proxy fails - the
+    caller decides whether to surface it (the manual command does) or swallow it
+    (the startup check does).
+
+    Network policy: gated on :func:`_net_policy_allows_update_check` BEFORE any
+    request is built or attempted, so a blocked check never resolves DNS or
+    opens a socket - and, because it raises rather than returning a dict, it can
+    never collapse into a false "up to date" the way a swallowed exception
+    would (AGENTS.md rule 5).
 
     When the prerelease channel is opted into, appends ``?channel=prerelease`` to
     the request; the PROXY (not this client) decides which single candidate
@@ -213,6 +247,11 @@ def check(*, opener=None) -> dict:
     if not base:
         raise LocalmError("the updater is not configured",
                           reason="set bugreport_upload_url (or update_url) to enable it")
+    if not _net_policy_allows_update_check():
+        raise LocalmError(
+            "update checks are off because network access is set to off",
+            reason='turn on "Check for updates even when network access is off" '
+                   "in Settings, or set network access to ask or allow")
     path = "/update?channel=prerelease" if _prerelease_channel_enabled() else "/update"
     data = _proxy.request(base, path, token=token, opener=opener)
     current = _version.read_version()

@@ -84,6 +84,27 @@ def test_update_check_unconfigured(monkeypatch):
     assert _get(create_app(_engine()), "/api/update/check").json()["available"] is False
 
 
+def test_update_check_blocked_by_net_policy_is_not_up_to_date(monkeypatch):
+    """The route already has a generic error path (test_issues_endpoint_error_surfaced
+    is the same shape) - a net-policy refusal must go through it, never through
+    the success shape with newer=False (which the GUI reads as "up to date")."""
+    _open_mode(monkeypatch)
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(updater, "available", lambda: True)
+
+    def boom():
+        raise LocalmError(
+            "update checks are off because network access is set to off",
+            reason='turn on "Check for updates even when network access is off" '
+                   "in Settings, or set network access to ask or allow")
+
+    monkeypatch.setattr(updater, "check", boom)
+    data = _get(create_app(_engine()), "/api/update/check").json()
+    assert data["available"] is True
+    assert "network access is set to off" in data["error"]
+    assert "newer" not in data
+
+
 # --------------------------- update apply -------------------------------
 
 def test_update_apply_endpoint(monkeypatch):

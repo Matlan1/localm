@@ -307,7 +307,12 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # installing - same trust-widening class as OUTBOUND_OWNER_KEYS right
         # above it, but not itself an outbound endpoint, so kept on its own line
         # (see UPDATER-VERSION-RECOGNITION / prerelease-channel unit).
-        | {"update_allow_prerelease"})
+        | {"update_allow_prerelease"}
+        # update_ignore_net_policy EXEMPTS the update channel from net_mode=off
+        # (a real kill switch everywhere else) - same trust-widening class as
+        # update_allow_prerelease right above it, kept on its own line for the
+        # same reason (see the "make the update check obey net policy" unit).
+        | {"update_ignore_net_policy"})
 
 
 def test_outbound_endpoint_keys_are_owner_only():

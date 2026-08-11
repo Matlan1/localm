@@ -576,6 +576,19 @@ CORE_FIELDS: list = [
                  "field-tested. Turn this on only if you want to help test rc "
                  "builds.",
                  group="Bug reports", admin_only=True),
+    # admin_only: this EXEMPTS the update channel from net_mode - the same
+    # "widens network reach" reasoning as update_url/update_token/
+    # bugreport_upload_url and update_allow_prerelease right above (all
+    # admin_only in this same group). Default MUST be False: net_mode=off is
+    # meant to be a real kill switch (netpolicy.py's module docstring - explicit
+    # user actions "still respect net_mode = off"), so the update channel obeys
+    # it like every other network capability unless an admin opts it out here.
+    SettingField("update_ignore_net_policy", Widget.TOGGLE,
+                 "Check for updates even when network access is off",
+                 "The update check normally obeys the Network access setting "
+                 "above, so setting that to Off also turns off update checks. "
+                 "Turn this on to let the update channel through regardless.",
+                 group="Bug reports", admin_only=True),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
