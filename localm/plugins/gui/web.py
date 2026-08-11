@@ -811,42 +811,38 @@ def attach_gui(
             resp = RedirectResponse(url=clean, status_code=303, headers=headers)
             _set_session_cookies(resp, key, secure=request.url.scheme == "https")
             return resp
-        if key and loopback and _is_same_origin_document_request(request):
-            # Protected mode on loopback: establish an HttpOnly session cookie so
-            # the key never touches page JS / localStorage. Only MINT a new
-            # session when the browser has no valid one, so an ordinary reload does
-            # not spawn a session each time - and, crucially, a browser whose
-            # session is still valid after an owner-key ROLL stays signed in (the
-            # session is decoupled from the key), instead of being bounced to the
-            # key gate (the reported bug).
-            #
-            # Same-origin gated for the SAME reason spelled out on the open-mode
-            # branch below, which applies here with more force, not less: "loopback"
-            # describes what the SERVER BOUND TO, not who is asking. Without it, a
-            # cross-origin GET / (any website the user visits, regardless of
-            # "cors_origins") was answered with a Set-Cookie carrying a real OWNER
-            # session - so the branch that exists to protect a KEYED install handed
-            # out more than the keyless branch one gate away was already refusing to.
-            # A mismatched Origin, or an absent Origin with a non-loopback Host (DNS
-            # rebinding), now falls through to the plain shell with no cookie.
-            #
-            # SCOPE, so the next reader does not mistake this for more than it is:
-            # this is an ORIGIN check, not a caller-identity check. A top-level
-            # navigation from the local browser presents no Origin and a loopback
-            # Host, so anything else on this machine able to shape a request the
-            # same way is indistinguishable from it here, and no header-based test
-            # can separate the two. Treating a loopback-local caller as the owner
-            # is the pre-existing C1 assumption this branch implements; the gate
-            # narrows WHICH ORIGINS reach it and deliberately claims nothing more.
-            # Where that assumption is not wanted, the ?localm_token= launch grant
-            # above is the mechanism that does not rest on it.
-            from localm.inference.http_server import SESSION_COOKIE
-            from localm import sessions as _sessions
-            existing = (request.cookies.get(SESSION_COOKIE) or "").strip()
-            resp = HTMLResponse(_index_html_with_shell_token(""), headers=headers)
-            if not (existing and _sessions.lookup(existing) is not None):
-                _set_session_cookies(resp, key, secure=request.url.scheme == "https")
-            return resp
+        # THERE IS DELIBERATELY NO KEYED AUTO-SEED BRANCH HERE ANY MORE. DO NOT
+        # RE-ADD ONE.
+        #
+        # A branch used to sit here that, on a keyed loopback install, answered a
+        # credential-free GET / with a Set-Cookie carrying a real OWNER session.
+        # It was added so a fresh `localm gui` would not be locked out when a key
+        # is configured, and it was origin-gated after a cross-origin page was
+        # found to collect that cookie. The origin gate closed the cross-ORIGIN
+        # tier and could never close the LOCAL-PROCESS one: a top-level browser
+        # navigation to http://127.0.0.1:PORT/ and a local script calling the same
+        # URL are byte-identical at the HTTP layer, so no header-based test can
+        # separate them. Measured on a real socket: the cookie resolved to scopes
+        # ['admin'] and minted a fresh admin key, while the same request without
+        # it was refused 401.
+        #
+        # The maintainer's ruling: presenting no key to a keyed instance is the
+        # same as presenting an invalid one, and must be refused. So the shell is
+        # served WITHOUT a session and the page shows its key gate - which is the
+        # intended outcome for a manually-typed URL, not a regression to soften.
+        #
+        # Everything the branch legitimately supported still works, by other means:
+        #   - the LAUNCHER hands over a session through the single-use
+        #     ?localm_token= grant above, which carries its own credential;
+        #   - ENTERING THE KEY posts it to /api/session, which mints the session;
+        #   - AN EXISTING VALID SESSION is unaffected, because the browser already
+        #     holds the cookie and this route never needed to re-issue it - the
+        #     removed branch explicitly did NOT re-mint when one was present, so
+        #     the "stays signed in across an owner-key ROLL" property it was
+        #     originally written for is preserved by leaving the cookie alone.
+        # With the mint gone, the branch body was byte-identical to the fallthrough
+        # at the end of this function, which is why it is deleted rather than
+        # emptied.
         if not key and loopback and _is_same_origin_document_request(request):
             # Open mode on loopback: seed the per-process shell token as a JS
             # global so the loopback SPA can still manage. app.js sends it

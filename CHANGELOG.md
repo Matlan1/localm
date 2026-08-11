@@ -23,6 +23,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **Opening the web UI on an install that has an API key set now asks for the
+  key, instead of signing you in automatically.** When a key was configured, the
+  page would still hand a full owner session to whoever asked for it, with no key
+  presented, as long as the request came from this machine. That could not be told
+  apart from any other local program asking, so it is gone: presenting no key to a
+  keyed install is now treated the same as presenting a wrong one. Launching from
+  `localm gui` is unchanged and still signs you straight in, browsers that are
+  already signed in stay signed in, including across rolling the key, and typing
+  the key into the page works as before. The one visible change is that opening
+  the address by hand now shows the key prompt.
 - **Two ComfyUI updates can no longer run at once.** Updating localm's own
   ComfyUI rewrites its files in place, and until now nothing stopped a second
   update starting while the first was still going, which could leave the
