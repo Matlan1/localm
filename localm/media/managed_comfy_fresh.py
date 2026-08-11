@@ -52,10 +52,31 @@ from localm.media.managed_comfy_provision import (
 # --------------------------------------------------------------------------- #
 # A tagged, known-version ComfyUI to clone fresh. Advancing this pin and carrying
 # localm's own patches on top of it (e.g. the __func__ tolerance) is stage S4's
-# job; here it is a fixed CONSTANT. v0.9.2, resolved 2026-07-08.
+# job; here it is a fixed CONSTANT. v0.31.1, resolved 2026-08-11 (previously v0.9.2 /
+# 8f40b43e, resolved 2026-07-08).
+#
+# VERIFIED ON THIS BOX AT THIS PIN BEFORE BUMPING (never bump an untested commit):
+# a fresh S3 provision completes; the localm patch set still applies (the __func__
+# tolerance is STILL NEEDED upstream at this commit, so it is carried, not retired);
+# the pinned city96 GGUF node installs AND registers live; the hardware-matched ROCm
+# torch + torchaudio import and see the card; and an S4 update from the previous pin
+# succeeds with its rollback exercised. Evidence and method:
+# dev-notes/comfy-pin-advance-2026-08-11.md.
 COMFYUI_REPO = "https://github.com/comfyanonymous/ComfyUI.git"
-COMFYUI_PINNED_COMMIT = "8f40b43e0204d5b9780f3e9618e140e929e80594"
-COMFYUI_PINNED_VERSION = "v0.9.2"
+COMFYUI_PINNED_COMMIT = "fe4195f7f4275f2626cbafc703acc3ddde1e5490"
+COMFYUI_PINNED_VERSION = "v0.31.1"
+
+# The FIRST upstream release tag carrying comfy_extras/nodes_multigpu.py, i.e. the
+# per-component placement nodes (SelectModelDevice/SelectCLIPDevice/SelectVAEDevice).
+# Measured by walking every v* tag in the real repo: v0.22.2 lacks it, v0.23.0 has it;
+# the file landed 2026-05-25 in 0a2dd86e ("MultiGPU Work Units For Accelerated
+# Sampling", #7063), which is the date quoted throughout the placement code.
+#
+# It lives next to the pin so "does localm's own ComfyUI offer placement?" is a
+# MECHANICAL comparison against COMFYUI_PINNED_VERSION rather than prose that silently
+# goes stale when the pin moves - which is exactly how the previous pin ended up being
+# described in Settings as a permanent limitation months after it stopped being one.
+COMFYUI_PLACEMENT_MIN_VERSION = "v0.23.0"
 
 
 # --------------------------------------------------------------------------- #
