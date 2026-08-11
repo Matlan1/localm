@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **Revoking an admin-scoped device key now reliably signs out its browser
+  too.** Browser sessions are re-checked against the key that created them on
+  every request, so revoking or expiring that key ends the session. The owner
+  key is deliberately exempt, because rolling it must not sign you out of your
+  own browser, but that exemption was granted to any session holding admin
+  rights, including ones created by admin-scoped keys made with
+  `localm keys create`. Those keys are meant to be revocable, so their browser
+  sessions could outlive them. The exemption now follows the owner key itself.
+  Rolling the owner key still keeps you signed in, including on sessions created
+  by an older version.
 - **A `jobs`-scoped key can no longer point a scheduled coder job at any folder
   on the machine.** Scheduled coder jobs took their working directory from
   whoever created them, checked only for being a local path, so a key you handed
