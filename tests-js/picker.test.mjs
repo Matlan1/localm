@@ -173,6 +173,40 @@ test("issue #1220: reaching a dot-directory directly turns the toggle on for its
   assert.ok(rowNamed(win, ".git"), "back at the parent, the sibling dot-dir is now visible unprompted");
 });
 
+test("issue #1220: navigate always asks the server for hidden entries", async () => {
+  // Both #1220 tests above use the module-level fetchImpl, which returns the
+  // SAME entries[] regardless of query string - the server's own
+  // include_hidden gate (tests/test_fs_picker.py) is only exercised there, in
+  // isolation. Neither suite binds the CLIENT to actually requesting hidden
+  // entries: if navigate() ever stopped passing includeHidden=true to
+  // fetchDirs(), every test above would stay green (the fake still returns
+  // .git regardless), while the real server would simply omit dot-entries
+  // from every response and the "Hidden" toggle would have nothing left to
+  // reveal - the exact #1220 regression, invisible to the rest of the suite.
+  // This test is the one thing that would catch it: it inspects the actual
+  // request URL(s) navigate() sends.
+  const seenDirsUrls = [];
+  const recordingFetch = (url, opts) => {
+    const u = String(url);
+    if (u.includes("/api/fs/dirs")) seenDirsUrls.push(u);
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: recordingFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  rowNamed(win, "sub").click();   // a second navigate(), into a subfolder
+  await ticks();
+
+  assert.ok(seenDirsUrls.length >= 2,
+    "expected at least the initial nav plus the click-into-folder nav");
+  for (const u of seenDirsUrls) {
+    assert.ok(u.includes("include_hidden=true"),
+      `navigate() must always ask the server for hidden entries (the picker `
+      + `hides them client-side via the "Hidden" toggle, not by omitting the `
+      + `request) - got ${u}`);
+  }
+});
+
 test("dismissing the modal resolves null", async () => {
   const { window: win } = loadApp({ fetchImpl });
   start(win, `{ mode: "dir", startPath: "/root" }`);
