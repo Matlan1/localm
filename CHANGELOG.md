@@ -284,6 +284,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   recommends the faster vendor build when it finds one. Vulkan remains the
   recommendation when no toolkit is present, and the RX 6000 build is
   unaffected - it needs no toolkit at all, so it stays the default there.
+- **Filing a bug report from the app could freeze the whole server for as
+  long as it took to save.** Saving a report reads the current log, digests
+  it, and writes the report file, and all of that ran directly on the same
+  thread that serves every other request - so filing one, exactly when
+  something was already going wrong, stalled everyone else for the duration.
+  Saving now happens off to the side, and two reports filed close together
+  can no longer collide and corrupt each other's file.
+- **A GPU-compatibility warning in the debug log could be cut off before the
+  useful part.** When your GPU's PyTorch build reports it as unsupported, the
+  message logged for it was trimmed to 200 characters - shorter than the
+  install path that comes first in it, so the list of architectures your
+  PyTorch actually supports, the part that says what to do about it, never
+  made it in. The limit is now much higher, and a message rare enough to
+  still exceed it is now marked as cut short instead of stopping without a
+  word.
 
 ## [0.1.5rc2] - 2026-08-08
 
