@@ -552,6 +552,47 @@ def test_context_params_class_and_layout_helpers():
         _FakeLib(good_model(), good_ctx_v2())) == CONTEXT_PARAMS_V2
 
 
+def test_unknown_third_layout_still_fails_safe():
+    """The guarantee documented on verify_abi(): a layout NEITHER V1 nor V2
+    (e.g. a hypothetical future upstream insertion on top of today's V2) must
+    never silently misbind. Simulates one by inserting ANOTHER 4-byte field
+    at the same position n_outputs_max_per_seq already occupies, shifting
+    everything from n_threads onward one more +4 than V2 already does.
+
+    The fingerprint CONFIDENTLY (not inconclusively) misdetects this as V2 -
+    proving layout DETECTION alone is not the safety net here - but
+    evaluate()'s independent re-check of the actual keystone values at V2's
+    assumed offsets still catches the resulting garbage and refuses. This is
+    the defense-in-depth verify_abi()'s docstring describes; if this test
+    ever goes green with a non-raising, "ok" verdict, that guarantee has been
+    lost. Proven empirically (a live probe, not just this synthetic
+    reconstruction) 2026-08-11 - see dev-notes/FIX-2026-08-11-llama-context-
+    params-abi-mismatch.md."""
+    cp = good_ctx_v2()
+    raw_v2 = bytes(bytearray(
+        (ctypes.c_uint8 * ctypes.sizeof(cp)).from_buffer_copy(cp)))
+    # Insert 4 more zero bytes right where n_outputs_max_per_seq already is
+    # (offset 24), shifting everything after it +4 again; truncate to keep
+    # the original total length (mirrors how the real oversized receptacle
+    # always hands back a fixed-size buffer regardless of what wrote to it).
+    raw_v3 = raw_v2[:24] + b"\x00\x00\x00\x00" + raw_v2[24:-4]
+    assert len(raw_v3) == len(raw_v2)
+
+    # The fingerprint alone: must NOT be a quiet "inconclusive -> V1
+    # fallback" here - it actively (and wrongly) picks V2, which is the
+    # scenario worth proving evaluate() still catches. The inconclusive path
+    # is covered separately by test_context_params_layout_falls_back_to_v1_
+    # when_inconclusive.
+    layout = _abi._fingerprint_context_layout(raw_v3)
+    assert layout == CONTEXT_PARAMS_V2, (
+        "fixture must exercise the CONFIDENT-misdetection path")
+
+    fake_v3 = LlamaContextParamsV2()
+    ctypes.memmove(ctypes.byref(fake_v3), raw_v3, len(raw_v3))
+    with pytest.raises(AbiMismatch):
+        verify_abi(_FakeLib(good_model(), fake_v3))
+
+
 # --------------------------------------------------------------------------- #
 #  llama_sampler_init_penalties arity (upstream #26520)
 # --------------------------------------------------------------------------- #
