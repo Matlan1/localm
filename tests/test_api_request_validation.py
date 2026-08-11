@@ -153,3 +153,73 @@ def test_model_detail_empty_path_does_not_walk_cwd():
     # aggregate size; the guard leaves size_bytes None for an empty path.
     assert body["size_bytes"] is None, \
         "an empty registry path must not be stat/walked (server-CWD walk + size leak)"
+
+
+# --------------------------------------------------------------------------- #
+# LM-FZ-002: a deeply-nested body must not turn a 422 into a 500
+# --------------------------------------------------------------------------- #
+#
+# pydantic records the offending value under `input` verbatim, so the nesting
+# lands in the error object and `jsonable_encoder` walks it recursively. A ~2 KB
+# body raised RecursionError INSIDE the validation handler, so FastAPI could not
+# build a response and the documented 422 became an opaque 500 - measured at
+# ~0.25 s of event-loop CPU each, and a 147x latency rise on unrelated requests
+# under four connections.
+#
+# These assert on the STATUS CODE, which is the property. Deliberately NOT on
+# elapsed time: a duration assertion measures a proxy for the defect, and it is
+# the kind of number that gets "adjusted" until it passes rather than fixed.
+
+def _raw_client():
+    """Like _client(), but surfacing server errors as real 500 RESPONSES instead
+    of re-raising them, so the 422-vs-500 contract is observable exactly as a
+    real HTTP client sees it."""
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.active_requests = 0
+    type(engine).loaded = property(lambda self: True)
+    return TestClient(create_app(engine), raise_server_exceptions=False)
+
+
+def _deep_json(depth: int) -> bytes:
+    """A body that PARSES (well inside the JSON parser's own depth limit) but
+    whose nesting the error object then carries."""
+    return ("[" * depth + "]" * depth).encode()
+
+
+def test_deeply_nested_body_is_422_not_500():
+    r = _raw_client().post("/v1/chat/completions", content=_deep_json(1500),
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 422, (
+        f"a deeply-nested body returned {r.status_code}; the validation handler "
+        "could not encode its own error and the documented 422 became a 500")
+
+
+def test_deeply_nested_body_reports_the_elision():
+    """The pruning must be OBSERVABLE, not merely inferred from the absence of a
+    crash - otherwise this test would also pass if the body were simply empty."""
+    r = _raw_client().post("/v1/chat/completions", content=_deep_json(1500),
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert "elided" in r.text, (
+        "no elision marker: the depth cap did not visibly prune anything, so "
+        "this test cannot distinguish a working prune from an empty error body")
+
+
+def test_a_shallow_but_wide_body_is_unaffected():
+    """The cap is on DEPTH, not on size. A wide-but-flat body must still get its
+    ordinary validation error, with nothing elided."""
+    r = _raw_client().post("/v1/chat/completions",
+                           content=b"[" + b"1," * 5000 + b"1]",
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert "elided" not in r.text, "a flat body was wrongly pruned by the depth cap"
+
+
+def test_an_ordinary_validation_error_is_still_readable():
+    """No overcorrection: the handler's real job is unchanged."""
+    r = _chat(_client(), max_tokens=0)
+    assert r.status_code == 422
+    assert "max_tokens" in r.json()["detail"]
+    assert "elided" not in r.text

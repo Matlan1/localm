@@ -38,6 +38,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   to miss. A fresh install is unaffected and needs nothing extra.
 
 ### Fixed
+- **A malformed request with deeply nested JSON now gets the clear rejection it
+  should, instead of a generic server error.** Building the validation message
+  walked the offending value without any limit on how deep it went, so a small
+  body nested a few hundred levels deep exhausted the recursion limit inside the
+  error handler itself. The request came back as an unexplained server error, and
+  because each one occupied the server for a moment, a handful of them together
+  slowed unrelated requests noticeably. Nesting past a sensible depth is now
+  summarised rather than walked, so the response is the ordinary validation error
+  and the cost is gone.
 - **Indexing or attaching a hostile archive can no longer tie up the machine.**
   Archive extraction limited how much any single member could decompress to, and
   how many members it would look at, but not how much it decompressed in total.
