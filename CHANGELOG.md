@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **A `jobs`-scoped key can no longer point a scheduled coder job at any folder
+  on the machine.** Scheduled coder jobs took their working directory from
+  whoever created them, checked only for being a local path, so a key you handed
+  out with just the `jobs` scope could read and edit files anywhere the server
+  could reach. Coder sessions over the API already confined a scoped key to the
+  project folder; scheduled jobs now match. The owner key and `coder:full` keys
+  still choose freely, a scoped key's job is placed in the project folder (shown
+  in the API response and in the job's own output when an existing job is moved),
+  and the check runs again at each run, so narrowing or revoking a key takes
+  effect on its next tick.
 - **`localm key clear` and `localm key recover` no longer report success when
   they could not sign browser sessions out.** If the session store could not be
   written (a locked or read-only file), both commands printed their normal
