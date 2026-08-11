@@ -90,7 +90,12 @@ class Message(BaseModel):
 
 class EmbeddingRequest(BaseModel):
     """OpenAI /v1/embeddings request."""
-    model: str = "localm"
+    # None, not "localm": same reason as ChatRequest/CompletionRequest.model -
+    # "localm" is truthy, so it must not also be the field's own default, or an
+    # omitted field is indistinguishable from an explicit "localm" request. See
+    # the /v1/embeddings handler (routes/chat.py) for the gate and echo this
+    # enables.
+    model: Optional[str] = None
     input: Union[str, List[str]]      # single text or batch
     encoding_format: str = "float"    # "float" (JSON array) or "base64"
                                       # (base64 little-endian float32 buffer)

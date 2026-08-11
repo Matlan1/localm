@@ -294,7 +294,21 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
     async def embeddings(req: EmbeddingRequest):
-        if not req.model:
+        # An empty model means "no preference", exactly like /v1/chat/completions
+        # and /v1/completions (see chat_completions above for the full
+        # rationale) - refuse only when there is genuinely nothing to fall back
+        # to. Unlike those two routes, "no preference" is resolved a few lines
+        # below to the CONFIGURED embedder first when one exists (see
+        # resolved_model's own comment) rather than straight to whatever chat
+        # model happens to be active, because unlike chat, an embedding from
+        # the wrong model is not an error - it is silently wrong. Only when no
+        # embedder is configured at all does an unnamed request reach the
+        # general get_engine() resolution further down, and even then
+        # Engine.embed() itself falls back to the dedicated embedder (or
+        # raises a clean NotImplementedError, caught below as a 422) when the
+        # resolved engine cannot embed - so this gate relaxation cannot turn
+        # into a silently-wrong 200 either way.
+        if not req.model and not (_hs._active_model_name or _hs._default_model_name):
             raise HTTPException(400, "Model parameter is required and cannot be empty")
 
         # If the requested model is registered as model_type="embedding", OR it is
@@ -322,13 +336,30 @@ def register(app: FastAPI, ctx) -> None:
         try:
             from localm.config import load_config, load_registry
             _reg = load_registry()
-            _entry = _reg.get((req.model or "").strip()) if _reg else None
             _emb_cfg_name = str(load_config().get("embedding_model") or "").strip()
         except Exception:
-            _entry = None
+            _reg = None
             _emb_cfg_name = ""
+        # An omitted model must resolve to the CONFIGURED embedder when one
+        # exists, not to whatever chat model happens to be active. Unlike chat,
+        # embeddings from different models are not comparable (the same hazard
+        # NEW-RAG-DIM-NO-REEMBED tracks for a deliberate model switch) - and
+        # "active model" is shared, mutable state that unrelated chat activity
+        # can change between two otherwise-identical requests. Without this, an
+        # unnamed request would fall through to the general get_engine()
+        # resolution below, which is only safe by ACCIDENT: it happens to be
+        # deterministic whenever the active model's backend cannot itself embed
+        # (every GGUF, and any HF chat decoder - both always route through
+        # Engine.embed()'s own dedicated-embedder fallback regardless of WHICH
+        # such model is active), but is not deterministic if the active model
+        # is itself an embedding-capable HF encoder. Falls through to that
+        # general resolution only when no embedder is configured at all - at
+        # that point there is nothing dedicated to prefer, and this is the same
+        # best-effort "use whatever's loaded" fallback chat/completions use.
+        resolved_model = req.model or (_emb_cfg_name or None)
+        _entry = _reg.get((resolved_model or "").strip()) if _reg else None
         _is_registered_embedder = isinstance(_entry, dict) and _entry.get("model_type") == "embedding"
-        _is_configured_embedder = bool(_emb_cfg_name) and (req.model or "").strip() == _emb_cfg_name
+        _is_configured_embedder = bool(_emb_cfg_name) and (resolved_model or "").strip() == _emb_cfg_name
         if _is_registered_embedder or _is_configured_embedder:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()
@@ -371,7 +402,11 @@ def register(app: FastAPI, ctx) -> None:
                     {"object": "embedding", "index": i, "embedding": _enc_emb(vec)}
                     for i, vec in enumerate(vecs_emb)
                 ],
-                "model": req.model,
+                # resolved_model is guaranteed truthy here (both branches above
+                # that lead into this block require an explicit match against
+                # it) - report it rather than req.model, which is None on the
+                # omitted-model-resolved-to-the-configured-embedder path.
+                "model": resolved_model,
                 "usage": {"prompt_tokens": 0, "total_tokens": 0},
             }
 
@@ -379,9 +414,13 @@ def register(app: FastAPI, ctx) -> None:
         # (can_embed=False) embeds via the dedicated small embedder, so loading the
         # multi-GB chat model (and, under VRAM pressure, evicting the active one) is
         # pure waste (AUDIT-MED-13). Only a can_embed backend (HF) needs a real load.
-        engine = await _hs.get_engine(req.model, load=False)
+        # resolved_model, not req.model: identical when the client named a model
+        # explicitly, but resolved_model is also correctly None here rather than
+        # a leftover configured-embedder name (that case always took the branch
+        # above and returned already - see resolved_model's own comment).
+        engine = await _hs.get_engine(resolved_model, load=False)
         if getattr(getattr(engine, "_backend", None), "can_embed", True):
-            engine = await _hs.get_engine(req.model)
+            engine = await _hs.get_engine(resolved_model)
         _touch_activity(engine.display_name)
 
         # Honor the OpenAI encoding_format contract. "float" returns plain JSON
@@ -433,7 +472,13 @@ def register(app: FastAPI, ctx) -> None:
                 {"object": "embedding", "index": i, "embedding": _encode(vec)}
                 for i, vec in enumerate(vecs)
             ],
-            "model": req.model,
+            # Report the model that actually answered when the request named
+            # none, same as /v1/chat/completions and /v1/completions - an
+            # omitted model (resolved_model falls back to req.model here, and
+            # is None in that case too) falls through to engine.display_name;
+            # an explicit "localm" is a real value the client sent and still
+            # echoes back unchanged.
+            "model": resolved_model or engine.display_name,
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
         }
 
