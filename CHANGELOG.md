@@ -46,6 +46,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   else says the process exited unexpectedly and sends you to the log for the real
   error. The internal log line that made the same claim is neutral now too, so it
   no longer pre-judges a crash before anyone has looked at it.
+- **A working llama runtime is no longer refused over a setting it is allowed
+  to change.** Before loading the native library localm checks that its
+  internal layout is the one this build expects, and that check could pick the
+  wrong layout when a runtime changed any one of a handful of defaults.
+  Startup then stopped with "the native llama runtime has an incompatible
+  struct layout", named a setting whose value was in fact perfectly normal,
+  and told you to re-provision or to set LOCALM_SKIP_ABI_CHECK, all over a
+  runtime that was completely fine. The layout is now identified in a way that
+  does not fall over when a single default moves. Genuinely mismatched
+  runtimes are still refused, and now only ever name the setting that actually
+  moved.
 - **A crashed model process now says HOW it died, not just a bare number.** The
   error used to read "worker exit -4" and leave you to look that up. On Linux and
   macOS a negative code is the signal that killed it, so that one now reads

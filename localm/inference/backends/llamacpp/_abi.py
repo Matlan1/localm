@@ -139,39 +139,116 @@ _FINGERPRINT = {
 # keystone (test_keystone_enum_drift_refuses[rope_scaling_type-0]) once the
 # test double was fixed to faithfully reinterpret bytes through whatever
 # class detection actually selects, instead of always handing back the
-# original (correctly-typed) fixture object regardless of restype. Including
-# flash_attn_type breaks the tie: it is genuinely -1 only under the TRUE
-# layout's own run, so the wrong hypothesis loses the one point that used to
-# let it win outright, and the ambiguous case now correctly reports
-# INCONCLUSIVE (falling back to CONTEXT_PARAMS_V1) rather than a confident
-# wrong answer.
+# original (correctly-typed) fixture object regardless of restype.
 _CONTEXT_FINGERPRINT = {
     CONTEXT_PARAMS_V1: (32, 36),
     CONTEXT_PARAMS_V2: (36, 40),
 }
 
+# ctx_type's own default, and it is LOAD-BEARING rather than cosmetic - see
+# _fingerprint_context_layout's "the one asymmetry" note for why grading on
+# this exact value is the only signal that separates the two hypotheses at
+# the ONE offset that distinguishes them.
+#
+# MEASURED, both layouts, not inferred:
+#   * ctx_v1: probed live 2026-08-12 off this box's provisioned lemonade
+#     b1307 build. llama_context_default_params() int32s read
+#     [24] n_threads = 4, [28] n_threads_batch = 4, [32] ctx_type = 0,
+#     [36..48] rope/pooling/attention/flash = -1, [52] rope_freq_base = 0.0f.
+#   * ctx_v2: reported 0 on a real ggml-org b10360 build (the same
+#     measurement the "does NOT use the -1 UNSPECIFIED convention" note
+#     above rests on).
+_CTX_TYPE_DEFAULT = 0
+
 
 def _fingerprint_context_layout(raw: bytes) -> Optional[str]:
     """Which llama_context_params layout *raw* is consistent with, or None.
 
-    Scored out of 5 per layout (ctx_type-is-not-(-1) plus all FOUR -1 reads
-    from the run immediately after it - rope_scaling_type/pooling_type/
-    attention_type/flash_attn_type) - same never-upgrade-a-weak-signal shape
-    as _fingerprint_layout above: a clear, strictly-ahead majority (allowing
-    one miss) wins; a tie or weak signal is INCONCLUSIVE and must never be
-    treated as a determination on its own (see the module docstring's
-    never-false-positive priority; detect_context_params_layout falls back to
-    CONTEXT_PARAMS_V1 when this returns None)."""
-    scores = {}
+    Scored per layout over ctx_type plus all FOUR -1 reads from the run
+    immediately after it (rope_scaling_type/pooling_type/attention_type/
+    flash_attn_type) - same never-upgrade-a-weak-signal shape as
+    _fingerprint_layout above. A tie or weak signal is INCONCLUSIVE and must
+    never be treated as a determination on its own (see the module
+    docstring's never-false-positive priority; detect_context_params_layout
+    falls back to CONTEXT_PARAMS_V1 when this returns None).
+
+    THE ONE ASYMMETRY, and the whole reason ctx_type is scored GRADED (0/1/2)
+    rather than as a plain "is not -1" boolean:
+
+    The two hypotheses are the same pattern 4 bytes apart, so their -1 runs
+    OVERLAP: V1 expects -1 at 36/40/44/48, V2 at 40/44/48/52. Offsets
+    40/44/48 are therefore predicted "== -1" by BOTH, inflating both scores
+    equally and discriminating nothing. Only 32, 36 and 52 decide anything -
+    and offset 32 was a FREE POINT for V1 whichever layout was really
+    loaded, because on ctx_v2 bytes it holds n_threads_batch (measured 4),
+    which is not -1 and so passed V1's "ctx_type is not -1" check just as
+    readily as a real ctx_type would.
+
+    That free point is what made a legitimate ctx_v2 build with ONE drifted
+    default REFUSE. MEASURED on the old binary scoring:
+
+        clean ctx_v2                  {ctx_v1: 4, ctx_v2: 5} -> ctx_v2   ok
+        ctx_v2, flash_attn_type = 0   {ctx_v1: 4, ctx_v2: 4} -> None     BAD
+
+    Inconclusive falls back to CONTEXT_PARAMS_V1, evaluate() then reads V1's
+    offsets over V2's bytes, and the user is told
+    "context_params.rope_scaling_type = 0 (expected -1)" and to re-provision
+    - about a runtime whose rope_scaling_type IS -1. A false refusal, which
+    the module docstring names as the one outcome worse than the status quo.
+    The identical drift on a ctx_v1 build scored {ctx_v1: 4, ctx_v2: 2} and
+    bound fine, so the check was asymmetric as well as wrong.
+
+    Grading ctx_type removes the free point WITHOUT inventing a new signal:
+    a thread count is never 0 on a working build, so only a real ctx_type
+    scores the extra mark. Margins become symmetric (2 in both directions on
+    clean bytes) and every single-drift case resolves. MEASURED across all
+    50 single-drift images of both layouts (5 fingerprinted fields x 5
+    plausible drifted values x 2 layouts):
+
+        old scoring   4 FALSE REFUSALS of a legitimate build, 1 misbind
+        this scoring  0 false refusals,                       1 misbind
+
+    TWO LIMITS, stated because a scored heuristic that hides its edges is
+    worse than one that does not:
+
+    * The surviving misbind above is PRE-EXISTING and unchanged: ctx_v2
+      bytes whose ctx_type were itself -1 put a five-long -1 run under both
+      windows, so no reading of these six offsets can locate the boundary.
+      It needs ctx_type to break the very convention this fingerprint is
+      built on. Pinned by
+      test_ctx_v2_with_a_minus_one_ctx_type_is_a_known_undetectable_misbind.
+    * With TWO simultaneous drifts the regime is already unreliable and this
+      change neither rescues nor meaningfully worsens it: over all 500
+      two-drift images, confident-wrong answers go 24 -> 27 and silent
+      misbinds 16 -> 19. Those extra three need a ctx_type drift AND a
+      rope_scaling_type of 0 at once, i.e. a build already refusable on the
+      keystone upstream will not change. Buying that with 4 fewer refusals
+      of ordinary builds is the trade this module's stated priority asks
+      for, and it is deliberate.
+    """
+    scores, run_hits = {}, {}
     for layout, (ctx_off, run_off) in _CONTEXT_FINGERPRINT.items():
         try:
             ctx_val = struct.unpack_from("<i", raw, ctx_off)[0]
             run = struct.unpack_from("<iiii", raw, run_off)
         except struct.error:
             return None
-        scores[layout] = (ctx_val != -1) + sum(v == -1 for v in run)
+        run_hits[layout] = sum(v == -1 for v in run)
+        if ctx_val == _CTX_TYPE_DEFAULT:
+            ctx_pts = 2      # a real ctx_type; a thread count is never 0
+        elif ctx_val != -1:
+            ctx_pts = 1      # still consistent with "not part of the -1 run"
+        else:
+            ctx_pts = 0      # contradicted: this offset IS part of the run
+        scores[layout] = ctx_pts + run_hits[layout]
     best, runner = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
-    return best[0] if best[1] >= 4 and best[1] > runner[1] else None
+    # The run gate is what stops the ctx_type grade from manufacturing
+    # confidence on its own: a winner must still see at least three of its
+    # four keystone enums (one drifted default allowed), and be strictly
+    # ahead overall.
+    if run_hits[best[0]] < 3 or best[1] <= runner[1]:
+        return None
+    return best[0]
 
 # ggml versions that BRACKET the llama_sampler_init_penalties signature change
 # (upstream 935cad6497e8, 2026-08-04 06:02Z, which prepended an int32 n_vocab).
@@ -774,28 +851,48 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     once per process from ``load_lib`` (cached with the lib handle), so it adds
     no per-call overhead.
 
-    GUARANTEE FOR A FUTURE THIRD (or Nth) LAYOUT this module does not yet know
-    about: this fails safe, never a silent misbind, via TWO independent
-    layers. (1) If a genuinely unknown layout's bytes do not decisively match
-    either known context_params/model_params fingerprint,
-    detect_context_params_layout/detect_model_params_layout report
-    ``assumed=True`` and fall back to V1 - but that fallback is not "trust
-    blindly". (2) Whatever layout gets bound - detected OR assumed - is
-    handed to :func:`evaluate`, which independently RE-CHECKS the actual
-    keystone field values (the -1 enums, split_mode/load_mode range, batch
-    ordering) at wherever that layout says they live. A wrong bind almost
-    always reads garbage into at least one of those, and (2) catches it even
-    when (1) was confidently WRONG (a fingerprint can score a decisive but
-    incorrect match for an unknown layout that happens to resemble a known
-    one in its own checked window - proven empirically 2026-08-11 with a
-    synthetic "V3": the fingerprint confidently called it v2, but evaluate()
-    still caught the resulting garbage rope_scaling_type and refused; see
-    test_unknown_third_layout_still_fails_safe). Detection choosing wrong is
-    therefore not, by itself, memory corruption - evaluate() is the actual
-    gate. Preserve this when adding a V3: whatever chooses between V1/V2/V3
-    may be imperfect, but the class it is bound into must still pass through
-    evaluate()'s real value checks before a single by-value struct crosses
-    the FFI boundary."""
+    BEHAVIOUR FOR A FUTURE THIRD (or Nth) LAYOUT this module does not yet
+    know about. Detection can be wrong two ways: INCONCLUSIVE (the probes
+    report ``assumed=True`` and fall back to V1) or CONFIDENTLY WRONG (an
+    unknown layout resembles a known one inside the checked window).
+    Whatever layout gets bound - detected OR assumed - is handed to
+    :func:`evaluate`, which re-checks real field values at wherever that
+    layout says they live. HOW MUCH THAT SECOND LAYER BUYS DIFFERS PER AXIS.
+    It is not one guarantee covering both, and reading it as one is how a
+    model_params misbind would be waved through:
+
+    * ``context_params`` - the second layer is REAL. evaluate() reads the -1
+      keystones by NAME, so a wrong bind reads them at the wrong offsets and
+      a non-(-1) there refuses. Proven with a synthetic third layout the
+      fingerprint calls ctx_v2 CONFIDENTLY and evaluate() still refuses; see
+      test_unknown_third_layout_still_fails_safe. It is "usually", NOT
+      "always": bytes whose -1 run is longer than the four checked fields
+      (a build whose ctx_type were itself -1) put both candidate windows
+      inside one run, and every reading then satisfies evaluate(). Measured,
+      and pinned by
+      test_ctx_v2_with_a_minus_one_ctx_type_is_a_known_undetectable_misbind.
+
+    * ``model_params`` - the second layer buys NOTHING here, and that is
+      measured rather than suspected. evaluate()'s model_params checks are
+      RANGE checks over fields whose plausible values are legal in BOTH
+      layouts (V2's load_mode=1 read as V1's main_gpu is a valid device
+      index; V1's main_gpu=0 read as V2's load_mode is a valid
+      LLAMA_LOAD_MODE_NONE), so it returns ok with two soft diagnostics in
+      either direction - pinned by
+      test_evaluate_cannot_discriminate_the_two_layouts. A synthetic third
+      model_params layout is therefore detected confidently, passes
+      evaluate(), and is bound and crossed over the FFI by value: a silent
+      misbind, pinned by
+      test_unknown_third_model_params_layout_is_not_caught. What protects
+      model_params is not evaluate() but DETECTION being dual-signal (the
+      llama_load_mode_* symbols AND the value fingerprint) with disagreement
+      itself a refusal - strong for the two layouts localm knows, and
+      nothing at all for a third.
+
+    So when adding a V3: on the context_params axis evaluate() is a genuine
+    backstop for an imperfect choice; on the model_params axis it is not one,
+    and a new model_params layout needs its OWN detection signal, because
+    nothing downstream will catch a wrong choice."""
     global _detected_layout, _layout_assumed
     global _detected_context_layout, _context_layout_assumed
 
