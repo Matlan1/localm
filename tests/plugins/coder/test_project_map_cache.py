@@ -48,9 +48,9 @@ class _StubBackend:
         pass
 
 
-def _agent(cwd, **kw):
+def _agent(cwd, mode=SessionMode.LOG, **kw):
     from localm.plugins.coder.agent import Agent
-    return Agent(_StubBackend(), cwd=cwd, mode=SessionMode.LOG, **kw)
+    return Agent(_StubBackend(), cwd=cwd, mode=mode, **kw)
 
 
 def _project(tmp_path) -> Path:
@@ -109,6 +109,41 @@ def test_second_agent_sees_an_edit_made_between_sessions(home, tmp_path):
     agent2 = _agent(project)
     fs = next(f for f in agent2._project_map.files if f.path.name == "a.py")
     assert "bar" in fs.symbols and "foo" not in fs.symbols
+
+
+def test_privacy_mode_agent_writes_no_project_map_cache(home, tmp_path):
+    """Same promise save_checkpoint() already makes for the conversation: the
+    project map cache records this project's relative file paths and
+    extracted symbol names - real project content - under HOME, so a privacy
+    session must never leave it behind (checkup 2026-08-11 item 11 - this
+    write had no gate at all before this fix, unlike its sibling)."""
+    project = _project(tmp_path)
+    from localm.plugins.coder.agent.checkpoint import _project_map_path_for
+    cache_path = _project_map_path_for(project)
+    assert not cache_path.exists()
+
+    agent = _agent(project, mode=SessionMode.PRIVACY)
+    # The feature itself must still work - only the disk artifact is gone.
+    assert {f.path.name for f in agent._project_map.files} == {"a.py"}
+    assert not cache_path.exists()
+
+
+def test_privacy_mode_agent_ignores_an_existing_cache_too(home, tmp_path):
+    """Not just "stops writing" - a privacy session must not even READ a
+    cache an earlier non-privacy session left behind, so it always does a
+    full in-memory walk rather than reconciling from a file on disk."""
+    project = _project(tmp_path)
+    _agent(project, mode=SessionMode.LOG)   # leaves a real cache behind
+    from localm.plugins.coder.agent.checkpoint import _project_map_path_for
+    cache_path = _project_map_path_for(project)
+    assert cache_path.is_file()
+
+    import os
+    with patch.object(os, "walk", wraps=os.walk) as walk_spy:
+        agent = _agent(project, mode=SessionMode.PRIVACY)
+        walk_spy.assert_called()   # full walk, never reconciled from cache
+    assert agent._project_map.from_cache is False
+    assert {f.path.name for f in agent._project_map.files} == {"a.py"}
 
 
 def test_two_different_projects_never_share_a_cache(home, tmp_path):

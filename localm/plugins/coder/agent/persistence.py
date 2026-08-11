@@ -372,12 +372,18 @@ class _PersistenceMixin:
         This makes exactly ONE call into ProjectMap (deliberately: see
         build()'s cache_path docstring paragraph for why the cache lookup is
         folded inside build() rather than being a second classmethod call
-        here)."""
+        here).
+
+        No-op cache in privacy mode - the cache records this project's file
+        paths and extracted symbol names, the same promise save_checkpoint()
+        below makes about the conversation. cache_path=None makes build() do
+        a fresh in-memory walk with no cache read or write (see build()'s
+        cache_path branch)."""
         # Live-attribute access so a test patching agent.ProjectMap is honoured
         # (the name moved into this submodule when agent.py became a package).
         ProjectMap = _agent.ProjectMap
         import time
-        cache_path = _project_map_path_for(cwd)
+        cache_path = None if self.mode == SessionMode.PRIVACY else _project_map_path_for(cwd)
         t0 = time.monotonic()
         pm = ProjectMap.build(cwd, deadline_s=_index_deadline(), cache_path=cache_path)
         took = time.monotonic() - t0

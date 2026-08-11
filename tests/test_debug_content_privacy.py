@@ -51,6 +51,28 @@ def test_suppressed_when_a_per_surface_mode_is_privacy(monkeypatch):
     assert debuglog.debug_content_enabled() is False
 
 
+def test_suppressed_when_the_coder_surface_is_privacy(monkeypatch):
+    # Regression: debug_content_enabled() used to check only ("server", "chat"),
+    # so a coder-only privacy override (coder_mode) never suppressed the raw
+    # model output line the shared llama.cpp backend writes for a coder
+    # session's own generations - even though the coder surface itself had
+    # explicitly opted into privacy. Global log, chat/server unset (fall back
+    # to global log), coder alone set to privacy.
+    _debug(monkeypatch, True)
+    _mode(monkeypatch, mode="log", coder_mode="privacy")
+    assert debuglog.debug_content_enabled() is False
+
+
+def test_content_allowed_when_no_surface_including_coder_is_privacy(monkeypatch):
+    # The positive arm of the fix above: an explicit non-privacy coder_mode,
+    # with every other surface also non-privacy, must still allow content -
+    # adding the coder surface to the check must not turn into an
+    # always-suppress.
+    _debug(monkeypatch, True)
+    _mode(monkeypatch, mode="log", coder_mode="full")
+    assert debuglog.debug_content_enabled() is True
+
+
 def test_fails_safe_to_no_content_on_error(monkeypatch):
     _debug(monkeypatch, True)
     monkeypatch.delenv("LOCALM_MODE", raising=False)

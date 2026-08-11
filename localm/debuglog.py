@@ -56,10 +56,13 @@ def debug_content_enabled() -> bool:
         return False
     try:
         from localm.audit import SessionMode, effective_mode
-        # Suppress content if EITHER the server or the chat surface is privacy: the
-        # backend that produces the content is surface-agnostic, so err toward not
-        # writing (over-suppression only costs a debug convenience, never privacy).
-        for surface in ("server", "chat"):
+        # Suppress content if ANY of these surfaces is privacy: the backend that
+        # produces the content (llamacpp/llama.py) is surface-agnostic and serves
+        # coder sessions through the same generation path as chat/server, so a
+        # coder-only privacy override (coder_mode / .localcoder/config.toml) must
+        # suppress it too, even when chat/server are not privacy. Err toward not
+        # writing - over-suppression only costs a debug convenience, never privacy.
+        for surface in ("server", "chat", "coder"):
             if effective_mode(surface) == SessionMode.PRIVACY:
                 return False
         return True
