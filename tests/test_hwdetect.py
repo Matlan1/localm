@@ -431,6 +431,9 @@ def test_main_torch_subcommand(monkeypatch, capsys):
 
 def test_main_torch_args_subcommand(monkeypatch, capsys):
     monkeypatch.setattr(hwdetect, "detect", lambda: Detection(vendors=["nvidia"]))
+    # Deterministic regardless of the test-running machine's own hardware - see
+    # test_torch_pip_args_cuda above for the same guard on the same accessor.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     hwdetect.main(["torch-args", "cuda"])
     assert "cu126" in capsys.readouterr().out
 
@@ -438,6 +441,8 @@ def test_main_torch_args_subcommand(monkeypatch, capsys):
 def test_main_torch_args_missing_backend_defaults_empty(monkeypatch, capsys):
     # "torch-args" with no backend -> backend="" -> vendor-neutral routing by GPU.
     monkeypatch.setattr(hwdetect, "detect", lambda: Detection(vendors=["nvidia"]))
+    # Deterministic regardless of the test-running machine's own hardware.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     hwdetect.main(["torch-args"])
     assert "cu126" in capsys.readouterr().out   # neutral + nvidia -> cuda wheels
 

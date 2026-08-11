@@ -169,9 +169,14 @@ def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
 
 
 def test_torch_spec_nvidia_is_cuda(monkeypatch):
+    from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
     # cuda is platform-agnostic; pin the platform so the test is deterministic.
     monkeypatch.setattr(sys, "platform", "linux")
+    # Deterministic regardless of the test-running machine's own hardware - see
+    # test_torch_install_args_cuda_uses_index_url below for the same guard on
+    # the same accessor comfy_torch_spec() calls internally.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     spec = fresh.comfy_torch_spec(_det(["nvidia"], "NVIDIA GeForce RTX 4090"))
     assert spec.variant == "cuda"
     assert spec.packages == ("torch", "torchvision")
