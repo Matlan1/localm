@@ -22,7 +22,7 @@ import os
 
 import pytest
 
-from localm._mp_spawn import describe_exit_code
+from localm._mp_spawn import death_was_a_native_fault, describe_exit_code
 from localm.inference.backends.llamacpp import _runner as runner_mod
 from localm.inference.backends.llamacpp._runner import ModelRunner
 
@@ -123,6 +123,76 @@ class TestWindowsNtstatusDecoding:
         assert describe_exit_code(1, posix=False) == "1"
 
 
+class TestNativeFaultClassification:
+    """A worker death must not be CALLED a native fault unless it was one.
+
+    Two places in this repo already knew exit 1 is an uncaught Python exception
+    rather than a native abort - `_runner_entry`'s own docstring, and
+    tests/test_image_decode_without_pillow.py, whose entire subject is a missing
+    Pillow surfacing as "Native inference fault (worker exit 1)" with a plain
+    ModuleNotFoundError in the log ("Every clause of that was false"). That was
+    fixed for Pillow specifically; the misclassification lived at the site that
+    WORDS the message, which a per-cause fix cannot reach (diff-review item 23).
+    """
+
+    @pytest.mark.parametrize("code", [-4, -11, -6, -9])
+    def test_a_posix_signal_death_is_a_native_fault(self, code):
+        assert death_was_a_native_fault(code, posix=True)
+
+    @pytest.mark.parametrize("code", [0, 1, 3, 134])
+    def test_an_ordinary_posix_exit_is_not(self, code):
+        """1 is the one that mattered: multiprocessing's signature for an
+        uncaught Python exception, and the code in the false message."""
+        assert not death_was_a_native_fault(code, posix=True)
+
+    def test_a_windows_ntstatus_is_a_native_fault(self):
+        assert death_was_a_native_fault(0xC0000005, posix=False)
+        assert death_was_a_native_fault(0xC000001D, posix=False)
+
+    @pytest.mark.parametrize("code", [0, 1, 3, -1])
+    def test_an_ordinary_windows_exit_is_not(self, code):
+        """-1 included on purpose: Process.terminate() produces it on Windows,
+        and 3 is what an ARMED-faulthandler abort exits with - neither is
+        classifiable from the code alone, so neither may be asserted as native."""
+        assert not death_was_a_native_fault(code, posix=False)
+
+    def test_a_captured_trace_settles_it_on_either_platform(self):
+        """The strongest evidence, and the reason it leads rather than tiebreaks:
+        faulthandler only fires on SIGSEGV/SIGFPE/SIGABRT/SIGBUS/SIGILL, so a
+        trace means a native signal even when the exit code cannot say so - which
+        is exactly the Windows armed-abort-exits-3 case."""
+        assert death_was_a_native_fault(3, trace_captured=True, posix=False)
+        assert death_was_a_native_fault(1, trace_captured=True, posix=True)
+
+    @pytest.mark.parametrize("bad", [None, "x", object()])
+    def test_junk_is_not_a_native_fault_and_never_raises(self, bad):
+        assert death_was_a_native_fault(bad) is False
+
+    def test_a_real_python_exception_death_is_not_called_a_native_fault(self):
+        """END TO END, through a REAL child, on the exact fault the false message
+        was reported for: chat_stream before any load -> worker is None ->
+        AttributeError -> uncaught -> exit 1.
+
+        This is the regression oracle for the reported symptom. It is sited at the
+        runner rather than on the predicate because the defect was in how the
+        message is WORDED, and a predicate test cannot see that."""
+        r = ModelRunner()
+        r._spawn()
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+            msg = str(ei.value)
+        finally:
+            r.shutdown(grace=0)
+
+        assert "Native inference fault" not in msg, (
+            "an uncaught Python exception in the worker is still reported as a "
+            f"native fault\n--- message ---\n{msg}")
+        assert "exited unexpectedly" in msg, msg
+        # The containment contract itself must survive the rewording.
+        assert "reload on the next request" in msg, msg
+
+
 class TestNeverRaises:
     """This decorates a message on a path that is ALREADY failing. Raising here
     would replace a real crash report with an unrelated traceback."""
@@ -212,10 +282,16 @@ class TestRunnerReportsTheDecodedCode:
         from localm.inference.backends.llamacpp import _runner
 
         src = inspect.getsource(_runner)
+        # THE RULE THIS ENCODES: the raw exit code has exactly TWO legitimate
+        # consumers - the decoder that RENDERS it (describe_exit_code) and the
+        # classifier that INTERPRETS it (death_was_a_native_fault) - and both are
+        # reached through one-line accessors. Anything else touching the number is
+        # on its way into a message and must use _exit_reason() instead.
         offenders = [
             line.strip() for line in src.splitlines()
             if "_exitcode()" in line
             and "describe_exit_code" not in line
+            and "death_was_a_native_fault" not in line
             and "def _exitcode" not in line
         ]
         assert not offenders, (

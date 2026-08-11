@@ -23,6 +23,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **A model process that dies from an ordinary error is no longer reported as a
+  "native inference fault".** Any death of the model process used to be announced
+  that way, including a plain Python error inside it - so a missing image library,
+  for one real example, produced "Native inference fault (worker exit 1). See the
+  debug log for the native stack trace" when there was no native fault, no such
+  trace, and nothing wrong with the model. The wording is now decided by the
+  evidence: a genuine crash still says so and points at its trace, while anything
+  else says the process exited unexpectedly and sends you to the log for the real
+  error. The internal log line that made the same claim is neutral now too, so it
+  no longer pre-judges a crash before anyone has looked at it.
 - **A crashed model process now says HOW it died, not just a bare number.** The
   error used to read "worker exit -4" and leave you to look that up. On Linux and
   macOS a negative code is the signal that killed it, so that one now reads
