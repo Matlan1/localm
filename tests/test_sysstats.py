@@ -310,6 +310,17 @@ def test_wait_first_gives_up_at_the_probe_deadline_not_forever(monkeypatch):
         release.set()
 
     assert out == {}
+    # BOTH bounds matter, not just the upper one: a no-op that ignores
+    # wait_first entirely and returns {} instantly would also satisfy
+    # "elapsed < 2.0" without ever having waited at all - that would prove
+    # nothing about the deadline behaviour this test exists to check. The
+    # lower bound proves it genuinely blocked close to the patched deadline
+    # (0.1s + the 1.0s margin _vram adds) before giving up.
+    assert elapsed > 0.9, (
+        f"wait_first returned after only {elapsed:.2f}s - it must actually "
+        f"wait close to the probe deadline before giving up, not bail out "
+        f"immediately (that would be indistinguishable from wait_first "
+        f"being ignored entirely)")
     assert elapsed < 2.0, (
         f"wait_first blocked for {elapsed:.2f}s - it must give up at the "
         f"probe deadline (0.1s here, plus margin), not hang indefinitely "
