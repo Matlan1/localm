@@ -726,9 +726,10 @@
             </section>
 
             <!-- Changelog: always available (it ships in every build), so it is NOT
-                 gated behind the updater proxy like the Updates card below. The full
-                 version history is fetched from /api/changelog and rendered in the
-                 shared modal via the same DOMPurify markdown path as chat. -->
+                 gated behind the updater proxy like the Updates card below. The
+                 RELEASED version history is fetched from /api/changelog (which
+                 strips the in-progress section) and rendered in the shared modal
+                 via the same DOMPurify markdown path as chat. -->
             <section class="card settings-section" id="sec-changelog" data-group="system" data-sec-label="Changelog">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="clock"></span>
                 <div class="card-head-text"><h3>Changelog</h3></div></div>
