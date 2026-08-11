@@ -959,10 +959,26 @@ class PluginManager:
             sys.modules.pop(uniq, None)
             raise ValueError(f"plugin {spec.name!r}: no callable {attr!r}")
         host = PluginHost(self.app, self, spec)
-        register(host)
-        # Serve a declared surface assets_dir even if register() did not mount it
-        # itself, so a client_entry plugin's module never silently 404s.
-        host.mount_surface_assets()
+        try:
+            register(host)
+            # Serve a declared surface assets_dir even if register() did not mount
+            # it itself, so a client_entry plugin's module never silently 404s.
+            host.mount_surface_assets()
+        except Exception:
+            # register() can raise AFTER already mounting some routes or chat
+            # hooks (a plugin that wires up part of itself, then hits a bad
+            # config value and raises). Without this, those mounts stay live on
+            # self.app and firing on every request/chat turn while self._loaded
+            # never gets the entry - so the engine reports the plugin "not
+            # loaded" while it demonstrably still acts on user traffic, and a
+            # retry (enable()/install() calling _load again) mounts a SECOND
+            # copy on top of the still-live first one. host.unmount() undoes
+            # exactly what THIS host tracked (routes, static mounts, chat
+            # hooks, deferred on_startup callbacks), so a failed load leaves
+            # nothing behind, matching what "not loaded" claims.
+            host.unmount()
+            _purge_plugin_modules(uniq)
+            raise
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
         self._maybe_fire_first_use(spec.name)   # REC-ONFIRSTUSE
@@ -1595,14 +1611,19 @@ class PluginManager:
     def uninstall(self, name: str, *, delete_data: bool = False) -> bool:
         """Uninstall a plugin: unload it, disable it, and DELETE its directory from
         the installed folder (it reverts to being merely available in the store).
-        User content is kept unless *delete_data*; the on_uninstall hook runs
-        first. Returns True only if it was installed AND its directory was
-        actually removed from disk; False if it was not installed to begin with,
-        or if the removal could not complete (a locked file, an AV hold, or a
-        permission denial - all reachable on Windows). In the latter case the
-        plugin is still disabled and unloaded, but its files remain on disk; see
-        the WARNING logged by _remove_installed_dir for the concrete cause.
-        KeyError if wholly unknown."""
+        User content is kept unless *delete_data*, in which case its data
+        directory is deleted too; the on_uninstall hook runs first. Returns True
+        only if it was installed AND its installed directory was actually removed
+        from disk AND - when delete_data was requested - its data directory was
+        actually removed too. False if it was not installed to begin with, or if
+        either removal could not complete (a locked file, an AV hold, or a
+        permission denial - all reachable on Windows - or a data_subdir that
+        refused to resolve inside the data dir). In the degraded case the plugin
+        is still disabled and unloaded, but some of its files remain on disk; see
+        the WARNING logged by _remove_installed_dir / _delete_plugin_data for the
+        concrete cause. A caller must never report bare success without checking
+        this return value (AGENTS.md rule 5: a privacy step that fails must never
+        report success). KeyError if wholly unknown."""
         self.discover()
         spec = self._specs.get(name)
         was_installed = name in self._installed_set()
@@ -1641,39 +1662,54 @@ class PluginManager:
                     pass
         self._unload(name)
         self._set_enabled(name, False)
+        data_deleted = True         # vacuously true: nothing was asked to go
         if delete_data and spec and spec.data_subdir:
-            self._delete_plugin_data(spec)
+            data_deleted = self._delete_plugin_data(spec)
         removed = self._remove_installed_dir(name)    # delete from the installed folder
         if was_installed and not removed:
             _log.warning(
                 "plugin %s: uninstall disabled and unloaded it, but its "
                 "installed directory could not be removed; reporting a "
                 "degraded result rather than a bare success", name)
-        return was_installed and removed
+        if delete_data and not data_deleted:
+            _log.warning(
+                "plugin %s: uninstall disabled and unloaded it, but its data "
+                "could not be fully deleted; reporting a degraded result "
+                "rather than a bare success", name)
+        return was_installed and removed and data_deleted
 
-    def _delete_plugin_data(self, spec: PluginSpec) -> None:
+    def _delete_plugin_data(self, spec: PluginSpec) -> bool:
+        """Delete the plugin's data_subdir. Returns True iff it is confirmed gone
+        afterwards (or there was nothing to delete); False if a security refusal
+        (data_subdir escapes the data dir) or a removal failure (locked file, AV
+        hold, permission denial) leaves it on disk - the caller (uninstall())
+        must fold this into its reported result rather than treating a removed
+        installed-dir as the whole story (rule 5: a privacy step that fails must
+        never report success)."""
         import shutil
-        import sys
         from localm.config import home_dir
         if not spec.data_subdir:
-            return
+            return True
         # data_subdir comes verbatim from a (possibly third-party) manifest.
         # Resolve it and confine to home_dir: reject traversal ('../models'),
         # absolute escapes, and the home root itself ('.') before any rmtree.
         home = home_dir().resolve()
         d = (home / spec.data_subdir).resolve()
         if d == home or not d.is_relative_to(home):
-            print(
-                "[localm] refusing to delete plugin data outside the data dir: "
-                f"data_subdir={spec.data_subdir!r} -> {d}",
-                file=sys.stderr, flush=True,
-            )
-            return
+            _log.warning(
+                "plugin %s: refusing to delete data_subdir %r -> %s (it does "
+                "not resolve inside the data dir); the data is NOT deleted",
+                spec.name, spec.data_subdir, d)
+            return False
         try:
             if d.is_dir():
                 shutil.rmtree(d)
-        except OSError:
-            pass
+        except OSError as e:
+            _log.warning(
+                "plugin %s: could not delete data directory %s: %s; the data "
+                "remains on disk", spec.name, d, e)
+            return not d.is_dir()
+        return not d.is_dir()
 
     # ---- state for the API / GUI -------------------------------------------
     def api_state(self) -> dict:
@@ -1818,13 +1854,24 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def uninstall_plugin_engine(name: str, delete_data: bool = False):
         _valid_name_or_404(name)
         try:
-            manager.uninstall(name, delete_data=delete_data)
+            complete = manager.uninstall(name, delete_data=delete_data)
         except KeyError:
             raise HTTPException(404, f"No such plugin: {name}")
         except ValueError as e:
             raise HTTPException(409, str(e))
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}")
+        if not complete:
+            # uninstall() already disabled and unloaded the plugin; what did NOT
+            # complete is deleting its files from disk (a locked file, an AV
+            # hold, a permission denial, or - with delete_data - its data
+            # directory). Reporting {"status": "uninstalled"} here would be a
+            # bare success over a step that failed (rule 5).
+            raise HTTPException(
+                500,
+                f"Plugin {name!r} was disabled and unloaded, but its files "
+                f"could not be fully removed from disk; see the server log "
+                f"for the cause.")
         return {"status": "uninstalled", "name": name}
 
     @app.post("/api/plugins/refresh",
