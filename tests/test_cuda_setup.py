@@ -489,6 +489,24 @@ def test_nothing_loads_raises_reportable_error(monkeypatch, tmp_path):
     assert "no llama.cpp backend" in ei.value.summary
 
 
+def test_nothing_loads_reports_last_fallback_detail_not_stale_first(monkeypatch, tmp_path):
+    """The 'last error' in the final report must be from the LAST thing that
+    was actually tried (cpu, the final fallback), not the stale detail from
+    the very first (chosen) backend's failed attempt. A fixture that returns
+    the same detail string for every call cannot tell these apart - each
+    call here returns a DISTINCT string so a stale value is provably wrong."""
+    _stub_provision(monkeypatch)
+    seq = iter([(False, "cuda: driver too old"),
+                (False, "vulkan: no ICD loader found"),
+                (False, "cpu: illegal instruction")])
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
+    from localm.bugreport import LocalmError
+    with pytest.raises(LocalmError) as ei:
+        sl._provision_with_fallback("cuda", tmp_path, None, True)
+    assert "cpu: illegal instruction" in ei.value.reason
+    assert "cuda: driver too old" not in ei.value.reason
+
+
 def test_pinned_sha256_never_falls_back(monkeypatch, tmp_path):
     """A --sha256 pin means 'exactly this artifact' - a validation failure must
     stop, not silently swap to an unpinned vulkan build."""

@@ -136,6 +136,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   - the recommended way to protect an install from other local processes -
   broke the everyday `localm run <model>` / `localcoder` workflow with a
   bare connection error. Fixed for both, including `localcoder --no-server`.
+- **When setup could not find a working llama.cpp backend at all, the error
+  named the wrong cause.** After your chosen backend failed to load, setup
+  falls back through the universal Vulkan and CPU builds; if those failed too,
+  the final message always blamed whatever went wrong with your *original*
+  pick, even though it was the fallback builds that were actually the last
+  thing tried. It now reports the real reason the last build tried would not
+  load, and also prints why each fallback failed as it happens instead of only
+  at the very end.
 
 ## [0.1.5rc2] - 2026-08-08
 
