@@ -397,7 +397,11 @@ def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch):
     victim = tmp_path / "victim"
     victim.mkdir()
     (victim / "keep.txt").write_text("important", encoding="utf-8")
-    mgr._delete_plugin_data(mgr._specs["evil"])
+    # A refused delete is a FAILURE, not a silent no-op: the caller (uninstall())
+    # must be able to tell "nothing needed deleting" apart from "deletion was
+    # refused for safety", or a --delete-data request that hits this guard would
+    # be reported as having succeeded (rule 5).
+    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
     assert victim.exists() and (victim / "keep.txt").exists()
 
 
@@ -405,7 +409,7 @@ def test_delete_data_rejects_dot_root(tmp_path, monkeypatch):
     mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, ".")
     (home / "models").mkdir()
     (home / "models" / "big.gguf").write_text("data", encoding="utf-8")
-    mgr._delete_plugin_data(mgr._specs["evil"])
+    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
     assert home.exists() and (home / "models" / "big.gguf").exists()
 
 
@@ -414,8 +418,80 @@ def test_delete_data_deletes_legit_subdir(tmp_path, monkeypatch):
     target = home / "evil_data"
     target.mkdir()
     (target / "cache.bin").write_text("x", encoding="utf-8")
-    mgr._delete_plugin_data(mgr._specs["evil"])
+    assert mgr._delete_plugin_data(mgr._specs["evil"]) is True
     assert not target.exists()
+
+
+def test_delete_data_reports_failure_when_rmtree_fails(tmp_path, monkeypatch):
+    """A locked/permission-denied data directory must not be silently swallowed
+    (AGENTS.md rule 5): the old code's ``except OSError: pass`` returned None
+    either way, so a caller had no way to tell a real failure from success."""
+    import shutil
+    from pathlib import Path
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
+    target = home / "evil_data"
+    target.mkdir()
+    (target / "cache.bin").write_text("x", encoding="utf-8")
+
+    real_rmtree = shutil.rmtree
+
+    def _boom(path, *a, **k):
+        if Path(path) == target:
+            raise OSError(13, "Permission denied", str(path))
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(shutil, "rmtree", _boom)
+    assert mgr._delete_plugin_data(mgr._specs["evil"]) is False
+    assert target.is_dir() and (target / "cache.bin").exists()
+
+
+def test_uninstall_delete_data_reports_degraded_result_on_failure(tmp_path, monkeypatch, caplog):
+    """uninstall(delete_data=True) must fold a failed data deletion into its
+    returned bool, not just the installed-dir removal. Before the fix,
+    uninstall() ignored _delete_plugin_data's outcome entirely (it had none to
+    ignore - the function returned None), so a locked data directory reported a
+    bare True success while the data stayed on disk."""
+    import logging
+    import shutil
+    from pathlib import Path
+
+    from localm.config import load_config
+
+    # _mgr_with_data_subdir's external_root IS the installed/discovery dir, so
+    # "evil" is already physically installed - no extra provisioning needed.
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
+    installed_dir = home / "plugins" / "evil"
+    assert installed_dir.is_dir()
+
+    target = home / "evil_data"
+    target.mkdir()
+    (target / "cache.bin").write_text("x", encoding="utf-8")
+
+    real_rmtree = shutil.rmtree
+
+    def _boom(path, *a, **k):
+        if Path(path) == target:
+            raise OSError(13, "Permission denied", str(path))
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(shutil, "rmtree", _boom)
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        result = mgr.uninstall("evil", delete_data=True)
+
+    # The data genuinely was not removed: prove it, don't assume it.
+    assert target.is_dir() and (target / "cache.bin").exists()
+    assert result is not True, \
+        "uninstall() reported success while requested data survived on disk"
+    assert any("evil" in rec.message and "Permission denied" in rec.message
+                for rec in caplog.records), (
+        "expected a WARNING naming the plugin and the real OSError; got: "
+        f"{[rec.message for rec in caplog.records]}")
+    # The installed directory itself (unaffected by the data-dir failure) is
+    # still gone, and config state is still updated - a degraded report is
+    # about the DATA, not a full no-op.
+    assert not installed_dir.exists()
+    cfg = load_config()
+    assert "evil" not in cfg.get("plugins_enabled", [])
 
 
 def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
@@ -772,6 +848,42 @@ def test_attach_engine_http_install_lifecycle(env, monkeypatch):
 
         assert c.post("/api/plugins/ghost/install").status_code == 404
         assert c.post("/api/plugins/ghost/uninstall").status_code == 404
+
+
+def test_uninstall_http_reports_failure_when_removal_incomplete(env, monkeypatch):
+    """The route must not report {"status": "uninstalled"} when uninstall()
+    itself reports a degraded (False) result. Before the fix, the route called
+    manager.uninstall(...) and discarded its return value entirely, so it
+    always replied 200 "uninstalled" even when the plugin's files could not
+    actually be removed from disk (a locked file, an AV hold, a permission
+    denial)."""
+    import shutil
+    from pathlib import Path
+
+    from localm.plugins.engine import attach_engine
+
+    app = FastAPI()
+    manager = attach_engine(app)              # default roots = the real builtins
+    with TestClient(app) as c:
+        assert c.post("/api/plugins/voice/install").status_code == 200
+
+    installed_dir = Path(manager._installed_root) / "voice"
+    assert installed_dir.is_dir()
+
+    real_rmtree = shutil.rmtree
+
+    def _boom(path, *a, **k):
+        if Path(path) == installed_dir:
+            raise OSError(13, "Permission denied", str(path))
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(shutil, "rmtree", _boom)
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/voice/uninstall")
+    assert r.status_code != 200, \
+        "the route reported success while the installed directory could not be removed"
+    # The removal genuinely did not complete: prove it, don't assume it.
+    assert installed_dir.is_dir()
 
 
 def _make_legacy_plugin(root, name, *, exports='["tool_hello"]'):
