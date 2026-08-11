@@ -194,6 +194,62 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
+## Diagnostics, issues, and updates
+
+These routes are part of the base server, registered unconditionally. They are
+present on a headless `localm serve` with no plugins installed, not only under
+`localm gui`. `/v1/server/restart` and `/v1/server/shutdown` are documented under
+[Server control](#server-control) above.
+
+| Route | Scope | Purpose |
+|---|---|---|
+| `GET /api/issues` | `config:read` | List the project's issues through the bug-report proxy. Takes `?state=` (default `all`). |
+| `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. |
+| `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. |
+| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](../SECURITY.md) for the signing and rollback model. |
+| `POST /api/bug-report` | `config:write` | Generate a bug report, and optionally file it. |
+
+**A proxy failure is reported in the body, not the status.** `GET /api/issues`
+and `GET /api/update/check` answer `200` with an `error` string when the proxy
+cannot be reached, rather than a 5xx. Check for `error` rather than branching on
+the status code alone. They are not blanket "always 200" routes though: the
+scope dependency still rejects an unauthorised caller before the handler runs.
+
+**Only the update check honours `net_mode: off`.** `GET /api/issues` reaches the
+network regardless, and `GET /api/changelog` makes no network call at all.
+
+### `POST /api/bug-report`
+
+Scope: `config:write`.
+
+Takes a JSON object. Recognised fields are `description` (alias `message`),
+`what_i_expected`, `what_happened`, `include_log`, `client` and `upload`.
+
+- At least one of `description`/`message` or `what_happened` must be non-empty,
+  otherwise `400`. `what_i_expected` on its own does NOT satisfy that check.
+- An absent or non-object body is a FastAPI validation `422`, not the `400`.
+- A report that cannot be written to disk returns `500`. A failed save is never
+  reported as success.
+- Filing to the issue tracker happens ONLY when the request sets `upload`. It is
+  never automatic.
+
+On success the response carries `saved`, `filename`, `path`, `maintainer`, and,
+best-effort, `report_markdown` (the saved text, so a browser client can offer a
+download; omitted if it cannot be read back).
+
+When `upload` was requested and failed, the report is still saved and the
+response is still `200`, carrying `uploaded: false` plus `upload_stage`,
+`upload_message` and `upload_error`. A rate-limited upload additionally sets
+`rate_limited: true` and `retry_after` in seconds. A successful upload sets
+`uploaded: true` and, when the proxy returned one, `issue_url`.
+
+The optional `client` object is reduced server-side before it is written into
+the report, so a client cannot inflate a report with arbitrary content.
+
+The `bugreport_upload_*` and `update_*` config keys that back these routes widen
+a trust boundary and are owner-only; see the note under
+[`GET /v1/config`](#get-v1config--patch-v1config) above.
+
 ## Plugin management endpoints
 
 These endpoints are present under `localm serve` too, not just `localm gui`.
