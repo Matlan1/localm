@@ -23,6 +23,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **When the model process dies from a native crash, the error now tells you what
+  crashed instead of only that something did.** The message has always ended with
+  "see the debug log for the native stack trace", but for the worst kind of crash
+  there was never any trace to find: a hard native fault never returns to Python,
+  so nothing localm could run afterwards was able to record where it happened.
+  The model process now arms a crash handler before it loads anything, so a fault
+  leaves a trace behind, and the error you get names the fault and points at the
+  full trace in the debug log. If nothing could be captured the message now says
+  so plainly rather than sending you to look for a trace that was never written.
 - **Opening the web UI on an install that has an API key set now asks for the
   key, instead of signing you in automatically.** When a key was configured, the
   page would still hand a full owner session to whoever asked for it, with no key
