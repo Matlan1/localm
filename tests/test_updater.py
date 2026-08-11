@@ -111,6 +111,94 @@ def test_check_unconfigured_raises(monkeypatch):
         updater.check()
 
 
+# --------------------- network policy gate (SSRF-UPDATE) -------------------
+
+def _counting_opener(payload):
+    """Like _opener, but records how many times it was actually called - the
+    mechanism assertion the policy gate needs: a blocked check must not just
+    fail, it must never invoke the transport at all (no DNS, no socket)."""
+    calls = {"n": 0}
+
+    def op(method, url, data, headers, timeout):
+        calls["n"] += 1
+        op.url = url
+        return 200, json.dumps(payload).encode("utf-8")
+
+    op.calls = calls
+    return op
+
+
+def test_check_blocked_when_net_mode_off_never_calls_opener(monkeypatch):
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://w", "net_mode": "off"})
+    from localm.bugreport import LocalmError
+    op = _counting_opener({"ok": True, "version": "v9.9.9"})
+    with pytest.raises(LocalmError) as ei:
+        updater.check(opener=op)
+    assert op.calls["n"] == 0, "a blocked check must not attempt any connection"
+    msg = f"{ei.value.summary} {ei.value.reason}".lower()
+    assert "network access" in msg and "off" in msg
+    assert "settings" in msg or "net_mode" in msg
+
+
+def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):
+    """The admin-only toggle lets THIS channel through even with net_mode=off -
+    the opener IS invoked, and the result is a normal successful check (not the
+    blocked path)."""
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://w", "net_mode": "off",
+        "update_ignore_net_policy": True})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
+    op = _counting_opener({"ok": True, "version": "v0.2.0"})
+    res = updater.check(opener=op)
+    assert op.calls["n"] == 1
+    assert res["newer"] is True
+    assert op.url.endswith("/update")
+
+
+@pytest.mark.parametrize("mode", ["ask", "allow"])
+def test_check_ask_and_allow_modes_are_unaffected(monkeypatch, mode):
+    """The gate only fires on the literal 'off' kill switch - this is a no-op
+    for the default 'ask' mode and for 'allow', matching model_manager/pull.py's
+    own net_mode=='off' bar (no per-call confirmation needed here)."""
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://w", "net_mode": mode})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
+    op = _counting_opener({"ok": True, "version": "v0.2.0"})
+    res = updater.check(opener=op)
+    assert op.calls["n"] == 1
+    assert res["newer"] is True
+
+
+def test_check_env_var_off_blocks_even_with_config_ask(monkeypatch):
+    """LOCALM_NET_MODE overrides config, matching network_mode()'s own
+    precedence - a blocked check via the env var must also never call out."""
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://w", "net_mode": "ask"})
+    from localm.bugreport import LocalmError
+    op = _counting_opener({"ok": True, "version": "v0.2.0"})
+    with pytest.raises(LocalmError):
+        updater.check(opener=op)
+    assert op.calls["n"] == 0
+
+
+def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypatch):
+    """An unreadable config while net_mode is off must resolve to BLOCKED, never
+    silently exempted - same fail-closed direction as
+    _prerelease_channel_enabled() and network_mode() itself (HON-2)."""
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+
+    def boom():
+        raise OSError("config unreadable")
+
+    monkeypatch.setattr("localm.config.load_config", boom)
+    assert updater._net_policy_allows_update_check() is False
+
+
 # ------------------------ prerelease channel -----------------------------
 
 def test_check_stable_by_default_no_channel_param(monkeypatch):
