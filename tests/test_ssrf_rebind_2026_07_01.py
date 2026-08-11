@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from localm import netpolicy
 from localm.netpolicy import NetworkPolicyError
@@ -183,3 +184,98 @@ def test_https_pool_preserves_sni_and_repoints_socket():
 
     assert conn._dns_host == "93.184.216.34"              # socket dials the pinned IP
     assert conn.server_hostname == "realhost.example"     # SNI + cert keep the real host
+
+
+# --------------------------------------------------------------------------- #
+#  trust_env=False: the pin must not be routable AROUND (env proxy / .netrc)  #
+# --------------------------------------------------------------------------- #
+
+def test_pinned_session_disables_trust_env():
+    """trust_env=True (the requests default) lets HTTP_PROXY/HTTPS_PROXY
+    environment variables route a request through an operator- or
+    attacker-controlled proxy INSTEAD of the pinned IP, and lets .netrc on
+    disk auto-attach credentials to a request that never asked to
+    authenticate. Both defeat the pin from entirely outside this module's own
+    logic, so a pinned session must never consult either."""
+    from localm.netpin import pinned_session
+
+    assert pinned_session("93.184.216.34").trust_env is False
+
+
+def test_pinned_session_ignores_an_environment_proxy(monkeypatch):
+    """The proxy-environment SSRF-pin bypass this closes. When a proxy is
+    selected for a plain-HTTP request, requests.adapters.HTTPAdapter routes
+    it through a DIFFERENT connection pool (proxy_manager_for's own plain
+    urllib3.ProxyManager) that never sees _pinned_ip at all - so with
+    trust_env=True an HTTP_PROXY env var bypasses the pin completely, not
+    merely weakens it. Proven live: a "trap" server stands in for the env
+    proxy and a "real" server stands in for the pinned target; the trap must
+    never be hit."""
+    trap_hits = {"n": 0}
+    real_hits = {"n": 0}
+
+    class _Trap(BaseHTTPRequestHandler):
+        def do_GET(self):
+            trap_hits["n"] += 1
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    class _Real(BaseHTTPRequestHandler):
+        def do_GET(self):
+            real_hits["n"] += 1
+            body = b"real-ok"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    trap = HTTPServer(("127.0.0.1", 0), _Trap)
+    real = HTTPServer(("127.0.0.1", 0), _Real)
+    trap_port = trap.server_address[1]
+    real_port = real.server_address[1]
+    threading.Thread(target=trap.serve_forever, daemon=True).start()
+    threading.Thread(target=real.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{trap_port}")
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{trap_port}")
+
+        from localm.netpin import pinned_session
+        session = pinned_session("127.0.0.1")
+        resp = session.get(f"http://vhost.test:{real_port}/",
+                           headers={"Host": f"vhost.test:{real_port}"})
+        body = resp.content
+        resp.close()
+        session.close()
+    finally:
+        trap.shutdown()
+        real.shutdown()
+
+    assert trap_hits["n"] == 0, (
+        "the environment HTTP_PROXY was consulted and the request was routed "
+        "through the proxy instead of the pinned IP - the SSRF pin is "
+        "bypassable via the environment")
+    assert real_hits["n"] == 1, "the pinned request never reached the real target"
+    assert body == b"real-ok"
+
+
+def test_pinned_session_ignores_netrc_credentials(monkeypatch, tmp_path):
+    """trust_env=True (the requests default) auto-attaches .netrc credentials
+    to any request whose host has a matching entry, even though the caller
+    never asked to authenticate - a pinned session must never do this."""
+    netrc_path = tmp_path / "netrc"
+    netrc_path.write_text(
+        "machine vhost.test login leaked-user password leaked-pass\n")
+    monkeypatch.setenv("NETRC", str(netrc_path))
+
+    from localm.netpin import pinned_session
+    session = pinned_session("127.0.0.1")
+    prepared = session.prepare_request(requests.Request("GET", "http://vhost.test/"))
+    assert "Authorization" not in prepared.headers, (
+        "a .netrc entry was auto-attached to a pinned request as Basic auth - "
+        "trust_env must be False")
