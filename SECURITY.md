@@ -118,12 +118,13 @@ localm process's own permissions rather than a sandbox:
   property of the folders rather than of one route. It is narrower than it
   looks - the folders hold generated media and files you uploaded, not your
   keys or sessions - but if that matters to you, issue one media key.
-- **Host filesystem access** gates any route that can point localm at an
-  arbitrary path on the machine: pulling a model by naming a path already on
-  the server, scanning for ComfyUI models, downloading a curated ComfyUI
-  model, and moving a generated media file out of the data directory (see
-  above). Without it, a scoped key is confined to HuggingFace-by-name pulls
-  and the folders localm already manages.
+- **Host filesystem access** is a separate dial, and it gates the model and
+  media routes that can name a path on the server: pulling a model by naming a
+  path that already exists there, scanning for ComfyUI models, downloading a
+  curated ComfyUI model, and moving a generated media file out of the data
+  directory (see above). Without it, a key holding those scopes is confined to
+  HuggingFace-by-name pulls and the folders localm already manages. It is a
+  per-route gate on those routes, not a blanket property of every scope.
 - **Installing a plugin** (a store name, or a third-party directory via
   `localm plugin install <path>` / `POST /api/plugins/install-external`)
   refuses a source tree containing any symlink or Windows junction, so a
