@@ -222,6 +222,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   layout, so every freshly downloaded cuda, vulkan and cpu build was refused.
   Both layouts are recognized now, detected per install, so this affects
   every platform equally going forward as upstream keeps evolving.
+- **Choosing CUDA on Linux could silently fetch a build with no kernels for
+  your GPU.** Detecting which CUDA build line a card actually needs (the
+  newer line for very recent architectures, the broadly-compatible one for
+  everything else) only ran on Windows; Linux always fetched the older line
+  regardless of what was actually installed. The runtime still loaded - it is
+  a valid build, just not for that card - so `localm doctor` reported no
+  usable GPU with no indication why. Linux now detects the same way Windows
+  already did, so the build fetched actually matches the card.
 
 ## [0.1.5rc2] - 2026-08-08
 

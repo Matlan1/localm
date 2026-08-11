@@ -364,6 +364,48 @@ def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeyp
         "the recommendation from the three-way dialogue must be what actually gets provisioned")
 
 
+def test_main_threads_cuda_line_detection_on_linux(monkeypatch, tmp_path):
+    """The bug this pins: nvidia_preflight()/_cuda_setup_dialogue() used to be
+    reached only on win32, so a real Blackwell (or any cuda-13-line) GPU on
+    Linux silently got the cuda-12 line - a build with no kernels for that
+    architecture - and no with_cudart, skipping the PyPI cudart runtime fetch
+    too. The runtime still LOADS (it is a valid cuda-12 binary, so the ABI
+    check passes) but registers zero usable GPU devices - found live,
+    2026-08-11, on a real 3x-Blackwell Linux box ('GPU: none in the loaded
+    runtime (cuda)'). _resolve_backend_asset/_fetch_cuda_runtime_libs already
+    handle cuda-13 correctly on Linux (test_linux_cuda_runtime_provisioning.py)
+    - what was missing is main() ever detecting and passing it through."""
+    monkeypatch.setattr(sl.sys, "platform", "linux")
+    # A real Blackwell compute capability - NvidiaInfo.cuda_line resolves this
+    # to "cuda-13", the exact case that silently regressed to "cuda-12".
+    monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(
+        present=True, gpu_name="NVIDIA RTX PRO 4000 Blackwell",
+        driver_version="580.65", cuda_capability="13.3",
+        compute_capability="12.0"))
+
+    target = tmp_path / "lib"
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
+    calls = []
+
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+        calls.append((backend, with_cudart, cuda_line))
+        (tgt / sl._lib_name()).write_bytes(b"stub")
+
+    monkeypatch.setattr(sl, "_provision_backend", fake_provision_backend)
+    monkeypatch.setattr(sl, "_clear_target", lambda tgt: None)
+    monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg_dir: True)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    monkeypatch.setattr(sl, "_verify", lambda: None)
+
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(sl.main, ["--backend", "cuda", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert calls == [("cuda", True, "cuda-13")], (
+        "on Linux, a real Blackwell GPU must reach _provision_backend with "
+        "with_cudart=True and cuda_line='cuda-13', not the module default")
+
+
 # ---------------- real click.confirm: reprompt + stray-input handling ------ #
 #
 # The tests above monkeypatch sl.click.confirm itself, so they never exercise
