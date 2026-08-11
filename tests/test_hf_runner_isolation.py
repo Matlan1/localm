@@ -169,7 +169,15 @@ class TestChatStreamCrashContainment:
         try:
             with pytest.raises(RuntimeError) as ei:
                 list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-            assert "native inference fault" in str(ei.value).lower()
+            msg = str(ei.value).lower()
+            # ASSERTION CORRECTED, and the old one was the bug: this fault is an
+            # uncaught PYTHON exception (exit 1), so the message must NOT call it
+            # a native fault. Contained-and-reported is the property under test;
+            # the classification never was, and pinning the wrong one is what
+            # made the misclassification permanent. Mirrors the identical
+            # correction in test_gguf_runner_isolation.py.
+            assert "unloaded" in msg and "reload" in msg, msg
+            assert "native inference fault" not in msg, msg
             assert not r.is_alive()
         finally:
             r.shutdown(grace=0)
@@ -232,7 +240,15 @@ class TestCrashDiagnosticsReachDebugLog:
         try:
             with pytest.raises(RuntimeError) as ei:
                 list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-            assert "native inference fault" in str(ei.value).lower()
+            msg = str(ei.value).lower()
+            # ASSERTION CORRECTED, and the old one was the bug: this fault is an
+            # uncaught PYTHON exception (exit 1), so the message must NOT call it
+            # a native fault. Contained-and-reported is the property under test;
+            # the classification never was, and pinning the wrong one is what
+            # made the misclassification permanent. Mirrors the identical
+            # correction in test_gguf_runner_isolation.py.
+            assert "unloaded" in msg and "reload" in msg, msg
+            assert "native inference fault" not in msg, msg
             assert not r.is_alive()
         finally:
             r.shutdown(grace=0)
@@ -368,7 +384,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         try:
             with pytest.raises(RuntimeError) as ei:
                 list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-            assert "no native stack trace was captured" in str(ei.value).lower()
+            assert "no native fault trace was captured" in str(ei.value).lower()
         finally:
             r.shutdown(grace=0)
 
@@ -389,7 +405,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
                 r.count_tokens("hello")
             message = str(ei.value)
             assert "crashed" in message.lower()
-            assert "no native stack trace was captured" in message.lower(), (
+            assert "no native fault trace was captured" in message.lower(), (
                 "a hard kill leaves no trace to relay, so the message must say "
                 f"so rather than pointing at a log with nothing in it\n{message}")
         finally:
