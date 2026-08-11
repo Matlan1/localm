@@ -11,6 +11,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The
+  pinned version had not moved since July and was roughly 21 releases behind
+  upstream, which is why "Split media across GPUs (experimental)" reported that
+  localm's own ComfyUI was too old to offer per component placement. It now
+  offers it. That setting still needs two or more graphics cards, so it
+  continues to decline on a single card machine, but for a reason about your
+  hardware rather than about the version localm ships.
+
+  **If you already have a localm managed ComfyUI, run `localm comfy update
+  --reinstall-requirements` when you update.** v0.31.1 needs several packages
+  the old version did not, so a plain `localm comfy update` moves the checkout
+  without installing them. The command does say so when it runs, but it is easy
+  to miss. A fresh install is unaffected and needs nothing extra.
+
 ### Fixed
 - **Revoking an admin-scoped device key now reliably signs out its browser
   too.** Browser sessions are re-checked against the key that created them on
