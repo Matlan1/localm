@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from localm.inference.backends.base import ModelLoadCancelled
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference.backends.llamacpp import _runner as runner_mod
 from localm.inference.backends.llamacpp._runner import ModelRunner
@@ -120,19 +121,89 @@ class TestLoadCrashContainment:
         "load" branch's try/except (previously only worker.load() was
         guarded - see _runner.py), so a malformed payload - a parent/child
         protocol bug, not a native fault - is a normal, clean error, not an
-        uncaught crash that kills the process for no native reason at all."""
+        uncaught crash: the RuntimeError carries the real message
+        ("unexpected keyword argument"), never the "crashed (exit code ...)"
+        text the sibling crash-containment tests above assert on.
+
+        The worker process is still reaped by spawn_and_load before this
+        raises, same as every other non-"ok" load outcome (cancelled,
+        unexpected envelope) - a failed load never produces a usable model,
+        so nothing is left running to keep alive. See
+        TestLoadFailureReapsWorker below for the count-based regression
+        oracle this is a special case of."""
         r = ModelRunner()
         bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
         try:
             with pytest.raises(RuntimeError) as ei:
                 r.spawn_and_load(bad_params, timeout=30.0)
             assert "unexpected keyword argument" in str(ei.value).lower()
-            assert r.is_alive(), (
-                "a bad payload is a protocol error, not a native fault - the "
-                "worker process itself must not have been killed by it"
+            assert not r.is_alive(), (
+                "a failed load produced no usable model - the worker must "
+                "be reaped, not left orphaned for the next retry to pile "
+                "another one alongside"
             )
         finally:
             r.shutdown(grace=0)
+
+
+class TestLoadFailureReapsWorker:
+    """The regression oracle for the worker-leak fix: engine.py's chat_stream
+    retries GgufBackend.load() on EVERY request while the model is not
+    loaded (see engine.py's auto-reload), and GgufBackend.load() spawns a
+    BRAND NEW ModelRunner every attempt (see gguf.py's _load_native). So an
+    unloadable model that keeps failing must not leave a trail of live
+    worker processes behind it - each failed spawn_and_load must reap its
+    own worker before it ever returns to the caller.
+
+    Counts real, spawned multiprocessing.Process objects via is_alive()
+    (never a mock) - a test built on a fake process cannot fail on this
+    defect at all, since a mock's is_alive()/terminate() prove nothing about
+    the real subprocess boundary this bug lives on."""
+
+    def test_repeated_load_errors_never_leave_a_surviving_worker(self):
+        bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
+        runners = []
+        try:
+            for _ in range(3):
+                r = ModelRunner()
+                runners.append(r)
+                with pytest.raises(RuntimeError, match="unexpected keyword argument"):
+                    r.spawn_and_load(bad_params, timeout=30.0)
+            survivors = sum(1 for r in runners if r.is_alive())
+            assert survivors == 0, (
+                f"{survivors} of {len(runners)} workers from a failed "
+                "(ERROR) load are still alive - each failed load must reap "
+                "its own worker"
+            )
+        finally:
+            for r in runners:
+                r.shutdown(grace=0)
+
+    def test_repeated_load_cancellations_never_leave_a_surviving_worker(
+            self, monkeypatch):
+        # Forces a real child process to report a clean "cancelled" envelope
+        # without touching the native runtime - see _FORCE_LOAD_CANCEL_ENV's
+        # own docstring in _runner.py for why this hook exists rather than
+        # driving a genuine native cancellation (it would need a real,
+        # provisioned llama.cpp runtime, which this suite's default
+        # selection deliberately does not depend on).
+        monkeypatch.setenv(runner_mod._FORCE_LOAD_CANCEL_ENV, "1")
+        runners = []
+        try:
+            for _ in range(3):
+                r = ModelRunner()
+                runners.append(r)
+                with pytest.raises(ModelLoadCancelled):
+                    r.spawn_and_load(_DUMMY_LOAD_PARAMS, timeout=30.0)
+            survivors = sum(1 for r in runners if r.is_alive())
+            assert survivors == 0, (
+                f"{survivors} of {len(runners)} workers from a "
+                "CANCELLED load are still alive - each cancelled load must "
+                "reap its own worker"
+            )
+        finally:
+            for r in runners:
+                r.shutdown(grace=0)
 
 
 class TestRunnerLifecycle:

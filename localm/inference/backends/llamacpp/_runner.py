@@ -145,6 +145,17 @@ def _simulate_fault(mode: str) -> None:
     os.abort()                                    # genuine uncatchable native abort
 
 
+# Test-only: forces the "load" command to report a clean cancellation without
+# ever touching the native runtime, so a parent-side reap on a cancelled load
+# (see ModelRunner.spawn_and_load) can be proven against a REAL child process
+# with no GGUF file and no provisioned llama.cpp runtime needed. Never set in
+# production. Deliberately NOT folded into _FAULT_ENV above: that one is
+# checked before the command name is even known and always kills or hangs the
+# process, which would never let a clean "cancelled" envelope through -
+# checked here instead, only inside the "load" branch's own try.
+_FORCE_LOAD_CANCEL_ENV = "LOCALM_GGUF_FORCE_LOAD_CANCEL_FOR_TEST"
+
+
 # --------------------------------------------------------------------------- #
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
@@ -266,6 +277,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             # always still None here - there is no in-place "reload" whose
             # state this could disturb.
             try:
+                if os.environ.get(_FORCE_LOAD_CANCEL_ENV):
+                    raise ModelLoadCancelled("forced cancellation (test-only)")
                 worker = GgufWorker(cancel_event=load_cancel_event, **payload)
                 meta = worker.load()
                 resp_q.put(("ok", meta))
@@ -600,6 +613,12 @@ class ModelRunner:
         kind = result[0]
         if kind == "ok":
             return result[1]
+        # No branch below produced a usable model, so this worker holds
+        # nothing worth keeping - reap it here (mirrors the LOAD-TIMEOUT
+        # branch above) rather than leaving it orphaned for the caller's next
+        # load attempt (engine.py retries per-request) to pile another one
+        # alongside it.
+        self.shutdown(grace=0)
         if kind == "cancelled":
             raise ModelLoadCancelled(result[1])
         if kind == "error":
