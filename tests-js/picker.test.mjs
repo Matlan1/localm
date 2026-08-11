@@ -11,6 +11,7 @@ const FS = {
   "/root": {
     path: "/root", parent: "/", entries: [
       { name: "sub", is_dir: true, size: null, mtime: 1700000000 },
+      { name: ".git", is_dir: true, size: null, mtime: 1700000000 },
       { name: "apple.md", is_dir: false, size: 1234, mtime: 1700000000 },
       { name: "photo.png", is_dir: false, size: 5000, mtime: 1700000000 },
     ],
@@ -18,6 +19,11 @@ const FS = {
   "/root/sub": {
     path: "/root/sub", parent: "/root", entries: [
       { name: "note.txt", is_dir: false, size: 10, mtime: 1700000000 },
+    ],
+  },
+  "/root/.git": {
+    path: "/root/.git", parent: "/root", entries: [
+      { name: "HEAD", is_dir: false, size: 21, mtime: 1700000000 },
     ],
   },
   "": { path: "", parent: null, entries: [
@@ -126,6 +132,45 @@ test("filter narrows the visible rows", async () => {
   await ticks(1);
   const names = rows(win).map((r) => r.querySelector(".picker-name").textContent);
   assert.deepEqual(names, ["apple.md"], "only the matching row remains");
+});
+
+test("issue #1220: dot-directories are hidden by default and shown after toggling", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  assert.equal(rowNamed(win, ".git"), undefined, "dot-directory hidden by default");
+  const toggle = body(win).querySelector(".picker-hidden-toggle input");
+  assert.ok(toggle, "the Show-hidden toggle is rendered");
+  toggle.checked = true;
+  toggle.dispatchEvent(new win.Event("change"));
+  await ticks(1);
+  const gitRow = rowNamed(win, ".git");
+  assert.ok(gitRow, "dot-directory appears once the toggle is on");
+  assert.ok(gitRow.classList.contains("is-dir"), "still recognized as a directory");
+  // Browsing into a dot-directory works exactly like any other folder.
+  gitRow.click();
+  await ticks();
+  assert.ok(rowNamed(win, "HEAD"), "navigated into the dot-directory's own contents");
+  toggle.checked = false;
+  toggle.dispatchEvent(new win.Event("change"));
+  await ticks(1);
+  assert.equal(rowNamed(win, ".git"), undefined, "hidden again after toggling off");
+});
+
+test("issue #1220: reaching a dot-directory directly turns the toggle on for its siblings", async () => {
+  // navigate() cannot tell a typed/pasted path from startPath - both funnel
+  // through the same function - so startPath exercises the identical code
+  // path a user's pasted "~/.git"-style path would.
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root/.git" }`);
+  await ticks();
+  const toggle = body(win).querySelector(".picker-hidden-toggle input");
+  assert.equal(toggle.checked, true, "toggle auto-enables on landing in a dot-directory");
+  assert.ok(rowNamed(win, "HEAD"), "shows the dot-directory's own (non-dot) contents");
+  const upBtn = body(win).querySelector('button[title="Up one level"]');
+  upBtn.click();
+  await ticks(1);
+  assert.ok(rowNamed(win, ".git"), "back at the parent, the sibling dot-dir is now visible unprompted");
 });
 
 test("dismissing the modal resolves null", async () => {

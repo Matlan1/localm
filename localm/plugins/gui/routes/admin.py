@@ -230,7 +230,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/fs/dirs", dependencies=[Depends(require_fs_host)])
     def fs_dirs(path: str = "", include_files: bool = False,
-                meta: bool = False):
+                meta: bool = False, include_hidden: bool = False):
         """Directory listing for the GUI file/folder picker.
 
         Requires HOST filesystem access (owner / open mode / a key granted
@@ -245,6 +245,14 @@ def register(app: FastAPI, ctx) -> None:
         ``{name, is_dir, size, mtime}`` so the picker can show sizes and dates;
         the flat ``dirs``/``files`` arrays stay for older callers. A listing over
         ``_FS_LIST_CAP`` entries is truncated with ``truncated: true``.
+
+        ``include_hidden=false`` (default) skips dot-prefixed entries, same as
+        a plain ``ls``. Dot-DIRECTORIES are where several tools this app's own
+        users interoperate with keep their data (``~/.ollama``, ``~/.lmstudio``,
+        ``~/.cache/huggingface``), so the GUI picker always passes
+        ``include_hidden=true`` and offers its own "Show hidden" toggle
+        client-side (issue #1220) rather than making that data unreachable by
+        browsing. The server-side default stays off for any other caller.
 
         Plain `def`, NOT `async def`: is_dir/resolve/iterdir/stat all block, and
         blocking inside an async handler stalls the event loop for every other
@@ -286,7 +294,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
                 try:
-                    if child.name.startswith("."):
+                    if not include_hidden and child.name.startswith("."):
                         continue
                     # Bound the per-child stat() work by number of children
                     # EXAMINED, not just those returned - else a folder of a
