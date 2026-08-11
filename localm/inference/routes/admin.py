@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
 from localm.inference.errors import format_localm_error
 
 
@@ -43,6 +44,18 @@ _UNRELEASED_HEADING = re.compile(r"^##[ \t]*\[unreleased\]", re.IGNORECASE)
 # section that refers back to a correction made in the unreleased one. Both of those
 # must survive: the second is part of the permanent public record of a shipped release.
 _UNRELEASED_LINKDEF = re.compile(r"^\[unreleased\]:[ \t]", re.IGNORECASE)
+
+# bugreport.save_user_report() does local disk I/O only (read up to
+# bugreport._LOG_TAIL_READ_BYTES of the current run's log, digest/scrub it,
+# write the report markdown) - generous over even a slow-disk worst case.
+# _BUG_REPORT_SAVE_TIMEOUT_S - the value actually passed to
+# run_in_threadpool_bounded - is 2x that ceiling, not just equal to it:
+# save_user_report() acquires its own _SAVE_REPORT_LOCK INSIDE the call (never
+# around this await, per diff-review-discipline.md item 15), so a request's
+# own clock also covers however long it waits behind another concurrent save.
+# Same reasoning as media_workflows.py's _WORKFLOW_RMW_TIMEOUT_S.
+_BUG_REPORT_OWN_WORK_TIMEOUT_S = 10.0
+_BUG_REPORT_SAVE_TIMEOUT_S = 2 * _BUG_REPORT_OWN_WORK_TIMEOUT_S
 
 
 def _strip_unreleased(markdown: str) -> str:
@@ -131,9 +144,22 @@ def register(app: FastAPI, ctx) -> None:
         # bloat the report. It is rendered as plain text (markdown code fence),
         # never executed.
         client = _sanitize_client_context(body.get("client"))
-        path = bugreport.save_user_report(
-            description, what_i_expected=what_i_expected, what_happened=what_happened,
-            include_log=bool(body.get("include_log")), client=client)
+        # Off the event loop: measured loop_lag=0.67s on this route in the
+        # field - a synchronous log read + scrub + file write on the loop
+        # stalls every concurrent request at exactly the moment the user is
+        # already having a problem, which is why they are filing. Bounded
+        # rather than a bare run_in_threadpool: see _BUG_REPORT_SAVE_TIMEOUT_S
+        # above for why the budget is 2x save_user_report()'s own ceiling.
+        def _save():
+            return bugreport.save_user_report(
+                description, what_i_expected=what_i_expected, what_happened=what_happened,
+                include_log=bool(body.get("include_log")), client=client)
+
+        try:
+            path = await run_in_threadpool_bounded(
+                _save, timeout=_BUG_REPORT_SAVE_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Saving the bug report timed out: {e}")
         if path is None:
             # A failed save must not report success (we do not hide problems).
             raise HTTPException(500, "Could not save the bug report to disk.")

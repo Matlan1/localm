@@ -43,6 +43,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   captured the message now says so plainly rather than sending you to look for a
   trace that was never written. This covers the GGUF, HuggingFace and embedding
   workers alike.
+- **Models are now sized against all your GPUs, not just one of them.** If you
+  have more than one card, localm already spread a model across all of them at
+  load time, but when working out how much it could offload it only ever looked
+  at a single card's free memory. So it offloaded far less than your machine
+  could hold and left the rest idle: on one three-card machine a load used
+  39 GB and left 21.5 GB unused. Both the number of layers put on the GPU and
+  the context size are now worked out from the free memory of every card the
+  model will actually be spread over, including cards of different sizes. You
+  do not need to configure anything for this. If you have one GPU, nothing
+  changes.
 - **Opening the web UI on an install that has an API key set now asks for the
   key, instead of signing you in automatically.** When a key was configured, the
   page would still hand a full owner session to whoever asked for it, with no key
@@ -274,6 +284,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   recommends the faster vendor build when it finds one. Vulkan remains the
   recommendation when no toolkit is present, and the RX 6000 build is
   unaffected - it needs no toolkit at all, so it stays the default there.
+- **Filing a bug report from the app could freeze the whole server for as
+  long as it took to save.** Saving a report reads the current log, digests
+  it, and writes the report file, and all of that ran directly on the same
+  thread that serves every other request - so filing one, exactly when
+  something was already going wrong, stalled everyone else for the duration.
+  Saving now happens off to the side, and two reports filed close together
+  can no longer collide and corrupt each other's file.
+- **A GPU-compatibility warning in the debug log could be cut off before the
+  useful part.** When your GPU's PyTorch build reports it as unsupported, the
+  message logged for it was trimmed to 200 characters - shorter than the
+  install path that comes first in it, so the list of architectures your
+  PyTorch actually supports, the part that says what to do about it, never
+  made it in. The limit is now much higher, and a message rare enough to
+  still exceed it is now marked as cut short instead of stopping without a
+  word.
 
 ## [0.1.5rc2] - 2026-08-08
 

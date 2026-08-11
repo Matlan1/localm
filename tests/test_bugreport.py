@@ -13,6 +13,7 @@ import os
 import stat
 import sys
 import threading
+import time
 import types
 from urllib.parse import unquote
 
@@ -186,6 +187,61 @@ def test_save_user_report_blank_description_still_saves(tmp_path, monkeypatch):
     path = bugreport.save_user_report("")
     assert path is not None and path.exists()
     assert "user-reported issue" in path.read_text(encoding="utf-8")
+
+
+# ------------------- concurrency: two GUI reports at once ----------------- #
+
+def test_concurrent_save_user_report_calls_never_overlap(tmp_path, monkeypatch):
+    """The GUI endpoint now offloads save_user_report() to a real worker thread
+    (localm/inference/routes/admin.py, off the event loop), so two reports
+    filed close together can run this function on two DIFFERENT threads at the
+    same instant - not merely interleaved on one event loop the way the old
+    synchronous handler guaranteed for free. Without _SAVE_REPORT_LOCK, two
+    threads could have save_report() open the SAME same-second-timestamped
+    file for writing at once, interleaving their content into one corrupted
+    report instead of cleanly losing one.
+
+    Proven by instrumenting save_report() itself (the actual write) rather
+    than by hoping a real OS race reproduces on this run: a shared flag records
+    whether any thread is already "inside" a save_report() call when another
+    thread arrives, and a sleep widens the window so a missing lock would be
+    caught essentially every time across several threads, not by luck."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    in_critical_section = threading.Event()
+    overlap_detected = threading.Event()
+    real_save_report = bugreport.save_report
+
+    def _instrumented_save_report(text, when=None):
+        if in_critical_section.is_set():
+            overlap_detected.set()
+        in_critical_section.set()
+        try:
+            time.sleep(0.05)
+            return real_save_report(text, when=when)
+        finally:
+            in_critical_section.clear()
+
+    monkeypatch.setattr(bugreport, "save_report", _instrumented_save_report)
+
+    errors = []
+
+    def _file(n):
+        try:
+            bugreport.save_user_report(f"report from thread {n}")
+        except Exception as e:      # pragma: no cover - failure path only
+            errors.append(e)
+
+    threads = [threading.Thread(target=_file, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not errors, f"save_user_report raised under concurrency: {errors}"
+    assert not overlap_detected.is_set(), (
+        "two save_user_report() calls executed their save_report() critical "
+        "section concurrently - _SAVE_REPORT_LOCK did not serialize them, so "
+        "two writers could interleave content into one corrupted report file")
 
 
 def test_save_user_report_scrubs_home_path_in_description(tmp_path, monkeypatch):

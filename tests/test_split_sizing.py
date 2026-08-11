@@ -91,6 +91,37 @@ def _forbidden_list_gpus(**kw):
     raise AssertionError("list_gpus must not be probed on this path")
 
 
+def _implicit_box(monkeypatch, per_gpu, *, vulkan=False, status=GPU_PROBE_OK,
+                  dev_types=None):
+    """A box with NO gpu_split_indices, where llama.cpp's own default layer
+    split spreads the load over the given [(free, total), ...] devices.
+
+    Pins _native_backend_has_vulkan explicitly rather than letting it read this
+    machine: the vulkan branch reads the ggml registry (native_gpu_devices) and
+    the other reads torch's view (list_gpus), so an unpinned value silently
+    decides WHICH double is consulted - and on a box where the other one is
+    live, a test can pass without its own fixture ever being read."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                        lambda: vulkan)
+    # type defaults to GGML_DEV_TYPE_GPU (discrete). It is carried even on the
+    # list_gpus path, where it is ignored, so the two fixtures stay comparable.
+    # A fixture WITHOUT a type cannot fail the discrete-only filter at all -
+    # the field that decides right from wrong has to be in the data.
+    devices = [{"index": i, "name": f"GPU {i}", "free": f, "total": t,
+                "type": (dev_types[i] if dev_types else 1)}
+               for i, (f, t) in enumerate(per_gpu)]
+    if vulkan:
+        monkeypatch.setattr("localm.discover.native_gpu_devices",
+                            lambda: list(devices))
+        monkeypatch.setattr("localm.discover.list_gpus", _forbidden_list_gpus)
+    else:
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            _gpus_double(devices, status))
+    return devices
+
+
 # The audit's repro box: 2 x 16 GB, ~15.5 GB free each, a 20 GB model split
 # over both. Combined: 31 GB free / 32 GB total.
 AUDIT_BOX = [(int(15.5 * GB), 16 * GB), (int(15.5 * GB), 16 * GB)]
@@ -110,11 +141,19 @@ class TestSplitFreeTotalBytes:
         assert total == 32 * GB
         assert devices == 2
 
-    def test_no_probe_when_no_split_configured(self, tmp_path, monkeypatch):
-        # The common single-GPU case must stay probe-free (config answers it).
-        monkeypatch.setattr("localm.config.load_config", lambda: {})
-        monkeypatch.setattr("localm.discover.list_gpus", _forbidden_list_gpus)
-        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    def test_one_device_and_no_split_configured_yields_no_combined_reading(
+            self, tmp_path, monkeypatch):
+        # No gpu_split_indices AND a single detected GPU: nothing to combine,
+        # so the single-device reading stands. This is the single-GPU majority
+        # and it must be untouched by the implicit-split work.
+        #
+        # It USED to assert the stronger "and it never probes at all", which
+        # stopped being true once we learned llama.cpp splits implicitly (an
+        # unset split is not a single-GPU load, so the device COUNT has to be
+        # looked up). That assertion was also dead: it raised AssertionError
+        # from a list_gpus double, and _split_free_total_bytes' own
+        # `except Exception` swallowed it, so it passed either way.
+        _implicit_box(monkeypatch, [(8 * GB, 16 * GB)])
         b = _model(tmp_path, MODEL_20GB)
         assert b._split_free_total_bytes() == (None, None, 0)
 
@@ -189,7 +228,11 @@ class TestAutoGpuLayersSplitAware:
         b = _model(tmp_path, MODEL_20GB)
         n = b._auto_gpu_layers()
         kv = 4096 * GgufBackend._bytes_per_token(MODEL_20GB)
-        budget = 16 * GB - kv - GgufBackend._VRAM_OVERHEAD_BYTES
+        # 2x the overhead: each device that holds layers reserves its own
+        # compute buffer, so an N-device split reserves N of them (see
+        # _split_overhead_bytes). The COMBINED FREE is what this test is about,
+        # and that is unchanged - only the overhead term is per-device.
+        budget = 16 * GB - kv - 2 * GgufBackend._VRAM_OVERHEAD_BYTES
         expected = int(min(max(budget / MODEL_20GB, 0.0), 1.0) * 32)
         assert n == expected
         assert 0 < n < 99
@@ -277,7 +320,9 @@ class TestAutoCtxMaxSplitAware:
         monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes", lambda: 0)
         b = _model(tmp_path, MODEL_20GB)
         auto = b._auto_ctx_max()
-        budget = 31 * GB - MODEL_20GB - GgufBackend._VRAM_OVERHEAD_BYTES
+        # 2x the overhead - one compute buffer per device holding layers; see
+        # _split_overhead_bytes. The combined 31 GB free is the subject here.
+        budget = 31 * GB - MODEL_20GB - 2 * GgufBackend._VRAM_OVERHEAD_BYTES
         expected = (budget // GgufBackend._bytes_per_token(MODEL_20GB)) // 1024 * 1024
         expected = int(max(4096, min(65536, expected)))
         assert auto == expected
@@ -396,3 +441,225 @@ class TestVramCapacityCombinedOnly:
         info = vram_capacity(self.CFG)
         assert "devices" not in info
         assert info["total"] == 16 * GB
+
+
+# --------------------------------------------------------------------------- #
+#  The IMPLICIT split: no gpu_split_indices, and llama.cpp splits anyway       #
+# --------------------------------------------------------------------------- #
+#
+# Field finding (BLACKWELL, 2026-08-11): a three-GPU box loaded 39.24 GB across
+# its cards and left 21.5 GB idle, because the sizing budgeted the whole load
+# against ONE card. It did that whenever gpu_split_indices was unset, on the
+# premise that an unconfigured box runs single-GPU. That premise is false.
+# llama_model_default_params() sets split_mode = LLAMA_SPLIT_MODE_LAYER with
+# tensor_split = NULL, llama.cpp narrows to main_gpu only under
+# LLAMA_SPLIT_MODE_NONE (which localm never sets), and a NULL tensor_split takes
+# the "default split, by free memory" branch across every registered GPU.
+# See dev-notes/MULTI-GPU-SIZING-split-policy-2026-08-11.md for the source.
+
+# Deliberately UNEVEN, and free != total on every card. A fixture of identical
+# GPUs cannot fail on the overcommit question at all (every candidate budget
+# agrees when the cards agree), so this set is what makes the smallest-card
+# assertion below able to go red - diff-review-discipline item 19.
+#   free  22 + 23 +  6 = 51 GB      total  24 + 24 + 16 = 64 GB
+UNEVEN_BOX = [(22 * GB, 24 * GB), (23 * GB, 24 * GB), (6 * GB, 16 * GB)]
+MODEL_45GB = 45 * GB
+
+
+def _shares(free_by_device):
+    """llama.cpp's own default split fractions: splits[i] = free_i, cumulative,
+    normalised (llama-model.cpp, the all_zero branch). So device i receives
+    free_i / SUM(free) of the offloaded layers, and their KV with them - the KV
+    cache follows its layer's device."""
+    total = sum(free_by_device)
+    return [f / total for f in free_by_device]
+
+
+class TestImplicitSplitSizing:
+    def test_combined_budget_spans_every_card_not_just_one(self, tmp_path,
+                                                           monkeypatch):
+        # The headline regression. No split configured, 3 GPUs present.
+        _implicit_box(monkeypatch, UNEVEN_BOX)
+        b = _model(tmp_path, MODEL_45GB)
+        free, total, devices = b._split_free_total_bytes()
+        assert free == 51 * GB          # NOT 22 GB, the main card alone
+        assert total == 64 * GB
+        assert devices == 3
+
+    def test_layer_budget_accounts_for_the_full_set(self, tmp_path, monkeypatch):
+        # _auto_gpu_layers must size the offload from the combined 51 GB, not
+        # the 22 GB main card. Assert the NUMBER, and that it beats what the
+        # one-card budget produces - that difference IS the defect.
+        _implicit_box(monkeypatch, UNEVEN_BOX)
+        b = _model(tmp_path, MODEL_45GB)
+        n = b._auto_gpu_layers()
+
+        kv = 4096 * GgufBackend._bytes_per_token(MODEL_45GB)
+        combined = 51 * GB - kv - 3 * GgufBackend._VRAM_OVERHEAD_BYTES
+        expected = int(min(max(combined / MODEL_45GB, 0.0), 1.0) * 32)
+        assert n == expected
+        assert 0 < n < 99               # still a partial offload, honestly sized
+
+        one_card = 22 * GB - kv - GgufBackend._VRAM_OVERHEAD_BYTES
+        split_blind = int(min(max(one_card / MODEL_45GB, 0.0), 1.0) * 32)
+        assert n > split_blind          # the idle-VRAM bug, in one assertion
+
+    def test_context_budget_accounts_for_the_full_set(self, tmp_path, monkeypatch):
+        # The finding named context sizing too, not only layers: the KV cache
+        # lands on the same devices as the layers it belongs to.
+        _implicit_box(monkeypatch, UNEVEN_BOX)
+        monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes", lambda: 0)
+        b = _model(tmp_path, MODEL_20GB)
+        auto = b._auto_ctx_max(capped=False)   # uncapped: the raw arithmetic
+
+        budget = 51 * GB - MODEL_20GB - 3 * GgufBackend._VRAM_OVERHEAD_BYTES
+        expected = (budget // GgufBackend._bytes_per_token(MODEL_20GB)) // 1024 * 1024
+        assert auto == int(max(4096, expected))
+
+        # The one-card budget is not underwater here, it is merely tiny: 22 - 20
+        # - 1.5 leaves 0.6 GB of KV headroom against 26.8 GB combined. So assert
+        # the CEILING, not the sign - a ~40x difference in usable context.
+        one_card = 22 * GB - MODEL_20GB - GgufBackend._VRAM_OVERHEAD_BYTES
+        split_blind = ((one_card // GgufBackend._bytes_per_token(MODEL_20GB))
+                       // 1024 * 1024)
+        assert auto > int(max(4096, split_blind))
+
+    def test_smallest_card_is_not_overcommitted(self, tmp_path, monkeypatch):
+        # THE SAFETY DIRECTION. Summing free is only correct because llama.cpp
+        # weights the split BY FREE MEMORY: device i gets free_i/SUM(free) of
+        # the layers, so a SUM(free) budget places exactly free_i on device i.
+        # Assert that per device, on a set where the cards genuinely disagree.
+        #
+        # This is what kills the plausible-but-wrong budgets: SUM(total), 64 GB,
+        # would hand the 6 GB card 64 * 6/51 = 7.5 GB, and a "3x the main card's
+        # free" shortcut, 66 GB, would hand it 7.8 GB. Both overcommit the one
+        # card that cannot take it, which is an OOM on a user's box.
+        _implicit_box(monkeypatch, UNEVEN_BOX)
+        b = _model(tmp_path, MODEL_45GB)
+        free, _total, devices = b._split_free_total_bytes()
+
+        per_device_free = [f for f, _t in UNEVEN_BOX]
+        # What actually gets placed: the budget net of the per-device overhead.
+        placed = free - b._split_overhead_bytes(devices)
+        for share, card_free in zip(_shares(per_device_free), per_device_free):
+            assert placed * share <= card_free
+
+        smallest = min(per_device_free)
+        assert placed * _shares(per_device_free)[-1] < smallest   # strictly under
+        assert smallest == 6 * GB                # the fixture really is uneven
+
+    def test_vulkan_reads_the_native_registry_not_torch(self, tmp_path,
+                                                        monkeypatch):
+        # GPU-SPLIT-VKINDEX: on the vulkan build list_gpus speaks torch's index
+        # space and is structurally blind to ggml's. The sum must come from the
+        # space that actually receives the layers. _implicit_box makes list_gpus
+        # explode here, so reaching the right number proves which one was read.
+        _implicit_box(monkeypatch, UNEVEN_BOX, vulkan=True)
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (51 * GB, 64 * GB, 3)
+
+    def test_igpu_alongside_a_discrete_card_is_not_summed(self, tmp_path,
+                                                          monkeypatch):
+        # THE OOM CASE, and an ordinary one: any laptop, or any desktop CPU with
+        # integrated graphics, on the vulkan build. The native registry reports
+        # every non-CPU device, but llama.cpp appends integrated GPUs ONLY when
+        # no discrete GPU was found - so it places the whole load on the two
+        # discrete cards. Summing the iGPU's memory in would budget 8 GB that
+        # llama.cpp never uses, and over-budgeting is the direction that OOMs.
+        # GGML_DEV_TYPE: CPU 0, GPU 1, IGPU 2.
+        _implicit_box(monkeypatch,
+                      [(22 * GB, 24 * GB), (23 * GB, 24 * GB), (8 * GB, 8 * GB)],
+                      vulkan=True, dev_types=[1, 1, 2])
+        b = _model(tmp_path, MODEL_45GB)
+        # 45 GB free / 48 GB total over the two DISCRETE cards - the iGPU's
+        # 8 GB is excluded, and it does not count toward the device total.
+        assert b._split_free_total_bytes() == (45 * GB, 48 * GB, 2)
+
+    def test_one_discrete_card_plus_an_igpu_is_a_single_gpu_box(self, tmp_path,
+                                                                monkeypatch):
+        # Same filter, the commoner shape: llama.cpp puts everything on the one
+        # discrete card, so there is no combined budget at all and the
+        # single-device reading must stand.
+        _implicit_box(monkeypatch, [(22 * GB, 24 * GB), (8 * GB, 8 * GB)],
+                      vulkan=True, dev_types=[1, 2])
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (None, None, 0)
+
+    def test_untyped_native_devices_decline_rather_than_assume_discrete(
+            self, tmp_path, monkeypatch):
+        # The probe did not report a device class. We cannot tell a discrete
+        # card from an iGPU, and guessing "discrete" is the OOM direction, so
+        # the combined budget is declined.
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: True)
+        monkeypatch.setattr("localm.discover.native_gpu_devices", lambda: [
+            {"index": 0, "name": "A", "free": 22 * GB, "total": 24 * GB},
+            {"index": 1, "name": "B", "free": 23 * GB, "total": 24 * GB}])
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (None, None, 0)
+
+    def test_a_blind_device_declines_rather_than_undercounting(self, tmp_path,
+                                                               monkeypatch):
+        # All-or-nothing: one device with no free reading must not be summed as
+        # 0 (under-count) nor assumed empty (over-count, an OOM).
+        box = [{"index": 0, "name": "A", "free": 22 * GB, "total": 24 * GB},
+               {"index": 1, "name": "B", "total": 24 * GB}]
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: False)
+        monkeypatch.setattr("localm.discover.list_gpus", _gpus_double(box))
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (None, None, 0)
+
+    def test_stale_probe_declines(self, tmp_path, monkeypatch):
+        # A non-OK probe serves a frozen last-known-good list; sizing from it is
+        # the rule-5 gap the admission gate's freshness contract closes.
+        _implicit_box(monkeypatch, UNEVEN_BOX, status=GPU_PROBE_TIMEOUT)
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (None, None, 0)
+
+
+class TestSingleGpuPathUnchanged:
+    """The regression that matters most: one card is the field's commonest
+    configuration and it works today. Every number below is the FLAT-overhead
+    arithmetic that shipped before the implicit-split change."""
+
+    def test_layer_sizing_is_byte_identical_on_one_card(self, tmp_path,
+                                                        monkeypatch):
+        _implicit_box(monkeypatch, [(10 * GB, 16 * GB)])
+        b = _model(tmp_path, MODEL_20GB)
+        with _vram(10 * GB, 16 * GB):
+            n = b._auto_gpu_layers()
+        kv = 4096 * GgufBackend._bytes_per_token(MODEL_20GB)
+        budget = 10 * GB - kv - GgufBackend._VRAM_OVERHEAD_BYTES   # FLAT, x1
+        assert n == int(min(max(budget / MODEL_20GB, 0.0), 1.0) * 32)
+        assert 0 < n < 99
+
+    def test_context_sizing_is_byte_identical_on_one_card(self, tmp_path,
+                                                          monkeypatch):
+        _implicit_box(monkeypatch, [(30 * GB, 32 * GB)])
+        monkeypatch.setattr(_sizing, "embedder_ctx_reservation_bytes", lambda: 0)
+        b = _model(tmp_path, MODEL_20GB)
+        with _vram(30 * GB, 32 * GB):
+            auto = b._auto_ctx_max(capped=False)
+        budget = 30 * GB - MODEL_20GB - GgufBackend._VRAM_OVERHEAD_BYTES  # FLAT
+        expected = (budget // GgufBackend._bytes_per_token(MODEL_20GB)) // 1024 * 1024
+        assert auto == int(max(4096, expected))
+
+    def test_overhead_is_the_flat_constant_for_one_device(self, tmp_path):
+        b = _model(tmp_path, MODEL_20GB)
+        assert b._split_overhead_bytes(1) == GgufBackend._VRAM_OVERHEAD_BYTES
+        # 0 means "no combined reading" - the single-device fallback.
+        assert b._split_overhead_bytes(0) == GgufBackend._VRAM_OVERHEAD_BYTES
+        assert b._split_overhead_bytes(3) == 3 * GgufBackend._VRAM_OVERHEAD_BYTES
+
+    def test_check_vram_refusal_wording_unchanged_on_one_card(self, tmp_path,
+                                                              monkeypatch):
+        _implicit_box(monkeypatch, [(15 * GB, 16 * GB)])
+        b = _model(tmp_path, MODEL_45GB, n_gpu_layers=99, auto=False)
+        with _vram(15 * GB, 16 * GB):
+            with pytest.raises(RuntimeError, match="cannot fit regardless"):
+                b._check_vram()

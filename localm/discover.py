@@ -1179,6 +1179,32 @@ _isolated_torch_unavailable = False
 # probe - roughly every 2.5s under the live VRAM meter.
 _isolated_torch_broken_warned = False
 
+# Field evidence (a real user's debug log): the child probe's stderr routinely
+# starts with a long virtualenv install-path prefix from Python's own
+# warnings.warn() formatting (``<path>:<line>: <Category>: <message>``) - on
+# its own, longer than the 200-char cap this used to be truncated to. So the
+# message body, the part that is actually actionable (e.g. "The following
+# list of GPU architectures compatible with this version of PyTorch..."),
+# never survived: measured, the fragment "The following list" appeared with
+# nothing after it dozens of times across one session. Raised generously
+# rather than truncated from either a fixed front or back: this stderr can
+# carry either a warnings.warn() message (the point comes AFTER the
+# file:line: Category: prefix) or an uncaught exception's traceback (the
+# point is the LAST line), and a truncation direction that helps one shape
+# reliably guts the other. A blind cut is also a rule-5 violation regardless
+# of direction, so any truncation that still happens beyond this generous a
+# limit is marked, never silent.
+_CHILD_STDERR_LOG_CAP = 2000
+
+
+def _capped_stderr(text: str, limit: int = _CHILD_STDERR_LOG_CAP) -> str:
+    """*text* (child-probe stderr), capped to *limit* chars for a log line.
+    Marks the cut explicitly when it actually truncates - a silently cut
+    diagnostic is the same rule-5 shape as swallowing it outright."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated, {len(text) - limit} more chars]"
+
 
 class _IsolatedTorchWedged(Exception):
     """The out-of-process torch probe ran but did not finish in time, i.e. TORCH
@@ -1271,7 +1297,7 @@ def _torch_gpus_isolated() -> "Optional[list]":
         logger.debug("list_gpus: out-of-process torch probe printed nothing "
                      "(rc=%s)%s; treating as unavailable, not as 'no device'",
                      proc.returncode,
-                     f"; child said: {err[:200]}" if err else "")
+                     f"; child said: {_capped_stderr(err)}" if err else "")
         return None
     try:
         devices = json.loads(raw)
@@ -1284,14 +1310,14 @@ def _torch_gpus_isolated() -> "Optional[list]":
     except Exception as e:
         logger.debug("list_gpus: out-of-process torch probe reply unusable "
                      "(%s)%s; falling through to nvidia-smi", e,
-                     f"; child said: {err[:200]}" if err else "")
+                     f"; child said: {_capped_stderr(err)}" if err else "")
         return None
     if err:
         # The child prints its own failure cause here before answering []. That
         # is the reason the reading is missing, so it must not die with the
         # discarded stream.
         logger.debug("list_gpus: out-of-process torch probe reported: %s",
-                     err[:200])
+                     _capped_stderr(err))
     return devices
 
 
@@ -1628,6 +1654,16 @@ def native_gpu_devices() -> Optional[list]:
             v = d.get(key)
             if isinstance(v, int) and v > 0:
                 entry[key] = v
+        # ggml_backend_dev_type, passed through so a caller can tell a DISCRETE
+        # GPU from an integrated one or an accelerator. llama.cpp treats them
+        # very differently when placing layers - it skips ACCEL entirely and
+        # uses an iGPU ONLY when no discrete GPU exists - so a caller summing
+        # capacity across "the devices this load will spread over" must be able
+        # to filter. Absent when the probe did not report one; a caller that
+        # NEEDS the distinction must then decline rather than assume.
+        t = d.get("type")
+        if isinstance(t, int):
+            entry["type"] = t
         out.append(entry)
     return out
 
@@ -2049,10 +2085,19 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
                     ratios_override: Optional[list] = None):
     """Set ``mp.split_mode``/``mp.tensor_split`` from the configured
     ``gpu_split_indices``/``gpu_split_ratios``, validated via
-    :func:`resolve_gpu_split`. Leaves native defaults (a single active GPU -
-    whatever :func:`apply_main_gpu` already set) untouched when fewer than 2
-    valid devices are configured. Shared by the llama.cpp chat backend and the
-    embedder, same as ``apply_main_gpu``.
+    :func:`resolve_gpu_split`. Leaves ``split_mode``/``tensor_split`` at their
+    native defaults when fewer than 2 valid devices are configured. Shared by
+    the llama.cpp chat backend and the embedder, same as ``apply_main_gpu``.
+
+    THOSE NATIVE DEFAULTS ARE NOT A SINGLE-GPU LOAD, which this docstring
+    asserted until 2026-08-11 and which cost the sizing preflight a whole
+    board's capacity in the field. ``llama_model_default_params()`` sets
+    ``split_mode = LLAMA_SPLIT_MODE_LAYER`` with ``tensor_split = NULL``, and
+    llama.cpp confines a load to ``main_gpu`` only under
+    ``LLAMA_SPLIT_MODE_NONE`` - which nothing here ever sets. So leaving the
+    defaults alone yields an IMPLICIT layer split across every registered GPU,
+    distributed by each device's free memory. Anything sizing or budgeting a
+    load must account for that: see :func:`implicit_split_capacity`.
 
     ``ratios_override`` (when non-empty) replaces the config's
     ``gpu_split_ratios`` for THIS load: it carries the PARENT's already-
@@ -2406,6 +2451,122 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
                                  if all(s == FREE_SCOPE_DEVICE for s in scopes)
                                  else FREE_SCOPE_PROCESS)
     return _ret(out)
+
+
+def implicit_split_capacity(config: Optional[dict] = None, *,
+                            wait_for_inflight: bool = False) -> dict:
+    """``{"free", "total", "devices"}`` summed across every GPU device
+    llama.cpp's DEFAULT layer split will spread a load over, or ``{}`` when no
+    implicit split applies or it is not measurable.
+
+    THE IMPLICIT SPLIT IS REAL, AND IT IS NOT WHAT THIS PROJECT ASSUMED. With
+    no ``gpu_split_indices`` configured, :func:`apply_gpu_split` leaves
+    ``split_mode``/``tensor_split`` at ``llama_model_default_params()``'s own
+    values - and those are ``LLAMA_SPLIT_MODE_LAYER`` with ``tensor_split ==
+    NULL``, NOT a single-GPU load. Read from upstream source (llama.cpp's
+    ``llama_prepare_model_devices``): the "remove all except the main GPU"
+    narrowing is gated on ``LLAMA_SPLIT_MODE_NONE`` alone, which localm never
+    sets, so ``main_gpu`` does not confine the load. The device list is every
+    registered discrete GPU (deduped by device id; integrated GPUs only when no
+    discrete one exists). A ``NULL`` ``tensor_split`` then takes llama.cpp's
+    "default split, by free memory": ``splits[i] = free_i``, normalized, with
+    each layer assigned by ``upper_bound`` over the cumulative fractions - and
+    the per-layer KV cache follows its layer's device. See
+    dev-notes/MULTI-GPU-SIZING-split-policy-2026-08-11.md for the quoted source.
+
+    WHY A PLAIN SUM IS THE CORRECT BUDGET AND NOT MERELY A BIGGER ONE, which is
+    the whole reason this helper may exist at all: because the weighting is by
+    FREE MEMORY, device *i* receives the fraction ``free_i / SUM(free)`` of the
+    offloaded layers, so a budget of ``SUM(free)`` places exactly ``free_i`` on
+    device *i*. Every card is filled to its own free memory and no further. That
+    is what makes a HETEROGENEOUS set safe - a 24/24/8 GB board is not treated
+    as 56 GB of anything-goes, the 8 GB card is simply handed a proportionally
+    smaller share. Had llama.cpp split EVENLY, summing would overcommit the
+    smallest card, so this is a consequence of the measured policy and not a
+    property of summing.
+
+    Callers must still charge overhead PER DEVICE (each one carries its own
+    compute buffers) - see ``_sizing.VramSizingMixin._split_overhead_bytes``.
+
+    Deliberately separate from :func:`vram_capacity`, which answers for a
+    CONFIGURED split and feeds the admission gate: this is the sizing question
+    ("how much can this load actually use") and must not silently move a
+    refusal threshold. Answers ``{}``, i.e. "no implicit combined figure - use
+    the single-device reading", in every case where a sum would be dishonest:
+
+    - A ``gpu_split_indices`` IS configured: an explicit ``tensor_split`` is
+      written, the shares are the configured/auto ratios rather than the
+      free-memory default, and :func:`vram_capacity` already owns that case.
+      Answered from config alone, with NO hardware probe.
+    - Fewer than 2 devices are detected: the single-GPU majority, and the case
+      where this must cost nothing and change nothing.
+    - Any device does not report BOTH ``free`` and ``total`` (all-or-nothing,
+      mirroring :func:`vram_capacity`'s own "free" key): a partially-measurable
+      board must not under-count by reading a missing device as 0, nor
+      over-count by assuming a blind device is empty.
+    - (``list_gpus()`` path only) the probe did not complete fresh this call:
+      sizing a load from a frozen last-known-good snapshot is the rule-5 gap
+      :func:`gpu_split_shortfall`'s probe-freshness contract exists to close.
+
+    On the ``vulkan`` build the reading comes from :func:`native_gpu_devices`
+    (the crash-isolated probe daemon's view of ggml's OWN registry), because
+    that is the device space the layers are actually placed in;
+    :func:`list_gpus` speaks torch's space and is structurally blind there
+    (GPU-SPLIT-VKINDEX). A sum needs the right device SET rather than an index
+    correspondence, but taking it from the space that receives the layers is
+    what makes the sum honest. Same branch, same reason, as
+    :func:`resolve_auto_split_ratios`.
+
+    Never raises: a combined reading is an upgrade over the single-device one,
+    and failing to fetch it must never break a load that worked without it."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    if cfg.get("gpu_split_indices"):
+        return {}
+    if _native_backend_has_vulkan():
+        devices = native_gpu_devices()
+        if not devices:
+            return {}
+        # DISCRETE GPUs ONLY, and this is a load-safety filter, not tidiness.
+        # The native registry reports every non-CPU device, but llama.cpp's
+        # device list SKIPS accelerators outright and appends integrated GPUs
+        # only when no discrete GPU was found. So a box with a discrete card
+        # AND an iGPU - an ordinary laptop, or any desktop CPU with integrated
+        # graphics - would otherwise have the iGPU's memory summed into a
+        # budget llama.cpp then places entirely on the discrete card. That
+        # over-budgets, which is the direction that OOMs rather than merely
+        # wasting memory.
+        #
+        # Filter to GGML_DEV_TYPE_GPU rather than excluding the others by
+        # value: the enum has GROWN (IGPU was inserted ahead of ACCEL, so the
+        # numeric value of ACCEL differs between builds we may ship), and this
+        # module cannot know which llama.cpp is provisioned. CPU=0 and GPU=1
+        # have been stable throughout, so an allowlist is version-independent
+        # where a denylist is not. A device whose type the probe did not report
+        # is not assumed to be discrete - it fails the filter and, if that
+        # leaves fewer than 2, the single-device reading stands.
+        #
+        # The iGPU-only box needs no special case: llama.cpp keeps at most ONE
+        # integrated GPU, so it can never reach the 2+ devices this requires.
+        from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+        devices = [d for d in devices
+                   if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
+    else:
+        devices, status = _list_gpus_kw(return_status=True,
+                                        wait_for_inflight=wait_for_inflight)
+        if status != GPU_PROBE_OK or not devices:
+            return {}
+    if len(devices) < 2:
+        return {}
+    frees, totals = [], []
+    for d in devices:
+        free = d.get("free") if isinstance(d, dict) else None
+        total = d.get("total") if isinstance(d, dict) else None
+        if not isinstance(free, int) or not isinstance(total, int):
+            return {}
+        frees.append(free)
+        totals.append(total)
+    return {"free": sum(frees), "total": sum(totals), "devices": len(devices)}
 
 
 def split_device_count(config: Optional[dict] = None) -> int:

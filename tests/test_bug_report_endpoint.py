@@ -38,6 +38,79 @@ def test_no_token_refused_in_open_mode(monkeypatch):
     assert r.status_code == 403
 
 
+def test_save_does_not_run_on_the_event_loop(monkeypatch):
+    """Filing a report does a synchronous log read + scrub + file write
+    (bugreport.save_user_report) - measured loop_lag=0.67s in the field,
+    stalling every concurrent request for the duration. Oracle:
+    asyncio.get_running_loop() succeeds only on the event-loop thread and
+    raises RuntimeError in a threadpool worker (same technique as
+    test_comfy_models_offloaded_638.py) - structural, no sleeps or timing, so
+    it cannot be load-sensitive or flaky."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import asyncio
+
+    from localm import bugreport
+
+    seen: dict = {}
+    real_save = bugreport.save_user_report
+
+    def _probing_save(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True      # ON the event-loop thread: the defect
+        except RuntimeError:
+            seen["on_loop"] = False     # off-loop (threadpool worker): correct
+        return real_save(*a, **kw)
+
+    monkeypatch.setattr(bugreport, "save_user_report", _probing_save)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "must not stall the loop"},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200, r.text
+    assert seen.get("on_loop") is False, (
+        "file_bug_report_ep called save_user_report ON the event loop: a slow "
+        "log digest or disk write would stall every other concurrent request")
+
+
+def test_a_scrub_failure_does_not_write_or_report_success(monkeypatch):
+    """save_user_report SCRUBS before it saves (home paths, secrets - HON-03/
+    HON-15). Moving the whole call into a worker thread via
+    run_in_threadpool_bounded must not let a scrub failure quietly become a
+    success: an exception raised inside the offloaded closure has to reach
+    the caller as a failure, not be swallowed en route with an unscrubbed (or
+    any) report left on disk (AGENTS.md rule 5 - a privacy step that fails
+    must never report success). build_report() calls _scrub_secrets(summary)
+    unconditionally as its very first line, before save_report() is ever
+    reached, so a raise there proves the whole chain fails closed."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    from localm import bugreport
+    from localm.config import home_dir
+
+    def _boom(text):
+        raise RuntimeError("scrub exploded")
+
+    monkeypatch.setattr(bugreport, "_scrub_secrets", _boom)
+    app = create_app(_engine())
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "trigger the scrub failure"},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code != 200, (
+        f"a scrub failure must not report success, got {r.status_code}: {r.text}")
+    reports_dir = home_dir() / "bug-reports"
+    written = list(reports_dir.glob("*.md")) if reports_dir.is_dir() else []
+    assert written == [], (
+        f"a scrub failure must not leave a report on disk: {written}")
+
+
 def test_files_a_report_with_shell_token(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
