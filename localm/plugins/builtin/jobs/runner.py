@@ -424,9 +424,19 @@ def _run_rag(job: Job) -> str:
 
     had_vectors = bool(coll.stats().get("has_vectors"))
     embed_fn = _rag_embed_fn()
+    # Same configured-name lookup as `rag add`/`rag resync` from the CLI (FIX4):
+    # a scheduled re-sync that actually embeds should also leave the model on
+    # record, not only the interactive paths.
+    model_name = None
+    if embed_fn is not None:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     lines: list = []
     try:
         result = coll.resync(embed_fn=embed_fn, policy=indexing_policy(),
+                             model_name=model_name,
                              on_progress=lines.append)
     except CollectionLockedError as e:
         # Somebody is hand-running `localm rag add|resync` on this collection (or

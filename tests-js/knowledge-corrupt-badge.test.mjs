@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadAppWithPages, runScript } from "./harness.mjs";
+
+// The server has served stats().corrupt (set for a corrupt meta.json, a
+// malformed chunks.jsonl line, or an unreconstructable roots map - see
+// store.py's three self.corrupt = True sites) since before this change, and
+// the CLI already renders it ("(corrupt index - run 'localm rag repair')" in
+// cli/rag.py). The GUI never referenced .corrupt at all, so a user only saw
+// the unrelated "re-embed needed" badge, which says nothing about on-disk
+// damage. This adds a distinct badge in the collections table and a warning
+// line in the per-collection info modal, both pointing at 'localm rag repair'.
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+const NOT_INSTALLED = { status: "not_installed", model: "bge-small-en-v1.5", dim: null, internal: [], error: null };
+
+function setupTable(collections) {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (/\/api\/rag\/collections$/.test(u))
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ collections }) };
+    if (u.includes("/api/rag/embedding"))
+      return { ok: true, status: 200, text: async () => "", json: async () => NOT_INSTALLED };
+    return { ok: true, status: 200, text: async () => "", json: async () => ({}) };
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  return window;
+}
+
+test("corrupt collection gets a distinct 'index damaged' badge in the table", async () => {
+  const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true,
+                                vector_degrade_reason: null, corrupt: true }]);
+  runScript(window, "refreshKnowledgePage();");
+  await tick(); await tick(); await tick();
+
+  const table = window.document.getElementById("kb-table");
+  const badge = table.querySelector(".corrupt-badge");
+  assert.ok(badge, "a .corrupt-badge is rendered inline in the row");
+  assert.equal(badge.textContent, "index damaged");
+  assert.match(badge.title, /rag repair/);
+});
+
+test("a healthy collection gets no corrupt badge", async () => {
+  const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true,
+                                vector_degrade_reason: null, corrupt: false }]);
+  runScript(window, "refreshKnowledgePage();");
+  await tick(); await tick(); await tick();
+
+  const table = window.document.getElementById("kb-table");
+  assert.equal(table.querySelector(".corrupt-badge"), null);
+});
+
+test("corrupt and re-embed badges can both show at once, distinctly", async () => {
+  const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: false,
+                                vector_degrade_reason: null, corrupt: true }]);
+  runScript(window, "refreshKnowledgePage();");
+  await tick(); await tick(); await tick();
+
+  const table = window.document.getElementById("kb-table");
+  // embedding not installed -> no re-embed badge here, only the corrupt one;
+  // the point of this case is that the two badges are independent flags.
+  assert.ok(table.querySelector(".corrupt-badge"));
+  assert.equal(table.querySelector(".retrieval-badge"), null);
+});
+
+function setupDetail(collData) {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (/\/api\/rag\/collections\/[^/]+$/.test(u))
+      return { ok: true, status: 200, text: async () => "", json: async () => collData };
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ collections: [] }) };
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  return window;
+}
+
+test("info modal shows the corrupt-index warning when the collection is corrupt", async () => {
+  const win = setupDetail({
+    name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true, docs: [],
+    vector_degrade_reason: null, corrupt: true,
+  });
+  runScript(win, 'kbInfoModal("kb");');
+  await tick();
+  await tick();
+  const modal = win.document.getElementById("modal");
+  assert.match(modal.textContent, /corrupt or malformed/);
+  assert.match(modal.textContent, /rag repair/);
+});
+
+test("info modal shows no corrupt warning when the collection is healthy", async () => {
+  const win = setupDetail({
+    name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true, docs: [],
+    vector_degrade_reason: null, corrupt: false,
+  });
+  runScript(win, 'kbInfoModal("kb");');
+  await tick();
+  await tick();
+  const modal = win.document.getElementById("modal");
+  assert.equal(/corrupt or malformed/.test(modal.textContent), false);
+});

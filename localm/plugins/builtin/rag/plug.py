@@ -109,6 +109,10 @@ class RagUploadRequest(BaseModel):
 
 class EmbeddingModelRequest(BaseModel):
     model: str                    # an internal key, a registered model name, or a GGUF path
+    # False (default): report what switching MIGHT invalidate and stop there -
+    # no config write, no embedder reset. True: actually make the switch. See
+    # rag_embedding_set's docstring for why this two-step split exists.
+    confirm: bool = False
 
 
 def _make_self_embed(self_url: str, active_model):
@@ -339,6 +343,56 @@ def _collection_dim_report(target_dim: int) -> dict:
         else:
             unaffected += 1
     return {"degrades": degrades, "unknown": unknown, "unaffected": unaffected}
+
+
+def _collection_provenance_report() -> list:
+    """Every collection that currently has vectors, with its recorded 'built
+    with' model (``Collection.embedding_model()``, None if never recorded -
+    see FIX4) and chunk count. The pre-switch, NEW-model-dimension-free sibling
+    of ``_collection_dim_report``: that function needs the CANDIDATE model's
+    own dimension to say which collections will actually degrade, and getting
+    that means resolving and loading the candidate - exactly the step
+    ``rag_embedding_set`` must not take before the caller confirms (a
+    ``resolve_embedding_model_path``/``get_embedder`` call there is a real
+    fetch/VRAM-load, not a free probe, and there is no static dim table for an
+    arbitrary registered model or GGUF path).
+
+    So this reports what CAN be known for free from disk alone: which
+    collections have semantic search today, and what they were built with.
+    Deliberately not a verdict on whether a given collection's dimension will
+    actually change - only reembed()/add_paths() recording ``embedding_model``
+    know that for certain, and only once the new model has actually been
+    loaded and measured. Honest under-claiming (AGENTS rule 5: never assert a
+    dimension nobody has measured) rather than a confident but fabricated
+    per-collection verdict.
+
+    Best-effort per collection, same as ``_collection_dim_report``: one that
+    fails to even construct is still named, with the failure NOTED (not
+    silently dropped from the count) - but unlike that function, this one's
+    return value is serialized straight into an HTTP response body (the
+    dry-run JSON), not just read internally for a name to log. So the
+    exception's own text is logged server-side only, never placed in the
+    field this function returns - the raw message can carry a filesystem
+    path or other implementation detail (CWE-209), and reaching the response
+    is exactly the leak _collection_dim_report never had because its own
+    'reason' string is only ever read for logging, never re-serialized."""
+    from localm.rag import Collection, collection_names
+    out: list = []
+    for name in collection_names():
+        try:
+            coll = Collection(name)
+            stats = coll.stats()
+        except Exception as e:
+            logger.warning("rag: %r could not be read for the embedding-switch "
+                           "impact preview (%s: %s)", name, type(e).__name__, e)
+            out.append({"name": name, "built_with": None, "n_chunks": None,
+                        "reason": "could not be read"})
+            continue
+        if not stats.get("has_vectors"):
+            continue
+        out.append({"name": name, "built_with": coll.embedding_model(),
+                    "n_chunks": stats["n_chunks"]})
+    return out
 
 
 def _require_jobs(request: Request):
@@ -688,6 +742,16 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
+    # Same configured-name lookup _make_self_embed itself sends over the wire
+    # (see there) - recorded so a collection built the ordinary way through
+    # this route ends up with embedding_model() on record, not only reembed()
+    # (FIX4). None (embed off) is fine: never reached without embed_fn.
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     # Kernel-level since ADR-0008, so a bare `localm serve` has one too. This
     # used to branch on "jobs is None" and index SYNCHRONOUSLY for a headless
     # server; that server now gets the same streamed background job the GUI
@@ -701,6 +765,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         try:
             result = coll.add_paths(
                 paths, embed_fn=embed_fn, classify_fn=self_classify,
+                model_name=model_name,
                 describe_image_fn=self_describe,
                 policy=policy, force=req.reindex,
                 on_progress=_job_progress(job))
@@ -785,6 +850,13 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
+    # See rag_add: record which model this upload actually embeds with (FIX4).
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     # See rag_add: kernel-level job registry, so the headless synchronous branch
     # is gone and an upload streams as a background job here too.
     jobs = _require_jobs(request)
@@ -795,6 +867,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
         try:
             result = coll.add_uploads(
                 uploads, embed_fn=embed_fn, classify_fn=self_classify,
+                model_name=model_name,
                 describe_image_fn=self_describe,
                 force=req.reindex,
                 on_progress=_job_progress(job))
@@ -952,6 +1025,18 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     silently swaps the user's choice - on failure the selection stands and the UI
     offers the internal default.
 
+    Two-step by *confirm* (NEW-RAG-DIM-NO-REEMBED item 3). Without it (the
+    default), this is a DRY RUN: no config write, no embedder reset, no job -
+    just ``_collection_provenance_report()``'s honest "these collections have
+    semantic search today and may be invalidated" answered synchronously and
+    fast (see that function's docstring for why it does not, and cannot
+    cheaply, assert the NEW dimension). With ``confirm: true``, this makes the
+    switch exactly as before this change. The caller (the GUI) is expected to
+    show the dry-run report, let the user confirm, and only then re-POST with
+    ``confirm: true`` - so the warning lands BEFORE the switch takes effect,
+    not after, which the single-step version could never do (the config write
+    and embedder reset used to be the very first thing this route did).
+
     OWNER-ONLY. This writes the `embedding_model` config key, which names a FILE
     THIS PROCESS OPENS and is flagged admin_only in the schema. The route's own
     mount gate is the plugin's `rag` scope, and `rag` is NOT in
@@ -959,7 +1044,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     docs/cli.md as the canonical restricted key - so without this check the
     plugin route is a back door around the owner gate on PATCH /v1/config. Same
     shape and placement as the rag_allowed_roots widening check above: open mode
-    is the trusted local owner (caller_scopes None) and passes."""
+    is the trusted local owner (caller_scopes None) and passes. The dry-run
+    branch is gated identically - it names collections and chunk counts, which
+    is exactly the same information the confirmed switch already discloses."""
     model = req.model.strip()
     if not model:
         raise HTTPException(400, "No model given")
@@ -971,6 +1058,22 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
             403, "Changing the embedding model requires an owner (admin) key: it "
             "selects a file this process loads, so it widens a trust boundary. "
             "The rag scope alone is not enough.")
+
+    if not req.confirm:
+        affected = _collection_provenance_report()
+        if affected:
+            note = (
+                f"Switching to '{model}' may invalidate the semantic search of "
+                f"{len(affected)} existing collection(s) until they are "
+                "re-embedded. The exact impact cannot be confirmed until the "
+                "new model is loaded and tested - re-embed after switching if "
+                "any of them drop to BM25/lexical-only.")
+        else:
+            note = (f"No existing collection currently has embeddings, so "
+                     f"switching to '{model}' has nothing to invalidate.")
+        return {"needs_confirm": True, "model": model,
+                "collections": affected, "note": note}
+
     jobs = _require_jobs(request)
 
     def _setup(job):

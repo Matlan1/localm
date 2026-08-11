@@ -1389,7 +1389,8 @@ class Collection:
                   describe_image_fn: Optional[DescribeImageFn] = None,
                   on_progress: Optional[ProgressFn] = None,
                   policy: Optional[dict] = None,
-                  force: bool = False) -> dict:
+                  force: bool = False,
+                  model_name: Optional[str] = None) -> dict:
         """
         Index files/folders. Unchanged files (same mtime+size+content hash) are
         skipped; changed ones are re-indexed in place. Pass ``force=True`` to
@@ -1403,6 +1404,11 @@ class Collection:
         embedding model whose dimensionality differs from the collection's also
         raises ``ValueError`` rather than corrupting the vectors with mixed
         dimensions (C3).
+
+        *model_name*, like ``reembed()``'s, is the EMBEDDING model's name, only
+        recorded (as ``embedding_model()``) the first time this collection is
+        actually embedded - passing it when *embed_fn* is None is harmless, it is
+        simply never reached.
         """
         # Serialise the whole read-modify-write per collection AND re-sync with the
         # latest committed state under the lock, so a concurrent add_paths() that
@@ -1414,14 +1420,16 @@ class Collection:
             return self._add_paths_locked(
                 paths, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn,
-                on_progress=on_progress, policy=policy, force=force)
+                on_progress=on_progress, policy=policy, force=force,
+                model_name=model_name)
 
     def _add_paths_locked(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
                           classify_fn: Optional[ClassifyFn] = None,
                           describe_image_fn: Optional[DescribeImageFn] = None,
                           on_progress: Optional[ProgressFn] = None,
                           policy: Optional[dict] = None,
-                          force: bool = False) -> dict:
+                          force: bool = False,
+                          model_name: Optional[str] = None) -> dict:
         """The add_paths read-modify-write body. MUST run under
         _collection_lock(self.name) after a fresh _load() (see add_paths)."""
         say = on_progress or (lambda _t: None)
@@ -1547,6 +1555,14 @@ class Collection:
                             vectors = vecs
                             if self._vec_dim is None and new_dim is not None:
                                 self._vec_dim = new_dim
+                                # Record which model built this index, same as
+                                # reembed() - the ONLY other writer of this key -
+                                # so a later dimension-mismatch message can name
+                                # it instead of leaving the "built with" clause
+                                # empty for every collection made the ordinary
+                                # way (FIX4).
+                                if model_name:
+                                    self._meta["embedding_model"] = str(model_name)
 
             # Replace any previous chunks (and vectors) for this document
             if known:
@@ -1597,7 +1613,8 @@ class Collection:
                on_progress: Optional[ProgressFn] = None,
                policy: Optional[dict] = None,
                force: bool = False,
-               prune_missing: bool = False) -> dict:
+               prune_missing: bool = False,
+               model_name: Optional[str] = None) -> dict:
         """Bring the index back in line with the folders it was built from.
 
         Re-walks every persisted root through the ORDINARY incremental path
@@ -1629,6 +1646,10 @@ class Collection:
         was legal when it was added but is outside the owner's allowed folders
         now. Callers that run unattended (the jobs runner) always pass one.
 
+        *model_name*: see ``add_paths()`` - forwarded to the same first-embed
+        recording, so a collection built via resync also ends up with its
+        embedding model on record.
+
         Returns the ``add_paths`` counters plus ``missing`` (newly flagged),
         ``missing_total``, ``restored``, ``pruned``, ``roots``,
         ``unavailable_roots`` and ``blocked_roots`` (each ``{root, reason}``), and
@@ -1641,10 +1662,12 @@ class Collection:
             return self._resync_locked(
                 embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn, on_progress=on_progress,
-                policy=policy, force=force, prune_missing=prune_missing)
+                policy=policy, force=force, prune_missing=prune_missing,
+                model_name=model_name)
 
     def _resync_locked(self, *, embed_fn, classify_fn, describe_image_fn,
-                       on_progress, policy, force, prune_missing) -> dict:
+                       on_progress, policy, force, prune_missing,
+                       model_name=None) -> dict:
         """The resync body. MUST run under _collection_lock after _load()."""
         say = on_progress or (lambda _t: None)
         available, unavailable, blocked = self._partition_roots(policy, say)
@@ -1668,7 +1691,7 @@ class Collection:
             result = self._add_paths_locked(
                 targets, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn, on_progress=on_progress,
-                policy=policy, force=force)
+                policy=policy, force=force, model_name=model_name)
         else:
             result = {"added": 0, "updated": 0, "skipped": 0, "failed": [],
                       "chunks": len(self._chunks)}
@@ -1880,7 +1903,8 @@ class Collection:
                     classify_fn: Optional[ClassifyFn] = None,
                     describe_image_fn: Optional[DescribeImageFn] = None,
                     on_progress: Optional[ProgressFn] = None,
-                    force: bool = False) -> dict:
+                    force: bool = False,
+                    model_name: Optional[str] = None) -> dict:
         """Index documents UPLOADED from the caller's own device (the per-device
         path for a client that cannot browse the server disk).
 
@@ -1898,20 +1922,24 @@ class Collection:
         an ``upload:<name>`` doc cannot be re-read from disk: ``localm rag repair``
         simply skips these keys (Path('upload:x') is not a file) - their chunks
         persist and are never lost, they just cannot be re-embedded from source.
+
+        *model_name*: see ``add_paths()`` - the embedding model's name, recorded
+        the first time this collection is actually embedded.
         """
         with _collection_lock(self.name), self._write_lock("an upload", on_progress):
             self._load()
             return self._add_uploads_locked(
                 uploads, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn,
-                on_progress=on_progress, force=force)
+                on_progress=on_progress, force=force, model_name=model_name)
 
     def _add_uploads_locked(self, uploads: list, *,
                             embed_fn: Optional[EmbedFn] = None,
                             classify_fn: Optional[ClassifyFn] = None,
                             describe_image_fn: Optional[DescribeImageFn] = None,
                             on_progress: Optional[ProgressFn] = None,
-                            force: bool = False) -> dict:
+                            force: bool = False,
+                            model_name: Optional[str] = None) -> dict:
         """The add_uploads body. MUST run under _collection_lock after _load().
 
         Mirrors the per-document body of _add_paths_locked (chunk -> embed ->
@@ -2004,6 +2032,10 @@ class Collection:
                             vectors = vecs
                             if self._vec_dim is None and new_dim is not None:
                                 self._vec_dim = new_dim
+                                # See add_paths: record the model that built this
+                                # index, same key reembed() writes (FIX4).
+                                if model_name:
+                                    self._meta["embedding_model"] = str(model_name)
 
             if known:
                 keep = [i for i, c in enumerate(self._chunks)

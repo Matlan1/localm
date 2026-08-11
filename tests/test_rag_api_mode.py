@@ -254,19 +254,34 @@ class TestApiModeIndexesHeadless:
     def test_embedding_set_starts_a_job_headless(self, api_mode_app):
         """Embedding-model setup needs a job for its download-progress stream,
         and headless now has one, so it starts the job instead of 503-ing with
-        "run localm gui"."""
+        "run localm gui". confirm=True: the unconfirmed dry-run (see
+        TestEmbeddingSetConfirmGate below) never reaches the job registry at
+        all, so this must actually confirm to exercise that path."""
         with TestClient(api_mode_app) as c:
-            r = c.post("/api/rag/embedding", json={"model": "bge-small-en-v1.5"})
+            r = c.post("/api/rag/embedding",
+                       json={"model": "bge-small-en-v1.5", "confirm": True})
             assert r.status_code == 200, r.text
             assert "job_id" in r.json(), r.text
 
     def test_embedding_set_without_a_job_registry_is_a_clean_503(
             self, api_mode_app_no_jobs):
-        """The other half of audit item 8: still a 503, never a 500."""
+        """The other half of audit item 8: still a 503, never a 500.
+        confirm=True: only the confirmed path touches the job registry."""
         with TestClient(api_mode_app_no_jobs) as c:
-            r = c.post("/api/rag/embedding", json={"model": "bge-small-en-v1.5"})
+            r = c.post("/api/rag/embedding",
+                       json={"model": "bge-small-en-v1.5", "confirm": True})
             assert r.status_code == 503, r.text
             assert "localm gui" not in r.text.lower()
+
+    def test_embedding_set_unconfirmed_needs_no_job_registry(
+            self, api_mode_app_no_jobs):
+        """The dry-run report is answered synchronously and reads meta.json
+        only - it must work even where _require_jobs would 503, since it
+        never reaches that gate."""
+        with TestClient(api_mode_app_no_jobs) as c:
+            r = c.post("/api/rag/embedding", json={"model": "bge-small-en-v1.5"})
+            assert r.status_code == 200, r.text
+            assert r.json()["needs_confirm"] is True
 
     def test_query_succeeds_and_degrades_to_lexical_only(self, api_mode_app):
         # THE POINT (finding 1): with no bind coordinates on app.state (this bare

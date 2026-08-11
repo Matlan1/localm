@@ -91,10 +91,20 @@ def rag_add(collection, paths, force, embed, url):
     console = Console()
     coll = run_or_die(Collection, collection)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
+    # Same expression as `rag reembed` (below): the configured embedding model's
+    # name, so a fresh collection ends up with embedding_model() on record (FIX4)
+    # instead of only reembed() ever writing it. None (never embedded) is fine -
+    # the store only records it the first time embedding actually succeeds.
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     with _refuse_if_locked(console):
         coll.create()             # a write too: takes the same lock
         result = coll.add_paths(
-            list(paths), force=force, embed_fn=embed_fn,
+            list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
@@ -183,9 +193,16 @@ def rag_repair(collection, embed, url, yes):
             if not proceed:
                 raise click.Abort()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
+    # See `rag add`: record the model this repair actually re-embeds with.
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     with _refuse_if_locked(console):
         result = coll.add_paths(
-            paths, force=True, embed_fn=embed_fn,
+            paths, force=True, embed_fn=embed_fn, model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
@@ -243,6 +260,13 @@ def rag_resync(collection, embed, url, prune_missing):
             f"Index a folder (localm rag add {collection} <folder>) to have new "
             f"files in it picked up.[/yellow]")
     embed_fn = _cli_rag_embed_fn(url) if embed else None
+    # See `rag add`: record the model any newly-embedded document used.
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     # policy=None, exactly like `rag add` from the CLI: the local operator can
     # already read their own files, so they stay unconfined (the credential-dir
     # hard floor still applies inside confine_index_path). The SCHEDULED job path
@@ -251,6 +275,7 @@ def rag_resync(collection, embed, url, prune_missing):
     with _refuse_if_locked(console):
         result = coll.resync(
             embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
+            model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "

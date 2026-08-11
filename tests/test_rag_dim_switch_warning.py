@@ -212,7 +212,10 @@ def embedding_route_app(rag_home, monkeypatch):
 
 
 def _run_job_and_get_lines(client, app, model: str) -> str:
-    r = client.post("/api/rag/embedding", json={"model": model})
+    # confirm=True: these tests exercise the ACTUAL switch (the job that
+    # writes config, loads the model, and reports the dim-mismatch warning) -
+    # see TestEmbeddingSetConfirmGate for the unconfirmed dry-run itself.
+    r = client.post("/api/rag/embedding", json={"model": model, "confirm": True})
     assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]
     job = app.state.jobs.get(job_id)
@@ -282,6 +285,134 @@ class TestEmbeddingSwitchRouteEndToEnd:
 
         assert "Ready: new-model (384-dim)" in text
         assert "will fall back to BM25" not in text
+
+
+# --------------------------------------------------------------------------- #
+#  FIX3: POST /api/rag/embedding without confirm=True is a DRY RUN - the      #
+#  warning must land BEFORE the switch takes effect, not only after (as a    #
+#  job-log line once config was already written and the embedder already     #
+#  reset). No embedder mocking here on purpose: an unconfirmed request must   #
+#  never touch resolve_embedding_model_path/get_embedder at all - it answers  #
+#  from meta.json alone (embedding_model()), same as _collection_dim_report.  #
+# --------------------------------------------------------------------------- #
+
+class TestEmbeddingSetConfirmGate:
+    def test_unconfirmed_does_not_write_config_or_start_a_job(
+            self, embedding_route_app, rag_home):
+        from localm.config import load_config
+        before = load_config().get("embedding_model")
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            r = c.post("/api/rag/embedding", json={"model": "new-model"})
+
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["needs_confirm"] is True
+        assert "job_id" not in data
+        assert load_config().get("embedding_model") == before, \
+            "an unconfirmed request must not write embedding_model"
+
+    def test_unconfirmed_names_collections_with_embeddings_but_asserts_no_dim(
+            self, embedding_route_app, rag_home):
+        c = _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        c._meta["embedding_model"] = "old-model"
+        c._save()
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as post_client:
+            r = post_client.post("/api/rag/embedding", json={"model": "new-model"})
+
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["needs_confirm"] is True
+        assert data["model"] == "new-model"
+        assert data["collections"] == [
+            {"name": "docs", "built_with": "old-model", "n_chunks": 2}]
+        assert "may invalidate" in data["note"]
+        assert "1 existing collection" in data["note"]
+        # The whole point: no dimension is asserted anywhere in the report -
+        # that would require loading the candidate model, which confirm=False
+        # must never do.
+        assert "768" not in data["note"]
+        assert "dim" not in str(data["collections"])
+
+    def test_unconfirmed_with_no_embedded_collections_says_nothing_to_invalidate(
+            self, embedding_route_app, rag_home):
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            r = c.post("/api/rag/embedding", json={"model": "new-model"})
+
+        data = r.json()
+        assert data["collections"] == []
+        assert "nothing to invalidate" in data["note"]
+
+    def test_unconfirmed_omits_a_collection_with_no_vectors(
+            self, embedding_route_app, rag_home):
+        # Lexical-only (never embedded) collections have nothing a model
+        # switch could invalidate, so they must not pad the count.
+        _collection(rag_home, "lexical-only", ["alpha"], dim=None)
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            r = c.post("/api/rag/embedding", json={"model": "new-model"})
+
+        assert r.json()["collections"] == []
+
+    def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
+            self, embedding_route_app, rag_home, caplog):
+        """CodeQL py/stack-trace-exposure (alert #292): a construction failure
+        must still be NAMED in the response (rule 5 - not silently dropped,
+        mirroring _collection_dim_report's own 'unknown' bucket), but the raw
+        exception text must never reach the HTTP response body - only the
+        server-side log. _collection_dim_report's identical 'reason' field
+        never had this problem because its only reader is _setup(), which logs
+        just the collection NAME, never re-serializes 'reason' into a
+        response; this route serializes its whole report straight into JSON,
+        so the exception text itself must be kept out of the field it returns."""
+        rogue = rag_home / "not a valid name!"
+        rogue.mkdir(parents=True)
+        (rogue / "meta.json").write_text("{}", encoding="utf-8")
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c, \
+                caplog.at_level("WARNING", logger="localm"):
+            r = c.post("/api/rag/embedding", json={"model": "new-model"})
+
+        data = r.json()
+        assert len(data["collections"]) == 1
+        entry = data["collections"][0]
+        assert entry["name"] == "not a valid name!"
+        assert entry["reason"] == "could not be read"
+        # The property under test: nothing exception-shaped in the RESPONSE.
+        body_text = r.text
+        assert "ValueError" not in body_text
+        assert "Traceback" not in body_text
+        # The failure is still surfaced, just server-side (rule 5: noted, not muted).
+        assert "not a valid name!" in caplog.text
+        assert "ValueError" in caplog.text
+
+    def test_confirming_after_a_dry_run_actually_switches(
+            self, embedding_route_app, rag_home, monkeypatch):
+        _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        import localm.inference.embedder as emb
+
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: "/fake/new-model.gguf")
+        monkeypatch.setattr(emb, "get_embedder",
+                            lambda **kw: type("E", (), {"embed": staticmethod(
+                                lambda texts: [[0.1] * 384 for _ in texts])})())
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c:
+            dry = c.post("/api/rag/embedding", json={"model": "new-model"})
+            assert dry.json()["needs_confirm"] is True
+
+            text = _run_job_and_get_lines(c, embedding_route_app, "new-model")
+
+        assert "Ready: new-model (384-dim)" in text
+        from localm.config import load_config
+        assert load_config().get("embedding_model") == "new-model"
 
 
 # --------------------------------------------------------------------------- #
