@@ -177,7 +177,20 @@ _ASSET_MATCH = {
             "cuda-13": ["bin-win-cuda-13.3-x64", "bin-win-cuda-13"],
         },
         "sycl":   ["bin-win-sycl-x64"],
-        "hip":    ["bin-win-hip-radeon-x64"],   # needs AMD HIP SDK present
+        # Upstream renamed the Windows ROCm/HIP asset at b10356 (2026-08-11,
+        # PR 25775 "Add CI targets for ROCm 7.14"): "bin-win-hip-radeon-x64"
+        # -> "bin-win-rocm-<version>-x64" (e.g. bin-win-rocm-7.14-x64), the
+        # same shape as the Linux asset's own versioned name. The OLD name is
+        # kept FIRST because the pinned _PINNED_FALLBACK_SHA256 entry for the
+        # frozen b9870 fallback tag is genuinely still named that way there
+        # (that tag predates the rename and its assets never change); the NEW
+        # generic fragment is what matches every live tag going forward,
+        # mirroring the Linux entry's existing "specific, then generic" shape
+        # below. Without the generic fragment this backend silently guessed a
+        # URL for a filename that no longer exists at the live tag and 404'd -
+        # caught 2026-08-11 while building the AMD ROCm-detection escalation
+        # (dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5).
+        "hip":    ["bin-win-hip-radeon-x64", "bin-win-rocm"],
     },
     "linux": {
         "cpu":    ["bin-ubuntu-x64"],
