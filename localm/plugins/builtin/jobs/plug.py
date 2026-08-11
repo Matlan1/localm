@@ -170,17 +170,40 @@ def _caller_is_owner_key(request: Request) -> bool:
     Returns False in open mode / for a tokenless caller: ``owner`` is then None,
     which the runner already treats as needing no re-check.
 
-    KNOWN GAP (pre-existing, not a regression - master behaves the same): a job
-    created through an owner SESSION whose minting key was ALREADY rotated away
-    resolves to the old key's hash, so it does not match here and is not stamped.
-    Closing that needs the session to record at MINT time that the owner key
-    minted it (sessions.create), which is outside this change's blast radius.
+    TWO WAYS TO PROVE IT, because one of them cannot survive a roll:
+
+    1. The SESSION's own mint-time record (``caller_minted_by_owner_key``). This is
+       the authoritative answer for a cookie caller and closes what an earlier pass
+       had to leave open as a KNOWN GAP: an owner key ROLL deliberately leaves
+       browser sessions alive (cli/keys.py: a GUI roll must not log the browser
+       out), so a job created afterwards through that still-valid owner session
+       resolved the OLD key's hash - matching neither the new owner key nor any
+       keystore entry, i.e. indistinguishable from a REVOKED scoped key. It was
+       stamped False, and the runner then stripped shell from the owner's own
+       automation, silently and permanently. That is REG-509's own named trigger.
+    2. The key VALUE comparison below. Still needed, and not merely legacy: it is
+       the ONLY answer for a BEARER caller (no session exists to have recorded
+       anything), and it covers a cookie session minted before the flag existed.
+
+    Both are positive proofs, and (1) adds no authority: the session it reads is
+    already ADMIN-scoped and already exempt from ``key_hash_live``, so the same
+    caller can already create this job and drive the coder route with shell
+    interactively - only the SCHEDULED path disagreed. The flag is an attribute of
+    the session, so it dies with it: logout, ``revoke_all`` (key clear / sign out
+    everywhere) and expiry all revoke it, leaving the containment path for a leaked
+    owner key exactly as it was.
     """
     from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
-    from localm.inference.http_server import principal_id
+    from localm.inference.http_server import caller_minted_by_owner_key, principal_id
     owner_key = get_api_key()
     if not owner_key:
         return False
+    # Checked first because it is the one answer a rotation cannot invalidate. It
+    # is gated on an owner key EXISTING (above) so open mode still answers False,
+    # and it reads the session through the same re-validation every other cookie
+    # consumer uses - never a bare sessions.lookup().
+    if caller_minted_by_owner_key(request):
+        return True
     h = principal_id(request)
     if h is None:
         return False

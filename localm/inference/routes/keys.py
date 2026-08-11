@@ -93,8 +93,14 @@ def register(app: FastAPI, ctx) -> None:
             # key), so it keeps full access and survives a later key roll - same
             # decoupled-session model as the login/auto-seed paths.
             from localm import sessions
+            # owner_key_minted: see sessions.create. `owner` IS the owner key here
+            # by construction (read back, or just seeded), but the proof is taken
+            # rather than assumed - _is_owner_key re-compares against the live
+            # value, so a seed that somehow did not take reports False instead of
+            # stamping a privilege nothing established.
             sid = sessions.create(scopes={scopes.ADMIN},
-                                  key_hash=auth._hash_key(owner), fs_access="host")
+                                  key_hash=auth._hash_key(owner), fs_access="host",
+                                  owner_key_minted=auth._is_owner_key(owner))
             secure = request.url.scheme == "https"
             response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",

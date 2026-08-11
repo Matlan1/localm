@@ -146,7 +146,8 @@ def _expired(rec: dict, now: float) -> bool:
 
 def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
            label: str = "", ttl: float = _ABS_TTL_S,
-           idle_ttl: float = _IDLE_TTL_S) -> str:
+           idle_ttl: float = _IDLE_TTL_S,
+           owner_key_minted: bool = False) -> str:
     """Mint a new session, persist it, and return the opaque session id (the value
     the caller sets as the HttpOnly cookie). Stores only a HASH of the id.
 
@@ -155,7 +156,28 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
     the key that minted it (so principal_id() over a cookie matches the same key
     presented as a bearer, for job ownership). *fs_access* is the host-filesystem
     reach for this session. Raises if the store cannot be persisted (a security
-    step that fails must not look like success)."""
+    step that fails must not look like success).
+
+    *owner_key_minted* records WHAT KIND of credential minted this session: True
+    only when the presented credential WAS the owner key itself (auth._is_owner_key,
+    a constant-time plaintext compare against auth.get_api_key()), as opposed to a
+    minted, revocable keystore key. Every caller must pass a freshly computed
+    POSITIVE proof; the False default is the fail-closed answer, so a mint site that
+    forgets it, or a record persisted before this field existed, resolves to "not
+    the owner" rather than to a privilege it never proved (REG-509, cookie path).
+
+    Why the flag has to be recorded HERE rather than derived later: *key_hash* is a
+    snapshot of the key VALUE at login, and an owner key ROLL deliberately leaves
+    sessions alive (cli/keys.py). After a roll the frozen hash matches neither the
+    new owner key nor any keystore entry - exactly what a REVOKED scoped key looks
+    like - so the two become indistinguishable at run time and the owner's own
+    scheduled jobs silently lose shell. Mint time is the last moment the difference
+    is provable.
+
+    It grants no authority on its own: it is an ATTRIBUTE OF THE SESSION, so it is
+    exactly as revocable as the session carrying it (revoke / revoke_all / absolute
+    and idle expiry all destroy it), and the sessions it can appear on already carry
+    the owner's ADMIN scope snapshot."""
     now = time.time()
     sid = secrets.token_urlsafe(32)
     rec = {
@@ -163,6 +185,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
         "scopes": sorted(scopes) if scopes else [],
         "key_hash": key_hash,
         "fs_access": fs_access or "none",
+        "owner_key_minted": bool(owner_key_minted),
         "label": (label or "")[:120],
         "issued": now,
         "last_used": now,
@@ -209,6 +232,13 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
             return {"scopes": list(r.get("scopes", [])),
                     "key_hash": r.get("key_hash"),
                     "fs_access": r.get("fs_access", "none"),
+                    # `is True`, not bool(): create() only ever writes a real
+                    # bool, so anything else in the file is a record written
+                    # before this field existed, or a hand-edited/corrupted store.
+                    # A truthy string must NOT read as the owner stamp, and an
+                    # absent field must read as False - a session cannot acquire
+                    # this retroactively, only by proving it at mint time.
+                    "owner_key_minted": r.get("owner_key_minted") is True,
                     "label": r.get("label", "")}
     return None
 

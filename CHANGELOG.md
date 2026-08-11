@@ -11,6 +11,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Scheduled jobs no longer lose their shell step when you roll the API key.**
+  Rolling the key deliberately keeps you signed in to the web UI. But a
+  scheduled coder job created from that still-signed-in browser afterwards was
+  no longer recognised as yours, so every later run quietly dropped its shell
+  access and there was no way to tell from the job itself. Signing in now
+  records that it was the owner key that signed in, so your own automation keeps
+  working across a key roll. Keys minted with `localm keys create` are
+  unaffected and are still re-checked on every run, so revoking one still
+  removes shell access from the jobs it created.
+
 ## [0.1.5rc2] - 2026-08-08
 
 ### Added
