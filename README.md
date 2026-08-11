@@ -113,8 +113,8 @@ https://astral.sh/uv/install.sh | sh` on Linux/macOS).
 # choice. The UV_* vars only apply to this one command, never persisted.
 UV_PYTHON_INSTALL_DIR="$PWD/.python" UV_CACHE_DIR="$PWD/.cache" \
   uv venv --python 3.12 --python-preference only-managed .venv
-uv pip install -p .venv -e ".[coder,voice]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
-uv pip install -p .venv -e ".[gpu,coder,voice]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
+uv pip install -p .venv -e ".[coder,voice,monitor]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
+uv pip install -p .venv -e ".[coder,voice,monitor,gpu,audio]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
 localm setup-llama                                 # provision the native llama.cpp backend (Vulkan/CUDA/CPU)
 ```
 
@@ -140,7 +140,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
 | `cpu` | Explicit CPU-only marker (empty; core already runs GGUF on CPU) |
-| `dev` | Contributor / CI tooling: `ruff` + `pytest` |
+| `dev` | Contributor / CI tooling: `ruff`, `pytest`, `pytest-cov`, `pytest-xdist`, plus `pypdf`/`psutil` so the tests that need them do not skip |
 
 Not every plugin needs an extra: the image/music/video plugins talk to an external media-generation server you run (ComfyUI today), jobs and web have no extra, and tts runs in the browser.
 
@@ -240,6 +240,7 @@ localm pull SPEC                  # download from HuggingFace or URL
 localm search QUERY               # search HuggingFace for GGUF models
 localm add PATH                   # register a local model (--store copy|move to import it into <data dir>/models)
 localm alias MODEL NEWNAME        # add a second name
+localm rename MODEL NEWNAME       # rename it outright (unlike alias, the old name stops working)
 localm set-type MODEL TYPE        # fix a model's detected type (llm, vae, lora, unknown, ...)
 localm list [--type TYPE]        # registered models, optionally filtered by type
 localm rm MODEL                   # remove a model

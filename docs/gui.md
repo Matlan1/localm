@@ -70,7 +70,7 @@ Coder is a plugin: this tab and its routes appear only when the coder plugin is 
 
 Pair with an AI agent on code tasks. Point it at a project directory and give it a goal - the agent reads files, writes code, runs tests, searches, and can call any MCP tools configured for that project.
 
-**Start a session:** Click the "New session" button, pick a directory, and give the agent a task. The agent gets the same tools as the terminal version: read, write, edit, patch, shell, search, tests, image generation, plus any MCP tools configured in `.localcoder/config.toml` for that project.
+**Start a session:** Click the "New session" button, pick a directory, and give the agent a task. The agent gets the same tools as the terminal version: read, write, edit, patch, shell, search, tests, image generation, Knowledge-collection search, plus any MCP tools configured in `.localcoder/config.toml` for that project.
 
 **Common workflows:**
 - **Build a feature:** "Add a login form to pages/auth.tsx that validates email and password" - the agent writes components, runs tests, and shows you diffs before applying changes.
@@ -102,9 +102,9 @@ Pair with an AI agent on code tasks. Point it at a project directory and give it
 
 Of the pages below, only **Models** and **Plugins** are part of the core shell. The **Images**, **Music**, **Video**, **Knowledge**, and **Jobs** tabs are each contributed by a plugin and appear only when installed and enabled.
 
-**Models:** Search HuggingFace for GGUF models (empty query shows most downloaded). Expand a repo to see every quantization with its size and a "fits your VRAM" badge (compared against total VRAM, no torch required). Pull any file with one click; pull by spec with live progress, switch the active engine, add aliases, inspect path/hash/size, and remove models. Search is lazy - no network request until you ask.
+**Models:** Search HuggingFace for GGUF models (empty query shows most downloaded); results show the model's architecture family and an MoE badge when applicable. Expand a repo to see every quantization with its size and a "fits your VRAM" badge (compared against total VRAM, no torch required). Pull any file with one click; pull by spec with live progress, switch the active engine (the "use" button shows "loading…" for the duration), add aliases or rename outright, inspect path/hash/size, and remove models. Your registered models list carries the same architecture/MoE badges and sorts by column (Name, Role, Source, Size, Modified - remembered across reloads). Search is lazy - no network request until you ask.
 
-**Images:** Drive the local ComfyUI FLUX pipeline. Prompt, negative prompt, seed, guidance, img2img with denoise. History grid with metadata from sidecar files. If ComfyUI is not running, the job tells you how to start it, or starts it automatically if `comfy_launch_cmd` is set in the config. After generation, ComfyUI releases its models and the chat model reloads for instant replies.
+**Images:** Drive the local ComfyUI FLUX pipeline. Prompt, negative prompt, seed, guidance, img2img with denoise, and an optional LoRA (picked from what is installed in your ComfyUI, with separate strength fields for the model and CLIP). History grid with metadata from sidecar files. If ComfyUI is not running, the job tells you how to start it, or starts it automatically if `comfy_launch_cmd` is set in the config. After generation, ComfyUI releases its models and the chat model reloads for instant replies.
 
 **Music:** Generate tracks with the local ComfyUI ACE-Step workflow - style tags, optional lyrics ([verse]/[chorus] markers), and arbitrary track length in seconds. Seed/steps/CFG for control. History with inline playback, move-to-folder, and delete. `/generate-music <tags>` in chat generates a default-length instrumental inline. Use `localm music "tags" --lyrics song.txt -d 180` from the terminal.
 

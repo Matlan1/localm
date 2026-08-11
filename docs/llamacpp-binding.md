@@ -133,9 +133,13 @@ still loads (the drift is logged and shown by `localm doctor`). Two safety valve
   untested build can never permanently block a user.
 
 The fingerprint was validated byte-for-byte against the cpu, vulkan, and amd-rocm
-prebuilts (b1288..b9740). Offsets for these POD fields are commit-determined, not
-OS-determined, so a given build matches on every OS. `localm doctor` surfaces the verdict ("native ABI: ...")
-by running the check in a subprocess so a broken DLL cannot crash the diagnostic.
+prebuilts localm provisions. Offsets for these POD fields are commit-determined,
+not OS-determined, so a given build matches on every OS. Note that llama.cpp's
+own build-tag namespaces collide: a bare `b1xxx` number can mean either the
+lemonade-sdk/llamacpp-rocm AMD build or an unrelated ggml-org/llama.cpp tag - see
+`_structs.py`'s docstring before quoting one. `localm doctor` surfaces the
+verdict ("native ABI: ...") by running the check in a subprocess so a broken DLL
+cannot crash the diagnostic.
 
 ## Checking against upstream (`scripts/check_llama_abi.py`)
 

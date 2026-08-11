@@ -33,6 +33,15 @@ localm rag query manuals "how do I replace the toner"
 localm rag rm manuals
 ```
 
+From the coder: two built-in tools let the agent search your Knowledge
+collections mid-task - one lists what is available, the other searches a
+named collection for matching excerpts. Search asks for confirmation by
+default (collection content is not scoped to the project the way file reads
+are), and retrieved text goes through the same sanitiser used for any other
+untrusted content before it reaches the model. Search is lexical only for
+now, not the hybrid/embedding search the Knowledge page itself can do. A
+restricted (shared, non-owner) coder session cannot use either tool.
+
 Collections live in `<data dir>/rag/<name>/` - plain JSON, no database.
 Deleting a collection removes only the index; your files are untouched.
 Creating or indexing a collection is an explicit action, so it writes to disk
@@ -102,20 +111,25 @@ embedder too rather than quietly returning those vectors.
   `localm setup-embeddings`. When it is present and you index with vectors
   enabled, chunk vectors are stored and queries score as an equal blend of
   normalised BM25 and cosine similarity. The Knowledge page shows `hybrid` vs
-  `BM25` per collection.
+  `BM25` per collection. It otherwise loads on demand, on whichever request
+  needs it first; Settings has a "Warm up now" button that loads it up front
+  instead, with a live status line through resolving, downloading if needed,
+  freeing VRAM, and loading (already-loaded shows "Already warm"). Changing
+  which model is used (Knowledge page, or `PATCH /v1/config`) requires an
+  owner (admin-scoped) key; a scoped `rag` key can index and query but not
+  switch models.
 - Embedding failures **degrade, never break**: indexing falls back to
-  lexical-only. Through the GUI, indexing runs as a background job and the
-  fallback is noted in that job's log. A headless `localm serve` (no GUI
-  attached) runs `/api/rag/collections/{name}/add` and `/upload`
-  synchronously with no job to log into, so that note goes to the server log
-  instead: it prints when `--debug` / `LOCALM_DEBUG=1` is on, and is always
-  captured in the always-on in-memory activity buffer a bug report can
-  include, even without `--debug`. A headless caller that needs to confirm a
-  document was actually vectored (not just indexed) can compare the
-  collection's `has_vectors` stat from `GET /api/rag/collections/{name}`
-  before and after. A query that cannot use its vectors falls back to BM25 and
-  records the reason on the collection's status (a corrupt or
-  dimension-mismatched vector sidecar is also logged at WARNING).
+  lexical-only. Indexing (`add`/`upload`) and embedding setup always run as a
+  background job, on `localm gui` and a headless `localm serve` alike:
+  `POST /api/rag/collections/{name}/add` and `.../upload` return
+  `{"job_id": ...}` immediately, and any degrade-to-lexical fallback is noted
+  in that job's log - follow it with `GET /api/jobs/{id}/events`, the same way
+  the GUI does. A headless caller that needs to confirm a document was
+  actually vectored (not just indexed) can compare the collection's
+  `has_vectors` stat from `GET /api/rag/collections/{name}` before and after,
+  or just read the job's own outcome. A query that cannot use its vectors
+  falls back to BM25 and records the reason on the collection's status (a
+  corrupt or dimension-mismatched vector sidecar is also logged at WARNING).
 
 By default CLI indexing is lexical-only (no running engine); pass `--embed` to
 `localm rag add` / `localm rag query` to compute vectors via a running localm
@@ -183,8 +197,9 @@ policy as an interactive add. Full details in
 
 - **No embeddings? It still works.** Retrieval degrades to lexical-only (BM25)
   automatically (see above). Run `localm setup-embeddings` to install the
-  on-device embedding model (default `bge-small-en-v1.5`), then re-index to get
-  vectors blended back in.
+  on-device embedding model (default `bge-small-en-v1.5`), then
+  `localm rag reembed NAME` to add vectors to what is already indexed, without
+  re-reading the source files.
 - **A query returns nothing.** No chunk matched: broaden or rephrase the query
   (exact words matter in lexical mode), or confirm the collection
   indexed the files (re-index if a source changed).
@@ -213,11 +228,13 @@ policy as an interactive add. Full details in
   away: the vector file is kept as it is, or moved aside to
   `vectors.json.rejected` in the collection folder if the chunks were rewritten
   in the meantime, and the reason is repeated by the Knowledge page, `rag resync`
-  and every scheduled run until you rebuild the index with
-  `localm rag repair NAME --embed`. Only a rebuild that covers **every** chunk
-  clears it. Indexing one more document meanwhile does not, even with embeddings
-  on: that leaves the older chunks without vectors, which is a thinner index than
-  you had, not a repaired one. Each incident keeps its own set-aside copy
+  and every scheduled run until you clear it with `localm rag reembed NAME`
+  (recomputes every chunk's vector from what is already indexed, no source
+  files needed) or `localm rag repair NAME --embed` (re-reads from source
+  too, needed if the chunks themselves are also suspect). Only a pass that
+  covers **every** chunk clears it. Indexing one more document meanwhile does
+  not, even with embeddings on: that leaves the older chunks without vectors,
+  which is a thinner index than you had, not a repaired one. Each incident keeps its own set-aside copy
   (`vectors.json.rejected`, then `.rejected.2`, and so on), and they stay after a
   successful rebuild as a record of what happened - delete them yourself if you
   want the space back. The one time localm removes them is when the collection
