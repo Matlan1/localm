@@ -118,7 +118,7 @@ def _check_native_abi() -> None:
         "v=abi_report();"
         "print('ABI_RESULT:'+json.dumps("
         "{'status':v.status,'detail':v.detail,'failures':v.failures[:3],"
-        "'layout':v.layout}))"
+        "'layout':v.layout,'context_layout':v.context_layout}))"
     )
     # Kept separately from the `or {}` fallback below: None means the PROBE never
     # ran (subprocess timed out, crashed, or printed no matching line - see
@@ -134,7 +134,12 @@ def _check_native_abi() -> None:
     # installed, and it is the first thing anyone diagnosing a wrong-GPU or
     # unexpected-memory-behaviour report needs. See llamacpp/_structs.py.
     layout = abi.get("layout") or ""
-    suffix = f" [dim](model params layout {layout})[/dim]" if layout else ""
+    context_layout = abi.get("context_layout") or ""
+    layout_bits = ", ".join(
+        s for s in (f"model params {layout}" if layout else "",
+                    f"context params {context_layout}" if context_layout else "")
+        if s)
+    suffix = f" [dim]({layout_bits})[/dim]" if layout_bits else ""
     if status == "ok":
         console.print(f"  {_OK_SYM}  native ABI: struct layout matches this build"
                       + suffix)

@@ -121,6 +121,20 @@ _BAD_HEADER = _GOOD_HEADER.replace(
     "    uint32_t n_ctx;\n    int32_t injected_evil_field;\n",
 )
 
+# _GOOD_HEADER / _GOOD_HEADER_V2 both carry a context_params WITHOUT
+# n_outputs_max_per_seq (context_params v1) - they only vary the
+# model_params half, since that split predates the context_params one.
+# This is context_params AFTER upstream's insertion (sometime between
+# lemonade b1307 and ggml-org b10360) - localm's context_params V2 layout.
+# Built off _GOOD_HEADER (model_params v1) since the two axes are
+# independent; a real ggml-org b10360 header carries model_params v2 AND
+# context_params v2 together, but nothing about the verifier assumes they
+# move in lockstep, so testing them decoupled here is the stronger check.
+_GOOD_HEADER_CTX_V2 = _GOOD_HEADER.replace(
+    "    uint32_t n_outputs_max;\n",
+    "    uint32_t n_outputs_max;\n    uint32_t n_outputs_max_per_seq;\n",
+)
+
 
 def test_embedded_headers_are_the_two_real_layouts():
     """Guards the fixtures themselves: if the V2 edit above stopped producing a
@@ -128,31 +142,51 @@ def test_embedded_headers_are_the_two_real_layouts():
     check V1 twice and still pass."""
     assert abichk._header_model_params_layout(_GOOD_HEADER) == "v1"
     assert abichk._header_model_params_layout(_GOOD_HEADER_V2) == "v2"
+    assert abichk._header_context_params_layout(_GOOD_HEADER) == "v1"
+    assert abichk._header_context_params_layout(_GOOD_HEADER_CTX_V2) == "v2"
 
 
 @pytest.mark.parametrize("struct", ["llama_model_params", "llama_context_params", "llama_batch"])
 @pytest.mark.parametrize("header,layout", [
     (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2")])
 def test_verifier_passes_on_matching_header(struct, header, layout):
-    assert abichk._check(struct, header, layout) == 0
+    # Both fixtures are context_params v1; the model_params axis under test
+    # varies via `layout`, independent of context - see _GOOD_HEADER_CTX_V2's
+    # own dedicated coverage below for the context axis.
+    assert abichk._check(struct, header, layout, "v1") == 0
+
+
+def test_verifier_passes_on_matching_context_params_header():
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v2") == 0
 
 
 @pytest.mark.parametrize("header,layout", [
     (_GOOD_HEADER, "v1"), (_GOOD_HEADER_V2, "v2")])
 def test_verifier_fails_on_midstruct_insertion(header, layout):
     # The injected field shifts n_batch onward -> many offset mismatches.
+    # model_layout is irrelevant here (_check ignores it for
+    # llama_context_params), context_layout is "v1" since these fixtures are.
     bad = header.replace(
         "    uint32_t n_ctx;\n",
         "    uint32_t n_ctx;\n    int32_t injected_evil_field;\n")
-    assert abichk._check("llama_context_params", bad, layout) > 0
+    assert abichk._check("llama_context_params", bad, layout, "v1") > 0
 
 
 def test_verifier_fails_when_the_wrong_model_params_layout_is_selected():
     """The upgrade's core hazard, as the offline verifier sees it: a V2 header
     checked against the V1 class (what a stale binding does) must FAIL, and vice
     versa. If either direction passed, the two-layout split would be cosmetic."""
-    assert abichk._check("llama_model_params", _GOOD_HEADER_V2, "v1") > 0
-    assert abichk._check("llama_model_params", _GOOD_HEADER, "v2") > 0
+    assert abichk._check("llama_model_params", _GOOD_HEADER_V2, "v1", "v1") > 0
+    assert abichk._check("llama_model_params", _GOOD_HEADER, "v2", "v1") > 0
+
+
+def test_verifier_fails_when_the_wrong_context_params_layout_is_selected():
+    """Same hazard, the newer axis: a context_params v2 header checked against
+    the v1 class (or vice versa) must FAIL - this is the exact check that
+    would have caught the n_outputs_max_per_seq insertion before it ever
+    reached a user, had the verifier been run against a current header."""
+    assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v1") > 0
+    assert abichk._check("llama_context_params", _GOOD_HEADER, "v1", "v2") > 0
 
 
 def test_layout_natural_alignment():
