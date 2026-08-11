@@ -189,7 +189,8 @@ class Agent(
         self._global_error_streak: int = 0     # consecutive failed tool calls (ANY tool)
         self._abort_no_progress: bool = False  # set when the no-progress breaker trips
         self._last_response_fp: str = ""       # last LLM response (repeated-scaffold breaker)
-        self._repeat_response_count: int = 0   # consecutive identical responses
+        self._repeat_response_count: int = 0   # consecutive near-identical responses
+        self._recent_finals: list[str] = []    # bounded history the breaker compares against
         self._compact_warned: bool = False
         # Per-run: False when the LAST _loop failed (max_turns, a circuit breaker,
         # a stop). _loop re-arms it to True at the start of every run, so one bad

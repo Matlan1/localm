@@ -196,10 +196,24 @@ class TestRepairTurn:
         ]
 
     def test_repair_fires_then_accepts_reformatted_answer(self, tmp_path):
+        """First a truncated call that cannot parse but clearly tried, so the
+        repair re-prompt fires; then the model RE-EMITS it correctly and that
+        call runs; then a plain final answer, which is accepted.
+
+        The middle step used to be missing - the old script went straight from
+        the broken call to "Done.", so nothing in it was ever reformatted and
+        the test did not check what its name claims. It also meant the model
+        never called a tool at all on a "read a file" request, which
+        NEW-CODER-NO-TOOLCALL-SILENT now escalates rather than accepting in
+        silence (correctly: nothing had been read). Scripting the reformatted
+        call makes the test match its own name AND exercises the real path."""
         agent = _make_agent(tmp_path)
-        # First: a truncated tool call that cannot parse but clearly tried.
-        # Then: a plain final answer.
-        responses = iter(['{"name": "read_file", "args": {"path"', "Done."])
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        responses = iter([
+            '{"name": "read_file", "args": {"path"',
+            '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>',
+            "Done.",
+        ])
         with patch.object(agent, "_call_llm",
                           side_effect=lambda *a, **k: next(responses)):
             result = agent.run_task("read a file")
