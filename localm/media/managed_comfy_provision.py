@@ -412,6 +412,33 @@ def torch_index_url_from_freeze(freeze_lines) -> Optional[str]:
     return None
 
 
+# pip's own wording when a requirement resolves to nothing at all (verified live:
+# `pip install --no-index vendor-only-package==9.9.9` prints exactly this line,
+# in addition to "Could not find a version that satisfies the requirement ...").
+# A requirement in the user's freeze that only pip's OWN venv could satisfy - a
+# vendor-bundled driver package installed from a local wheel or a private index
+# never uploaded anywhere localm's replicated install can reach - hits this,
+# distinct from an ordinary transient/network install failure.
+_PIP_NO_MATCH_RE = re.compile(r"^ERROR: No matching distribution found for (\S+)",
+                              re.MULTILINE)
+
+
+def _unresolvable_packages(pip_output: str) -> list:
+    """Package names pip reported it found NO version for at all (parsed from its
+    own ``No matching distribution found for <req>`` lines), deduped and in
+    first-seen order. Empty when *pip_output* names none - an ordinary failure
+    (network error, build failure, disk full) leaves this empty and the caller
+    falls back to the generic message."""
+    names: list = []
+    for m in _PIP_NO_MATCH_RE.finditer(pip_output or ""):
+        # Strip the version/marker suffix so the message names the bare package,
+        # e.g. "amd-torch-device-gfx1030==2.12.0+rocm7.14.0" -> the package name.
+        name = re.split(r"[=<>!~;\s]", m.group(1), maxsplit=1)[0]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 # --------------------------------------------------------------------------- #
 #  The COPY provisioning steps                                                #
 # --------------------------------------------------------------------------- #
@@ -620,6 +647,15 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
             ok, out = _install_freeze(paths.venv_python, freeze, index_url, root,
                                       on_progress)
             if not ok:
+                unresolvable = _unresolvable_packages(out)
+                if unresolvable:
+                    return _fail("error",
+                                 f"Could not replicate {', '.join(unresolvable)}: "
+                                 "pip found no matching version. This usually means "
+                                 "the package came from a non-public index or a "
+                                 "local wheel on your ComfyUI's machine (e.g. a "
+                                 "vendor-bundled driver package) that is not "
+                                 f"available here. {_tail(out)}")
                 return _fail("error",
                              f"Installing the replicated packages failed: {_tail(out)}")
             n_pkgs = len(freeze)

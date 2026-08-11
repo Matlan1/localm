@@ -441,6 +441,68 @@ def test_provision_fails_and_rolls_back_when_freeze_unreadable(home, fake_user_c
     assert not mc.managed_comfy_paths().root.exists()   # rolled back, nothing lingers
 
 
+def test_unresolvable_packages_parses_pip_no_match_lines():
+    """_unresolvable_packages parses pip's own 'No matching distribution found
+    for <req>' wording (verified live against a real pip: `pip install --no-index
+    vendor-only-package==9.9.9` prints exactly this line), stripping the version
+    pin so the message names the bare package, deduped and in first-seen order."""
+    from localm.media import managed_comfy_provision as prov
+    out = (
+        "Collecting foo==1.0\n"
+        "ERROR: Could not find a version that satisfies the requirement "
+        "amd-torch-device-gfx1030==2.12.0+rocm7.14.0 (from versions: none)\n"
+        "ERROR: No matching distribution found for "
+        "amd-torch-device-gfx1030==2.12.0+rocm7.14.0\n"
+    )
+    assert prov._unresolvable_packages(out) == ["amd-torch-device-gfx1030"]
+    assert prov._unresolvable_packages("Collecting foo==1.0\nSuccessfully installed foo-1.0\n") == []
+
+
+def test_provision_copy_names_the_unresolvable_package_not_just_a_pip_tail(
+        home, fake_user_comfy, monkeypatch):
+    """NEW-COMFY-S2-COPY-FAILS-ON-SIDELOADED-PACKAGE: when the user's freeze names
+    a package pip can find NO version for at all (the shape produced by a
+    vendor-bundled driver package installed from a non-public index or a local
+    wheel on the ORIGINAL machine - reproduced live against a real StableMatrix
+    ComfyUI), the failure must name the package and say why, not just echo a
+    generic pip-transcript tail.
+
+    Injects one synthetic unresolvable line alongside the REAL freeze (so the
+    real, tiny replicable package still installs and only the synthetic one
+    fails) and runs the real pip subprocess under PIP_NO_INDEX=1, same as
+    test_provision_copy_end_to_end - no mock of pip itself.
+
+    Deliberately asserts wording that is NOT a substring of pip's own raw
+    output ("pip found no matching version", "non-public index", "local
+    wheel") rather than merely checking the package name appears somewhere -
+    the package name alone would ALSO appear in the status-quo generic
+    tail-of-pip-output message and prove nothing about this fix."""
+    from localm.media import managed_comfy_provision as prov
+
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+
+    real_freeze = prov.read_user_freeze
+    bogus_pkg = "vendor-only-package"
+
+    def _freeze_with_unresolvable(venv_python):
+        lines = real_freeze(venv_python)
+        return None if lines is None else [*lines, f"{bogus_pkg}==9.9.9"]
+
+    monkeypatch.setattr(prov, "read_user_freeze", _freeze_with_unresolvable)
+
+    stack = prov.discover_user_comfy()
+    assert stack is not None
+    result = prov.provision_by_copy(stack, copy_custom_nodes=False)
+
+    assert result.ok is False
+    assert bogus_pkg in result.message
+    assert "pip found no matching version" in result.message
+    assert "non-public index" in result.message or "local wheel" in result.message
+    assert mc.is_managed_comfy_installed() is False
+    assert not mc.managed_comfy_paths().root.exists()   # rolled back, nothing lingers
+
+
 def test_copy_custom_nodes_returns_warnings_not_silent(tmp_path, monkeypatch):
     """A node that fails to copy is RETURNED as a warning (so the caller can route it
     into the run log), not only streamed and forgotten (rule 5, the #622 vanished-log
