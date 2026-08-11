@@ -374,6 +374,16 @@ export function pickPath(opts = {}) {
           if (push && current !== d.path) history.push(current);
           current = d.path;
           data = d;
+          // Reaching a dot-directory directly - typed, pasted, or via startPath -
+          // means the caller already knows hidden entries exist here. Turn the
+          // toggle on so its siblings are visible too, instead of leaving a user
+          // who just found one hidden folder to separately notice a checkbox
+          // (issue #1220: this is the sharpest form of "I know it's there").
+          const base = (current || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+          if (base.startsWith(".") && !showHidden) {
+            showHidden = true;
+            hiddenCb.checked = true;
+          }
           setLoading(false);
           renderPath();
           renderList();
