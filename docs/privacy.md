@@ -4,13 +4,16 @@ localm is offline-first and privacy-first: by default it saves nothing about you
 conversations. This page lists every mode and switch that controls what localm
 writes to disk, and exactly what each one does.
 
-There are two independent dials:
+There are two independent dials for what gets WRITTEN, plus one network
+behaviour covered separately below:
 
 1. **Session persistence mode** - what localm saves about your CHAT/CODER
    sessions (messages, replies, transcripts, memory).
 2. **Diagnostics** - whether localm keeps OPERATIONAL logs (crash/hang traces,
    a debug log) to help diagnose a problem. Diagnostics never contain chat
    content in privacy mode (see the guarantee at the bottom).
+3. **Update checks** - whether localm phones its update server; not a
+   persistence mode, but still something that leaves your machine.
 
 ---
 
@@ -90,6 +93,37 @@ Set it in **Settings > Privacy** (in-app, persistent), with the **desktop
 launcher** checkbox, or with `--keep-diagnostics` on `localm gui` / `serve` (a
 per-run override via `LOCALM_KEEP_DIAGNOSTICS`). In `log`/`full` mode diagnostics
 are already kept, so this toggle only changes behaviour in privacy mode.
+
+---
+
+## 3. Update checks (network policy, not a persistence mode)
+
+Separate from both dials above: localm periodically asks its update server whether
+a newer release exists. This is a network behaviour, not something that writes to
+disk, so it isn't one of the two dials - it's covered by the [network
+policy](network.md) instead.
+
+- **When it fires.** A quiet check at most once every 6 hours while the GUI is
+  open (a client-side throttle - there is no background daemon; a headless
+  `localm serve` that nobody opens the GUI on never checks), plus whenever you
+  press "Check for updates" in the GUI or run `localm update` / `localm update
+  --check`.
+- **What it sends, and what it does not.** A bare GET request identifying itself
+  as `localm`, plus a shared-secret header if one is configured. It does **not**
+  send your installed version, chat content, or anything else - the comparison
+  to the latest release happens locally, on your machine. What it does expose to
+  the update server is your IP address, the time you checked, and the fact that
+  a localm install checked in.
+- **It obeys `net_mode`.** Like every other outbound request, the update check
+  goes through the network policy (`localm/netpolicy.py`) - setting network
+  access to `off` blocks it too, and it fails honestly (never a false "you are
+  up to date") when blocked. Turn on "Check for updates even when network
+  access is off" in **Settings > Bug reports** to exempt just this one channel;
+  it is off by default, so `net_mode=off` is a real kill switch unless you
+  opt back in.
+- **Turning the channel off entirely.** Clear the update endpoint
+  (`update_url` and `bugreport_upload_url` both blank) to disable update
+  checks regardless of network policy.
 
 ---
 

@@ -65,7 +65,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **Model management that stays out of the way.** Pull from HuggingFace with aliases and SHA256 dedup, browse quants with a note on whether they fit your VRAM, and let localm register whatever you drop into the models folder. Types are detected deterministically from the file itself; anything it cannot classify is left as `unknown` (still runnable by name, never auto-loaded for chat) and you can correct it with `localm set-type`.
 
-- **Offline first.** Nothing leaves your machine unless you allow it. The optional online parts (cloud providers for the coder, web access for fetching pages) are opt-in and run through one network policy you set.
+- **Offline first.** Nothing leaves your machine unless you allow it. The optional online parts (cloud providers for the coder, web access for fetching pages) are opt-in, and every outbound request - including the periodic update check - runs through one network policy you set ([details](docs/privacy.md)).
 
 ---
 
@@ -349,7 +349,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
-| [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, and the two independent dials that control it |
+| [docs/privacy.md](docs/privacy.md) | Privacy modes and diagnostics: what localm saves, what it never does, the two independent dials that control it, and how the update check respects network policy |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |
 | [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
 | [docs/native-app.md](docs/native-app.md) | The native `LocaLM.exe` launcher: how it works, `make-launcher`, the freeze trade-off |

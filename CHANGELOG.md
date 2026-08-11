@@ -25,6 +25,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   case where the browser cookie is cleared but the server-side session survives.
   Revoking a scoped key now also logs a warning if its sessions could not be
   dropped, instead of only a debug line.
+- **The update check now obeys network access policy, with an opt-out.**
+  Setting network access to Off in Settings blocked every model-initiated
+  request but not the periodic update check, which kept quietly phoning the
+  update server regardless. It now goes through the same policy as everything
+  else - Off stops it too, unless you turn on "Check for updates even when
+  network access is off" for that one channel. Pressing "Check for updates"
+  while blocked now shows a short reason instead of either a silent failure or
+  a false "you are up to date".
 - **Scheduled jobs no longer lose their shell step when you roll the API key.**
   Rolling the key deliberately keeps you signed in to the web UI. But a
   scheduled coder job created from that still-signed-in browser afterwards was
