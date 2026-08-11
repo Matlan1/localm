@@ -112,7 +112,7 @@ _MAX_DERIVED_PROBE_CHARS = 8   # same rationale as _trigger_probe.py: a cheap,
 
 
 def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
-    """One probe per distinct alphanumeric character IN the pattern (the
+    """One probe per distinct character IN the pattern (the
     _MAX_DERIVED_PROBE_CHARS most frequent, most-frequent-first), each that
     character alone repeated 60,000 times. See _trigger_probe.py's function of
     the same name for the fuller rationale (an ambiguous/nested-quantifier
@@ -122,16 +122,35 @@ def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
     concatenated (a mix acts as a periodic terminator that defeats the exact
     ambiguity being probed for - caught live in that module's own history).
 
-    Deliberately over-inclusive (isalnum(), not a literal-only parse): also
-    picks up e.g. the 's' in '\\s+' or the 'p'/'L' in '\\p{L}', which do not
-    name themselves as literal characters - harmless here (an extra probe
-    costs microseconds and _FIXED_PROBES already covers the whitespace/digit/
-    letter/punctuation CLASSES those escapes actually mean), not a
-    substitute for the class-level coverage _FIXED_PROBES provides."""
+    Every DISTINCT character in *pattern* is a candidate, not filtered to
+    isalnum(): an ambiguous-alternation or nested-quantifier pattern's
+    danger is keyed to whichever specific character it names, and that
+    character is exactly as often punctuation (a literal ',' or '.' inside
+    an escape like '\\.') as it is a letter or digit - isalnum() silently
+    dropped every such character from consideration, so a pattern keyed to
+    punctuation got no derived probe at all and this whole layer could never
+    catch it. _PROBE_PUNCTUATION in _FIXED_PROBES does NOT substitute for
+    this: it interleaves 16 distinct punctuation characters, so no single
+    one of them repeats consecutively long enough to trip an ambiguity keyed
+    to that ONE character - the same "a mix defeats the probe" failure this
+    function's single-character-per-probe design exists to avoid, just
+    re-introduced one level up, at the class-corpus level. Deliberately
+    over-inclusive rather than a precise literal-only parse: this also picks
+    up a character that is really part of regex syntax (a metacharacter
+    escape like the 's' in '\\s+', or a delimiter like '('), which is
+    harmless - an extra probe costs microseconds - whereas under-extracting
+    would silently narrow exactly the coverage this exists to add. Bounded
+    to _MAX_DERIVED_PROBE_CHARS distinct characters - a cheap, first-line
+    bound on probe COUNT, unaffected by widening which characters are
+    eligible; _check_one's own internal wall-clock budget
+    (_PROBE_LOOP_BUDGET_SECONDS) is what actually bounds total COST
+    regardless of count, since a caller-controlled property (how many
+    distinct characters a pattern names) must never be able to scale
+    validation cost past a fixed ceiling. Returns () for an empty
+    pattern."""
     counts: "dict[str, int]" = {}
     for ch in pattern:
-        if ch.isalnum():
-            counts[ch] = counts.get(ch, 0) + 1
+        counts[ch] = counts.get(ch, 0) + 1
     most_frequent = sorted(counts, key=lambda ch: counts[ch], reverse=True)
     return tuple(ch * 60_000 for ch in most_frequent[:_MAX_DERIVED_PROBE_CHARS])
 
