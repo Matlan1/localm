@@ -816,13 +816,22 @@ def register(app: FastAPI, ctx) -> None:
         # blocks in the SMB redirector (same reason model_detail offloads its
         # stat/rglob).
         loop = asyncio.get_running_loop()
-        holder = await loop.run_in_executor(
+        hold = await loop.run_in_executor(
             get_plugin_executor(), _hs.loaded_engine_holding_model_file,
             req.model, registry)
-        if holder is not None:
-            raise HTTPException(
-                409, f"Cannot remove '{req.model}' - its file is still loaded "
-                     f"as '{holder}'. Unload it first.")
+        if hold is not None:
+            # Two different refusals, kept apart on purpose. "Still loaded as
+            # X" is a fact; a cautious refusal is not, and telling a user their
+            # model is in use when what actually happened is that a path would
+            # not resolve sends them looking for the wrong thing.
+            if hold.reason is None:
+                detail = (f"Cannot remove '{req.model}' - its file is still "
+                          f"loaded as '{hold.key}'. Unload it first.")
+            else:
+                detail = (f"Cannot remove '{req.model}' - '{hold.key}' is "
+                          f"loaded and {hold.reason}, so it cannot be ruled "
+                          f"out as holding this file. Unload it first.")
+            raise HTTPException(409, detail)
         job = jobs.start_cli("remove", ["rm", req.model, "--yes"],
                              owner=principal_id(request))
         return {"job_id": job.id}
