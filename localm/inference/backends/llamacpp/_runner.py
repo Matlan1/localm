@@ -605,6 +605,17 @@ class ModelRunner:
         proc = self._proc
         return None if proc is None else proc.exitcode
 
+    def _exit_reason(self) -> str:
+        """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
+        than "-4".
+
+        Every user-facing report of a dead worker goes through this rather than
+        interpolating the raw code. On issues 1222/1223 the raw number was the
+        only fact the product surfaced about the death, and decoding it is what
+        separates an illegal instruction from a segfault from an abort."""
+        from localm._mp_spawn import describe_exit_code
+        return describe_exit_code(self._exitcode())
+
     def _poll(self, timeout: float):
         """``resp_q.get()`` that turns a concurrent teardown into
         :class:`_RunnerTornDown`.
@@ -692,10 +703,9 @@ class ModelRunner:
                     raise ModelLoadCancelled(
                         "the model was unloaded while it was still loading")
                 if not self._proc.is_alive():
-                    code = self._exitcode()
                     raise RuntimeError(
                         f"The native model-loading process crashed (exit code "
-                        f"{code}) while loading. The server stayed up."
+                        f"{self._exit_reason()}) while loading. The server stayed up."
                         + self._crash_detail() +
                         " Retry the load, or repair the runtime with "
                         "'localm setup-llama'."
@@ -800,7 +810,7 @@ class ModelRunner:
                                     )
                                 raise RuntimeError(
                                     f"Native inference fault (worker exit "
-                                    f"{self._exitcode()}). The model has been "
+                                    f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
                                     "request." + self._crash_detail()
                                 )
@@ -915,8 +925,8 @@ class ModelRunner:
                             raise RuntimeError(
                                 f"The model was unloaded while handling '{name}'.")
                         raise RuntimeError(
-                            f"The model process crashed (exit code {self._exitcode()}) "
-                            f"while handling '{name}'.")
+                            f"The model process crashed (exit code "
+                            f"{self._exit_reason()}) while handling '{name}'.")
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
                         raise RuntimeError(f"'{name}' timed out waiting for the model process.")

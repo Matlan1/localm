@@ -73,6 +73,133 @@ _parent_death_watchdog_installed = False
 _native_error_dialogs_suppressed = False
 
 
+# Windows has no signals for this: a hard native fault surfaces as an NTSTATUS
+# value in the process exit code. Only codes that are unambiguous and actually
+# reachable from a native crash are listed - a wrong name here would be worse
+# than a bare number, because a reader would act on it.
+#
+# 0xC0000409 is confirmed empirically, not just from documentation: os.abort()
+# under this project's own CRT exits with 3221226505 (measured 2026-08-11 while
+# building the worker crash-trace capture).
+#
+# 0xC0000139 earns its place twice over - it is the documented signature of the
+# torch/HIP DLL-identity conflict this codebase already guards against (see
+# discover.py's _torch_gpu_probe_known_doomed and _loader.native_lib_loaded), so
+# decoding it makes a future report self-identifying instead of needing the same
+# root-cause session again.
+_NTSTATUS_CRASH_NAMES = {
+    0xC0000005: "access violation",
+    0xC000001D: "illegal instruction",
+    0xC0000094: "integer divide by zero",
+    0xC00000FD: "stack overflow",
+    0xC0000135: "DLL not found",
+    0xC0000139: "entry point not found (a native DLL version conflict)",
+    0xC0000374: "heap corruption",
+    0xC0000409: "stack buffer overrun (the usual shape of a native abort)",
+}
+
+
+# The crash-relevant POSIX signals, resolved WITHOUT the host's own signal enum.
+#
+# MEASURED 2026-08-11, and this is not a portability nicety - the host enum is
+# actively WRONG for this job when the host is Windows:
+#
+#     Windows signal.Signals:  SIGILL 4, SIGFPE 8, SIGSEGV 11, SIGABRT 22
+#     Linux   signal.Signals:  SIGILL 4, SIGFPE 8, SIGSEGV 11, SIGABRT  6,
+#                              SIGKILL 9, SIGBUS 7
+#
+# So a POSIX -6 looked up in the Windows enum raises (6 is absent), and a POSIX
+# -22 would come back "SIGABRT" when Linux 22 is really SIGTTOU. A code that
+# reached us from a POSIX child must therefore be decoded with POSIX numbering,
+# not with whatever enum this interpreter happens to ship.
+#
+# Only signals whose numbers are IDENTICAL across Linux and the BSD/macOS family
+# are listed, so the table cannot itself become the wrong answer. SIGBUS is
+# deliberately ABSENT: it is 7 on Linux but 10 on macOS, so it is left to the
+# host enum below, which is authoritative when the host is the POSIX box in
+# question (the production case - parent and child are always the same platform).
+_POSIX_CRASH_SIGNALS = {
+    4: "SIGILL",
+    6: "SIGABRT",
+    8: "SIGFPE",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    13: "SIGPIPE",
+    15: "SIGTERM",
+}
+
+
+def _posix_signal_name(number: int) -> str:
+    """Name POSIX signal *number*, or return the bare number as a string.
+
+    Order matters. The universal table wins first so the answer is the same on
+    every platform for the signals that actually kill a native worker; the host
+    enum is consulted only on a POSIX host, where it is authoritative for
+    everything else (SIGBUS, SIGUSR1, real-time signals) and cannot be wrong
+    about its own box."""
+    name = _POSIX_CRASH_SIGNALS.get(number)
+    if name:
+        return name
+    if os.name != "nt":
+        try:
+            import signal
+            return signal.Signals(number).name
+        except (ValueError, ImportError):
+            pass
+    return str(number)
+
+
+def describe_exit_code(code, *, posix: Optional[bool] = None) -> str:
+    """Render a dead child's exit *code* so a reader can act on it, e.g.
+    ``"-4 (killed by signal SIGILL)"`` instead of ``"-4"``.
+
+    WHY THIS EXISTS: on the one crash that most needed diagnosing (issues
+    1222/1223) the product reported ``worker exit -4`` and nothing else. That
+    number is the single most discriminating fact available about a native death
+    - it separates an illegal instruction from a segfault from an abort, which
+    are different families of cause - and it had to be decoded by hand before the
+    investigation could even choose a direction. Throwing it away on every native
+    death is a diagnostic the product could give for free and did not.
+
+    *posix* selects which OS convention the code follows, defaulting to this
+    process's own. It is an explicit parameter rather than a bare ``os.name``
+    read because the two conventions are mutually exclusive and each is
+    unreachable from the other platform: without it, the POSIX branch (the one
+    the field crash is on) could never be exercised by a test running on Windows,
+    which is item-19 fixture blindness - the platform under test can never
+    produce the value that matters.
+
+    Never raises: this decorates an error message on a path that is already
+    failing, so an unrecognised code degrades to the bare number.
+    """
+    if code is None:
+        return "unknown"
+    if posix is None:
+        posix = os.name != "nt"
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return str(code)
+
+    if posix:
+        # POSIX: multiprocessing reports -N when the child was killed by signal
+        # N. A NON-negative code is an ordinary exit status and means nothing
+        # about signals, so it is left alone.
+        if code < 0:
+            return f"{code} (killed by signal {_posix_signal_name(-code)})"
+        return str(code)
+
+    # Windows: a negative code is NOT a signal. Python's own
+    # Process.terminate() calls TerminateProcess(handle, -1), so reading -1 as
+    # "SIGHUP" would actively mislead - which is the whole reason the branches
+    # are split rather than sharing the negative-means-signal rule.
+    unsigned = code & 0xFFFFFFFF
+    name = _NTSTATUS_CRASH_NAMES.get(unsigned)
+    if name:
+        return f"{code} (0x{unsigned:08X}, {name})"
+    return str(code)
+
+
 def real_base_python() -> Optional[Path]:
     """The real base interpreter directly under ``sys.base_prefix``
     (``<base_prefix>/python.exe``) - a single hop, unaffected by CPython's
