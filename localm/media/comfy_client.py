@@ -1477,6 +1477,23 @@ def comfy_launch_log_path(api_url: str) -> Path:
     return home_dir() / f"comfy-launch-{suffix}.log"
 
 
+def _launch_log_tail(log_path: Optional[Path], limit: int = 600) -> str:
+    """The last *limit* chars of a self-launched ComfyUI's captured console
+    output at *log_path*, so a launch-failure message can show WHY instead of
+    just naming the file for the user to go open by hand. "" (nothing to add)
+    when there is no log path, the file is empty, or it cannot be read -
+    never raises: this only enriches an already-failing launch's message."""
+    if log_path is None:
+        return ""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    return text if len(text) <= limit else "..." + text[-limit:]
+
+
 @dataclass(frozen=True)
 class ComfyConsoleTail:
     """Opaque token from comfy_console_tail_start, passed to
@@ -1870,7 +1887,10 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
         _t.sleep(0.5)
         if proc.poll() is not None and proc.returncode != 0:
             _take_spawned(api_url)         # it died; drop the dead handle
-            return False, f"ComfyUI launcher exited immediately with code {proc.returncode}"
+            detail = _launch_log_tail(launch_log_path)
+            return False, (
+                f"ComfyUI launcher exited immediately with code {proc.returncode}."
+                + (f" Its captured output:\n{detail}" if detail else ""))
     except Exception as e:
         return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
     finally:
@@ -1894,8 +1914,14 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
         _t.sleep(2)
     # Point the user at the captured launcher log (when we managed to open one):
     # a ComfyUI that died on startup wrote its own error there, not to the window.
-    log_hint = (f" The launcher's own output was captured to {launch_log_path} - "
-                "check it for the reason it failed to start." if launch_log_path else "")
+    tail = _launch_log_tail(launch_log_path)
+    if launch_log_path and tail:
+        log_hint = f" The launcher's own output ({launch_log_path}):\n{tail}"
+    elif launch_log_path:
+        log_hint = (f" The launcher's own output was captured to {launch_log_path} - "
+                    "check it for the reason it failed to start.")
+    else:
+        log_hint = ""
     return False, (
         f"ComfyUI did not come up within {wait_seconds // 60} minutes - "
         "check the launcher window for errors. If it is just a slow first "
