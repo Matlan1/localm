@@ -200,6 +200,60 @@ def describe_exit_code(code, *, posix: Optional[bool] = None) -> str:
     return str(code)
 
 
+def death_was_a_native_fault(code, *, trace_captured: bool = False,
+                             posix: Optional[bool] = None) -> bool:
+    """Whether a dead child's *code* ESTABLISHES that it died from a native
+    fault, as opposed to exiting with an ordinary status.
+
+    WHY THIS EXISTS. Every runner reported ANY worker death detected via
+    ``is_alive()`` as a "Native inference fault", including an ordinary uncaught
+    Python exception - and this codebase already knew better in two places:
+
+    * ``llamacpp/_runner.py``'s own docstring: "worker exit 1 ... is
+      multiprocessing's own signature for exactly this case (an uncaught PYTHON
+      exception), not a genuine native abort".
+    * ``tests/test_image_decode_without_pillow.py``, whose whole subject is a
+      missing Pillow surfacing as "Native inference fault (worker exit 1)" with
+      a plain ``ModuleNotFoundError`` in the log: "Every clause of that was
+      false. ... there was no native fault and no native stack trace, and the
+      model was fine."
+
+    That was fixed PER CAUSE (Pillow became a core dependency and the ImportError
+    is guarded). The MISCLASSIFICATION survived for every other Python exception,
+    because it lives one layer up - at the site that words the message - and a
+    per-cause fix cannot reach it (diff-review-discipline item 23).
+
+    EVIDENCE USED, strongest first:
+
+    * *trace_captured* - a faulthandler trace exists. DEFINITIVE: faulthandler
+      only fires on SIGSEGV/SIGFPE/SIGABRT/SIGBUS/SIGILL, so a trace means a
+      native signal, on either platform.
+    * a NEGATIVE code under the POSIX convention: death by signal.
+    * a Windows NTSTATUS-shaped code we recognise as a crash status.
+
+    Everything else answers FALSE - deliberately including codes we cannot
+    classify. This is a "has it been ESTABLISHED" predicate, not a guess: exit 1
+    is an uncaught Python exception, and a Windows abort under an ARMED
+    faulthandler exits 3 (measured), which is indistinguishable from an ordinary
+    exit 3 on the code alone. In that case the trace is what settles it, which is
+    why *trace_captured* leads rather than being a tiebreak.
+
+    Never raises - it decorates a message on an already-failing path."""
+    if trace_captured:
+        return True
+    if code is None:
+        return False
+    if posix is None:
+        posix = os.name != "nt"
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return False
+    if posix:
+        return code < 0
+    return (code & 0xFFFFFFFF) in _NTSTATUS_CRASH_NAMES
+
+
 def real_base_python() -> Optional[Path]:
     """The real base interpreter directly under ``sys.base_prefix``
     (``<base_prefix>/python.exe``) - a single hop, unaffected by CPython's

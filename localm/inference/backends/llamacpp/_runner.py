@@ -575,24 +575,41 @@ class ModelRunner:
         except OSError:
             pass
 
-    def _crash_detail(self) -> str:
-        """A trailing detail for a crash message: the native trace when one was
-        captured, else a plain statement that none was.
+    def _death_report(self):
+        """``(native_evidenced, detail)`` for a dead worker.
 
-        Saying "no native stack trace was captured" OUT LOUD matters as much as
-        relaying one (AGENTS.md rule 5): before this existed, the message claimed
-        a trace was in the debug log whether or not anything had ever written
-        one, so a user following that instruction found nothing and had no way to
-        tell an empty capture from their own failure to find it."""
+        Reads the captured trace EXACTLY ONCE, because reading consumes it (see
+        :meth:`_native_crash_trace`) and both halves need it: the trace is the
+        strongest evidence of whether this was a native fault at all, and it is
+        also the detail worth relaying.
+
+        Saying "no native fault trace was captured" OUT LOUD matters as much as
+        relaying one (AGENTS.md rule 5): the message used to claim a trace was in
+        the debug log whether or not anything had written one, so a user following
+        that instruction found nothing and could not tell an empty capture from
+        their own failure to find it.
+
+        The non-native branch deliberately gives an INSTRUCTION rather than a
+        promise ("check the debug log") - a Python exception escaping
+        ``_runner_main`` is logged with its traceback by ``_runner_entry``, but a
+        hard ``os._exit`` produces no exception and therefore no traceback, and
+        promising one for that case would repeat the exact defect this fixes."""
         trace = self._native_crash_trace()
+        native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
-            return " No native stack trace was captured for this fault."
+            return native, " No native fault trace was captured for this exit."
         from localm.debuglog import logger
         # Logged as well as returned: the trace is multi-line and belongs in the
         # debug log the message points at, not inlined into an HTTP error body.
         logger.error("gguf worker native fault trace:\n%s", trace)
         first = trace.splitlines()[0].strip()
-        return f" Native fault: {first} (full trace in the debug log)."
+        return native, f" Native fault: {first} (full trace in the debug log)."
+
+    def _crash_detail(self) -> str:
+        """Just the detail half of :meth:`_death_report`, for the load and
+        simple-request messages, whose own opening words ("crashed") are already
+        true of any worker death and need no native/ordinary distinction."""
+        return self._death_report()[1]
 
     def _exitcode(self):
         """The child's exit code, or None once it has been released.
@@ -615,6 +632,19 @@ class ModelRunner:
         separates an illegal instruction from a segfault from an abort."""
         from localm._mp_spawn import describe_exit_code
         return describe_exit_code(self._exitcode())
+
+    def _exit_was_native_fault(self, *, trace_captured: bool) -> bool:
+        """Whether this worker's death is EVIDENCED as a native fault.
+
+        A named wrapper per concern, exactly like :meth:`_exit_reason` above: the
+        raw exit code has precisely two legitimate consumers - the decoder that
+        renders it and the classifier that interprets it - and everything else
+        must go through one of those rather than touching the number. Keeping
+        both behind one-line accessors is what lets the source-scan guard in
+        tests/test_worker_exit_code_decoding.py state that rule mechanically."""
+        from localm._mp_spawn import death_was_a_native_fault
+        return death_was_a_native_fault(self._exitcode(),
+                                        trace_captured=trace_captured)
 
     def _poll(self, timeout: float):
         """``resp_q.get()`` that turns a concurrent teardown into
@@ -808,11 +838,30 @@ class ModelRunner:
                                         "was being generated. It will reload on "
                                         "the next request."
                                     )
+                                # Do NOT call this a native fault unless the
+                                # evidence says so. An uncaught Python exception
+                                # in the worker exits 1, which this module's own
+                                # _runner_entry docstring already identifies as
+                                # multiprocessing's signature for exactly that -
+                                # and reporting it as a native fault is false in
+                                # every clause (no native fault, no native trace,
+                                # model unharmed). See
+                                # tests/test_image_decode_without_pillow.py, where
+                                # that exact wrong message is the whole subject:
+                                # a missing Pillow reported as "Native inference
+                                # fault (worker exit 1)". That was fixed for
+                                # Pillow specifically; the misclassification lives
+                                # HERE and survived for every other exception.
+                                native, detail = self._death_report()
+                                opening = (
+                                    "Native inference fault"
+                                    if native else
+                                    "The model process exited unexpectedly")
                                 raise RuntimeError(
-                                    f"Native inference fault (worker exit "
+                                    f"{opening} (worker exit "
                                     f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
-                                    "request." + self._crash_detail()
+                                    "request." + detail
                                 )
                             if time.monotonic() > deadline:
                                 self.shutdown(grace=0)
@@ -926,7 +975,8 @@ class ModelRunner:
                                 f"The model was unloaded while handling '{name}'.")
                         raise RuntimeError(
                             f"The model process crashed (exit code "
-                            f"{self._exit_reason()}) while handling '{name}'.")
+                            f"{self._exit_reason()}) while handling '{name}'."
+                            + self._crash_detail())
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
                         raise RuntimeError(f"'{name}' timed out waiting for the model process.")

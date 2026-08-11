@@ -186,11 +186,33 @@ def test_simple_request_racing_a_shutdown_says_unloaded_not_attribute_error():
         r.count_tokens("some text")
 
 
-def test_a_genuinely_dead_child_still_reports_a_native_fault_on_the_stream():
-    """Fires-control for the stream path's own regression: a real death must
-    still be reported as a native fault, with the exit code."""
+@pytest.mark.parametrize("exitcode,expect_native", [
+    (-11, True),    # SIGSEGV: a genuine native fault
+    (1, False),     # multiprocessing's signature for an uncaught Python exception
+])
+def test_a_genuinely_dead_child_is_reported_as_dead_not_unloaded(
+        exitcode, expect_native, monkeypatch):
+    """Fires-control for the stream path's own regression: a real death must be
+    reported AS A DEATH, carrying its exit code - never as "unloaded", which is
+    what the teardown-race window used to produce.
+
+    RENAMED AND PARAMETRIZED, and the old form was over-specified. It asserted the
+    message says "Native inference fault" while setting ``exitcode = 1`` - an
+    arbitrary stand-in for "genuinely dead" that happens to be multiprocessing's
+    signature for an uncaught PYTHON exception, which is not a native fault at
+    all. The load-bearing property was always "reported as a death, with the
+    code", not the particular wording; pinning the wording made a
+    misclassification permanent on this path too. Now both classes are covered
+    here, so the distinction is guarded on the teardown path and not only in
+    tests/test_worker_exit_code_decoding.py."""
+    monkeypatch.setattr("localm._mp_spawn.os.name", "posix")
     r = _runner_with(_AlwaysEmpty(), proc=_FakeProc(alive=False))
-    r._proc.exitcode = 1
-    with pytest.raises(RuntimeError, match="Native inference fault"):
+    r._proc.exitcode = exitcode
+    with pytest.raises(RuntimeError) as ei:
         list(r.chat_stream(messages=[{"role": "user", "content": "hi"}],
                            first_chunk_timeout=1.0))
+    msg = str(ei.value)
+    # The original property: a real death is never mistaken for an unload.
+    assert "unloaded while" not in msg, msg
+    assert str(exitcode) in msg, msg
+    assert ("Native inference fault" in msg) is expect_native, msg

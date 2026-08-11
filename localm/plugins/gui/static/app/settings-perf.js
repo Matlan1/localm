@@ -85,6 +85,60 @@ export function setupPerfCard() {
     .catch(() => { sync(); refreshPerfEstimate(); });
   setupMainGpuSelector();
   setupGpuSplitCheckboxes();
+  setupBackendHintDismiss();
+  refreshBackendInfo();
+}
+
+// localStorage key for the dismissed NVIDIA+vulkan backend hint below - same
+// "localm." namespace and same never-in-privacy-mode handling as the
+// onboarding install gate's "localm.onboarded" (see dismissInstallGate in
+// models-sidebar.js).
+const BACKEND_HINT_DISMISSED_KEY = "localm.backendHintDismissed";
+
+/** Whether the "a faster backend is available" hint should show, given the
+ *  /api/backend payload and whether it was already dismissed. Exported
+ *  standalone so this decision is unit-testable without touching the DOM.
+ *  Informational only - this never changes what backend is actually
+ *  installed; only `localm setup-llama` (a user-run command) does that. */
+export function shouldShowBackendHint(data, dismissed) {
+  return !dismissed && !!data && data.vendor === "nvidia" && data.installed === "vulkan";
+}
+
+/** Read-only "Backend: <value>" row, plus the dismissable hint when an NVIDIA
+ *  GPU is present but Vulkan (not CUDA) is what is actually installed. Never
+ *  auto-switches anything - localm never re-provisions a user's backend on
+ *  its own (see updater._installed_backend()); this only ever informs. */
+export async function refreshBackendInfo() {
+  const row = $("perf-backend-row"), valueEl = $("perf-backend-value"), hint = $("perf-backend-hint");
+  if (!row || !valueEl || !hint) return;
+  try {
+    const r = await fetch("/api/backend", { headers: authHeaders() });
+    if (!r.ok) { row.hidden = true; hint.hidden = true; return; }
+    const data = await r.json();
+    if (!data.installed) { row.hidden = true; hint.hidden = true; return; }
+    valueEl.textContent = data.installed;
+    row.hidden = false;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(BACKEND_HINT_DISMISSED_KEY) === "1"; }
+    catch (e) { /* storage blocked - treat as not dismissed */ }
+    hint.hidden = !shouldShowBackendHint(data, dismissed);
+  } catch (e) { row.hidden = true; hint.hidden = true; }   // server unreachable - stay hidden, not broken
+}
+
+/** Wire the hint's Dismiss button: hides it now, and (mirroring
+ *  dismissInstallGate's privacy handling) remembers the dismissal in
+ *  localStorage so it does not reappear on a later visit - except in privacy
+ *  mode, where no trace is left and the hint may resurface next session. */
+export function setupBackendHintDismiss() {
+  const btn = $("perf-backend-hint-dismiss");
+  if (!btn) return;
+  btn.onclick = () => {
+    const hint = $("perf-backend-hint");
+    if (hint) hint.hidden = true;
+    if (!chat.privacy) {
+      try { localStorage.setItem(BACKEND_HINT_DISMISSED_KEY, "1"); } catch (e) { /* ignore */ }
+    }
+  };
 }
 
 /** Show (or remove) the native index-space note under a GPU selector row:

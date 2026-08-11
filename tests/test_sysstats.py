@@ -67,6 +67,7 @@ def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(sysstats, "_vram_last", None)
     monkeypatch.setattr(sysstats, "_vram_last_at", None)
     monkeypatch.setattr(sysstats, "_vram_inflight", False)
+    monkeypatch.setattr(sysstats, "_vram_ready", threading.Event())
 
 
 def _wait_for_vram_cache(timeout=2.0):
@@ -248,6 +249,82 @@ def test_vram_probe_failure_does_not_overwrite_a_cached_good_reading(monkeypatch
     assert sysstats._vram_last == good, (
         "a failed probe attempt overwrote a previously-good cached reading "
         "with an empty one")
+
+
+def test_wait_first_blocks_until_the_probe_lands(monkeypatch):
+    """A ONE-SHOT caller (wait_first=True, what the MCP system_stats tool
+    passes) never gets a second poll to pick up a reading that lands later,
+    so it must actually BLOCK for a real reading on a cold first call rather
+    than getting the {} a repeating-poll caller (the GUI) correctly accepts."""
+    _reset_vram_cache(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
+
+    def _slow_vram_capacity(*args, return_status=False, **kwargs):
+        entered.set()
+        release.wait(5)
+        return (info, GPU_PROBE_OK) if return_status else info
+
+    with patch("localm.discover.vram_capacity", side_effect=_slow_vram_capacity):
+        result = {}
+        caller_returned = threading.Event()
+
+        def _call():
+            result["out"] = _vram(wait_first=True)
+            caller_returned.set()
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        try:
+            assert entered.wait(2), "background probe never started"
+            assert not caller_returned.wait(0.3), (
+                "_vram(wait_first=True) returned before the probe landed - "
+                "it must block for a real reading, not report {} on a cold "
+                "first call the way the non-waiting default does")
+        finally:
+            release.set()
+        assert caller_returned.wait(5), "caller never returned after release"
+
+    assert result["out"] == {"vram": {"total": 16 * GB, "used": 12 * GB, "percent": 75.0}}
+
+
+def test_wait_first_gives_up_at_the_probe_deadline_not_forever(monkeypatch):
+    """A probe that never lands (a genuinely wedged driver) must not hang
+    wait_first indefinitely - it gives up at the bounded probe deadline and
+    reports the honest {}, same as every other omission in this module."""
+    _reset_vram_cache(monkeypatch)
+    monkeypatch.setattr("localm.discover._GPU_PROBE_DEADLINE", 0.1)
+    release = threading.Event()
+
+    def _hanging(*args, return_status=False, **kwargs):
+        release.wait(5)
+        return ({}, GPU_PROBE_OK) if return_status else {}
+
+    try:
+        with patch("localm.discover.vram_capacity", side_effect=_hanging):
+            t0 = time.monotonic()
+            out = _vram(wait_first=True)
+            elapsed = time.monotonic() - t0
+    finally:
+        release.set()
+
+    assert out == {}
+    # BOTH bounds matter, not just the upper one: a no-op that ignores
+    # wait_first entirely and returns {} instantly would also satisfy
+    # "elapsed < 2.0" without ever having waited at all - that would prove
+    # nothing about the deadline behaviour this test exists to check. The
+    # lower bound proves it genuinely blocked close to the patched deadline
+    # (0.1s + the 1.0s margin _vram adds) before giving up.
+    assert elapsed > 0.9, (
+        f"wait_first returned after only {elapsed:.2f}s - it must actually "
+        f"wait close to the probe deadline before giving up, not bail out "
+        f"immediately (that would be indistinguishable from wait_first "
+        f"being ignored entirely)")
+    assert elapsed < 2.0, (
+        f"wait_first blocked for {elapsed:.2f}s - it must give up at the "
+        f"probe deadline (0.1s here, plus margin), not hang indefinitely "
+        f"on a wedged driver")
 
 
 def test_vram_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch):

@@ -199,6 +199,12 @@ _vram_last_at: float | None = None  # monotonic time of the last COMPLETED
                                      # a persistently failing probe too, not
                                      # just successful readings (mirrors
                                      # _gpu_util_last_at).
+_vram_ready = threading.Event()     # set once, after the FIRST completed
+                                     # attempt (success or failure) ever
+                                     # lands - never cleared afterward. Lets a
+                                     # one-shot caller (see wait_first on
+                                     # _vram()) block for a real reading
+                                     # instead of spin-polling _vram_last.
 
 
 def _compute_vram() -> dict:
@@ -263,9 +269,10 @@ def _vram_probe() -> None:
             _vram_last = computed
         _vram_last_at = time.monotonic()
         _vram_inflight = False
+    _vram_ready.set()
 
 
-def _vram() -> dict:
+def _vram(wait_first: bool = False) -> dict:
     """{"vram": {"used"?, "total", "percent"?}} - combined across a configured
     multi-GPU split, else the single main GPU, or {} when unmeasurable or
     before the first reading has landed.
@@ -276,13 +283,22 @@ def _vram() -> dict:
     :data:`_VRAM_REFRESH_INTERVAL_S`, and this function always returns
     immediately with the last completed reading - omitting the section (never
     fabricating one) until a reading has landed, the same "omit rather than
-    fabricate" contract ``_cpu_ram``/``_gpu_util`` already use in this module."""
+    fabricate" contract ``_cpu_ram``/``_gpu_util`` already use in this module.
+
+    *wait_first*: for a ONE-SHOT caller that will never poll again to pick up
+    a reading that lands later (e.g. the MCP system_stats tool, unlike the
+    GUI's repeating ~2.5s poll) - when no reading has ever landed AND a probe
+    is genuinely in flight, block for up to the underlying probe's own
+    cold-init-tolerant deadline instead of silently omitting VRAM. Default
+    False leaves every existing (repeating-poll) caller's non-blocking
+    contract exactly as it was."""
     global _vram_inflight
     now = time.monotonic()
     start_probe = False
     with _vram_lock:
         stale = (_vram_last_at is None
                  or now - _vram_last_at >= _VRAM_REFRESH_INTERVAL_S)
+        probe_running = _vram_inflight
         if stale and not _vram_inflight:
             _vram_inflight = True
             start_probe = True
@@ -291,6 +307,7 @@ def _vram() -> dict:
         try:
             threading.Thread(target=_vram_probe, name="localm-vram-probe",
                              daemon=True).start()
+            probe_running = True
         except Exception as e:
             # Could not spawn the probe thread: never leave the in-flight guard
             # stuck True with nothing left to clear it - a LATER call must be
@@ -300,6 +317,14 @@ def _vram() -> dict:
             logger.debug("_vram: could not start probe thread: %s", e)
             with _vram_lock:
                 _vram_inflight = False
+    if last is None and wait_first and probe_running:
+        # Only wait when a probe is genuinely running - if thread spawn just
+        # failed above, no probe will ever set _vram_ready and waiting would
+        # just burn the full deadline for nothing.
+        from localm.discover import _GPU_PROBE_DEADLINE
+        if _vram_ready.wait(timeout=_GPU_PROBE_DEADLINE + 1.0):
+            with _vram_lock:
+                last = _vram_last
     return last if last is not None else {}
 
 
@@ -418,11 +443,18 @@ def _gpu_util() -> dict:
     return {"gpu": {"percent": last}}
 
 
-def system_stats() -> dict:
-    """Combined live stats; any unmeasurable section is simply absent."""
+def system_stats(*, wait_first_vram: bool = False) -> dict:
+    """Combined live stats; any unmeasurable section is simply absent.
+
+    *wait_first_vram*: pass True only for a one-shot caller that will not
+    poll again (see :func:`_vram`'s ``wait_first``) - blocks up to the GPU
+    probe's own deadline so a cold first call gets a real VRAM reading
+    instead of omitting it. The GUI's repeating status-bar poll must never
+    pass this: it self-heals within one refresh window and blocking it would
+    reintroduce the executor-stall this throttling exists to prevent."""
     out: dict = {}
     out.update(_cpu_ram())
-    out.update(_vram())
+    out.update(_vram(wait_first=wait_first_vram))
     out.update(_gpu_util())
     return out
 

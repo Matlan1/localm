@@ -144,6 +144,54 @@ class TestIsolatedProbeDegradesHonestly:
         assert out == [], "the child ANSWERED (with []); that is not a cannot-ask"
         assert "WinError 126" in caplog.text
 
+    # A short synthetic stderr cannot fail on the truncation defect - the value
+    # that distinguishes right from wrong is a message LONGER than the old
+    # 200-char cap, with a long path prefix ahead of the actionable content
+    # (diff-review-discipline.md item 19). Shaped from the real field evidence
+    # (issues/log_1.txt, log_2.txt): a virtualenv install-path warnings.warn()
+    # prefix, 180 chars alone, followed by the actionable GPU-architecture-list
+    # message. Cutting the combined 456-char string at 200 chars (the old
+    # behaviour) leaves exactly "...The following list o" - reproducing the
+    # observed fragment - and drops everything a user would need to act on.
+    _LONG_PATH_PREFIX = (
+        "/opt/pyenv/versions/3.12.4/lib/python3.12/site-packages/torch/cuda/"
+        "__init__.py:422: UserWarning: Found GPU0 NVIDIA RTX PRO 4000 Blackwell "
+        "which is of compute capability (CC) 12.0.\n"
+    )
+    _ACTIONABLE_TAIL = (
+        "The following list of GPU architectures compatible with this version "
+        "of PyTorch is: sm_37 sm_50 sm_60 sm_61 sm_70 sm_75 sm_80 sm_86 sm_90.\n"
+        "If you want to use the RTX PRO 4000 Blackwell GPU with PyTorch, please "
+        "check the instructions at https://pytorch.org/get-started/locally/"
+    )
+
+    def test_long_child_stderr_keeps_the_actionable_tail(self, monkeypatch, caplog):
+        """The whole point of the message - which GPU architectures are
+        supported - must survive a realistically long path prefix, not just
+        the boilerplate ahead of it."""
+        caplog.set_level("DEBUG", logger=self._LOGGER)
+        stderr = self._LONG_PATH_PREFIX + self._ACTIONABLE_TAIL
+        assert len(stderr) > 200, "fixture must exceed the old cap to prove anything"
+        out = self._run(monkeypatch, return_value=MagicMock(stdout="[]", stderr=stderr))
+        assert out == []
+        assert "sm_90" in caplog.text and "get-started/locally" in caplog.text, (
+            "truncated the child's stderr before its actionable content survived: "
+            + caplog.text)
+
+    def test_stderr_beyond_the_cap_says_so_rather_than_cutting_silently(
+            self, monkeypatch, caplog):
+        """A cap must still exist (an adversarial/huge child stream cannot be
+        logged unbounded), but a truncated diagnostic must SAY it was
+        truncated (AGENTS.md rule 5) rather than stopping mid-sentence with no
+        indication anything is missing."""
+        caplog.set_level("DEBUG", logger=self._LOGGER)
+        huge = self._LONG_PATH_PREFIX + self._ACTIONABLE_TAIL * 20
+        assert len(huge) > discover._CHILD_STDERR_LOG_CAP
+        out = self._run(monkeypatch, return_value=MagicMock(stdout="[]", stderr=huge))
+        assert out == []
+        assert "truncated" in caplog.text, (
+            "cut a diagnostic without saying so: " + caplog.text)
+
     def test_good_reply_is_passed_through(self, monkeypatch):
         payload = [{"index": 0, "name": "RTX", "total": 8, "free": 4}]
         assert self._run(monkeypatch, return_value=MagicMock(

@@ -1323,6 +1323,55 @@ class TestCompanionEndpoint:
         assert data["tailscale"] == "100.101.102.103"
 
 
+class TestBackendEndpoint:
+    """GET /api/backend - the actually-installed llama.cpp backend (never
+    auto-switched; see updater._installed_backend()), for the Settings
+    display and the NVIDIA+vulkan hint."""
+
+    def test_reports_installed_separately_from_recommended(self, gui_app):
+        """The whole point of this route: "installed" and "recommended" can
+        legitimately disagree (that disagreement is exactly what a runtime
+        recommendation-policy change produces), and the route must report
+        both rather than collapsing them into one value."""
+        from localm import hwdetect
+        app, _ = gui_app
+        with patch("localm.setup_llama.installed_backend", return_value="amd-rocm"), \
+             patch("localm.hwdetect.detect",
+                   return_value=hwdetect.Detection(vendors=["amd"])), \
+             patch("localm.hwdetect.recommended_install_backend", return_value="vulkan"):
+            with TestClient(app) as client:
+                r = client.get("/api/backend")
+        assert r.status_code == 200
+        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "recommended": "vulkan"}
+
+    def test_nothing_detected_reports_nulls_not_an_error(self, gui_app):
+        """A total detection failure (no marker, hwdetect raises) must still
+        return 200 with honest nulls - never a 500, and never a guessed value."""
+        app, _ = gui_app
+        with patch("localm.setup_llama.installed_backend",
+                   side_effect=RuntimeError("no marker")), \
+             patch("localm.hwdetect.detect", side_effect=RuntimeError("no probe tools")):
+            with TestClient(app) as client:
+                r = client.get("/api/backend")
+        assert r.status_code == 200
+        assert r.json() == {"installed": None, "vendor": None, "recommended": None}
+
+    def test_nvidia_vendor_reported_when_vulkan_installed(self, gui_app):
+        """The exact combination the Settings hint keys on (Part 3): an
+        NVIDIA vendor with vulkan actually installed must come through
+        distinctly, not be normalised away."""
+        from localm import hwdetect
+        app, _ = gui_app
+        with patch("localm.setup_llama.installed_backend", return_value="vulkan"), \
+             patch("localm.hwdetect.detect",
+                   return_value=hwdetect.Detection(vendors=["nvidia"])), \
+             patch("localm.hwdetect.recommended_install_backend", return_value="cuda"):
+            with TestClient(app) as client:
+                r = client.get("/api/backend")
+        assert r.status_code == 200
+        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "recommended": "cuda"}
+
+
 class TestModelEndpoints:
     def test_models_lists_registry(self, gui_app):
         app, _ = gui_app

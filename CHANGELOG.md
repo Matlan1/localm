@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Settings now shows which backend is actually installed, not just what
+  would be picked fresh.** The Runtime & GPU section only ever showed the
+  recommended default; Live tuning now shows what your install is really
+  running. If you have an NVIDIA GPU but are still on the Vulkan backend, a
+  dismissable hint says CUDA usually performs better - it only ever informs,
+  and never switches anything for you.
 - **Settings can now update localm's own ComfyUI.** The managed-ComfyUI box
   offered Set up, Repair and Remove but no way to update, so if you only use
   the GUI you could install localm's ComfyUI and never move it to a newer one.
@@ -23,6 +29,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **`localm update` no longer swaps your installed backend for a different
+  one.** The runtime-provisioning step picked whichever backend the current
+  hardware recommendation named, rather than the one you actually had
+  installed, so a change to that recommendation (an NVIDIA-on-Linux install
+  moving from Vulkan to CUDA, for example) could re-provision an already-
+  working install onto a backend you never chose. Updates now keep whatever
+  backend is already installed, no matter what the recommendation says.
+- **A model process that dies from an ordinary error is no longer reported as a
+  "native inference fault".** Any death of the model process used to be announced
+  that way, including a plain Python error inside it - so a missing image library,
+  for one real example, produced "Native inference fault (worker exit 1). See the
+  debug log for the native stack trace" when there was no native fault, no such
+  trace, and nothing wrong with the model. The wording is now decided by the
+  evidence: a genuine crash still says so and points at its trace, while anything
+  else says the process exited unexpectedly and sends you to the log for the real
+  error. The internal log line that made the same claim is neutral now too, so it
+  no longer pre-judges a crash before anyone has looked at it.
 - **A crashed model process now says HOW it died, not just a bare number.** The
   error used to read "worker exit -4" and leave you to look that up. On Linux and
   macOS a negative code is the signal that killed it, so that one now reads
@@ -284,6 +307,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   recommends the faster vendor build when it finds one. Vulkan remains the
   recommendation when no toolkit is present, and the RX 6000 build is
   unaffected - it needs no toolkit at all, so it stays the default there.
+- **Filing a bug report from the app could freeze the whole server for as
+  long as it took to save.** Saving a report reads the current log, digests
+  it, and writes the report file, and all of that ran directly on the same
+  thread that serves every other request - so filing one, exactly when
+  something was already going wrong, stalled everyone else for the duration.
+  Saving now happens off to the side, and two reports filed close together
+  can no longer collide and corrupt each other's file.
+- **A GPU-compatibility warning in the debug log could be cut off before the
+  useful part.** When your GPU's PyTorch build reports it as unsupported, the
+  message logged for it was trimmed to 200 characters - shorter than the
+  install path that comes first in it, so the list of architectures your
+  PyTorch actually supports, the part that says what to do about it, never
+  made it in. The limit is now much higher, and a message rare enough to
+  still exceed it is now marked as cut short instead of stopping without a
+  word.
 
 ## [0.1.5rc2] - 2026-08-08
 

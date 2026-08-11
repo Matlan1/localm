@@ -786,7 +786,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # replaces exactly (same user-facing message and effect).
             self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
-            _dbg.exception("native inference fault - dropping model instance")
+            # Deliberately class-NEUTRAL, and it used to say "native inference
+            # fault". This except catches EVERY RuntimeError the runner raises -
+            # a genuine native fault, an uncaught Python exception in the worker
+            # (exit 1), a generation stall, and an unload racing the stream - so
+            # naming one of them was wrong for the other three. It is also the
+            # line a reader greps first in a field log (it is the ERROR line in
+            # issues 1222/1223), which is exactly why a false label here is
+            # expensive: it pre-classifies the crash before anyone has looked.
+            # exception() carries the real message and traceback, and the runner's
+            # own message now states the class only when the exit code or a
+            # captured trace establishes it (see _mp_spawn.death_was_a_native_fault).
+            _dbg.exception("worker failure during generation - dropping model instance")
             try:
                 self.unload()
             except Exception:

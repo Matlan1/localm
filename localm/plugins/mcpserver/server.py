@@ -712,7 +712,13 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
     def system_stats(args: dict) -> dict:
         from localm.sysstats import system_stats as _stats
-        return _text_result(json.dumps(_stats()))
+        # A ONE-SHOT call, unlike the GUI's repeating ~2.5s poll: without
+        # wait_first_vram, the "Live ... VRAM" promise below silently omits
+        # VRAM on a cold first call while the background probe is still
+        # running, because there is no later poll here to pick up the
+        # landed reading. Safe to block on it - MCP stdio serves one
+        # request at a time with no event loop to stall (see run_stdio).
+        return _text_result(json.dumps(_stats(wait_first_vram=True)))
 
     def search_models(args: dict) -> dict:
         from localm.discover import DiscoverError, hf_search

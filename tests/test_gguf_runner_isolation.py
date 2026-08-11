@@ -231,13 +231,27 @@ class TestChatStreamCrashContainment:
         deliberately re-raises an unrecoverable fault uncaught - see its
         docstring), reproduced here without needing a real model or GPU by
         sending chat_stream before any load (worker is None -> AttributeError
-        inside _runner_main's dispatch -> uncaught -> the process dies)."""
+        inside _runner_main's dispatch -> uncaught -> the process dies).
+
+        THE ASSERTION CHANGED, AND THE OLD ONE WAS THE BUG. It required the
+        message to say "native inference fault" - for an AttributeError, which
+        exits 1, which this module's own _runner_entry docstring identifies as
+        multiprocessing's signature for an uncaught PYTHON exception. So the test
+        was pinning a message that is false in every clause for the very fault it
+        injects (no native fault, no native trace, model unharmed) - the exact
+        wrong message tests/test_image_decode_without_pillow.py exists to
+        document. A wrong assertion is a specification, so this one was making the
+        misclassification permanent rather than catching it."""
         r = ModelRunner()
         r._spawn()
         try:
             with pytest.raises(RuntimeError) as ei:
                 list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-            assert "native inference fault" in str(ei.value).lower()
+            msg = str(ei.value).lower()
+            # Contained and reported (the property under test)...
+            assert "unloaded" in msg and "reload" in msg, msg
+            # ...and NOT mislabelled as a native fault, because it was not one.
+            assert "native inference fault" not in msg, msg
             assert not r.is_alive()
         finally:
             r.shutdown(grace=0)
@@ -303,7 +317,11 @@ class TestCrashDiagnosticsReachDebugLog:
         try:
             with pytest.raises(RuntimeError) as ei:
                 list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-            assert "native inference fault" in str(ei.value).lower()
+            # Same correction as TestChatStreamCrashContainment above: this fault
+            # is an AttributeError (exit 1), an uncaught PYTHON exception, so the
+            # message must NOT call it a native fault. What this test is really
+            # about is the DEBUG LOG content asserted below, not the wording.
+            assert "native inference fault" not in str(ei.value).lower()
             # is_alive() only ever reports False once the OS has reported the
             # process fully exited - so any write the child's Python code did
             # before dying (including this fix's logger.critical call) is
@@ -425,7 +443,10 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         try:
             with pytest.raises(RuntimeError) as ei:
                 list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-            assert "no native stack trace was captured" in str(ei.value).lower()
+            # Wording tightened deliberately: "for this EXIT", not "for this
+            # FAULT". Calling it a fault in the no-trace branch pre-judges the
+            # very classification this message now declines to assert.
+            assert "no native fault trace was captured" in str(ei.value).lower()
         finally:
             r.shutdown(grace=0)
 
@@ -477,6 +498,47 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
             r.shutdown(grace=5)
         assert not trace_path.exists(), (
             f"a cleanly shut-down worker left {trace_path} behind")
+
+
+class TestSimpleRequestNativeSignalCrashDiagnosticsReachDebugLog:
+    """The trace-relay fix TestNativeSignalCrashDiagnosticsReachDebugLog
+    proves for chat_stream() must also hold for _simple_request() - the code
+    path count_tokens()/check_grammar() go through. Before this fix,
+    _simple_request's native-crash branch reported the exit code but never
+    called _crash_detail(), so a trace the child DID capture was never read:
+    ModelRunner.shutdown()'s own comment says a trace surviving to teardown
+    is "either already relayed or describes a death nobody is going to
+    report" and discards it unconditionally - so a fault during a token
+    count or a grammar check left the exact issue 1222/1223 symptom
+    (a bare exit code, no trace) that chat_stream's fix already closed for
+    generation."""
+
+    def test_native_abort_during_count_tokens_is_reported_with_its_trace(
+            self, monkeypatch, caplog):
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = ModelRunner()
+        r._spawn()
+        try:
+            with caplog.at_level(logging.ERROR, logger="localm"):
+                with pytest.raises(RuntimeError) as ei:
+                    r.count_tokens("hello")
+            assert not r.is_alive()
+        finally:
+            r.shutdown(grace=0)
+
+        message = str(ei.value)
+        assert "crashed" in message.lower()
+        assert "Fatal Python error" in message, (
+            "a real native-signal death during count_tokens produced no "
+            "captured trace in the error - the same issue 1222/1223 symptom "
+            f"chat_stream's fix already closed\n--- message ---\n{message}")
+
+        # The FULL trace has to reach the debug log too, not just the
+        # summary line folded into the message - same requirement as
+        # chat_stream's own version of this test above.
+        logged = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "Fatal Python error" in logged and "_runner.py" in logged, (
+            f"the trace never reached the localm logger\n{logged}")
 
 
 # --------------------------------------------------------------------------- #

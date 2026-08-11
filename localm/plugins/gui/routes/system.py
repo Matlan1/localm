@@ -142,3 +142,35 @@ def register(app: FastAPI, ctx) -> None:
                 # so the GUI hides host-path config fields and the host file
                 # browser from a key that lacks it (server still enforces).
                 "fs_access": effective_fs_access(request)}
+
+    @app.get("/api/backend", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def gui_backend():
+        """The llama.cpp runtime backend actually installed on this box, plus
+        enough hardware context for Settings to show it and, at most, offer a
+        dismissable hint - NEVER to auto-switch anything. An update must never
+        silently re-provision a different backend than the one already
+        running (see updater._installed_backend()); this route is purely
+        informational.
+
+        Runs off-thread: hwdetect.detect() shells out (nvidia-smi/wmic/lspci),
+        same reason /api/gpus and /api/stats offload their own probes so a
+        slow driver never blocks the event loop."""
+        from localm import hwdetect, setup_llama
+        loop = asyncio.get_running_loop()
+
+        def _read():
+            installed = None
+            try:
+                installed = setup_llama.installed_backend()
+            except Exception:
+                pass
+            vendor = recommended = None
+            try:
+                det = hwdetect.detect()
+                vendor = det.vendors[0] if det.vendors else None
+                recommended = hwdetect.recommended_install_backend(det)
+            except Exception:
+                pass
+            return {"installed": installed, "vendor": vendor, "recommended": recommended}
+
+        return await loop.run_in_executor(get_plugin_executor(), _read)

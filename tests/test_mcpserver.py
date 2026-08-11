@@ -1189,6 +1189,18 @@ class TestModelDiscoveryTools:
             r = self._call(server, "system_stats", {})
         assert json.loads(r["result"]["content"][0]["text"]) == stats
 
+    def test_system_stats_waits_for_the_first_vram_reading(self):
+        """The MCP tool is a ONE-SHOT call, unlike the GUI's repeating ~2.5s
+        poll - it never gets a second chance to see a VRAM reading that lands
+        after it already returned, so it must ask sysstats.system_stats to
+        wait for the first reading (wait_first_vram=True) rather than
+        silently omitting VRAM on a cold first call."""
+        server, _ = _server()
+        mock_stats = MagicMock(return_value={"cpu": {"percent": 1.0}})
+        with patch("localm.sysstats.system_stats", mock_stats):
+            self._call(server, "system_stats", {})
+        mock_stats.assert_called_once_with(wait_first_vram=True)
+
     def test_search_models_wraps_hf_search(self):
         server, _ = _server()
         results = [{"id": "bartowski/Qwen2.5-7B-Instruct-GGUF", "downloads": 999,
