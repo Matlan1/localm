@@ -1091,17 +1091,53 @@ class LlamaCpp:
         # messages can be answered. Best-effort - any failure (no mtmd.dll, an
         # incompatible mmproj) leaves the model text-only rather than breaking it.
         if mmproj_path:
-            try:
-                from .mtmd import MtmdContext
-                mt = MtmdContext(mmproj_path, self._model_ptr)
-                if mt.supports_vision:
-                    self._mtmd = mt
-                else:
-                    mt.free()
-            except Exception as exc:
-                from localm.debuglog import logger
-                logger.debug("mmproj load failed (%s); model stays text-only", exc)
-                self._mtmd = None
+            self._load_mmproj(mmproj_path, verbose)
+
+    def _load_mmproj(self, mmproj_path: str, verbose: bool) -> None:
+        """Load *mmproj_path* via mtmd and set self._mtmd, or leave it None on
+        any failure. Pulled out of __init__ (same reasoning as
+        _stderr_ctx_for_generate above) so the wrap is directly unit-testable
+        without a real native model.
+
+        Wrapped in the SAME mirror+capture scope as the main model load in
+        __init__: MtmdContext.__init__ makes several native calls of its own
+        (mtmd_init_from_file for the CLIP/vision projector, then the
+        mtmd_tokenize-based ABI probe in _detect_input_text_class) and none of
+        them were ever redirected, so the projector's tensor-by-tensor load
+        report and the ABI probe's raw text payload both landed on the real
+        console unfiltered - see dev-notes for the field logs this was found
+        from. _capture_stderr also means a failure still carries its native
+        reason instead of losing it: MtmdContext.__init__ RAISES rather than
+        returning NULL (unlike the main model load in __init__), so the detail
+        is grabbed INSIDE the ``with`` block, before its temp file is unlinked
+        on exit (see _capture_stderr's own docstring)."""
+        from localm.debuglog import suppress_console_mirror
+        _mtmd_load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
+        _mtmd_mirror_ctx = suppress_console_mirror if not verbose else contextlib.nullcontext
+        _mtmd_detail = ""
+        try:
+            with _mtmd_mirror_ctx(), _mtmd_load_ctx() as captured:
+                try:
+                    from .mtmd import MtmdContext
+                    mt = MtmdContext(mmproj_path, self._model_ptr)
+                except Exception:
+                    if captured is not None:
+                        _mtmd_detail = captured.tail()
+                    raise
+            if mt.supports_vision:
+                self._mtmd = mt
+            else:
+                mt.free()
+        except Exception as exc:
+            from localm.debuglog import logger
+            suffix = f"\n{_mtmd_detail}" if _mtmd_detail else ""
+            # WARNING, not debug: a vision model that silently drops to
+            # text-only is a real capability loss the user asked for and
+            # did not get (AGENTS.md rule 5) - it must reach a level they
+            # will actually see, not only LOCALM_DEBUG=1.
+            logger.warning(
+                "mmproj load failed (%s); model stays text-only%s", exc, suffix)
+            self._mtmd = None
 
     def _read_kv_bytes_per_token(self) -> int:
         """Architecture-accurate KV-cache size PER TOKEN in bytes, from the loaded

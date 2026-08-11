@@ -177,6 +177,14 @@ def _load_lib() -> ctypes.CDLL:
 # two bytes of text_len. At 256 those read as add_special=False, parse_special=True.
 # add_special MUST come out False, or a V1 build would prepend BOS to the empty
 # string it sees and return 1 token instead of 0, destroying the discriminator.
+#
+# llama.cpp's own tokenizer trace echoes whatever it is handed via an
+# "add_text: <text>" line on stderr, so a reader of a captured/debug load log who
+# sees "add_text: aaaa..." followed by an empty "add_text: " is looking at these
+# two probe calls, in order - not a leaked user prompt. Both are text-only calls
+# with no marker/bitmaps, so nothing else runs during them (see _probe_n_tokens's
+# own docstring); llama.py's caller wraps this whole constructor call so neither
+# line reaches the console.
 _PROBE_CONTROL = b"a" * 256
 _PROBE_EMBEDDED_NUL = b"\x00" + b"a" * 255
 
