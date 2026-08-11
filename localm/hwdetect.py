@@ -5,17 +5,36 @@ Pure stdlib, and NEVER raises: detection is advisory, so a probe that fails just
 contributes nothing. ``detect()`` reports which GPU vendors are present and the
 recommended llama.cpp backend.
 
-Backend-selection policy (the "anybody, out of the box" rule): pick the backend
-that is fastest AND works with no user-installed toolkit on THIS machine.
-  * NVIDIA on Windows -> ``cuda``: the same llama.cpp release ships a
-    self-contained cudart bundle, so CUDA is out-of-the-box here (no Toolkit) and
-    the fastest path on NVIDIA. (NVIDIA on Linux stays ``vulkan`` - the Linux cuda
-    build needs a system CUDA toolkit we cannot self-provide.)
-  * ``vulkan`` is the universal default for every other GPU - it runs on AMD,
-    NVIDIA (Linux), and Intel through the vendor's normal display driver, with no
-    CUDA/ROCm/oneAPI toolkit to install.
-  * the remaining vendor-specific backends (``hip`` for AMD, ``sycl`` for Intel)
-    are offered as an opt-in for maximum performance, not the default.
+Backend-selection policy (maintainer's own words: "the best performing one is
+always our suggestion; vulkan is a fallback"): pick the best-performing backend
+THIS MACHINE CAN ACTUALLY HAVE SELF-PROVISIONED, with no user-installed vendor
+toolkit. Where the best performer needs a toolkit we cannot fetch ourselves,
+recommend the best one we CAN safely auto-provision instead - that gap belongs
+in the backlog as a missing capability, not papered over silently.
+  * NVIDIA, any OS -> ``cuda``: llama.cpp ships a self-contained cudart bundle
+    for both Windows and Linux (setup-llama fetches the CUDA runtime libraries
+    itself, no Toolkit needed - see ``_provision_backend``'s cuda branch and
+    ``NvidiaInfo.cuda_line`` for the architecture-aware build-line pick), so
+    CUDA is out-of-the-box AND the fastest path on NVIDIA regardless of
+    platform. Was Windows-only until 2026-08-11: the Linux self-contained path
+    was new and unconfirmed on real NVIDIA Linux hardware, so vulkan stayed the
+    default there as a matter of caution. Real hardware (RTX PRO 4000
+    Blackwell) has since confirmed CUDA works and outperforms vulkan on that
+    box, and the setup-llama load-test + vulkan fallback (``_provision_with_
+    fallback``) already covers a bad guess on any platform - see
+    dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.
+  * ``vulkan`` is the default for every OTHER GPU (AMD outside the self-contained
+    gfx103X/Windows build, Intel, any mixed/unrecognised box) - not because it is
+    the fastest there, but because it is the best backend we can auto-provision
+    with no pre-installed vendor toolkit. The vendor-optimal alternatives
+    (``hip`` for AMD, ``sycl`` for Intel) ARE downloadable prebuilt binaries on
+    both platforms, but both require a SEPARATELY installed system ROCm/oneAPI
+    runtime we do not verify or fetch - offered as an explicit opt-in, never the
+    default, because recommending a backend we cannot confirm will load is worse
+    than vulkan (AGENTS.md rule 5). Genuinely missing self-contained builds
+    (e.g. no gfx110X/gfx120X self-contained Windows ROCm build) are a gap in
+    what we ship, not a wrong recommendation - tracked separately, not silently
+    routed around here.
   * ``cpu`` when no GPU is detected.
 
 Detection is intentionally conservative: a missing tool or an unparseable name
@@ -173,29 +192,32 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
     setup.bat and setup.sh call, so the two detectors can never drift:
       * Apple Silicon                         -> metal
       * no GPU                                -> cpu
-      * NVIDIA on Windows                      -> cuda      (peak performance; the same
-        llama.cpp release ships a self-contained cudart bundle, so it is out-of-the-box
-        with no CUDA Toolkit, and setup-llama's driver preflight + load-test fall back
-        to vulkan if the driver is too old - never strands a box on a runtime it cannot load)
-      * NVIDIA on Linux                        -> vulkan    (a self-contained Linux CUDA
-        path now EXISTS - setup-llama fetches a prebuilt binary (from a third-party
-        builder, ggml-org itself publishes none for Linux - see dev-notes/ADR-0010)
-        plus the CUDA runtime libraries, no Toolkit needed, same as Windows - but it
-        is newer and not yet confirmed across real NVIDIA Linux hardware, so vulkan
-        stays the DEFAULT recommendation for now. `--backend cuda` is a working
-        explicit choice; see docs/gpu-setup.md. Flip this once real-hardware
-        confirmation comes in.)
+      * NVIDIA, any OS                        -> cuda      (peak performance; llama.cpp
+        ships a self-contained cudart bundle on both Windows and Linux, so it is
+        out-of-the-box with no CUDA Toolkit on either, and setup-llama's driver
+        preflight + load-test fall back to vulkan if the driver is too old or the
+        build fails to load - never strands a box on a runtime it cannot load. Was
+        Windows-only until 2026-08-11 field testing on real NVIDIA Linux hardware
+        (RTX PRO 4000 Blackwell) confirmed CUDA works and outperforms vulkan there -
+        maintainer's ruling: "the best performing one is always our suggestion;
+        vulkan is a fallback". See dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.)
       * AMD on Windows, RX 6000 / unknown     -> amd-rocm  (self-contained gfx103X build)
-      * AMD on Windows, clearly not RX 6000    -> vulkan    (gfx103X build won't fit)
-      * any other GPU (Intel, Linux AMD, mixed)-> vulkan    (no vendor toolkit needed)
-    The self-contained ROCm bundle is gfx103X + Windows only, and self-contained CUDA is
-    Windows only, hence both vendor-optimized cases are narrowed to Windows."""
+      * AMD on Windows, clearly not RX 6000    -> vulkan    (gfx103X build won't fit;
+        no self-contained build exists for gfx110X/gfx120X - a gap in what we ship,
+        not a wrong recommendation; hip is downloadable but needs a system ROCm
+        install we do not verify, so it stays opt-in, not default)
+      * any other GPU (Intel, Linux AMD, mixed)-> vulkan    (no vendor toolkit needed;
+        sycl/hip are downloadable prebuilt binaries on Linux too, but both need a
+        SEPARATELY installed vendor runtime we do not verify or fetch, so recommending
+        them by default risks a confirmed-broken suggestion - opt-in only)
+    The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA is
+    now both-OS, hence only the AMD vendor-optimized case is still narrowed to Windows."""
     d = det or detect()
     if "apple" in d.vendors:
         return "metal"
     if not d.has_gpu:
         return "cpu"
-    if "nvidia" in d.vendors and sys.platform == "win32":
+    if "nvidia" in d.vendors:
         return "cuda"
     if (sys.platform == "win32" and d.vendors == ["amd"]
             and not _amd_known_non_gfx103x(d.gpu_names)):

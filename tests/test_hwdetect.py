@@ -179,13 +179,27 @@ def test_install_backend_win_nvidia_is_cuda(monkeypatch):
     assert hwdetect.recommended_install_backend(d) == "cuda"
 
 
-def test_install_backend_linux_nvidia_is_vulkan(monkeypatch):
-    # NVIDIA on Linux -> vulkan: the Linux cuda build needs a system CUDA toolkit
-    # we cannot self-provide, so vulkan (runs via the display driver) is the
-    # out-of-the-box choice there.
+def test_install_backend_linux_nvidia_is_cuda(monkeypatch):
+    # NVIDIA on Linux -> cuda: llama.cpp ships a self-contained cudart bundle on
+    # Linux too (setup-llama fetches the CUDA runtime libraries itself, no system
+    # Toolkit needed), and 2026-08-11 field testing on real NVIDIA Linux hardware
+    # (RTX PRO 4000 Blackwell, CC 12.0) confirmed CUDA works and outperforms
+    # vulkan there. Was vulkan until that confirmation landed - see
+    # dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     d = Detection(vendors=["nvidia"], gpu_names="nvidia geforce rtx 4090")
-    assert hwdetect.recommended_install_backend(d) == "vulkan"
+    assert hwdetect.recommended_install_backend(d) == "cuda"
+
+
+def test_install_backend_linux_nvidia_blackwell_is_cuda(monkeypatch):
+    # The exact field-evidence case: compute capability alone (not the platform)
+    # decides NVIDIA gets cuda now; recommended_install_backend does not itself
+    # branch on architecture (that is NvidiaInfo.cuda_line's job, downstream), so
+    # this just confirms a Blackwell-named/CC-bearing card is not accidentally
+    # excluded by name-based reasoning anywhere in this function.
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    d = Detection(vendors=["nvidia"], gpu_names="nvidia rtx pro 4000 blackwell")
+    assert hwdetect.recommended_install_backend(d) == "cuda"
 
 
 def test_install_backend_win_amd_rx6000_is_rocm(monkeypatch):
@@ -327,13 +341,16 @@ def test_torch_pip_args_rocm_win_unknown_amd_is_empty(monkeypatch):
 
 def test_main_prints_vendor_and_backend(monkeypatch, capsys):
     # Pin Linux so the install-backend is deterministic (this asserts the OUTPUT
-    # FORMAT "<vendor> <backend>"; NVIDIA-on-Linux is vulkan, NVIDIA-on-Windows
-    # would be cuda - both are covered by the policy tests above).
+    # FORMAT "<vendor> <backend>"; NVIDIA is cuda on both platforms now - see the
+    # policy tests above - so this and the Windows path share one expectation).
+    # NOTE: main() calls recommended_install_backend(d), NOT d.recommended (the
+    # LEGACY field) - the "vulkan" passed to Detection() below is deliberately
+    # the WRONG legacy value, to prove main() ignores it.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "detect",
                         lambda: Detection(vendors=["nvidia"], recommended="vulkan"))
     assert hwdetect.main([]) == 0
-    assert capsys.readouterr().out.strip() == "nvidia vulkan"
+    assert capsys.readouterr().out.strip() == "nvidia cuda"
 
 
 def test_main_no_gpu_prints_none_cpu(monkeypatch, capsys):

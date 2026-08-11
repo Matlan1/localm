@@ -642,8 +642,12 @@ class TestRecommendedBackendMatchesInstallPolicy:
         diag = self._diag_with(monkeypatch, [], "win32")
         assert diag["recommended_backend"] == "cpu"
 
-    def test_nvidia_on_linux_stays_vulkan(self, monkeypatch):
-        """The Linux CUDA build needs a system toolkit localm cannot self-provide,
-        so vulkan genuinely IS the policy there - the fix must not overreach."""
+    def test_nvidia_on_linux_reports_cuda_not_vulkan(self, monkeypatch):
+        """llama.cpp ships a self-contained cudart bundle on Linux too (no system
+        toolkit needed), and 2026-08-11 field testing confirmed CUDA outperforms
+        vulkan on real NVIDIA Linux hardware - see
+        dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5. A diagnostics field that
+        still said vulkan here would send triage after the wrong backend, same
+        #833 trap as the Windows case above."""
         diag = self._diag_with(monkeypatch, ["nvidia"], "linux")
-        assert diag["recommended_backend"] == "vulkan"
+        assert diag["recommended_backend"] == "cuda"
