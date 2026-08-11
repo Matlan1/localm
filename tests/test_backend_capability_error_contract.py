@@ -264,13 +264,21 @@ class TestGrammarUnsupportedIsNotConfusedWithOtherFailures:
 
 
 # --------------------------------------------------------------------------- #
-#  2. Engine delegation - where the defect actually lived                      #
+#  2. Engine delegation - the end-to-end property                              #
 #                                                                              #
-#  The fix moved the decision onto BaseBackend. That makes the tests above pass #
-#  whether or not Engine still probes with getattr, so they cannot be the       #
-#  regression guard: reintroducing `fn = getattr(self._backend,                 #
-#  "validate_grammar", None)` leaves every one of them green. These are the     #
-#  tests that go red for it.                                                    #
+#  MEASURED, because the obvious assumption about these is wrong: restoring     #
+#  Engine's old `fn = getattr(self._backend, "validate_grammar", None)` probe   #
+#  leaves ALL 36 tests in this file GREEN. That is not a gap in them. The probe #
+#  simply stopped being load-bearing the moment validate_grammar moved onto     #
+#  BaseBackend: it is now always found, so getattr and a direct call do the     #
+#  same thing. The getattr form is stale style, not a latent defect.            #
+#                                                                              #
+#  What CAN bring the defect back is the base class losing the capability, and  #
+#  that is what these guard. Deleting supports_grammar and validate_grammar     #
+#  from BaseBackend turns this section red with "DID NOT RAISE                  #
+#  GrammarUnsupportedError" and turns the route tests below red with            #
+#  "assert 200 == 400" - a success response carrying unconstrained text, which  #
+#  is the original bug exactly.                                                 #
 # --------------------------------------------------------------------------- #
 
 class TestEngineDelegatesTheCapability:
