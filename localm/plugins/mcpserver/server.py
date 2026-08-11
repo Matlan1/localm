@@ -1186,10 +1186,25 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         delete_data = args.get("delete_data", False)
         from localm.plugins.engine import PluginManager
         mgr = PluginManager(None)
-        err = _run_mgr_action(
-            mgr, lambda m: m.uninstall(plugin, delete_data=delete_data), plugin=plugin)
-        if err is not None:
-            return err
+        # Bypasses _run_mgr_action (unlike install/enable/disable above): those
+        # three have nothing worth reading from fn(mgr)'s return value, but
+        # uninstall()'s bool is the only signal that the installed directory (a
+        # locked file, an AV hold, a permission denial) actually came off disk -
+        # discarding it is how the GUI/HTTP route was found to always report
+        # success (checkup honesty audit 2026-08-11). Read it here instead.
+        was_installed = mgr.is_installed(plugin)
+        with _quiet_stdout():
+            try:
+                removed = mgr.uninstall(plugin, delete_data=delete_data)
+            except KeyError:
+                return _text_result(f"No such plugin: {plugin}", is_error=True)
+            except ValueError as e:
+                return _text_result(str(e), is_error=True)
+        if was_installed and not removed:
+            return _text_result(
+                f"Plugin '{plugin}' was disabled and unloaded, but its installed "
+                "files could not be fully removed (a locked file, an AV hold, or "
+                "a permission denial); it is not fully uninstalled.", is_error=True)
         return _text_result(f"Plugin '{plugin}' successfully uninstalled.")
 
     _model_param = {"type": "string",

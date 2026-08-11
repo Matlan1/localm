@@ -1741,3 +1741,21 @@ class TestNewToolCalls:
         assert resp["result"]["isError"] is False
         assert "uninstalled" in resp["result"]["content"][0]["text"]
         mock_uninstall.assert_called_once_with("coder", delete_data=True)
+
+    def test_uninstall_plugin_reports_degraded_removal(self):
+        # PluginManager.uninstall() returns False (not an exception) when the
+        # installed directory could not actually be removed - a locked file, an
+        # AV hold, or a permission denial, all reachable on Windows. A bare
+        # "successfully uninstalled" in that case is the same discard-the-bool
+        # defect the checkup honesty audit found in the HTTP/GUI route: rule 5
+        # forbids reporting success for a step that did not complete.
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.is_installed", return_value=True), \
+             patch("localm.plugins.engine.PluginManager.uninstall", return_value=False) as mock_uninstall:
+            resp = _req(server, "tools/call",
+                        {"name": "uninstall_plugin", "arguments": {"plugin": "coder"}})
+        assert resp["result"]["isError"] is True
+        text = resp["result"]["content"][0]["text"]
+        assert "could not be fully removed" in text
+        assert "successfully uninstalled" not in text
+        mock_uninstall.assert_called_once_with("coder", delete_data=False)
