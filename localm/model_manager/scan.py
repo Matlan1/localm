@@ -71,6 +71,50 @@ def get_comfy_workdir() -> Optional[str]:
             return workdir
     return cfg.get("comfy_workdir")
 
+def _resolve_explicit_workdir_models_path(workdir: str) -> Path:
+    """An explicit *workdir* override (the guided Import-from-ComfyUI flow) is
+    normally a real ComfyUI checkout root picked via Browse or typed by hand, so
+    its models live at <workdir>/models exactly as ComfyUI itself expects. The
+    one exception is the "Use localm's own ComfyUI" quick-fill, which hands back
+    the managed checkout root itself (managed-status's `path` field is also
+    legitimately shown elsewhere as "installed at", so it cannot just be
+    changed to return the models dir instead). A managed install's models live
+    in a SIBLING directory, never inside a `models` subfolder under the
+    checkout - managed_comfy_provision.py's copy step excludes "models" from
+    what gets copied there, so <root>/models never exists. Recognize that one
+    specific, unambiguous root and redirect to the real managed models dir
+    rather than guessing at a subfolder that provably never exists for it."""
+    from localm.media.managed_comfy import managed_comfy_paths
+    paths = managed_comfy_paths()
+    if Path(workdir).resolve() == paths.root.resolve():
+        return paths.models_dir
+    return Path(workdir) / "models"
+
+
+def _resolve_scan_models_path(workdir: Optional[str]) -> Optional[Path]:
+    """Resolve the actual directory scan_comfy_models/preview_comfy_models
+    should walk. An explicit *workdir* is a one-off override (see
+    _resolve_explicit_workdir_models_path). With none given, this mirrors the
+    same managed-routing check get_comfy_workdir() makes, but - unlike
+    get_comfy_workdir() - resolves straight to the managed ComfyUI's actual
+    models directory rather than its checkout root: the managed instance's
+    models live directly under <LOCALM_HOME>/comfyui-models, a SIBLING of the
+    checkout root (managed_comfy.py's module docstring; comfy_models_dest_dir()
+    downloads there), never inside a `models` subfolder under the checkout.
+    get_comfy_workdir() correctly reports the checkout root for OTHER purposes
+    (e.g. display), but appending "/models" to it - the only thing a scan can
+    do with a bare workdir string - always finds nothing for a managed
+    install. Falls back to get_comfy_workdir() + "/models" exactly as before
+    when not managed. Returns None when nothing is configured/resolvable."""
+    if workdir:
+        return _resolve_explicit_workdir_models_path(workdir)
+    from localm.media.managed_comfy import managed_comfy_active, managed_comfy_paths
+    if managed_comfy_active():
+        return managed_comfy_paths().models_dir
+    wd = get_comfy_workdir()
+    return Path(wd) / "models" if wd else None
+
+
 def get_comfy_api_url() -> str:
     from localm.media.comfy_client import default_api_url
     from localm.media.managed_comfy import managed_comfy_active
@@ -104,17 +148,19 @@ def _existing_registered_paths(reg: dict) -> set:
     return existing
 
 
-def _discover_comfy_files(workdir: str, comfy_url: Optional[str] = None):
-    """Walk *workdir*/models (pass 1) and, if ComfyUI answers /object_info,
+def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
+    """Walk *models_path* (pass 1) and, if ComfyUI answers /object_info,
     reconcile types against its loader specs (pass 2). Shared by scan_comfy_models
     and preview_comfy_models so both use the EXACT same discovery logic.
+    *models_path* is the already-resolved directory to walk (see
+    _resolve_scan_models_path) - a real ComfyUI's <checkout>/models, or the
+    managed instance's own models dir; this function never derives it.
 
     Returns (found_files, method). found_files is None (method explains why)
     only when the models folder itself is missing - the one discovery-level
     error a caller must treat specially rather than as an empty result."""
-    models_path = Path(workdir) / "models"
     if not models_path.is_dir():
-        return None, f"none (models folder not found under {workdir})"
+        return None, f"none (models folder not found under {models_path})"
 
     # Pass 1: Walk the local folders
     found_files: Dict[Path, str] = {}
@@ -184,11 +230,11 @@ def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = 
     files. *workdir* overrides the configured comfy_workdir for a one-off scan
     of an arbitrary folder (e.g. the guided Import-from-ComfyUI flow) WITHOUT
     reading or mutating the persistent comfy_workdir config value."""
-    wd = workdir or get_comfy_workdir()
-    if not wd:
+    models_path = _resolve_scan_models_path(workdir)
+    if models_path is None:
         return ScanResult(added=0, skipped=0, method="none (comfy_workdir not configured)")
 
-    found_files, method = _discover_comfy_files(wd, comfy_url)
+    found_files, method = _discover_comfy_files(models_path, comfy_url)
     if found_files is None:
         return ScanResult(added=0, skipped=0, method=method)
 
@@ -229,12 +275,12 @@ def preview_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str]
     Returns per-type counts of NEW (not-yet-registered) files plus how many
     discovered files are already registered, so the guided Import-from-ComfyUI
     flow can show what a real scan WOULD do before the user confirms it."""
-    wd = workdir or get_comfy_workdir()
-    if not wd:
+    models_path = _resolve_scan_models_path(workdir)
+    if models_path is None:
         return ScanPreview(counts={}, already_registered=0,
                             method="none (comfy_workdir not configured)")
 
-    found_files, method = _discover_comfy_files(wd, comfy_url)
+    found_files, method = _discover_comfy_files(models_path, comfy_url)
     if found_files is None:
         return ScanPreview(counts={}, already_registered=0, method=method)
 
