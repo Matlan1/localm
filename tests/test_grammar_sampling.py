@@ -599,7 +599,9 @@ def test_pattern_derived_probes_are_single_character_not_interleaved():
     from localm.inference._trigger_probe import _pattern_derived_probes
 
     probes = _pattern_derived_probes(r"(a|a)*b")
-    assert len(probes) == 2   # distinct alnum chars: 'a' and 'b'
+    # One probe per distinct character in the pattern (now every character,
+    # not just alnum() ones - see the punctuation tests below), never fewer.
+    assert len(probes) == len(set(r"(a|a)*b"))
     for probe in probes:
         assert len(set(probe)) == 1, (
             f"a derived probe must be a single character repeated, got "
