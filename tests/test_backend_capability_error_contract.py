@@ -473,22 +473,63 @@ class TestBothPathsAgree:
         assert "localm[grammar]" in r.json()["detail"]
         assert backend.chat_stream_calls == []
 
-    def test_a_mid_generation_reason_reaches_the_client_on_both_paths(self):
-        # A vision failure surfaces only once generation has started, and the
-        # streaming path has already committed its 200 by then (the role chunk
-        # goes out before the generator runs). So the STATUS cannot agree here
-        # and the contract is the REASON, which is the thing that was missing.
-        exc_text = "mtmd_bitmap_init failed (bad image buffer)"
+    # EVERY mid-generation family, paired. A family covered only on the
+    # non-streaming side cannot fail on a regression that re-opens the gap for
+    # that family specifically, and the gap between the two paths IS the defect
+    # this module exists for - so one representative is not enough.
+    #
+    # EmbedBatchTooLargeError is absent by construction, not by oversight: it is
+    # raised by HFBackend.embed, and /v1/embeddings has no streaming form to pair
+    # against. Its non-streaming status is asserted in the table tests above.
+    @pytest.mark.parametrize("exc_factory,status,reason", [
+        (ImageDecodeUnavailable, 501, "Pillow is not installed"),
+        (VisionInputError, 400, "mtmd_bitmap_init failed (bad image buffer)"),
+        (UnsupportedInputError, 400, "This model cannot accept image input"),
+        (InvalidGrammarError, 400, "grammar failed to parse at 'root'"),
+    ])
+    def test_a_mid_generation_reason_reaches_the_client_on_both_paths(
+            self, exc_factory, status, reason):
+        # These surface only once generation has started, and the streaming path
+        # has already committed its 200 by then (the role chunk goes out before
+        # the generator runs, so the headers are gone). The STATUS therefore
+        # cannot agree, and saying it does would be a claim the transport cannot
+        # support. What CAN agree, and what was missing, is that the reason
+        # reaches the caller at all and that the failure is machine-detectable.
         payload = {"model": "test-model", "messages": _TEXT_MSG}
 
-        streamed = _post(_mock_engine(stream_exc=VisionInputError(exc_text)),
+        streamed = _post(_mock_engine(stream_exc=exc_factory(reason)),
                          {**payload, "stream": True})
-        plain = _post(_mock_engine(stream_exc=VisionInputError(exc_text)),
+        plain = _post(_mock_engine(stream_exc=exc_factory(reason)),
                       {**payload, "stream": False})
 
-        assert exc_text in self._sse_text(streamed.text)
-        assert exc_text in plain.json()["detail"]
-        # Machine-detectable on both: the stream marks the terminal frame, the
+        # Same input, same failure: the reason reaches the caller on BOTH.
+        assert reason in self._sse_text(streamed.text)
+        assert reason in plain.json()["detail"]
+        assert plain.json()["detail"] != "Internal server error"
+        # Machine-detectable on both: the stream marks its terminal frame, the
         # non-streaming path uses the status line.
         assert "error" in self._finish_reasons(streamed.text)
-        assert plain.status_code == 400
+        assert plain.status_code == status
+
+    @pytest.mark.parametrize("exc_factory,reason", [
+        (ImageDecodeUnavailable, "Pillow is not installed"),
+        (VisionInputError, "mtmd_bitmap_init failed (bad image buffer)"),
+        (UnsupportedInputError, "This model cannot accept image input"),
+        (InvalidGrammarError, "grammar failed to parse at 'root'"),
+    ])
+    def test_the_completions_route_agrees_with_its_own_stream_too(
+            self, exc_factory, reason):
+        # /v1/completions has the same two-path split and is the route that had
+        # NO handler at all, so it gets the same paired treatment rather than
+        # inheriting confidence from the chat route's coverage.
+        payload = {"model": "test-model", "prompt": "hi"}
+
+        streamed = _post(_mock_engine(stream_exc=exc_factory(reason)),
+                         {**payload, "stream": True}, path="/v1/completions")
+        plain = _post(_mock_engine(stream_exc=exc_factory(reason)),
+                      {**payload, "stream": False}, path="/v1/completions")
+
+        assert reason in streamed.text
+        assert reason in plain.json()["detail"]
+        assert plain.json()["detail"] != "Internal server error"
+        assert plain.status_code == backend_error_status(exc_factory(reason))
