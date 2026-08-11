@@ -34,6 +34,25 @@ MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
 MAX_ARCHIVE_MEMBERS = 5_000
 _ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
 
+# Hard cap on the total bytes an archive extractor may INFLATE, across every
+# member, whether or not that member yielded any text.
+#
+# The three caps above bound the wrong quantities for this attack, and they
+# MULTIPLY rather than compose: MAX_ARCHIVE_MEMBER_BYTES * MAX_ARCHIVE_MEMBERS is
+# 400 GB. The text budget only advances when a member YIELDS TEXT, so a member
+# whose content sniffs as binary is skipped and charges NOTHING - the loop then
+# runs to the full member cap while each iteration still decompresses up to 80 MB.
+# MEASURED (checkup 2026-08-11, LM-FZ-003): a 27.7 MB zip of 5,000 compressible
+# .bin members inflated to 28.0 GB and burned 86.93 s of CPU in ONE call, ending
+# in a correct "no extractable text" refusal - the refusal was never the problem,
+# the 87 seconds spent reaching it was. It fits under the 30 MB /api/rag/extract
+# request cap, which bounds what ARRIVES and says nothing about what decompression
+# PRODUCES.
+#
+# 500 MB is ~60x the ~8 MB text budget, so a legitimate document archive stops on
+# text long before reaching it, and ~1.6 s at the measured 322 MB/s.
+MAX_ARCHIVE_INFLATED_BYTES = 500_000_000
+
 # Hard cap on how deeply extraction may descend into nested containers. The
 # archive extractors already SKIP nested zip/tar members, but the single-stream
 # fallback (a bare .gz/.bz2/.xz that is NOT a tarball) re-enters extract_bytes on
@@ -590,6 +609,7 @@ def _extract_zip(data: bytes, filename: str,
     texts: list = []
     total = 0
     processed = 0
+    inflated = 0
     truncated = False
     limit = MAX_ARCHIVE_MEMBER_BYTES
     try:
@@ -603,7 +623,24 @@ def _extract_zip(data: bytes, filename: str,
                 processed += 1
                 try:
                     with zf.open(member) as fh:
-                        member_data = fh.read(limit + 1)
+                        # Charged against the WHOLE-ARCHIVE inflation budget, and
+                        # the read is clamped to what is left of it so the final
+                        # member cannot overshoot by a further MAX_ARCHIVE_MEMBER_
+                        # BYTES before being charged.
+                        member_data = fh.read(min(limit, MAX_ARCHIVE_INFLATED_BYTES - inflated) + 1)
+                    # Charge and break BEFORE the per-member limit check below:
+                    # that check SKIPS an oversized member with `continue`, but the
+                    # bytes were already inflated to discover it was oversized.
+                    # Charging afterwards would let the measured bomb shape (every
+                    # member skipped) run entirely uncharged.
+                    inflated += len(member_data)
+                    if inflated >= MAX_ARCHIVE_INFLATED_BYTES:
+                        truncated = True
+                        _archive_log().warning(
+                            "rag: %s exceeded the whole-archive decompressed-size "
+                            "budget (%d MB); stopped early and truncated the text",
+                            filename, MAX_ARCHIVE_INFLATED_BYTES // 1_000_000)
+                        break
                     if len(member_data) > limit:
                         _archive_log().warning("rag: archive member %s in %s exceeds the "
                                                "decompressed-size limit; skipped", member, filename)
@@ -672,6 +709,7 @@ def _extract_tar_or_stream(data: bytes, filename: str,
 def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 0) -> str:
     texts: list = []
     total = 0
+    inflated = 0
     truncated = False
     limit = MAX_ARCHIVE_MEMBER_BYTES
     # Collect at most MAX_ARCHIVE_MEMBERS headers by iterating the tar LAZILY.
@@ -704,7 +742,18 @@ def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 
                 f = tf.extractfile(member)
                 if f is None:
                     continue
-                member_data = f.read(limit + 1)
+                # Same whole-archive inflation budget as _extract_zip, charged and
+                # broken on BEFORE the per-member check for the same reason: that
+                # check skips an oversized member that has already been inflated.
+                member_data = f.read(min(limit, MAX_ARCHIVE_INFLATED_BYTES - inflated) + 1)
+                inflated += len(member_data)
+                if inflated >= MAX_ARCHIVE_INFLATED_BYTES:
+                    truncated = True
+                    _archive_log().warning(
+                        "rag: %s exceeded the whole-archive decompressed-size "
+                        "budget (%d MB); stopped early and truncated the text",
+                        filename, MAX_ARCHIVE_INFLATED_BYTES // 1_000_000)
+                    break
                 if len(member_data) > limit:
                     _archive_log().warning("rag: archive member %s in %s exceeds the "
                                            "decompressed-size limit; skipped", member.name, filename)

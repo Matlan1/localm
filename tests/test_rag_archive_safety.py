@@ -157,3 +157,98 @@ def test_member_error_is_not_indexed_as_content(monkeypatch):
     assert "error:" not in out.lower(), \
         f"per-member error leaked into indexed text: {out!r}"
     assert "broken.pdf" not in out or "error" not in out.lower()
+
+
+# --------------------------------------------------------------------------- #
+#  LM-FZ-003: a whole-archive budget on bytes INFLATED, not just text produced. #
+# --------------------------------------------------------------------------- #
+#
+# The per-member cap (80 MB) and the member-count cap (5,000) MULTIPLY rather
+# than compose, and the text budget only advances when a member YIELDS TEXT. A
+# member that sniffs as binary is skipped and charges nothing, so the loop runs
+# to the full member cap while still decompressing each one. Measured: 27.7 MB
+# in -> 28.0 GB out, 86.93 s CPU, all under the 30 MB request cap.
+#
+# These assert on BYTES ACTUALLY INFLATED, deliberately, not on wall-clock time:
+# a timing assertion measures a proxy for the defect and flakes under load on a
+# shared machine, so it would be the wrong instrument for the property.
+
+def _binary_bomb(count: int, size: int) -> dict:
+    """The MEASURED bomb shape, not a synthetic stand-in: highly compressible NUL
+    blocks named .bin, so sniff_format classifies them as binary and they are
+    SKIPPED - contributing nothing to the text budget while each still costs a
+    full decompression."""
+    return {f"m{i:04d}.bin": b"\x00" * size for i in range(count)}
+
+
+def _inflation_probe(monkeypatch) -> list:
+    """Record the size of every member the extractor actually decompressed.
+
+    sniff_format is called once per successfully-read member, with that member's
+    DECOMPRESSED bytes, so summing its inputs measures inflation directly. The
+    real function is still called, so routing behaviour is unchanged (patching it
+    away would delete the behaviour under test)."""
+    seen: list = []
+    real_sniff = extract.sniff_format
+
+    def counting_sniff(data, filename):
+        seen.append(len(data))
+        return real_sniff(data, filename)
+
+    monkeypatch.setattr(extract, "sniff_format", counting_sniff)
+    return seen
+
+
+def _extract_ignoring_refusal(data: bytes, name: str) -> str:
+    """Extract, treating a refusal as an empty result. An all-binary archive
+    correctly ends in "no extractable text" - that refusal was never the defect,
+    the work done to reach it was, and that is what these tests measure."""
+    try:
+        return extract_bytes(data, name)
+    except Exception:
+        return ""
+
+
+@pytest.mark.parametrize("kind, build", [("zip", _zip), ("tar.gz", _targz)])
+def test_binary_members_cannot_inflate_past_the_whole_archive_budget(
+        monkeypatch, kind, build):
+    cap = 5_000_000
+    member = 1_000_000
+    monkeypatch.setattr(extract, "MAX_ARCHIVE_INFLATED_BYTES", cap)
+    seen = _inflation_probe(monkeypatch)
+
+    # 40 MB of inflation available if nothing bounds it; the cap is 5 MB.
+    _extract_ignoring_refusal(build(_binary_bomb(40, member)), f"bomb.{kind}")
+
+    total = sum(seen)
+    # One member of slack: the cap is checked AFTER the read that crosses it.
+    assert total <= cap + member, (
+        f"{kind}: inflated {total} bytes against a {cap}-byte whole-archive "
+        "budget - the decompression-amplification window is open")
+    assert len(seen) < 40, (
+        f"{kind}: decompressed all {len(seen)} members; the budget never stopped it")
+
+
+@pytest.mark.parametrize("kind, build", [("zip", _zip), ("tar.gz", _targz)])
+def test_the_budget_marks_the_result_truncated(monkeypatch, kind, build):
+    """Rule 5: hitting the budget must TELL the user the archive was cut short,
+    not silently hand back partial text. Text members here, so there is a result
+    to carry the note."""
+    monkeypatch.setattr(extract, "MAX_ARCHIVE_INFLATED_BYTES", 2_000_000)
+    members = {f"f{i:03d}.txt": ("x" * 500_000) for i in range(20)}
+    out = _extract_ignoring_refusal(build(members), f"big.{kind}")
+    assert "truncated" in out.lower(), f"{kind}: no truncation note on a cut-off archive"
+
+
+@pytest.mark.parametrize("kind, build", [("zip", _zip), ("tar.gz", _targz)])
+def test_an_ordinary_archive_is_untouched_by_the_budget(monkeypatch, kind, build):
+    """No overcorrection. A normal small archive extracts every member in full
+    and carries NO truncation note - the budget must be invisible in normal use."""
+    seen = _inflation_probe(monkeypatch)
+    members = {f"doc{i}.txt": f"hello from document {i}" for i in range(5)}
+    out = _extract_ignoring_refusal(build(members), f"docs.{kind}")
+
+    for i in range(5):
+        assert f"hello from document {i}" in out, f"{kind}: lost member {i}"
+    assert "truncated" not in out.lower(), f"{kind}: falsely marked truncated"
+    assert len(seen) == 5, f"{kind}: expected all 5 members read, got {len(seen)}"

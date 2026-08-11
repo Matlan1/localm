@@ -38,6 +38,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   to miss. A fresh install is unaffected and needs nothing extra.
 
 ### Fixed
+- **Indexing or attaching a hostile archive can no longer tie up the machine.**
+  Archive extraction limited how much any single member could decompress to, and
+  how many members it would look at, but not how much it decompressed in total.
+  An archive of many small, highly compressible files could stay well under the
+  upload limit while still expanding to many gigabytes and occupying a CPU core
+  for over a minute before being correctly rejected as containing no text. There
+  is now an overall budget for how much an archive may decompress to, and every
+  member counts against it whether or not any text came out. Ordinary archives
+  are unaffected; one that hits the budget stops early and says so in the
+  extracted text, as it already did for the other limits.
 - **Revoking an admin-scoped device key now reliably signs out its browser
   too.** Browser sessions are re-checked against the key that created them on
   every request, so revoking or expiring that key ends the session. The owner
