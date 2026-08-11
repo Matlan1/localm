@@ -40,6 +40,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   leaves a trace behind, and the error you get names the fault and points at the
   full trace in the debug log. If nothing could be captured the message now says
   so plainly rather than sending you to look for a trace that was never written.
+- **The same crash-trace fix now also covers the HuggingFace-format model process
+  and the dedicated embedding-model process**, not just the main chat model. Both
+  had the identical "see the debug log for the native stack trace" message with
+  nothing ever behind it for a hard native crash; they now arm the same crash
+  handler and report a fault, or its absence, the same honest way.
 - **Opening the web UI on an install that has an API key set now asks for the
   key, instead of signing you in automatically.** When a key was configured, the
   page would still hand a full owner session to whoever asked for it, with no key
