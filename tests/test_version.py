@@ -83,3 +83,74 @@ def test_is_newer_prerelease_never_more_permissive_than_before():
     assert _version.is_newer("0.1.3-rc1", "0.1.4") is False      # older AND a prerelease
     assert _version.is_newer("not-a-version", "0.1.3") is False  # malformed candidate
     assert _version.is_newer("0.1.4", "not-a-version") is True   # malformed current (unchanged: fails open toward offering, not toward accepting a downgrade)
+
+
+# ---------------------- comparable() (the honesty fix) ---------------------
+#
+# is_newer() silently returns False both for a genuine tie/older release AND
+# for a tag it could not parse as a version at all - "stable"/"nightly"/
+# "release-5" all degrade to the same (0,) tuple _parse() gives a real
+# "0.0.0"-shaped version, so the caller cannot tell "not newer" from "could
+# not tell" from the bool alone. comparable() is the second signal a caller
+# reads ALONGSIDE is_newer()'s result to make that distinction (see
+# updater.check()/localm/cli/maintenance.py's update_cmd).
+
+def test_comparable_true_for_two_real_versions():
+    assert _version.comparable("0.2.0", "0.1.0") is True
+    assert _version.comparable("v0.2.0", "0.1.9") is True
+
+
+def test_comparable_true_for_a_genuine_tie_or_older():
+    # A real, ordered comparison - "not newer" here really does mean not newer,
+    # never "could not tell".
+    assert _version.comparable("0.1.0", "0.1.0") is True
+    assert _version.comparable("0.1.0", "0.2.0") is True
+
+
+def test_comparable_false_for_non_numeric_leading_candidate():
+    # The filed bug, reproduced: each of these silently ties at False against a
+    # real version, and none of them is actually "not newer" - they are
+    # unrecognized.
+    for tag in ("stable", "nightly", "release-5"):
+        assert _version.is_newer(tag, "0.1.4") is False
+        assert _version.comparable(tag, "0.1.4") is False, tag
+
+
+def test_comparable_false_for_non_numeric_leading_current():
+    assert _version.comparable("0.1.5", "nightly") is False
+
+
+def test_comparable_true_when_current_has_no_signal():
+    # Matches is_newer's own special case: a fresh install with no local
+    # version signal still sees any real candidate as comparable (an update).
+    assert _version.comparable("0.2.0", "unknown") is True
+    assert _version.comparable("0.2.0", "") is True
+
+
+def test_comparable_false_for_empty_candidate():
+    assert _version.comparable("", "0.1.0") is False
+
+
+# ------------- pinned to the ACTUAL shipped tag shape (unhyphenated) -------
+#
+# Every truth-table test above uses the hyphenated "0.1.4-rc1" form. This
+# project's real tags and VERSION file use the UNHYPHENATED form instead - see
+# VERSION at repo root (0.1.5rc2) and the git tags (v0.1.5rc1, v0.1.5rc2). The
+# code already handles both by construction (_prerelease_suffix's
+# `.lstrip("-_")`), but nothing previously pinned the shape that actually
+# ships - a refactor of the parsing could silently stop handling it while
+# every existing hyphenated-form test kept passing.
+
+def test_is_newer_pinned_to_shipped_tag_shape():
+    assert _version.is_newer("v0.1.5rc2", "v0.1.5rc1") is True
+    assert _version.is_newer("v0.1.5rc1", "v0.1.5rc2") is False
+    assert _version.is_newer("v0.1.5", "v0.1.5rc2") is True     # final outranks any rc
+    assert _version.is_newer("v0.1.5rc1", "v0.1.5") is False
+    assert _version.is_newer("v0.1.5rc1", "v0.1.5rc1") is False  # exact tie
+    assert _version.normalize("v0.1.5rc2") == "0.1.5rc2"
+
+
+def test_prerelease_suffix_shipped_tag_shape():
+    assert _version._prerelease_suffix("0.1.5rc1") == ("rc", 1)
+    assert _version._prerelease_suffix("0.1.5rc2") == ("rc", 2)
+    assert _version._prerelease_suffix("0.1.5") is None

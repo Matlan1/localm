@@ -218,10 +218,17 @@ def check(*, opener=None) -> dict:
     current = _version.read_version()
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
+    # Whether "not newer" above actually means anything: is_newer() silently
+    # returns False both for a genuine tie/older release AND for a tag it could
+    # not parse as a version at all (see _version.comparable's docstring). No
+    # candidate at all (latest falsy - "no releases published") is not this
+    # function's problem to flag; the caller already branches on that first.
+    comparable = (not latest) or _version.comparable(latest, current)
     return {
         "current": current,
         "latest": latest,
         "newer": newer,
+        "comparable": comparable,
         "notes": (data.get("notes") or "") if isinstance(data, dict) else "",
         "published_at": data.get("published_at") if isinstance(data, dict) else None,
         "asset": data.get("asset") if isinstance(data, dict) else None,

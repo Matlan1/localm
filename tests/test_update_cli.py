@@ -25,6 +25,19 @@ def test_update_check_up_to_date(monkeypatch):
     assert "up to date" in r.output
 
 
+def test_update_check_unrecognized_tag_reports_uncertainty_not_up_to_date(monkeypatch):
+    """The honesty fix: when the comparator could not order the tags (info's
+    "comparable" is False), the CLI must say so, never fold that into a false
+    "up to date"."""
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.4", "latest": "nightly", "newer": False, "comparable": False,
+        "notes": "", "asset": None})
+    r = CliRunner().invoke(main, ["update", "--check"])
+    assert "Could not tell" in r.output
+    assert "up to date" not in r.output
+
+
 def test_update_check_reports_available(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
