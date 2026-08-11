@@ -795,7 +795,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/remove", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_remove(req: RemoveModelRequest, request: Request):
-        _require_registered(req.model)
+        registry = _require_registered(req.model)
         if req.model == active_model():
             raise HTTPException(409, "Cannot remove the active model - switch first")
         # A model can be resident in VRAM (loaded) without being the ACTIVE one -
@@ -806,6 +806,23 @@ def register(app: FastAPI, ctx) -> None:
         engine = _hs._engines.get(req.model)
         if engine is not None and engine.loaded:
             raise HTTPException(409, "Cannot remove a loaded model - unload it first")
+        # Both guards above ask whether a loaded engine is keyed under this
+        # NAME, which answers the real question only while every renamer
+        # re-keys the engine map. `localm rename` is a separate process and
+        # cannot, so after a CLI rename both miss and the removal below deletes
+        # a file a live engine is still serving from. Ask what the deletion
+        # actually turns on instead: is any live engine holding THAT FILE. Off
+        # the event loop because it resolves registry paths, and a UNC entry
+        # blocks in the SMB redirector (same reason model_detail offloads its
+        # stat/rglob).
+        loop = asyncio.get_running_loop()
+        holder = await loop.run_in_executor(
+            get_plugin_executor(), _hs.loaded_engine_holding_model_file,
+            req.model, registry)
+        if holder is not None:
+            raise HTTPException(
+                409, f"Cannot remove '{req.model}' - its file is still loaded "
+                     f"as '{holder}'. Unload it first.")
         job = jobs.start_cli("remove", ["rm", req.model, "--yes"],
                              owner=principal_id(request))
         return {"job_id": job.id}
@@ -846,40 +863,12 @@ def register(app: FastAPI, ctx) -> None:
         config/jobs/RAG references that named it). Renaming the currently
         ACTIVE (or merely loaded) model is allowed: the live engine is
         re-keyed in place right after the registry move, so it keeps serving
-        under its new name instead of being orphaned under the old one."""
-        registry = _require_registered(req.model)
-        # Same precheck-then-report-the-sanitized-name discipline as alias
-        # (REG-562): sanitizing happens server-side, so the collision check and
-        # the eventual response must both speak the sanitized name, not the raw
-        # text the caller sent.
-        from localm.model_manager import _sanitize_name, rename_model_with_notes
-        new_name = _sanitize_name(req.new_name)
-        if new_name != req.model and new_name in registry:
-            raise HTTPException(409, f"Name already taken: {new_name}")
-        loop = asyncio.get_running_loop()
-        try:
-            renamed, notes = await loop.run_in_executor(
-                get_plugin_executor(), rename_model_with_notes, req.model, req.new_name)
-        except Exception as e:
-            raise HTTPException(400, f"Rename failed: {e}")
-        if not renamed:
-            # rename_model_with_notes itself distinguishes "vanished" from "name
-            # taken" via its own console output, but only the return value
-            # crosses the executor boundary - re-derive which race it lost the
-            # same way alias does.
-            from localm.config import load_registry
-            if req.model not in load_registry():
-                raise HTTPException(404, f"Model not registered: {req.model}")
-            raise HTTPException(409, f"Name already taken: {new_name}")
-        # Synchronous, in-memory only (no await) - safe to call directly on the
-        # event loop right after the executor call above returns.
-        _hs.rekey_loaded_model(req.model, new_name)
-        # `notes` includes what could be migrated AND what could not (e.g. a
-        # per-project .localcoder/config.toml, unreachable from here) - it must
-        # reach the caller, not just the server log, or a user has no way to
-        # learn their coder config may still name the old model.
-        return {"status": "renamed", "model": req.model, "new_name": new_name,
-                "notes": notes}
+        under its new name instead of being orphaned under the old one.
+
+        The registry move and the re-key are one operation, not two steps a
+        route is trusted to perform in order, so both this and the /v1 sibling
+        go through the single helper that pairs them."""
+        return await _hs.rename_registered_model(req.model, req.new_name)
 
     @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_set_type(req: SetTypeRequest):

@@ -1945,6 +1945,44 @@ def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
         return False
 
 
+def resolve_deletion_target(path) -> Optional[Path]:
+    """The RESOLVED file (or directory) that removing a registry entry pointing
+    at *path* would actually DELETE, or None when the removal drops the name
+    only and leaves the bytes alone.
+
+    Split out of :func:`remove_model`'s own gate below so that a caller which
+    has to decide, BEFORE the removal runs, whether a file is about to be
+    destroyed asks exactly the question the deletion will answer. The server's
+    remove-model route is such a caller: it spawns ``localm rm`` in a CHILD
+    PROCESS, so once the removal starts there is nothing left for it to
+    consult, and a guard that re-derived this predicate by hand could drift
+    away from it. Same reasoning as the ``localm rm`` confirmation prompt
+    sharing :func:`is_owned_model_path`: a check in front of a destructive
+    action must not be a second, independent opinion about what that action
+    does.
+
+    Alias-awareness is deliberately NOT part of this. Whether another
+    registered name still references the file is a registry question, answered
+    by :func:`find_aliases_by_path` before this is consulted (remove_model does
+    exactly that, and returns early).
+
+    Returns None for a path outside <data dir>/models (never ours to delete),
+    for one that is already gone, and for one that cannot be resolved at all -
+    in every case there is no deletion for a caller to guard against.
+    """
+    try:
+        target = Path(path).resolve()
+    except (OSError, ValueError):
+        # Same reasoning as is_owned_model_path's guard: an unresolvable stored
+        # path (an embedded NUL from a hand-edited registry, a dead drive) is
+        # not one anything is willing to delete under, so it is not a deletion
+        # target either.
+        return None
+    if is_owned_model_path(target) and target.exists():
+        return target
+    return None
+
+
 def remove_model(name: str) -> None:
     reg = _mm.load_registry()
     if name not in reg:
@@ -1981,7 +2019,10 @@ def remove_model(name: str) -> None:
     # stands immediately in front of shutil.rmtree / unlink, and it has to hold on
     # a path that was NOT written by this process, so it goes through the single
     # resolving definition rather than a local test (see is_owned_model_path for
-    # the two hand-rolled variants it replaces and why both were wrong).
+    # the two hand-rolled variants it replaces and why both were wrong). It is
+    # resolve_deletion_target because a caller standing in front of this
+    # deletion - the server's remove route, which spawns it in a child process -
+    # must be able to ask the same question and get the same answer.
     #
     # Every operation below runs on the RESOLVED path, because that is the path
     # the ownership decision was made about. Deciding on one and deleting via the
@@ -1991,12 +2032,17 @@ def remove_model(name: str) -> None:
     # gate just authorised. Resolving once and using it throughout makes the
     # decision and the action refer to the same file by construction, rather than
     # by a reader noticing they agree.
-    try:
-        target = path.resolve()
-    except (OSError, ValueError):
-        target = path
-    owned = is_owned_model_path(target)
-    if owned and target.exists():
+    target = resolve_deletion_target(path)
+    # is_owned_model_path is asked AGAIN here, deliberately, even though a
+    # non-None target already means it answered True inside the helper. A
+    # destructive sink keeps its authorization inline and dominating at the
+    # sink rather than inheriting it from a helper's return contract: a later
+    # edit that gave resolve_deletion_target one more reason to return a path
+    # would silently widen what rmtree/unlink touch, with nothing at the delete
+    # site saying otherwise. The repeat costs one resolve of an already-resolved
+    # path and is what keeps "the gate stands immediately in front of
+    # shutil.rmtree / unlink" a true statement about this code.
+    if target is not None and is_owned_model_path(target):
         if target.is_dir():
             import shutil
             shutil.rmtree(target)

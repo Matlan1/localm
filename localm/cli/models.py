@@ -426,6 +426,110 @@ def alias(existing, new_name):
         sys.exit(1)
 
 
+def _rename_on_running_server(old_name: str, new_name: str):
+    """Ask the localm server serving this directory to perform the rename, so
+    the registry move and the live engine's re-key happen in ONE process.
+
+    Returns True on success, False when the server refused the rename ITSELF
+    (already reported to the user, and renaming locally would fail the same
+    way), or None when the caller should go ahead and rename locally.
+
+    Why this exists: a rename done in THIS process moves the registry entry
+    while a running server keeps its loaded engine keyed under the OLD name -
+    two processes, no shared memory. The server then believes it is serving a
+    model the registry no longer lists, requests naming the NEW name reload the
+    same file into a second engine, and every name-keyed check on the server
+    side is asking about a name nothing is under.
+    """
+    import os
+
+    import requests
+
+    from .. import instances, tls
+    from ..auth import resolve_bearer_headers
+
+    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    entry = None
+    if not url:
+        entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
+        if entry is None:
+            return None                      # nothing running: rename locally
+        scheme = entry.get("scheme", "http")
+        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+
+    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    try:
+        resp = requests.post(f"{url}/v1/models/rename", headers=headers,
+                             params={"model": old_name, "new_name": new_name},
+                             timeout=60, verify=tls.requests_verify(url))
+    except requests.ConnectionError as e:
+        # Never established, so the server certainly did not act. Usually a
+        # stale registry entry for a process that has gone. Say so at the
+        # altitude it deserves and fall back, rather than refusing a rename
+        # because of a dead entry. (ConnectTimeout subclasses this, and it
+        # belongs here: no connection means no request.)
+        console.print(f"[dim]No reachable server at {url} ({e}) - renaming locally.[/dim]")
+        return None
+    except requests.RequestException as e:
+        # The request WAS sent and the reply did not arrive (a read timeout
+        # while the plugin executor is busy is the realistic one). Whether the
+        # rename was applied is now unknown, and BOTH wrong answers cost the
+        # user something: renaming locally on top of a rename that succeeded
+        # reports "Not found" for work that actually completed, and reporting
+        # success for one that did not is a rule 5 violation. The registry is
+        # the ground truth, so read it rather than guess.
+        from ..config import load_registry
+        from ..model_manager import _sanitize_name
+        safe = _sanitize_name(new_name)
+        reg = load_registry()
+        if safe in reg and old_name not in reg:
+            console.print(f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> "
+                          f"[bold]{safe}[/bold]")
+            console.print(f"[dim](no reply from the server: {e} - but the rename "
+                          f"itself completed)[/dim]")
+            return True
+        console.print(f"[yellow]No reply from {url} ({e}); the rename does not "
+                      f"appear to have been applied - doing it locally.[/yellow]")
+        return None
+
+    if resp.ok:
+        data = resp.json()
+        console.print(f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> "
+                      f"[bold]{data.get('new_name', new_name)}[/bold]")
+        for note in data.get("notes") or []:
+            console.print(f"[dim]{note}[/dim]")
+        return True
+
+    detail = ""
+    try:
+        detail = resp.json().get("detail", "")
+    except Exception:
+        pass
+    # Match the two verdicts the rename route itself raises, NOT the status
+    # code alone: a server too old to have this route answers 404 as well, with
+    # FastAPI's bare "Not Found", and treating that as "model not registered"
+    # would refuse a rename the user is perfectly entitled to. Falling through
+    # to the local rename is the safe direction; refusing is not.
+    _verdict = detail.lower()
+    if resp.status_code in (404, 409) and (
+            "not registered" in _verdict or "already taken" in _verdict):
+        # The server's own verdict on the rename itself. Renaming locally would
+        # fail identically, so report it and stop rather than going behind its
+        # back.
+        console.print(f"[red]{detail}[/red]")
+        return False
+    # Anything else (401 without a key, a server too old to have the route, a
+    # 5xx) leaves the rename undone, and the user asked for a rename. Do it
+    # locally and say plainly what the running server now believes - a silent
+    # fallback here is how the server ends up serving an orphaned name.
+    console.print(f"[yellow]The running server declined the rename "
+                  f"({resp.status_code}{': ' + detail if detail else ''}).[/yellow]")
+    console.print("[yellow]Renaming locally; that server will keep the model "
+                  "loaded under its old name until it is restarted or the "
+                  "model is unloaded ([bold]localm unload[/bold]).[/yellow]")
+    return None
+
+
 @main.command()
 @click.argument("old_name", shell_complete=_complete_model_name)
 @click.argument("new_name")
@@ -439,12 +543,20 @@ def rename(old_name, new_name):
     and is not touched - update it by hand in any project that pinned this
     model.
 
+    If a localm server is serving this directory it performs the rename, so a
+    model that is loaded right now keeps serving under its new name instead of
+    being stranded under the old one. Set LOCALM_URL to target a different
+    instance, and LOCALM_API_KEY if it requires one.
+
     \b
     Example:
       localm rename gemma3-12b daily-driver
     """
     from ..model_manager import rename_model
 
+    done = _rename_on_running_server(old_name, new_name)
+    if done is not None:
+        sys.exit(0 if done else 1)
     if not rename_model(old_name, new_name):
         sys.exit(1)
 
