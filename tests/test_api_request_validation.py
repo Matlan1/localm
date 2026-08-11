@@ -189,11 +189,27 @@ def _deep_json(depth: int) -> bytes:
 
 
 def test_deeply_nested_body_is_422_not_500():
+    """THE STATUS CODE ALONE IS NOT A SUFFICIENT ORACLE HERE, and finding that
+    out is why this test also asserts on `errors`.
+
+    The handler carries a RecursionError fallback that returns a 422 with an
+    EMPTY `errors` list. That fallback is deliberate, but it means the status
+    code is 422 whether the depth prune worked or whether it failed and the net
+    caught it - and in the second case the CPU cost, which is the actual finding,
+    is entirely still there. MEASURED: with the prune reverted, an
+    assert-on-422-only version of this test still PASSED.
+
+    So the real property is "the prune worked", and its observable is that the
+    structured detail SURVIVED rather than being discarded by the fallback."""
     r = _raw_client().post("/v1/chat/completions", content=_deep_json(1500),
                            headers={"Content-Type": "application/json"})
     assert r.status_code == 422, (
         f"a deeply-nested body returned {r.status_code}; the validation handler "
         "could not encode its own error and the documented 422 became a 500")
+    assert r.json()["errors"], (
+        "the 422 came from the RecursionError fallback, not from the depth "
+        "prune: `errors` is empty, so the encoder still blew the stack and the "
+        "event-loop cost this fix exists to remove is still being paid")
 
 
 def test_deeply_nested_body_reports_the_elision():
