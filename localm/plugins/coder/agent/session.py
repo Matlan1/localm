@@ -28,6 +28,10 @@ class _SessionMixin:
         self._abort_no_progress = False
         self._last_response_fp = ""
         self._repeat_response_count = 0
+        # Goes with them: the similarity breaker compares against this history,
+        # so carrying it past a cleared conversation would let a new session
+        # trip on responses the user can no longer see.
+        self._recent_finals = []
         self._last_run_ok = True
         # Goes with it: a verdict about a run whose conversation has just been
         # dropped is not a verdict about anything. _loop re-arms this too, so

@@ -746,8 +746,8 @@ ws     ::= [ \t\n\r]*
             # downstream that would ever reveal it again.
             yield buf, in_call or (fence_state == "explicit")
 
-    def _tool_call_grammar(self) -> Optional[tuple]:
-        """(grammar, trigger_patterns) for LAZY tool-call enforcement, or None.
+    def _tool_call_grammar(self, *, forced: bool = False) -> Optional[tuple]:
+        """(grammar, trigger_patterns) for tool-call enforcement, or None.
 
         Returns ``(gbnf.TOOL_CALLS_ONLY, [gbnf.TOOL_CALL_TRIGGER])`` when the
         ``coder_tool_grammar`` config flag is on (the default since 2026-07-02,
@@ -755,26 +755,62 @@ ws     ::= [ \t\n\r]*
         thinking and prose flow unconstrained; the grammar engages only when the
         model itself starts a <tool_call>, from which point the call must be
         structurally valid JSON. Live-verified on the bundled runtime. External
-        API backends report supports_grammar=False and are unaffected."""
+        API backends report supports_grammar=False and are unaffected.
+
+        With *forced*, returns ``(gbnf.TOOL_CALLS_AFTER_THINK, None)`` instead:
+        no trigger, so the grammar binds from the FIRST token and the response
+        cannot be anything but an optional reasoning block followed by a real
+        tool call. That is the difference that matters for
+        NEW-CODER-NO-TOOLCALL-SILENT - the lazy form engages only once the model
+        starts a <tool_call>, i.e. it is gated on the model already doing the
+        exact thing it is failing to do, so it can never rescue a turn that
+        produced no call at all.
+
+        The ``coder_tool_grammar`` flag gates the forced form too. Turning it
+        off is an explicit user choice to leave sampling unconstrained, and
+        quietly re-imposing a grammar on the rescue path would override that
+        choice silently; the caller reports that forcing is unavailable and why
+        instead."""
         if not getattr(self.backend, "supports_grammar", False):
             return None
         try:
             from localm.config import load_config
             if not load_config().get("coder_tool_grammar", True):
                 return None
+            if forced:
+                from localm.inference.gbnf import TOOL_CALLS_AFTER_THINK
+                return TOOL_CALLS_AFTER_THINK, None
             from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
             return TOOL_CALLS_ONLY, [TOOL_CALL_TRIGGER]
         except Exception:
             return None
 
+    def can_force_tool_calls(self) -> bool:
+        """True when this backend + config can bind the tool-call grammar from
+        the first token (the escalation ladder's forcing rung). Pure query: it
+        builds nothing and mutates nothing, so a caller may ask before deciding
+        whether the rung exists without that question having a side effect."""
+        return self._tool_call_grammar(forced=True) is not None
+
     def _llm_kwargs(self) -> dict:
-        """gen_kwargs for an LLM call, adding the lazy tool-call grammar when
-        enabled (see :meth:`_tool_call_grammar`)."""
+        """gen_kwargs for an LLM call, adding the tool-call grammar when enabled
+        (see :meth:`_tool_call_grammar`).
+
+        ``_force_tool_grammar`` selects the FORCED variant for a single turn.
+        Reading it here is deliberately side-effect free - the flag is set and
+        cleared by the escalation ladder in loop.py, which owns the one-shot
+        semantics. Clearing it here would make an ordinary kwargs build mutate
+        turn state, so anything that assembled kwargs twice (a retry, a test, a
+        future caller) would silently consume the escalation."""
         kw = dict(self.gen_kwargs)
-        pair = self._tool_call_grammar()
+        pair = self._tool_call_grammar(
+            forced=bool(getattr(self, "_force_tool_grammar", False)))
         if pair and "grammar" not in kw:
-            kw["grammar"], kw["grammar_triggers"] = pair
-            kw["grammar_lazy"] = True
+            grammar, triggers = pair
+            kw["grammar"] = grammar
+            if triggers:
+                kw["grammar_triggers"] = triggers
+                kw["grammar_lazy"] = True
         return kw
 
     def _stream_and_record(self, messages: list[dict], *, on_token, on_reasoning,

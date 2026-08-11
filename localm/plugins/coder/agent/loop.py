@@ -16,7 +16,55 @@ from ..display import (
 from ..parser import looks_like_tool_attempt, split_response
 from ..tools import ToolResult
 from ..audit import SessionMode
-from .constants import _MAX_TOOL_REPAIRS, _REPEAT_RESPONSE_ABORT
+from .constants import (
+    _ACTION_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
+    _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
+    _WORKSPACE_HINT,
+)
+
+_RE_WORKSPACE = None      # compiled on first use
+
+
+def implies_action(text: str) -> bool:
+    """True when *text* asks for something that needs a TOOL rather than an
+    explanation - the precondition for escalating a turn that produced no tool
+    call (NEW-CODER-NO-TOOLCALL-SILENT).
+
+    Two independent signals, either of which is enough: an imperative action
+    verb (``_ACTION_VERBS``), or a reference to this workspace - a path, a
+    filename with an extension, or a project noun (``_WORKSPACE_HINT``). Read
+    verbs count: "show me what is in config.py" needs read_file exactly as much
+    as "write config.py" needs write_file, and a model answering either from
+    imagination is the same defect.
+
+    THE BAR IS DELIBERATELY LOW, and that is a judgement about relative cost,
+    not sloppiness. A false POSITIVE costs one extra turn whose re-prompt says
+    in as many words that a plain answer is acceptable if no tool is needed, so
+    the model can decline and the loop finishes normally. A false NEGATIVE is
+    the defect this whole ladder exists to remove: the request is silently
+    answered with prose and nothing happens. Those are not symmetric, so this
+    leans toward firing.
+
+    Pure and module-level so it can be tested directly on the request strings
+    that matter, without constructing an Agent."""
+    global _RE_WORKSPACE
+    if not text:
+        return False
+    lowered = text.lower()
+    import re
+    if _RE_WORKSPACE is None:
+        _RE_WORKSPACE = re.compile(_WORKSPACE_HINT, re.IGNORECASE)
+    for word in re.findall(r"[a-z]+", lowered):
+        if word in _ACTION_VERBS:
+            return True
+    return bool(_RE_WORKSPACE.search(text))
+
+
+def response_similarity(a: str, b: str) -> float:
+    """difflib ratio of two responses, whitespace-normalised. 1.0 is identical."""
+    import difflib
+    return difflib.SequenceMatcher(None, " ".join(a.split()),
+                                   " ".join(b.split())).ratio()
 
 
 class _LoopMixin:
@@ -33,6 +81,10 @@ class _LoopMixin:
             self._review_task = task   # remembered for the pre-done diff review
         if not self._session_title:
             self._session_title = task   # resume-listing display title (item 3)
+        # The RAW request, before _with_episodes can prepend a lessons preamble:
+        # implies_action() must judge what the USER asked for, not boilerplate
+        # that happens to contain an action verb.
+        self._last_user_request = task
         self._add_user(self._with_episodes(task))
         return self._loop(interactive=False)
 
@@ -45,6 +97,7 @@ class _LoopMixin:
         injected on the first task). Used by the CLI goal loop to feed a
         verification failure back to the agent for another fix attempt.
         """
+        self._last_user_request = message
         self._add_user(message)
         return self._loop(interactive=False)
 
@@ -62,6 +115,7 @@ class _LoopMixin:
             self._session_title = user_input
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
+        self._last_user_request = user_input   # raw, see run_task
         if self._episodic and not self._episode_task:
             self._episode_task = user_input
             user_input = self._with_episodes(user_input)
@@ -168,7 +222,14 @@ class _LoopMixin:
         st = SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0,
                              verify_retries=0, verify_settled=False,
                              verify_checked_at=self._write_total(),
-                             partial_notice_count=0, partial_notice_cap_announced=False)
+                             partial_notice_count=0, partial_notice_cap_announced=False,
+                             # Zero-tool-call escalation (NEW-CODER-NO-TOOLCALL-SILENT):
+                             # how many rungs of the ladder this task has used, and
+                             # whether the model has managed ANY call yet. The second
+                             # is what keeps the ladder off a task that is genuinely
+                             # working and simply finished with a prose summary.
+                             nocall_escalation=0, tool_calls_made=0,
+                             writes_at_start=self._write_total())
 
         try:
             while self._turns < self.max_turns:
@@ -256,6 +317,13 @@ class _LoopMixin:
                 # ---- call LLM -------------------------------------------
                 messages = self._build_messages()
                 response = self._call_llm(messages, interactive=interactive)
+                # One-shot: the forcing grammar applies to the turn the ladder
+                # armed it for and no further. Cleared HERE, next to the single
+                # call that consumes it, so no later path can inherit a
+                # constrained sampler it never asked for - including the error
+                # paths below, which is why this is not in a finally further
+                # down or inside _llm_kwargs (see that method's docstring).
+                self._force_tool_grammar = False
 
                 if self._stop_requested:
                     # Stopped mid-generation: keep the partial text, run nothing
@@ -266,35 +334,76 @@ class _LoopMixin:
                     self._user_stopped = True
                     break
 
-                # ---- repeated-scaffold breaker (REC-CODER-LOOPBREAK) ------
-                # A stuck model can emit the SAME response over and over (the
-                # "Message 1..4 / I will now wait" narration) making no progress.
-                # The error-streak breakers only catch FAILED tool calls; this
-                # catches identical NON-failing repetition. Abort after N in a row.
-                fp = (response or "").strip()
-                if fp and fp == self._last_response_fp:
-                    self._repeat_response_count += 1
-                else:
-                    self._repeat_response_count = 0
-                    self._last_response_fp = fp
-                if self._repeat_response_count >= _REPEAT_RESPONSE_ABORT - 1:
-                    final_response = (
-                        "[circuit breaker: the model repeated the same response "
-                        f"{self._repeat_response_count + 1} times with no progress - "
-                        "stopping so you can adjust the approach instead of burning "
-                        "more turns. The conversation is intact.]")
-                    print_warning(final_response)
-                    self._emit("info", text=final_response)
-                    self._add_assistant(response)
-                    self._last_run_ok = False
-                    break
-
                 # ---- parse tool calls ------------------------------------
                 # Pass the known tool names so the lenient, name-gated formats
                 # (bare JSON and ```json / bare fences) are recognised without
                 # mistaking a JSON example in prose for a call.
                 tool_names = set(TOOL_REGISTRY) - self.disabled_tools
                 calls = parse_tool_calls(response, tool_names=tool_names)
+
+                # ---- repeated-scaffold breaker (REC-CODER-LOOPBREAK) ------
+                # A stuck model can restate the same non-answer over and over
+                # (the "Message 1..4 / I will now wait" narration, or the same
+                # refusal reworded) making no progress. The error-streak
+                # breakers only catch FAILED tool calls; this catches
+                # NON-failing repetition.
+                #
+                # SIMILARITY, NOT EQUALITY, AND AGAINST ANY EARLIER TURN, NOT
+                # ONLY THE LAST. The original compared exact stripped strings
+                # and reset to zero on ANY difference, so one changed character
+                # - a renumbered "Message 3", a reworded apology - made a stuck
+                # model look like it was progressing, forever. Measured on the
+                # live NEW-CODER-NO-TOOLCALL-SILENT session the successive
+                # near-duplicates scored 0.91 / 0.75 / 0.72 and the exact-match
+                # breaker never once fired. A bounded history rather than only
+                # the previous turn also catches an A-B-A-B alternation, which
+                # a consecutive-only check can never see.
+                #
+                # SIMILAR TEXT ALONE IS NOT ENOUGH - THE CALL SIGNATURE MUST
+                # REPEAT TOO. Turns that reach here at all are overwhelmingly
+                # turns WITH tool calls: a turn with none ends the task in
+                # _handle_no_tool_calls, so only the capped continue-paths (the
+                # verify nudge, a repair, an escalation rung) ever produce two
+                # call-less turns in a row. That makes "count only call-less
+                # turns" a breaker that can essentially never fire, and
+                # "count every turn on text similarity alone" one that fires on
+                # honest work: reading five files differs only in the path and
+                # scores ~0.97 similar, so a working session would be aborted at
+                # turn five for doing exactly what it was asked.
+                #
+                # Requiring BOTH separates them exactly. Different args mean the
+                # model is advancing through real work; the same call plus the
+                # same narration, however reworded, is the stuck scaffold this
+                # breaker exists for.
+                fp = (response or "").strip()
+                sig = " | ".join(
+                    f"{c.name}({sorted((c.args or {}).items())!r})" for c in calls)
+                if fp:
+                    history = getattr(self, "_recent_finals", None)
+                    if history is None:
+                        history = self._recent_finals = []
+                    match = max((response_similarity(fp, prev_fp)
+                                 for prev_fp, prev_sig in history
+                                 if prev_sig == sig), default=0.0)
+                    if match >= _REPEAT_SIMILARITY:
+                        self._repeat_response_count += 1
+                    else:
+                        self._repeat_response_count = 0
+                    history.append((fp, sig))
+                    del history[:-_REPEAT_HISTORY_MAX]
+                    self._last_response_fp = fp
+                if self._repeat_response_count >= _REPEAT_RESPONSE_ABORT - 1:
+                    final_response = (
+                        "[circuit breaker: the model repeated essentially the "
+                        f"same response {self._repeat_response_count + 1} times "
+                        "with no progress - stopping so you can adjust the "
+                        "approach instead of burning more turns. The "
+                        "conversation is intact.]")
+                    print_warning(final_response)
+                    self._emit("info", text=final_response)
+                    self._add_assistant(response)
+                    self._last_run_ok = False
+                    break
 
                 if not calls:
                     should_break, fr = self._handle_no_tool_calls(
@@ -305,6 +414,11 @@ class _LoopMixin:
                     continue
 
                 # ---- there are tool calls --------------------------------
+                # Recorded before execution: the escalation ladder asks whether
+                # the model can produce a CALL at all, which is answered by
+                # parsing one, not by that call then succeeding.
+                st.tool_calls_made += len(calls)
+
                 # Show the non-tool-call text parts first
                 segments = split_response(response, calls)
                 if interactive:
@@ -569,6 +683,14 @@ class _LoopMixin:
             self._add_assistant(response)
             return (True, notice)
 
+        # Zero-attempt escalation: the model produced NOTHING tool-shaped on a
+        # request that needs a tool. Every branch above is reached only via
+        # looks_like_tool_attempt(), so before this the TOTAL failure was the
+        # one case with no handling at all - it fell through and was accepted.
+        escalated = self._escalate_no_tool_attempt(response, interactive, st)
+        if escalated is not None:
+            return escalated
+
         # Pre-done review: before accepting the final answer, let a
         # reviewer model check the cumulative diff and feed any blocking
         # issues back for one more fix pass. Fires at most once per loop,
@@ -601,12 +723,150 @@ class _LoopMixin:
         # exactly what every OTHER gate above has just failed to have an
         # opinion on (nothing to verify, no unverified writes, no reviewer
         # configured or nothing to review).
+        # Rung 3, and ONLY here: the ladder ran and the model still never
+        # produced a call. Reached when the rungs are exhausted, when forcing is
+        # unavailable, or when turns ran out mid-ladder. Stated as a fact about
+        # what this run could not make happen - never as advice to change model,
+        # which is the user's choice to make and not this code's to second-guess.
+        enforcement = ""
+        if st.nocall_escalation and not self._used_tools_this_task(st):
+            why = ("" if self.can_force_tool_calls() else
+                   " Constrained sampling, which would have forced one, is not "
+                   "available here (this backend cannot enforce a grammar, or "
+                   "coder_tool_grammar is off in config).")
+            enforcement = (
+                "\n\n[tool use not achieved: this model was asked "
+                f"{st.nocall_escalation} more time(s) to call a tool and did not, "
+                f"so nothing was run or written.{why}]")
+            self._audit.notice(
+                "no_tool_call",
+                f"escalation exhausted after {st.nocall_escalation} attempt(s); "
+                "no tool call was produced")
+            self._emit("info", text=(
+                "the model did not call any tool despite being asked again "
+                "- nothing was run or written"))
+
         footer = self._grounding_footer()
-        final_text = response + footer if footer else response
+        final_text = response + enforcement + (footer or "")
         if not interactive and self.on_event is None:
             print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)
         return (True, final_text)
+
+    def _used_tools_this_task(self, st) -> bool:
+        """Has the model demonstrated, THIS TASK, that it can drive a tool?
+
+        Three independent pieces of evidence, any one of which settles it. Only
+        the first is about parsing; the other two are about what the harness
+        actually recorded happening, which is the same grounding rule
+        _grounding_footer follows - never the model's own account of itself.
+
+        Both artifact checks are needed, and neither subsumes the other: a
+        write is recorded in _unverified_writes the moment it lands, while
+        _write_total() is the cumulative counter, snapshotted at task start so
+        an EARLIER task's writes in a long REPL session cannot be mistaken for
+        this one's. A task that has written something is self-evidently not a
+        task in which the model refuses to act, and escalating at it would
+        nag a model that is working."""
+        return bool(st.tool_calls_made
+                    or self._unverified_writes
+                    or self._write_total() > st.writes_at_start)
+
+    def _escalate_no_tool_attempt(self, response, interactive, st):
+        """Escalate a turn that produced NO tool call and no attempt at one, on a
+        request that needs a tool (NEW-CODER-NO-TOOLCALL-SILENT).
+
+        Returns None to fall through to the remaining gates, or the same
+        ``(should_break, final_response)`` pair the caller propagates.
+
+        THE POINT IS TO MAKE THE CALL HAPPEN, NOT TO REPORT THAT IT DID NOT.
+        Reporting already existed (_grounding_footer's "no files changed") and
+        it left the user with a model that never touched a tool across six
+        turns. The rungs, in order:
+
+          1. Re-prompt with the exact format block - the same treatment the
+             MALFORMED case has always had, triggered by ABSENCE instead. Some
+             models simply never saw the wrapper in a prompt this long and
+             produce a correct call the moment it is shown to them again.
+          2. Re-run the turn with the tool-call grammar bound from the FIRST
+             token (see context.can_force_tool_calls). At this point the
+             sampler cannot emit anything except an optional reasoning block
+             and a structurally valid call, so the model's willingness stops
+             being the deciding factor.
+          3. Only once forcing has actually been tried and still failed - or is
+             genuinely unavailable on this backend - tell the user. That
+             message is a report of FAILED ENFORCEMENT, never a suggestion to
+             pick a different model: which model to run is the user's choice
+             and this code's job is to make their choice work.
+
+        Deliberately NOT gated on the response's wording. Every phrasing-based
+        check inherits the unreliability of the self-report it is reading (see
+        _grounding_footer); "did the harness parse a call" is an observable
+        fact about this turn and "does the request need one" is a fact about
+        the user's own text, so neither can be talked past."""
+        if self._used_tools_this_task(st):
+            return None                      # this model calls tools fine
+        if not implies_action(getattr(self, "_last_user_request", "") or ""):
+            return None                      # a question, not an action
+        if self._turns >= self.max_turns:
+            return None                      # no turns left to escalate into
+        if st.nocall_escalation >= _MAX_NOCALL_ESCALATIONS:
+            return None                      # ladder exhausted; caller reports below
+
+        st.nocall_escalation += 1
+        rung = st.nocall_escalation
+
+        if rung == 1:
+            self._audit.notice(
+                "no_tool_call",
+                "model produced no tool call and no attempt on an action request "
+                "- re-prompting with the tool-call format")
+            self._add_assistant(response)
+            self._add_user(
+                "[no tool call] That request needs you to USE a tool - I run the "
+                "tools on this machine for you, and nothing was run or written, "
+                "so the task is not done. Do not describe the steps, do not hand "
+                "back a script for me to run: emit the call itself, in EXACTLY "
+                "this format:\n"
+                "<tool_call>\n"
+                '{"name": "TOOL_NAME", "args": {"PARAM": "VALUE"}}\n'
+                "</tool_call>\n"
+                "Use one of the available tools by its exact name, with valid "
+                "JSON args. Emit one call now and I will run it and give you the "
+                "result. If this genuinely needs no tool at all, say so in one "
+                "sentence and I will accept that as your answer."
+            )
+            if interactive:
+                print_info("(no tool call: re-prompting with the tool-call format)")
+            self._emit("info", text=(
+                "the model answered without using a tool - asking it again "
+                "with the tool-call format"))
+            return (False, "")
+
+        # Rung 2: force it at the sampler.
+        if not self.can_force_tool_calls():
+            self._audit.notice(
+                "no_tool_call",
+                "re-prompt did not produce a tool call and grammar forcing is "
+                "unavailable on this backend/config")
+            return None                      # caller's own branch reports it
+        self._force_tool_grammar = True
+        self._audit.notice(
+            "no_tool_call",
+            "re-prompt did not produce a tool call - re-running the turn with "
+            "the tool-call grammar bound from the first token")
+        self._add_assistant(response)
+        self._add_user(
+            "[no tool call] Still nothing was run. This turn is constrained: "
+            "the only output accepted is a tool call. Think first if you need "
+            "to, then emit the call."
+        )
+        if interactive:
+            print_info("(no tool call: forcing a tool call via constrained sampling)")
+        self._emit("info", text=(
+            "the model still did not use a tool - forcing a tool call via "
+            "constrained sampling"))
+        return (False, "")
 
     def _grounding_footer(self) -> str:
         """A factual line grounding the final answer in the session's own

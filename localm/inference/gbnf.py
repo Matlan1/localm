@@ -84,6 +84,83 @@ ws         ::= ([ \t\n\r])*
 opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 """.strip()
 
+# FORCED mode (grammar=TOOL_CALLS_AFTER_THINK alone, no trigger, grammar_lazy
+# off). Same guarantee as TOOL_CALLS_ONLY - the response MUST contain at least
+# one structurally valid tool call - but with a bounded reasoning prelude in
+# front of it, which is what makes it usable on the models that need forcing
+# most.
+#
+# WHY NOT JUST USE TOOL_CALLS_ONLY: see its note above. Live-tested 2026-07-02,
+# a thinking model masked its <think> opener stalls into that grammar's leading
+# `ws` and produced a WHITESPACE-ONLY reply - trading a useless answer for an
+# empty one. Forcing is only worth reaching for when the model has already
+# failed to call a tool unprompted, and the models that fail that way are
+# disproportionately the reasoning ones, so the strict form is close to
+# unusable exactly where it is needed.
+#
+# THE OPENING "<think>" IS REQUIRED WHEN THE PRELUDE IS USED, and that is the
+# whole difference between forcing and not forcing. MEASURED 2026-08-11 on the
+# repro model: an earlier version of this grammar made the opening tag OPTIONAL,
+# to also accommodate the templates that emit "<think>" themselves so generation
+# starts inside the block. That reasoning is sound about templates and fatal
+# here - an optional opener turns the prelude into an ARBITRARY PROSE prelude,
+# because any leading text at all parses as "reasoning that has not closed yet".
+# The grammar then constrains nothing until the {0,N} bound, and 3/3 live trials
+# rambled to max_tokens and emitted NO tool call. The permissive form is strictly
+# WEAKER than plain TOOL_CALLS_ONLY, which took the same request 3/3.
+#
+# With the tag required, a model that opens one may think and must then call; a
+# model that does not open one is held to a tool call from its first token,
+# exactly as the strict grammar does. The template-pre-opened case degrades to
+# that same immediate forcing rather than to a free-text escape hatch - measured
+# to work on this model, and the safe direction to be wrong in.
+#
+# think-char is the standard match-until-close-tag idiom: any character except
+# '<', OR '<' not followed by '/', OR '</' not followed by 't'. Only the exact
+# byte sequence "</t" is withheld, so reasoning text may contain '<' freely
+# while the close tag stays unambiguous. The cost is that a literal "</td>"
+# inside reasoning ends the block early; that is a rare sequence in prose and
+# the failure is benign (the model proceeds to the call it was going to make).
+#
+# THE {0,N} BOUND IS LOAD-BEARING, NOT DECORATION. An unbounded prelude keeps a
+# parse stack alive in which the model may emit text forever without ever
+# reaching tool-block+, which would silently defeat the forcing this grammar
+# exists to provide. Bounded, the only legal continuation after N prelude
+# characters is "</think>", so the model MUST arrive at the call.
+#
+# 1900 IS MEASURED, NOT CHOSEN. llama.cpp's GBNF parser rejects a repetition
+# count it considers unreasonable ("number of repetitions exceeds sane
+# defaults") and the limit is NOT the one localm's own pre-check enforces:
+# MAX_GRAMMAR_REPEAT_COUNT above is 10000, which is ABOVE the native ceiling,
+# so check_grammar_structure() cannot catch this and a too-large count fails
+# only at the native parse. Binary-searched against the bundled runtime on
+# 2026-08-11 via Engine.validate_grammar (negative control confirmed: a broken
+# grammar IS rejected by the same call, so the measurement is not a blind
+# pass):
+#
+#     {0,1999} -> parses      {0,2000} -> "exceeds sane defaults"
+#
+# 1900 leaves margin under that measured 1999 in case another build's ceiling
+# is slightly lower. A build whose ceiling is lower still would make this
+# grammar unparseable rather than silently wrong, and the coder's escalation
+# treats an unusable forcing grammar as forcing-unavailable and says so.
+TOOL_CALLS_AFTER_THINK = r"""
+root        ::= opt-think opt-ws tool-block+ opt-ws
+opt-think   ::= ("<think>" think-body "</think>")?
+think-body  ::= think-char{0,1900}
+think-char  ::= [^<] | "<" [^/] | "</" [^t]
+tool-block  ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws
+json-obj    ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"
+object      ::= "{" ws (member ws ("," ws member ws)*)? "}"
+member      ::= string ws ":" ws value
+value       ::= object | array | string | number | "true" | "false" | "null"
+array       ::= "[" ws (value ws ("," ws value ws)*)? "]"
+string      ::= "\"" ([^\"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+number     ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+ws          ::= ([ \t\n\r])*
+opt-ws      ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
+""".strip()
+
 # Lazy-grammar trigger for TOOL_CALLS_ONLY: full-match-with-capture-group form
 # per llama.cpp's trigger_patterns contract (the grammar is fed from capture
 # group 1, so enforcement starts exactly at the tag). Verified live 2026-07-02

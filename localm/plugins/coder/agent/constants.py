@@ -283,6 +283,65 @@ _MAX_TOOL_REPAIRS = 2
 # calls (e.g. git_show with invented hashes) and burn the budget. Any success resets.
 _GLOBAL_ERROR_ABORT = 6
 
+# --- zero-tool-call escalation (NEW-CODER-NO-TOOLCALL-SILENT) ---------------
+#
+# A model that emits NO tool call at all used to be accepted as a finished
+# answer, turn after turn: every gate in _handle_no_tool_calls was reached only
+# via looks_like_tool_attempt(), so the MALFORMED case (the model nearly
+# succeeding) was handled and the ZERO-attempt case (total failure) fell
+# straight through. Live: a request to create files produced 6 turns, 0 tool
+# calls, and a final "I don't have the capability to create files".
+#
+# The ladder below escalates instead of accepting. Rung 1 is the same format
+# re-prompt the malformed case already gets, triggered by ABSENCE. Rung 2
+# re-runs the turn with the tool-call grammar engaged from the first token, so
+# the sampler cannot emit anything but a valid call. Only after forcing has
+# actually failed is the user told - as a report of failed enforcement, never
+# as a suggestion to choose a different model.
+_MAX_NOCALL_ESCALATIONS = 2
+
+# Imperative verbs that make a request an ACTION rather than a question. Read
+# verbs are deliberately included: "show me what is in config.py" needs
+# read_file just as much as "write config.py" needs write_file, and a model
+# answering either from imagination is the same failure.
+_ACTION_VERBS: frozenset[str] = frozenset({
+    "add", "adjust", "append", "apply", "build", "bump", "change", "check",
+    "clean", "clear", "commit", "compile", "convert", "copy", "correct",
+    "create", "debug", "delete", "deploy", "diff", "drop", "edit", "execute",
+    "extract", "find", "fix", "format", "generate", "grep", "implement",
+    "init", "insert", "inspect", "install", "lint", "list", "load", "look",
+    "make", "merge", "migrate", "modify", "move", "open", "patch", "port",
+    "print", "pull", "push", "read", "rebase", "refactor", "remove", "rename",
+    "repair", "replace", "reproduce", "rerun", "resolve", "revert", "rewrite",
+    "run", "save", "scaffold", "search", "set", "show", "sort", "split",
+    "start", "stop", "swap", "test", "translate", "tweak", "uninstall",
+    "update", "upgrade", "verify", "write",
+})
+
+# Signals that a request is about THIS project rather than programming in the
+# abstract: an explicit path, a file extension, or a workspace noun. Either a
+# verb OR one of these is enough - see implies_action()'s docstring for why the
+# bar is deliberately low.
+_WORKSPACE_HINT = (
+    r"(?:[\w./\\-]+\.[A-Za-z0-9]{1,6}\b"          # something.ext
+    r"|[~./\\][\w./\\-]+"                          # a path-looking token
+    r"|\b(?:file|files|folder|directory|dir|repo|repository|project|codebase"
+    r"|workspace|script|module|package|test|tests|suite|branch|commit"
+    r"|readme|config|source|sources)\b)"
+)
+
+# Two finals this similar (difflib ratio) mean the model is restating itself
+# rather than progressing. Replaces an EXACT, CONSECUTIVE-ONLY fingerprint that
+# the measured near-duplicates (0.91 / 0.75 / 0.72 similar) never tripped: any
+# one-character difference reset that counter to zero, so a model rephrasing
+# the same refusal each turn looked like progress forever.
+_REPEAT_SIMILARITY = 0.85
+
+# How many earlier finals a turn is compared against. Bounded so a long session
+# cannot make this quadratic; the newest are kept because a stuck loop repeats
+# what it just said, not what it said an hour ago.
+_REPEAT_HISTORY_MAX = 12
+
 # Abort when the model emits the SAME response this many times in a row (the
 # "Message 1..4 / I will now wait" scaffold-repetition: narrates without progress).
 # Catches identical NON-failing repetition, which the error-streak breakers (FAILED

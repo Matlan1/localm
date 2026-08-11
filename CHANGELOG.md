@@ -42,6 +42,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still signs you in, a reload does not sign you in again, and a browser that
   is already signed in stays signed in after you roll the owner key. The
   one-time launcher handoff is unaffected and still works on any bind.
+- **The coder no longer accepts "I can't do that" as a finished answer.** A
+  model that replied in prose without calling any tool was taken at its word,
+  so a request to create files could end with an explanation and nothing
+  written. The coder now asks again with the tool-call format, and if that
+  does not work it constrains the model's output so that a valid tool call is
+  the only thing it can produce. Only if enforcement genuinely fails does it
+  say so plainly, instead of reporting the task as done. The prompt also no
+  longer describes the assistant as "running fully offline", which some models
+  read as being unable to touch your files at all.
+- The coder's stuck-loop detector now recognises a model that keeps rewording
+  the same non-answer, not only one that repeats it character for character.
 
 ## [0.1.5rc2] - 2026-08-08
 

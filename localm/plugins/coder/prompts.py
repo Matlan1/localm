@@ -501,14 +501,31 @@ def build_system_prompt(
     cwd_note = ("" if leaf is None else
                 f' (paths are relative to here - do not repeat "{leaf}", '
                 f'e.g. "file.py" not "{leaf}/file.py")')
+    # CAPABILITY, NOT DEPLOYMENT. This line used to say the assistant was
+    # "running fully offline", and a model read that as "sandboxed, therefore
+    # powerless" and refused a file-creation task outright: "As an AI running
+    # fully offline, I don't have the capability to create files directly on
+    # your local machine." It is a true statement about deployment that reads
+    # as a false statement about capability, and it handed the model a ready-
+    # made excuse for the exact failure NEW-CODER-NO-TOOLCALL-SILENT is about.
+    # The offline/privacy property is real and worth stating, just never inside
+    # the sentence that tells the model what it can do. Note the "small" branch
+    # never carried the phrase, so only default/thinking models were affected.
     if family == "small":
         identity = (
             f"You are {agent_name}, an AI coding assistant.\n"
+            f"You run on the user's own machine and really can read, write and "
+            f"run things here, using the tools below.\n"
             f"Working directory: {shown_cwd}{cwd_note}"
         )
     else:
         identity = (
-            f"You are {agent_name}, an expert AI coding assistant running fully offline.\n"
+            f"You are {agent_name}, an expert AI coding assistant.\n"
+            f"You run locally ON the user's own machine, and the tools listed "
+            f"below are real: they read, create and modify files on this "
+            f"machine and run commands on it. When a request needs one, call "
+            f"it - do not answer that you are unable to act, and do not hand "
+            f"back instructions or a script for the user to run instead.\n"
             f"You help the user write, debug, refactor, and understand code.\n\n"
             f"Working directory: {shown_cwd}{cwd_note}"
         )
