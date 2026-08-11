@@ -2225,7 +2225,21 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         # fetch a self-contained runtime (no Toolkit) or fall back cleanly.
         with_cudart = False
         cuda_line = _CUDA_LINE
-        if chosen == "cuda" and sys.platform == "win32":
+        # NOT platform-gated to win32: nvidia_preflight() and _cuda_setup_dialogue()
+        # are both fully platform-neutral (nvidia-smi runs on Linux too, and the
+        # dialogue's text/branches reference no OS). Restricting this to win32 was
+        # an accident of when Linux CUDA support was added (_provision_backend's
+        # Linux cudart branch, _resolve_backend_asset's Linux cuda_line-aware
+        # matcher, and _fetch_cuda_runtime_libs already handle cuda_line correctly
+        # for Linux and are unit-tested for it - see test_linux_cuda_runtime_
+        # provisioning.py) without this call site being revisited, so a real
+        # Blackwell (or any cuda-13-line) GPU on Linux silently got the cuda-12
+        # line - a build with no kernels for it - and no PyPI cudart runtime
+        # fetch, producing a runtime that LOADS (passes the ABI check) but
+        # registers zero usable GPU devices (found live, 2026-08-11, on a
+        # 3x-Blackwell Linux box: 'GPU: none in the loaded runtime (cuda)').
+        # Only darwin is excluded - CUDA is not a real path on Apple Silicon.
+        if chosen == "cuda" and sys.platform != "darwin":
             # Preflight ONCE and reuse it for both the dialogue and the asset
             # line - a second nvidia-smi call could (rarely) see different
             # hardware and pick a line the dialogue never actually displayed.
