@@ -15,8 +15,10 @@ curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | 
 
 This clones localm to `~/localm`, installs `uv` if needed, creates a private
 `.venv`, auto-detects your GPU, and runs a non-interactive setup that also
-provisions the matching llama.cpp backend (Vulkan for any GPU, Metal on Apple
-Silicon, CPU otherwise).
+provisions the matching llama.cpp backend (CUDA for NVIDIA, HIP for AMD when a
+system ROCm/HIP toolkit is present, Metal on Apple Silicon, Vulkan as the
+universal fallback otherwise, CPU with no GPU - see
+[gpu-setup.md](gpu-setup.md) for the full policy).
 Override the location with `LOCALM_DIR=...`.
 
 ## Manual install

@@ -364,9 +364,10 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # ---- provision the native library (official llama.cpp prebuilt) -------------
 # The RECOMMENDED backend comes from the SAME tested policy the Windows installer
 # uses (`python -m localm.hwdetect` -> "<vendor> <backend>"), so the two installers
-# can never drift: any GPU -> vulkan (runs on AMD/NVIDIA/Intel via the display
-# driver, no vendor toolkit), Apple Silicon -> metal, no GPU -> cpu. CUDA/ROCm are
-# offered below for peak vendor performance (they need that vendor's runtime).
+# can never drift: NVIDIA -> cuda (self-contained on both OSes), AMD -> hip when a
+# system ROCm/HIP toolkit is detected present (else vulkan; gfx103X on Windows
+# always gets the self-contained amd-rocm build regardless), Intel -> vulkan (no
+# toolkit-presence probe for oneAPI yet), Apple Silicon -> metal, no GPU -> cpu.
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
 REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
 case "$REC" in

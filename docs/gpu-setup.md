@@ -18,11 +18,11 @@ See the table below for what each backend needs and when to pick it.
 
 | Backend | Runs on | Notes |
 |---|---|---|
-| `vulkan` | any AMD / NVIDIA / Intel GPU | universal default - only the normal display driver, no CUDA/ROCm/oneAPI toolkit |
-| `cuda` | NVIDIA | peak performance; on Windows setup fetches the CUDA runtime for you (no Toolkit), then load-tests and falls back to vulkan/cpu if it cannot load |
-| `amd-rocm` | AMD RX 6000 (gfx103X / RDNA2) | self-contained ROCm build (bundles its runtime); gfx103X-only - other AMD GPUs use `vulkan` or `hip` |
-| `hip` | AMD (any gfx) | upstream ROCm build; needs the ROCm/HIP runtime |
-| `sycl` | Intel Arc | needs the oneAPI runtime |
+| `vulkan` | any AMD / NVIDIA / Intel GPU | the universal fallback - only the normal display driver, no CUDA/ROCm/oneAPI toolkit; auto-picked for Intel and for AMD with no ROCm/HIP toolkit detected |
+| `cuda` | NVIDIA | auto-picked on every OS (peak performance); setup fetches the CUDA runtime for you (no Toolkit) on both Windows and Linux, then load-tests and falls back to vulkan/cpu if it cannot load |
+| `amd-rocm` | AMD RX 6000 (gfx103X / RDNA2) | self-contained ROCm build (bundles its runtime); auto-picked on Windows for this card, since it needs no toolkit at all - gfx103X-only, other AMD GPUs use `vulkan` or `hip` |
+| `hip` | AMD (any gfx) | upstream ROCm build; auto-picked when a system ROCm/HIP toolkit is detected present, else `vulkan` |
+| `sycl` | Intel Arc | needs the oneAPI runtime; opt-in only (no toolkit-presence probe for it yet) |
 | `metal` | Apple Silicon | auto-picked on macOS; experimental and unverified - see the note below |
 | `cpu` | no GPU | always works |
 
@@ -92,34 +92,32 @@ localm run mymodel --gpu-layers 20 --prompt "hello"
 
 ## NVIDIA (CUDA)
 
-On **Windows** the installer recommends **`cuda`** for NVIDIA (peak performance,
-self-contained - see below). The universal alternative is
-`localm setup-llama --backend vulkan` (runs on the NVIDIA GPU through the normal
-driver, no CUDA toolkit); on **Linux**, Vulkan is still what the installer
-recommends by default.
+The installer recommends **`cuda`** for NVIDIA on **both Windows and Linux**
+(peak performance, self-contained - see below). The universal alternative is
+`localm setup-llama --backend vulkan` (runs on the NVIDIA GPU through the
+normal driver, no CUDA toolkit) if you would rather skip the runtime download.
 
-For peak performance pick `--backend cuda`. On **Windows** this is a guided,
-self-contained path: setup checks your driver, then fetches BOTH the CUDA
-`llama` build and the matching `cudart` runtime bundle from the same llama.cpp
-release, so **you do not need to install the CUDA Toolkit** (needs CUDA >= 12.4
-for most GPUs). Setup also detects your GPU's own architecture and picks the
-CUDA asset line it actually needs: NVIDIA Blackwell (RTX 50-series and
-datacenter B100/B200) automatically gets the newer 13.x line - which needs a
-newer driver in turn (CUDA >= 13.3) - since the 12.x build has no kernels for
-Blackwell; every earlier architecture stays on the 12.x line. Setup checks
-your driver against whichever line your GPU needs and, if it is too old or no
-NVIDIA is found, uses Vulkan for now and tells you what to do; after updating a
-driver, re-run
+On **Windows** this is a guided, self-contained path: setup checks your
+driver, then fetches BOTH the CUDA `llama` build and the matching `cudart`
+runtime bundle from the same llama.cpp release, so **you do not need to
+install the CUDA Toolkit** (needs CUDA >= 12.4 for most GPUs). Setup also
+detects your GPU's own architecture and picks the CUDA asset line it actually
+needs: NVIDIA Blackwell (RTX 50-series and datacenter B100/B200) automatically
+gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.3) -
+since the 12.x build has no kernels for Blackwell; every earlier architecture
+stays on the 12.x line. Setup checks your driver against whichever line your
+GPU needs and, if it is too old or no NVIDIA is found, uses Vulkan for now and
+tells you what to do; after updating a driver, re-run
 `localm setup-llama --backend cuda --force`.
 
-**On Linux**, `--backend cuda` is also self-contained, the same way: upstream
+**On Linux**, `--backend cuda` is self-contained the same way: upstream
 llama.cpp does not publish a Linux CUDA binary itself, so setup fetches one
 from an actively-maintained third-party builder, plus the CUDA runtime
 libraries (cudart, cuBLAS) as separate small downloads - again, no CUDA
-Toolkit install needed. This is newer than the Windows path and has not yet
-been confirmed across real NVIDIA Linux hardware, so Vulkan stays the default
-recommendation there for now; try `--backend cuda` explicitly if you want to
-test it, and report back what you find.
+Toolkit install needed, and the same Blackwell-aware asset-line pick applies.
+Real-hardware field testing (NVIDIA RTX PRO 4000 Blackwell) confirmed CUDA
+works and outperforms Vulkan on Linux too, so it is now the default
+recommendation there, the same as Windows.
 
 After provisioning, setup **load-tests** the library exactly as `localm run`
 will, on every platform. If the CUDA build cannot load on your machine it

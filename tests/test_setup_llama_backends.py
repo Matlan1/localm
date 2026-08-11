@@ -467,6 +467,24 @@ def test_custom_url_warning_printed(monkeypatch, tmp_path):
     assert "Warning: Custom URL download is unverified" in result.output
 
 
+def test_help_text_does_not_claim_nvidia_amd_default_to_vulkan_on_linux():
+    """Pins the live `--backend` --help string against the b8878c2b / 22cabce0
+    policy flip: NVIDIA now gets cuda on Linux too (not vulkan), and AMD gets
+    hip on any OS when a system ROCm/HIP toolkit is detected (not just vulkan).
+    A prior version of this text claimed 'vulkan for Intel and for NVIDIA/AMD
+    on Linux', which stopped being true the moment recommended_install_backend()
+    changed - this test exists so the next such flip cannot silently leave the
+    printed --help text behind again."""
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(sl.main, ["--help"])
+    assert result.exit_code == 0
+    help_text = " ".join(result.output.split())     # collapse click's line-wrapping
+    assert "vulkan for Intel and for NVIDIA" not in help_text
+    assert "cuda for NVIDIA on both Windows and Linux" in help_text
+    assert "hip for AMD" in help_text
+
+
 # --------------------------- bad-download diagnosis (issue #827) ---------- #
 #
 # A too-small/invalid download used to get ONE generic hedge naming every
